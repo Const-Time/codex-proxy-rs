@@ -1,4 +1,5 @@
 mod selection;
+mod selection_diagnostics;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;

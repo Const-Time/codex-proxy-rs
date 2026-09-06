@@ -590,7 +590,7 @@ impl AccountSelector {
         })
     }
 
-    fn scheduling_blocker(
+    pub(crate) fn scheduling_blocker(
         &self,
         candidate: &AccountCandidate,
         context: &AccountSelectionContext,
@@ -643,7 +643,7 @@ const SMART_QUOTA_WEIGHT: f64 = 0.8;
 const SMART_FAILURE_WEIGHT: f64 = 1.0;
 const SMART_LATENCY_WEIGHT: f64 = 0.5;
 // 容忍 5 个百分点的单项负载/失败率差异，避免微小信号波动独占新会话。
-const SMART_SCORE_TOLERANCE: f64 = 0.05;
+pub(crate) const SMART_SCORE_TOLERANCE: f64 = 0.05;
 // 首输出 10 秒时延迟得分减半；固定尺度不随其他候选账号变化。
 const SMART_LATENCY_HALF_SCORE_MS: f64 = 10_000.0;
 
@@ -677,7 +677,7 @@ fn select_smart_candidate<'a>(
     Some(ranked[index].0)
 }
 
-fn smart_score(candidate: &AccountCandidate, default_concurrency: NonZeroU32) -> f64 {
+pub(crate) fn smart_score(candidate: &AccountCandidate, default_concurrency: NonZeroU32) -> f64 {
     let load = 1.0 - capacity_utilization(candidate, default_concurrency).clamp(0.0, 1.0);
     let quota = candidate
         .signals

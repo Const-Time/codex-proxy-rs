@@ -512,7 +512,12 @@ impl CodexCredentialSelector {
                 account_scope: request.attempt.account_scope().cloned(),
             };
             let capacity = AccountSelector.capacity_snapshot(&candidates, &context);
-            let Some(selection) = AccountSelector.select(&candidates, &context) else {
+            let selection = AccountSelector.select(&candidates, &context);
+            request
+                .attempt
+                .trace()
+                .account_selection(&candidates, &context, selection.as_ref());
+            let Some(selection) = selection else {
                 return match shortest_retry {
                     Some(retry_after) => Err(CredentialSelectionError::CapacityUnavailable {
                         retry_after: Some(retry_after),

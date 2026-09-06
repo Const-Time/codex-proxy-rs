@@ -65,6 +65,12 @@ struct TraceEvent {
 }
 
 impl TraceContext {
+    /// 是否已启用请求诊断，供调用方避免构造不会保存的事实。
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        self.state.is_some()
+    }
+
     /// 一个模型请求只创建一次，所有 attempt 共享同一有界时间线。
     #[must_use]
     pub fn new(request_id: &str) -> Self {
@@ -306,6 +312,7 @@ impl TraceContext {
                     !matches!(
                         state.events[*index].stage,
                         "attempt.started"
+                            | "account.selection"
                             | "account.selected"
                             | "attempt.failed"
                             | "retry.decided"

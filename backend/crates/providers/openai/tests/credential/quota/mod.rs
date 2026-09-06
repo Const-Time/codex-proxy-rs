@@ -1,6 +1,7 @@
 //! OpenAI 额度事实边界与展示快照回归。
 
 mod recovery;
+mod scheduling;
 mod slots;
 mod snapshot;
 

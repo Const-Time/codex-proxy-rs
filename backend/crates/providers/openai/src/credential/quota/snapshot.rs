@@ -236,25 +236,36 @@ pub(crate) fn quota_snapshot_from_observation(
     Some(snapshot)
 }
 
-/// 调度投影缓存 TTL：`min(常规 TTL, 最近 active reset - now)`。
-/// reset 到期时缓存自然失效，不固定多等一个常规 TTL 周期。
+/// 缓存定期重读持久化事实，额度窗口独立按 reset 到期。
+/// 正常账号依赖被动同步，空闲超过缓存 TTL 不能把尚未重置的额度抹成未知。
 pub(crate) fn quota_projection_ttl(snapshot: &CodexAccountQuotaSnapshot) -> Option<Duration> {
-    let age = SystemTime::now()
-        .duration_since(snapshot.observed_at())
-        .unwrap_or(Duration::ZERO);
-    let normal_ttl = QUOTA_SCHEDULING_TTL.checked_sub(age)?;
     let now = SystemTime::now();
-    let reset_ttl = snapshot
+    snapshot
         .windows()
         .iter()
-        .filter_map(|window| window.reset_at())
-        .map(SystemTime::from)
-        .filter(|reset| *reset > now)
-        .map(|reset| reset.duration_since(now).unwrap_or(Duration::ZERO))
-        .min();
-    let ttl = match reset_ttl {
-        Some(reset_ttl) if reset_ttl < normal_ttl => reset_ttl,
-        _ => normal_ttl,
+        .filter_map(|window| quota_window_ttl(window, snapshot.observed_at(), now))
+        .min()
+        // 新观测即使没有有效窗口，也要用“未知”替换此前缓存的排序信号。
+        .or_else(|| {
+            QUOTA_SCHEDULING_TTL.checked_sub(
+                now.duration_since(snapshot.observed_at())
+                    .unwrap_or(Duration::ZERO),
+            )
+        })
+        .filter(|ttl| !ttl.is_zero())
+        .map(|ttl| ttl.min(QUOTA_SCHEDULING_TTL))
+}
+
+fn quota_window_ttl(
+    window: &CodexQuotaWindow,
+    observed_at: SystemTime,
+    now: SystemTime,
+) -> Option<Duration> {
+    let ttl = match window.reset_at() {
+        Some(reset_at) => SystemTime::from(reset_at).duration_since(now).ok()?,
+        // 没有明确窗口边界时，不能无限延长旧观测的有效期。
+        None => QUOTA_SCHEDULING_TTL
+            .checked_sub(now.duration_since(observed_at).unwrap_or(Duration::ZERO))?,
     };
     (!ttl.is_zero()).then_some(ttl)
 }
@@ -273,12 +284,13 @@ pub(crate) fn quota_scheduling_signals(
     let mut remaining_rank: Option<u64> = None;
     let mut reset_at: Option<SystemTime> = None;
     for window in &snapshot.windows {
+        if quota_window_ttl(window, snapshot.observed_at(), now).is_none() {
+            continue;
+        }
         let window_reset_at = window.reset_at().map(SystemTime::from);
-        let observation_expired = window_reset_at.is_some_and(|reset_at| reset_at <= now);
-        if !observation_expired
-            && let Some(used) = window
-                .used_percent()
-                .filter(|used| used.is_finite() && (0.0..=100.0).contains(used))
+        if let Some(used) = window
+            .used_percent()
+            .filter(|used| used.is_finite() && (0.0..=100.0).contains(used))
         {
             let rank = ((100.0 - used) * 100.0).round() as u64;
             remaining_rank = Some(remaining_rank.map_or(rank, |current| current.min(rank)));
