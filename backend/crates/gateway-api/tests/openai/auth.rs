@@ -14,6 +14,32 @@ fn bearer_client_api_key_should_reject_missing_authorization() {
 }
 
 #[test]
+fn actor_authorization_marker_should_not_replace_client_api_key() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-openai-actor-authorization",
+        HeaderValue::from_static("proxy-managed"),
+    );
+
+    assert_eq!(
+        bearer_client_api_key(&headers),
+        Err(ClientApiKeyAuthError::MissingAuthorization)
+    );
+}
+
+#[test]
+fn actor_authorization_marker_should_preserve_existing_bearer_authentication() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-openai-actor-authorization",
+        HeaderValue::from_static("proxy-managed"),
+    );
+    headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk_client"));
+
+    assert_eq!(bearer_client_api_key(&headers), Ok("sk_client"));
+}
+
+#[test]
 fn bearer_client_api_key_should_reject_non_utf8_authorization() {
     let mut headers = HeaderMap::new();
     headers.insert(

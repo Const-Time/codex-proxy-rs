@@ -60,7 +60,7 @@ const visibleFiles = computed(() => [
   <BaseModal
     v-model="open"
     title="使用密钥"
-    description="将下方内容分别保存到显示的 Codex CLI 配置文件"
+    description="将下方内容保存或合并到对应文件，保存后重新启动 Codex"
     size="lg"
   >
     <div class="flex flex-col gap-5">
@@ -75,6 +75,10 @@ const visibleFiles = computed(() => [
           :width="56"
         />
       </div>
+
+      <p class="text-cp-sm text-cp-text-secondary">
+        配置含密钥，请勿分享，覆盖前请备份。
+      </p>
 
       <div class="flex flex-col gap-3">
         <section

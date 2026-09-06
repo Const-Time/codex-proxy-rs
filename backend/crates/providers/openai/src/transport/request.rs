@@ -620,6 +620,7 @@ fn provider_managed_header(name: &str) -> bool {
                 | "x-request-id"
                 | "authorization"
                 | "x-api-key"
+                | "x-openai-actor-authorization"
                 | "cookie"
                 | "cookie2"
                 | "chatgpt-account-id"

@@ -46,6 +46,10 @@ fn request_with_opaque_headers(use_websocket: bool) -> CodexResponsesRequest {
                 ["x-invalid-base64", "%%%"],
                 ["x-still-valid", STANDARD.encode(b"after-invalid")],
                 ["authorization", STANDARD.encode(b"Bearer client-secret")],
+                [
+                    "X-OpenAI-Actor-Authorization",
+                    STANDARD.encode(b"proxy-managed")
+                ],
                 ["chatgpt-account-id", STANDARD.encode(b"client-account")],
                 [
                     "x-codex-installation-id",
@@ -425,6 +429,7 @@ async fn backend_http_should_restore_opaque_multivalue_header_bytes_and_lease_id
     );
     for dropped in [
         "openai-beta",
+        "x-openai-actor-authorization",
         "x-oai-attestation",
         "x-oai-is",
         "x-oai-is-update",
@@ -542,7 +547,12 @@ async fn backend_websocket_should_drop_only_unrepresentable_opaque_header_values
         values("x-openai-internal-codex-residency"),
         vec![b"us".to_vec()]
     );
-    for dropped in ["x-oai-attestation", "x-oai-is", "x-oai-is-update"] {
+    for dropped in [
+        "x-openai-actor-authorization",
+        "x-oai-attestation",
+        "x-oai-is",
+        "x-oai-is-update",
+    ] {
         assert!(values(dropped).is_empty(), "unexpected {dropped}");
     }
     assert_eq!(

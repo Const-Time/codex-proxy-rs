@@ -10,22 +10,29 @@ export interface CodexConfigInput {
 export function buildCodexConfigFiles(input: CodexConfigInput) {
   const baseUrl = input.baseUrl.replace(/\/+$/, '')
   const websocketEnabled = input.websocketEnabled ?? CODEX_WEBSOCKET_ENABLED_BY_DEFAULT
+  // 保留 auth.json 载荷，兼容仍依赖该字段的 CCSwitch 导入器。
   const auth = { OPENAI_API_KEY: input.apiKey }
   const configToml = `model_provider = "OpenAI"
 model = "${CODEX_DEFAULT_MODEL}"
 review_model = "${CODEX_DEFAULT_MODEL}"
 model_reasoning_effort = "max"
 service_tier = "default"
-disable_response_storage = true
-network_access = "enabled"
 
 [model_providers.OpenAI]
 name = "OpenAI"
-base_url = "${baseUrl}"
-wire_api = "responses"${websocketEnabled ? '\nsupports_websockets = true' : ''}
-requires_openai_auth = true
+base_url = ${JSON.stringify(baseUrl)}
+wire_api = "responses"
+supports_websockets = ${websocketEnabled}
+requires_openai_auth = false
+# 代理密钥仅用于网关鉴权，真实账号登录状态由服务端管理。
+experimental_bearer_token = ${JSON.stringify(input.apiKey)}
 
-[features]${websocketEnabled ? '\nresponses_websockets_v2 = true' : ''}
+[model_providers.OpenAI.http_headers]
+# 声明服务端托管认证，让官方客户端启用原生生图；该标记不是密钥。
+X-OpenAI-Actor-Authorization = "proxy-managed"
+
+[features]
+image_generation = true
 goals = true`
 
   return {

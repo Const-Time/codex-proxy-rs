@@ -483,6 +483,8 @@ fn passthrough_header_name(name: &str, connection_headers: &[String]) -> bool {
             // 下游鉴权和账号 cookie 绝不能成为上游账号身份。
             | "authorization"
             | "x-api-key"
+            // Codex 的服务端托管认证标记只用于客户端能力判断，不代表上游身份。
+            | "x-openai-actor-authorization"
             | "cookie"
             | "cookie2"
             | "chatgpt-account-id"

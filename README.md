@@ -148,6 +148,38 @@ curl http://127.0.0.1:8080/v1/responses \
 
 完整的客户端与管理端路由、鉴权、请求字段和 mutation 语义见 [接口文档](docs/api.md)。
 
+### Codex 原生生图
+
+在管理端的「使用密钥」中复制配置，或通过 CCSwitch 导入，保存后重启 Codex。
+新配置启用 `features.image_generation = true`，使用以下 Provider 认证方式：
+
+```toml
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+requires_openai_auth = false
+# 使用管理端创建的代理密钥，不是 ChatGPT 账号的访问令牌。
+experimental_bearer_token = "<client-api-key>"
+
+[model_providers.OpenAI.http_headers]
+# 声明账号认证由服务端托管；此标记本身没有鉴权能力。
+X-OpenAI-Actor-Authorization = "proxy-managed"
+
+[features]
+image_generation = true
+```
+
+合并到已有配置时，请修改当前 `model_provider` 对应的 Provider 段，不要重复添加同名 TOML 表，
+并保留其他个性化设置。配置文件包含代理密钥，请勿公开分享。
+无需更改本地 `auth.json`；真实 ChatGPT 登录状态仍由服务端管理。网关始终校验 Bearer Client Key，
+并过滤客户端的 Actor 认证标记，上游身份只来自调度选中的服务端账号。
+
+此配置使用官方客户端的服务端托管认证能力，不修改或伪造客户端登录状态。
+需要支持该能力的新版 Codex、支持图片输入及命名空间工具的对话模型，以及具备生图权限的 OpenAI 账号。
+模型会在需要图片时调用原生 `image_gen.imagegen`，图片请求通过本代理的 Images 路由完成。
+原来的 `auth.json` + `requires_openai_auth = true` 配置仍可用于已有请求，但不会因此自动获得原生生图能力。
+
 ## 运行维护
 
 ```bash

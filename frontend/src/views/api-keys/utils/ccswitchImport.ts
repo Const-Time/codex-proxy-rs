@@ -2,7 +2,7 @@ import {
   buildCodexConfigFiles,
   CODEX_DEFAULT_MODEL,
   CODEX_WEBSOCKET_ENABLED_BY_DEFAULT,
-} from './codexConfig'
+} from './codexConfig.ts'
 
 export interface CodexCcSwitchImportInput {
   apiKey: string
@@ -16,8 +16,7 @@ export function buildCodexCcSwitchImportDeeplink(input: CodexCcSwitchImportInput
     baseUrl: input.baseUrl,
     websocketEnabled: CODEX_WEBSOCKET_ENABLED_BY_DEFAULT,
   })
-  // Carry the complete files shown in the UI; the explicit fields below keep
-  // compatibility with CCSwitch versions that only extract common settings.
+  // 与界面共用原生生图配置；保留 auth 载荷和独立字段，兼容旧版 CCSwitch。
   const config = encodeBase64(JSON.stringify({
     auth: configFiles.auth,
     config: configFiles.configToml,

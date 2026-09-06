@@ -281,6 +281,10 @@ fn decoder_should_preserve_ordinary_request_headers_as_opaque_multivalues() {
     headers.insert("content-length", HeaderValue::from_static("999"));
     headers.insert("authorization", HeaderValue::from_static("Bearer client"));
     headers.insert("x-api-key", HeaderValue::from_static("client-key"));
+    headers.insert(
+        "x-openai-actor-authorization",
+        HeaderValue::from_static("proxy-managed"),
+    );
     headers.insert("cookie", HeaderValue::from_static("client=cookie"));
     headers.insert(
         "chatgpt-account-id",
@@ -348,6 +352,7 @@ fn decoder_should_preserve_ordinary_request_headers_as_opaque_multivalues() {
         "content-length",
         "authorization",
         "x-api-key",
+        "x-openai-actor-authorization",
         "cookie",
         "chatgpt-account-id",
         "chatgpt-project-id",
