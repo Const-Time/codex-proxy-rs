@@ -459,7 +459,6 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
         "acct_truncated_stream",
         "acct_usage_limit_request_path",
         "acct_websocket_close",
-        "acct_websocket_cooldown",
         "acct_websocket_fast_path",
         "acct_websocket_busy_replay",
         "acct_websocket_metadata_close",
@@ -666,7 +665,6 @@ async fn capture_turn_state_request(
     previous_turn_id: Option<&str>,
     current_turn_id: Option<&str>,
     client_turn_state: Option<&str>,
-    retry_checkpoint: bool,
 ) -> wiremock::Request {
     let account_id = "acct_session_affinity";
     let store = Arc::new(MemoryAccountStore::default());
@@ -690,9 +688,6 @@ async fn capture_turn_state_request(
     ]);
     if let Some(previous_turn_id) = previous_turn_id {
         session_state.insert("client_turn_id".to_owned(), json!(previous_turn_id));
-    }
-    if retry_checkpoint {
-        session_state.insert("retry_checkpoint".to_owned(), json!(true));
     }
     let mut protocol_context = Map::from_iter([("use_websocket".to_owned(), json!(false))]);
     if let Some(current_turn_id) = current_turn_id {
@@ -1326,7 +1321,7 @@ async fn selection_infrastructure_errors_have_a_distinct_classification() {
 }
 
 #[tokio::test]
-async fn websocket_close_after_delivery_preserves_details_and_forces_a_fresh_client_retry() {
+async fn websocket_close_after_delivery_preserves_details_and_reconnects_through_pool() {
     const ACCOUNT_ID: &str = "acct_websocket_close";
     const CONVERSATION_ID: &str = "conversation-websocket-close-after-delivery";
     const SESSION_ID: &str = "committed-websocket-session";
@@ -1496,7 +1491,7 @@ async fn websocket_close_after_delivery_preserves_details_and_forces_a_fresh_cli
             retry_pool_observation = Some(observation.websocket_pool());
         }
     }
-    assert_eq!(retry_pool_observation, Some(None));
+    assert_eq!(retry_pool_observation, Some(Some(WebSocketPoolKind::New)));
     server.await.expect("WebSocket server");
 }
 
@@ -1687,7 +1682,7 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
 }
 
 #[tokio::test]
-async fn ambiguous_websocket_close_probes_a_fresh_websocket_for_the_next_new_chain() {
+async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() {
     const ACCOUNT_ID: &str = "acct_websocket_close";
     const CONVERSATION_ID: &str = "conversation-websocket-ambiguous-close";
     const SESSION_ID: &str = "sticky-websocket-session";
@@ -1776,7 +1771,7 @@ async fn ambiguous_websocket_close_probes_a_fresh_websocket_for_the_next_new_cha
         let (stream, _) = listener
             .accept()
             .await
-            .expect("accept fresh WebSocket probe");
+            .expect("accept new pooled WebSocket");
         let mut websocket = accept_codex_test_websocket(stream).await;
         let _request = websocket
             .next()
@@ -1799,11 +1794,6 @@ async fn ambiguous_websocket_close_probes_a_fresh_websocket_for_the_next_new_cha
             .await
             .expect("complete fresh WebSocket request");
 
-        let (stream, _) = listener
-            .accept()
-            .await
-            .expect("accept same-session continuation WebSocket connection");
-        let mut websocket = accept_codex_test_websocket(stream).await;
         let request = websocket
             .next()
             .await
@@ -1817,7 +1807,7 @@ async fn ambiguous_websocket_close_probes_a_fresh_websocket_for_the_next_new_cha
         .expect("same-session continuation request JSON");
         assert_eq!(
             payload.get("previous_response_id"),
-            Some(&json!("external-previous-response"))
+            Some(&json!("resp_fresh_retry"))
         );
         websocket
             .send(completed_response("resp_external_continuation"))
@@ -1930,29 +1920,48 @@ async fn ambiguous_websocket_close_probes_a_fresh_websocket_for_the_next_new_cha
         .expect("same session should prepare a fresh WebSocket stream");
     assert_eq!(fresh_stream.metadata().transport().as_str(), "websocket");
     let mut fresh_pool_observation = None;
+    let mut recovered_session = None;
     while let Some(event) = fresh_stream.next().await {
         let event = event.expect("fresh WebSocket response");
+        if let Some(update) = event.session_update() {
+            recovered_session = Some(update.clone());
+        }
         if let Some(observation) = event.response_observation()
             && observation.transport().as_str() == "websocket"
         {
             fresh_pool_observation = Some(observation.websocket_pool());
         }
     }
-    assert_eq!(fresh_pool_observation, Some(None));
+    assert_eq!(fresh_pool_observation, Some(Some(WebSocketPoolKind::New)));
+    let recovered_session = recovered_session.expect("recovered session");
+    assert_eq!(
+        recovered_session.payload().get("continuation_scope"),
+        Some(&json!("connection_local"))
+    );
     drop(fresh_stream);
 
-    let continuation_operation = Operation::Generate(generate_with_session_context(
-        "sticky-websocket-session",
-        Some("thread-continuation"),
-        None,
-    ));
+    let continuation_operation = Operation::Generate(
+        generate_with_session_context(
+            "sticky-websocket-session",
+            Some("thread-continuation"),
+            None,
+        )
+        .with_provider_session_state(recovered_session),
+    );
     let mut continuation_stream = provider
         .execute(
             planned_request("openai", continuation_operation),
-            external_continuation_context("req_sticky_external_continuation"),
+            pinned_continuation_context(
+                "req_recovered_continuation",
+                ACCOUNT_ID,
+                "resp_fresh_retry",
+                "resp_fresh_retry",
+                1,
+                ContinuationAttempt::Native,
+            ),
         )
         .await
-        .expect("successful fresh probe must restore normal continuation routing");
+        .expect("recovered pooled socket must support native continuation");
     assert_eq!(
         continuation_stream.metadata().transport().as_str(),
         "websocket"
@@ -2009,366 +2018,117 @@ async fn ambiguous_websocket_close_probes_a_fresh_websocket_for_the_next_new_cha
 }
 
 #[tokio::test]
-async fn repeated_ambiguous_websocket_close_uses_steep_sse_cooldowns_and_one_half_open_probe() {
-    const ACCOUNT_ID: &str = "acct_websocket_cooldown";
-    const CONVERSATION_ID: &str = "conversation-websocket-cooldown";
-
+async fn repeated_websocket_failures_exhaust_budget_then_use_http_and_report_http_failure() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, ACCOUNT_ID).await;
+    create_account(&store, "acct_websocket_close").await;
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind WebSocket listener");
+        .expect("bind listener");
     let base_url = format!(
         "http://{}",
         listener.local_addr().expect("listener address")
     );
     let server = tokio::spawn(async move {
-        let completed_response = |response_id: &str| {
-            Message::Text(
-                json!({
-                    "type": "response.completed",
-                    "response": {
-                        "id": response_id,
-                        "model": "gpt-5.4",
-                        "status": "completed",
-                        "output": [],
-                        "usage": {
-                            "input_tokens": 1,
-                            "output_tokens": 1,
-                            "total_tokens": 2
-                        }
-                    }
-                })
-                .to_string()
-                .into(),
-            )
-        };
-
-        for response_id in ["resp_first_reset", "resp_fresh_probe_reset"] {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .expect("accept failing WebSocket connection");
+        for code in [1000, 1001, 1011] {
+            let (stream, _) = listener.accept().await.expect("accept websocket");
             let mut websocket = accept_codex_test_websocket(stream).await;
-            let _request = websocket
+            websocket
                 .next()
                 .await
-                .expect("WebSocket request")
-                .expect("valid WebSocket request");
-            websocket
-                .send(Message::Text(
-                    json!({
-                        "type": "response.created",
-                        "response": {"id": response_id, "model": "gpt-5.4"}
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .expect("send structural WebSocket event");
+                .expect("request")
+                .expect("valid frame");
             websocket
                 .close(Some(CloseFrame {
-                    code: CloseCode::Normal,
+                    code: CloseCode::from(code),
                     reason: "".into(),
                 }))
                 .await
-                .expect("close WebSocket before terminal event");
+                .expect("close websocket");
         }
-
-        for response_id in [
-            "resp_third_reset",
-            "resp_fourth_reset",
-            "resp_fifth_reset",
-            "resp_sixth_reset",
-        ] {
-            let (mut http, _) = listener
-                .accept()
-                .await
-                .expect("accept cooldown HTTP request");
-            let request = capture_http_request(&mut http).await;
-            let request_head = String::from_utf8_lossy(&request).to_ascii_lowercase();
-            assert!(!request_head.contains("upgrade: websocket"));
-            http.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CAPTURE_COMPLETED_SSE}",
-                    CAPTURE_COMPLETED_SSE.len()
-                )
-                .as_bytes(),
-            )
-            .await
-            .expect("write cooldown HTTP response");
-
-            let (stream, _) = listener
-                .accept()
-                .await
-                .expect("accept failing half-open WebSocket connection");
-            let mut websocket = accept_codex_test_websocket(stream).await;
-            let _request = websocket
-                .next()
-                .await
-                .expect("half-open WebSocket request")
-                .expect("valid half-open WebSocket request");
-            websocket
-                .send(Message::Text(
-                    json!({
-                        "type": "response.created",
-                        "response": {"id": response_id, "model": "gpt-5.4"}
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .expect("send half-open structural event");
-            websocket
-                .close(Some(CloseFrame {
-                    code: CloseCode::Normal,
-                    reason: "".into(),
-                }))
-                .await
-                .expect("close half-open WebSocket before terminal event");
-        }
-
-        for _ in 0..2 {
-            let (mut http, _) = listener
-                .accept()
-                .await
-                .expect("accept final cooldown HTTP request");
-            let request = capture_http_request(&mut http).await;
-            let request_head = String::from_utf8_lossy(&request).to_ascii_lowercase();
-            assert!(!request_head.contains("upgrade: websocket"));
-            http.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CAPTURE_COMPLETED_SSE}",
-                    CAPTURE_COMPLETED_SSE.len()
-                )
-                .as_bytes(),
-            )
-            .await
-            .expect("write final cooldown HTTP response");
-        }
-
-        for response_id in ["resp_half_open", "resp_recovered"] {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .expect("accept recovery WebSocket connection");
-            let mut websocket = accept_codex_test_websocket(stream).await;
-            let _request = websocket
-                .next()
-                .await
-                .expect("recovery WebSocket request")
-                .expect("valid recovery WebSocket request");
-            websocket
-                .send(Message::Text(
-                    json!({
-                        "type": "response.created",
-                        "response": {"id": response_id, "model": "gpt-5.4"}
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .expect("start recovery WebSocket response");
-            websocket
-                .send(completed_response(response_id))
-                .await
-                .expect("complete recovery WebSocket request");
+        for status in [200, 503] {
+            let (mut http, _) = listener.accept().await.expect("accept HTTP fallback");
+            assert!(
+                String::from_utf8_lossy(&capture_http_request(&mut http).await)
+                    .starts_with("POST /codex/responses")
+            );
+            let body = if status == 200 {
+                CAPTURE_COMPLETED_SSE
+            } else {
+                r#"{"error":{"code":"server_error","message":"unavailable"}}"#
+            };
+            http.write_all(format!("HTTP/1.1 {status} Response\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("HTTP response");
         }
     });
-
-    let provider = provider_with_base_url(&store, base_url);
-    let operation = |thread_id: &str| {
-        Operation::Generate(generate_with_persisted_session_context(
-            ACCOUNT_ID,
-            CONVERSATION_ID,
-            "websocket-cooldown-session",
-            thread_id,
-        ))
-    };
-
-    let mut first = provider
-        .execute(
-            planned_request("openai", operation("thread-first-reset")),
-            context("req_first_reset", CancellationToken::new()),
-        )
-        .await
-        .expect("prepare first WebSocket stream");
-    let first_error = loop {
-        match first.next().await {
-            Some(Ok(_)) => {}
-            Some(Err(error)) => break error,
-            None => panic!("first WebSocket reset must surface a provider error"),
-        }
-    };
-    assert_eq!(first_error.send_state(), UpstreamSendState::Ambiguous);
-    assert_eq!(first_error.pre_delivery_retry(), None);
-    drop(first);
-
-    let mut fresh = provider
-        .execute(
-            planned_request("openai", operation("thread-fresh-reset")),
-            context("req_fresh_reset", CancellationToken::new()),
-        )
-        .await
-        .expect("prepare fresh WebSocket probe");
-    assert_eq!(fresh.metadata().transport().as_str(), "websocket");
-    let mut fresh_pool_observation = None;
-    let second_error = loop {
-        match fresh.next().await {
-            Some(Ok(event)) => {
-                if let Some(observation) = event.response_observation()
-                    && observation.transport().as_str() == "websocket"
-                {
-                    fresh_pool_observation = Some(observation.websocket_pool());
-                }
-            }
-            Some(Err(error)) => break error,
-            None => panic!("fresh WebSocket reset must surface a provider error"),
-        }
-    };
-    assert_eq!(fresh_pool_observation, Some(None));
-    assert_eq!(second_error.send_state(), UpstreamSendState::Ambiguous);
-    assert_eq!(second_error.pre_delivery_retry(), None);
-    drop(fresh);
-    tokio::time::pause();
-
-    for (index, cooldown) in [
-        Duration::from_secs(5 * 60),
-        Duration::from_secs(30 * 60),
-        Duration::from_secs(60 * 60),
-        Duration::from_secs(4 * 60 * 60),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        tokio::time::advance(cooldown - Duration::from_secs(60)).await;
-        let mut active_cooldown = provider
+    let provider = provider_with_base_url_and_retry_budget(&store, base_url, 2);
+    for index in 0..3 {
+        let operation = Operation::Generate(generate_with_persisted_session_context(
+            "acct_websocket_close",
+            "conversation-repeated-close",
+            "repeated-close",
+            "turn",
+        ));
+        let mut stream = provider
             .execute(
-                planned_request(
-                    "openai",
-                    operation(&format!("thread-active-cooldown-{index}")),
-                ),
+                planned_request("openai", operation),
                 context(
-                    &format!("req_active_cooldown_{index}"),
+                    &format!("req_repeated_close_{index}"),
                     CancellationToken::new(),
                 ),
             )
             .await
-            .expect("prepare active cooldown HTTP stream");
-        assert_eq!(active_cooldown.metadata().transport().as_str(), "http_sse");
-        while let Some(event) = active_cooldown.next().await {
-            event.expect("active cooldown HTTP response");
-        }
-
-        tokio::time::advance(Duration::from_secs(60)).await;
-        tokio::time::resume();
-        let mut failed_probe = provider
-            .execute(
-                planned_request("openai", operation(&format!("thread-failed-probe-{index}"))),
-                context(
-                    &format!("req_failed_probe_{index}"),
-                    CancellationToken::new(),
-                ),
-            )
-            .await
-            .expect("prepare half-open WebSocket probe");
-        assert_eq!(failed_probe.metadata().transport().as_str(), "websocket");
-        let mut failed_probe_pool_observation = None;
-        let probe_error = loop {
-            match failed_probe.next().await {
-                Some(Ok(event)) => {
-                    if let Some(observation) = event.response_observation()
-                        && observation.transport().as_str() == "websocket"
-                    {
-                        failed_probe_pool_observation = Some(observation.websocket_pool());
-                    }
-                }
+            .expect("prepare stream");
+        assert_eq!(stream.metadata().transport().as_str(), "websocket");
+        let error = loop {
+            match stream.next().await {
+                Some(Ok(_)) => {}
                 Some(Err(error)) => break error,
-                None => panic!("half-open WebSocket reset must surface a provider error"),
+                None => panic!("close must fail"),
             }
         };
-        assert_eq!(failed_probe_pool_observation, Some(None));
-        assert_eq!(probe_error.send_state(), UpstreamSendState::Ambiguous);
-        assert_eq!(probe_error.pre_delivery_retry(), None);
-        drop(failed_probe);
-        tokio::time::pause();
+        assert_eq!(error.send_state(), UpstreamSendState::Ambiguous);
+        assert_eq!(error.pre_delivery_retry(), None);
+        assert!(!error.replay_is_safe());
     }
-
-    tokio::time::advance(Duration::from_secs(4 * 60 * 60 - 60)).await;
-    let mut capped_cooldown = provider
-        .execute(
-            planned_request("openai", operation("thread-capped-cooldown")),
-            context("req_capped_cooldown", CancellationToken::new()),
-        )
-        .await
-        .expect("prepare capped cooldown HTTP stream");
-    assert_eq!(capped_cooldown.metadata().transport().as_str(), "http_sse");
-    while let Some(event) = capped_cooldown.next().await {
-        event.expect("capped cooldown HTTP response");
-    }
-
-    tokio::time::advance(Duration::from_secs(60)).await;
-    tokio::time::resume();
-    let mut half_open = provider
-        .execute(
-            planned_request("openai", operation("thread-half-open")),
-            context("req_half_open", CancellationToken::new()),
-        )
-        .await
-        .expect("prepare half-open WebSocket probe");
-    assert_eq!(half_open.metadata().transport().as_str(), "websocket");
-
-    let mut concurrent = provider
-        .execute(
-            planned_request("openai", operation("thread-probe-busy")),
-            context("req_probe_busy", CancellationToken::new()),
-        )
-        .await
-        .expect("prepare concurrent HTTP stream");
-    assert_eq!(concurrent.metadata().transport().as_str(), "http_sse");
-    while let Some(event) = concurrent.next().await {
-        event.expect("probe-busy HTTP response");
-    }
-
-    let mut half_open_pool_observation = None;
-    let mut half_open_completed = false;
-    while let Some(event) = half_open.next().await {
-        let event = event.expect("half-open WebSocket response");
-        half_open_completed |= event
-            .canonical_facts()
-            .iter()
-            .any(|event| matches!(event, GatewayEvent::Completed(_)));
-        if let Some(observation) = event.response_observation()
-            && observation.transport().as_str() == "websocket"
-        {
-            half_open_pool_observation = Some(observation.websocket_pool());
+    for index in 0..2 {
+        let operation = Operation::Generate(generate_with_persisted_session_context(
+            "acct_websocket_close",
+            "conversation-repeated-close",
+            "repeated-close",
+            "turn",
+        ));
+        let mut stream = provider
+            .execute(
+                planned_request("openai", operation),
+                context(
+                    &format!("req_http_after_ws_{index}"),
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("prepare HTTP");
+        assert_eq!(stream.metadata().transport().as_str(), "http_sse");
+        let mut failure = None;
+        while let Some(event) = stream.next().await {
+            if let Err(error) = event {
+                failure = Some(error);
+                break;
+            }
+        }
+        if index == 0 {
+            assert!(failure.is_none());
+        } else {
+            let failure = failure.expect("HTTP failure is final transport result");
+            assert_eq!(failure.upstream_status(), Some(503));
+            assert!(!matches!(
+                failure.pre_delivery_retry(),
+                Some(
+                    PreDeliveryRetry::SameAccountTransportRetry { .. }
+                        | PreDeliveryRetry::SameAccountTransportFallback
+                )
+            ));
         }
     }
-    assert!(half_open_completed);
-    assert_eq!(half_open_pool_observation, Some(None));
-
-    let mut recovered = provider
-        .execute(
-            planned_request("openai", operation("thread-recovered")),
-            context("req_recovered", CancellationToken::new()),
-        )
-        .await
-        .expect("prepare recovered WebSocket stream");
-    assert_eq!(recovered.metadata().transport().as_str(), "websocket");
-    let mut recovered_pool_observation = None;
-    while let Some(event) = recovered.next().await {
-        let event = event.expect("recovered WebSocket response");
-        if let Some(observation) = event.response_observation()
-            && observation.transport().as_str() == "websocket"
-        {
-            recovered_pool_observation = Some(observation.websocket_pool());
-        }
-    }
-    assert_eq!(
-        recovered_pool_observation,
-        Some(Some(WebSocketPoolKind::New))
-    );
-    server.await.expect("WebSocket and HTTP recovery server");
+    server.await.expect("server");
 }
 
 #[tokio::test]
@@ -2452,6 +2212,45 @@ async fn websocket_upgrade_required_immediately_enables_session_http_fallback() 
     while let Some(event) = second.next().await {
         event.expect("HTTP fallback response");
     }
+    tokio::time::pause();
+    for index in 0..3 {
+        tokio::time::advance(Duration::from_secs(5 * 60 * 60)).await;
+        let stream = provider
+            .execute(
+                planned_request("openai", operation()),
+                context(
+                    &format!("req_active_http_session_{index}"),
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("prepare active session");
+        assert_eq!(stream.metadata().transport().as_str(), "http_sse");
+    }
+    let unrelated = provider
+        .execute(
+            planned_request(
+                "openai",
+                Operation::Generate(generate_with_session_context(
+                    "unrelated-session",
+                    None,
+                    None,
+                )),
+            ),
+            context("req_unrelated_session", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare unrelated session");
+    assert_eq!(unrelated.metadata().transport().as_str(), "websocket");
+    tokio::time::advance(Duration::from_secs(8 * 60 * 60)).await;
+    let expired = provider
+        .execute(
+            planned_request("openai", operation()),
+            context("req_expired_http_session", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare expired session");
+    assert_eq!(expired.metadata().transport().as_str(), "websocket");
     server.await.expect("upstream server");
 }
 
@@ -2572,7 +2371,7 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
 }
 
 #[tokio::test]
-async fn websocket_turn_state_metadata_close_requests_checkpointed_retry() {
+async fn websocket_turn_state_metadata_close_does_not_authorize_replay() {
     const ACCOUNT_ID: &str = "acct_websocket_metadata_close";
     const TURN_STATE: &str = "turn-state-before-close";
 
@@ -2630,7 +2429,7 @@ async fn websocket_turn_state_metadata_close_requests_checkpointed_retry() {
         .await
         .expect("prepare WebSocket provider stream");
     let mut observed_turn_state = false;
-    let mut replay_checkpoint = None;
+    let mut session_update = None;
     let error = loop {
         match stream.next().await {
             Some(Ok(event)) => {
@@ -2641,7 +2440,7 @@ async fn websocket_turn_state_metadata_close_requests_checkpointed_retry() {
                     });
                 }
                 if let Some(update) = event.session_update() {
-                    replay_checkpoint = Some(update.clone());
+                    session_update = Some(update.clone());
                 }
             }
             Some(Err(error)) => break error,
@@ -2651,22 +2450,10 @@ async fn websocket_turn_state_metadata_close_requests_checkpointed_retry() {
     server.await.expect("WebSocket server");
 
     assert!(observed_turn_state);
-    let replay_checkpoint = replay_checkpoint.expect("metadata close checkpoint");
-    assert_eq!(
-        replay_checkpoint.payload().get("turn_state"),
-        Some(&json!(TURN_STATE))
-    );
-    assert_eq!(
-        replay_checkpoint.payload().get("retry_checkpoint"),
-        Some(&json!(true))
-    );
+    assert!(session_update.is_none());
     assert_eq!(error.send_state(), UpstreamSendState::Ambiguous);
-    assert!(error.replay_is_safe());
-    assert!(matches!(
-        error.pre_delivery_retry(),
-        Some(PreDeliveryRetry::SameAccountTransportRetry { retry_index, .. })
-            if retry_index.get() == 1
-    ));
+    assert!(!error.replay_is_safe());
+    assert_eq!(error.pre_delivery_retry(), None);
     assert_eq!(
         error.upstream_code().map(|code| code.as_str()),
         Some("websocket_close_1000")
@@ -3114,20 +2901,8 @@ async fn matching_turn_id_should_restore_previous_turn_state() {
         Some("turn-same"),
         Some("turn-same"),
         None,
-        false,
     )
     .await;
-
-    assert_eq!(
-        captured_header_values(&request, "x-codex-turn-state"),
-        vec![b"previous-turn-state".to_vec()]
-    );
-}
-
-#[tokio::test]
-async fn retry_checkpoint_should_restore_turn_state_without_client_turn_id() {
-    let request =
-        capture_turn_state_request("req_restore_retry_checkpoint", None, None, None, true).await;
 
     assert_eq!(
         captured_header_values(&request, "x-codex-turn-state"),
@@ -3142,7 +2917,6 @@ async fn matching_turn_id_should_prefer_an_explicit_client_echo_over_saved_provi
         Some("turn-same"),
         Some("turn-same"),
         Some("client-turn-state"),
-        false,
     )
     .await;
 
@@ -3174,7 +2948,6 @@ async fn new_or_unidentified_turn_should_not_restore_previous_turn_state() {
             previous_turn_id,
             current_turn_id,
             client_turn_state,
-            false,
         )
         .await;
         assert!(captured_header_values(&request, "x-codex-turn-state").is_empty());
@@ -5216,4 +4989,142 @@ async fn provider_routes_catalog_model_when_supported_in_api_is_false() {
             .match_requirements(&CapabilityRequirements::new(OperationKind::Generate))
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn completed_websocket_response_resets_consecutive_failure_budget() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_websocket_close").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let base_url = format!("http://{}", listener.local_addr().expect("address"));
+    let server = tokio::spawn(async move {
+        let mut active = None;
+        for succeeds in [false, true, false, false, true] {
+            if active.is_none() {
+                let (stream, _) = listener.accept().await.expect("accept WS");
+                active = Some(accept_codex_test_websocket(stream).await);
+            }
+            let ws = active.as_mut().expect("active connection");
+            ws.next().await.expect("request").expect("valid frame");
+            if succeeds {
+                ws.send(Message::Text(json!({"type":"response.created","response":{"id":"resp_budget_reset","model":"gpt-5.4"}}).to_string().into())).await.expect("created response");
+                ws.send(Message::Text(json!({"type":"response.completed","response":{"id":"resp_budget_reset","model":"gpt-5.4","status":"completed","output":[]}}).to_string().into())).await.expect("complete response");
+            } else {
+                ws.close(None).await.expect("close connection");
+                active = None;
+            }
+        }
+    });
+    let provider = provider_with_base_url_and_retry_budget(&store, base_url, 2);
+    for (index, succeeds) in [false, true, false, false, true].into_iter().enumerate() {
+        let operation = Operation::Generate(generate_with_persisted_session_context(
+            "acct_websocket_close",
+            "conversation-budget-reset",
+            "budget-reset",
+            "turn",
+        ));
+        let mut stream = provider
+            .execute(
+                planned_request("openai", operation),
+                context(
+                    &format!("req_reset_budget_{index}"),
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("prepare request");
+        assert_eq!(
+            stream.metadata().transport().as_str(),
+            "websocket",
+            "request {index}"
+        );
+        let mut failed = false;
+        let mut completed = false;
+        while let Some(event) = stream.next().await {
+            if let Ok(event) = &event {
+                completed |= event
+                    .canonical_facts()
+                    .iter()
+                    .any(|fact| matches!(fact, GatewayEvent::Completed(_)));
+            }
+            if event.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert_eq!(failed, !succeeds);
+        assert_eq!(completed, succeeds);
+    }
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn connection_limit_rejection_requests_one_provider_retry_and_reconnects_in_pool() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_websocket_close").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let base_url = format!("http://{}", listener.local_addr().expect("address"));
+    let server = tokio::spawn(async move {
+        for first in [true, false] {
+            let (stream, _) = listener.accept().await.expect("accept WS");
+            let mut ws = accept_codex_test_websocket(stream).await;
+            ws.next().await.expect("request").expect("valid frame");
+            let event = if first {
+                json!({"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","type":"invalid_request_error","message":"connection expired"}})
+            } else {
+                json!({"type":"response.completed","response":{"id":"resp_reconnected","model":"gpt-5.4","status":"completed","output":[]}})
+            };
+            if !first {
+                ws.send(Message::Text(json!({"type":"response.created","response":{"id":"resp_reconnected","model":"gpt-5.4"}}).to_string().into())).await.expect("created response");
+            }
+            ws.send(Message::Text(event.to_string().into()))
+                .await
+                .expect("send response");
+        }
+    });
+    let provider = provider_with_base_url_and_retry_budget(&store, base_url, 1);
+    let operation = || {
+        Operation::Generate(generate_with_persisted_session_context(
+            "acct_websocket_close",
+            "conversation-rejected",
+            "rejected",
+            "turn",
+        ))
+    };
+    let mut stream = provider
+        .execute(
+            planned_request("openai", operation()),
+            context("req_rejected", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare request");
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("expected rejection"),
+        }
+    };
+    assert_eq!(error.send_state(), UpstreamSendState::Sent);
+    assert!(error.replay_is_safe());
+    assert!(
+        matches!(error.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransportRetry { retry_index, .. }) if retry_index.get() == 1)
+    );
+    drop(stream);
+    let retry_context = context("req_rejected", CancellationToken::new()).with_transport(
+        AttemptTransport::Retry(NonZeroU32::new(1).expect("retry index")),
+    );
+    let mut retry = provider
+        .execute(planned_request("openai", operation()), retry_context)
+        .await
+        .expect("prepare retry");
+    let mut pooled = false;
+    while let Some(event) = retry.next().await {
+        let event = event.expect("retry succeeds");
+        pooled |= event.response_observation().is_some_and(|observation| {
+            observation.websocket_pool() == Some(WebSocketPoolKind::New)
+        });
+    }
+    assert!(pooled);
+    server.await.expect("server");
 }

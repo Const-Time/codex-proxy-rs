@@ -15,19 +15,6 @@ pub(crate) const X_CODEX_TURN_STATE_CLIENT_METADATA_KEY: &str = "x-codex-turn-st
 /// 本地生成 history unavailable 错误时使用的官方提示文本。
 pub(crate) const PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE: &str =
     "Previous response was not found. Retrying the full request.";
-const INVALID_PREVIOUS_RESPONSE_ID_MESSAGE: &str = "Invalid `previous_response_id`.";
-
-/// 精确匹配上游省略错误码的旧版 previous response 拒绝形状。
-pub(crate) fn is_bare_invalid_previous_response_id_error(
-    code: Option<&Value>,
-    error_type: Option<&str>,
-    message: Option<&str>,
-) -> bool {
-    code.is_none_or(Value::is_null)
-        && error_type == Some("invalid_request_error")
-        && message == Some(INVALID_PREVIOUS_RESPONSE_ID_MESSAGE)
-}
-
 /// Codex Responses 上游请求体。
 ///
 /// 发往上游的 Responses 请求。`body` 持有客户端原始 JSON object，逐字段（含顺序、
@@ -161,13 +148,8 @@ impl TransportRequirement {
         )
     }
 
-    /// WebSocket 已发送 payload、但尚未交付业务事件时，是否允许同账号 HTTP 重放。
-    pub fn allows_pre_delivery_http_fallback(self) -> bool {
-        matches!(self, Self::NewChain)
-    }
-
-    /// 会话级恢复状态是否可以为请求选择 fresh WebSocket 或临时 HTTP。
-    pub fn allows_session_transport_recovery(self) -> bool {
+    /// 无续接依赖的新请求可以在明确的连接级拒绝后重新建连。
+    pub fn allows_connection_restart(self) -> bool {
         matches!(self, Self::NewChain)
     }
 

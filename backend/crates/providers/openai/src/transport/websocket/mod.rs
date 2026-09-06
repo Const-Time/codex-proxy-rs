@@ -41,5 +41,5 @@ pub(crate) use self::{
         execute_prepared_response_create_request_stream, post_send_ambiguous,
         prepare_response_create_request_with_pool,
     },
-    pool::DEFAULT_INITIAL_EVENT_TIMEOUT,
+    pool::DEFAULT_STREAM_IDLE_TIMEOUT,
 };

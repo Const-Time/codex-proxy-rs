@@ -1392,12 +1392,12 @@ async fn codex_backend_client_should_timeout_when_upstream_is_silent() {
             message,
             ..
         })
-            if message.contains("20s")
+            if message.contains("300s")
     );
 }
 
 #[tokio::test]
-async fn websocket_response_created_should_switch_to_active_stream_idle_timeout() {
+async fn websocket_stream_should_allow_silence_below_idle_timeout() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (created_tx, created_rx) = tokio::sync::oneshot::channel();
@@ -1437,7 +1437,7 @@ async fn websocket_response_created_should_switch_to_active_stream_idle_timeout(
     let response = response_task
         .await
         .expect("websocket task should finish")
-        .expect("structural activity should disable the initial timeout");
+        .expect("structural events and model output share the same idle timeout");
     server.await.unwrap();
 
     assert!(response.body.contains("event: response.created"));
@@ -1445,60 +1445,32 @@ async fn websocket_response_created_should_switch_to_active_stream_idle_timeout(
 }
 
 #[tokio::test]
-async fn websocket_connection_limit_error_should_retry_on_fresh_connection() {
+async fn websocket_connection_limit_should_be_reported_without_transport_retry() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let (attempts_tx, mut attempts_rx) = tokio::sync::mpsc::channel(2);
     let server = tokio::spawn(async move {
-        for attempt in 0..2 {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_codex_test_websocket(stream).await;
-            let _message = websocket.next().await.unwrap().unwrap();
-            attempts_tx.send(attempt).await.unwrap();
-            if attempt == 0 {
-                websocket
-                    .send(Message::Text(
-                        json!({
-                            "type": "error",
-                            "status": 400,
-                            "error": {
-                                "type": "invalid_request_error",
-                                "code": "websocket_connection_limit_reached",
-                                "message": "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."
-                            }
-                        })
-                        .to_string()
-                        .into(),
-                    ))
-                    .await
-                    .unwrap();
-            } else {
-                websocket
-                    .send(Message::Text(
-                        completed_websocket_response("resp_retry_fresh", 3, 1).into(),
-                    ))
-                    .await
-                    .unwrap();
-            }
-            websocket.close(None).await.unwrap();
-        }
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket.next().await.unwrap().unwrap();
+        websocket.send(Message::Text(json!({
+            "type":"error", "status":400,
+            "error":{"type":"invalid_request_error", "code":"websocket_connection_limit_reached", "message":"connection expired"}
+        }).to_string().into())).await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
     });
     let prepared = prepared_websocket_request(&format!("http://{addr}"));
-    let response = execute_response_create_request(&prepared)
+    let error = execute_response_create_request(&prepared)
         .await
-        .expect("connection limit should retry on a fresh connection");
+        .expect_err("transport reports rejection");
+    assert!(matches!(
+        error,
+        CodexClientError::WebSocket(CodexWebSocketExchangeError::ConnectionLimitReached)
+    ));
     server.await.unwrap();
-
-    let mut attempts = Vec::new();
-    while let Some(attempt) = attempts_rx.recv().await {
-        attempts.push(attempt);
-    }
-    assert_eq!(
-        attempts,
-        vec![0, 1],
-        "client should retry once on a new connection"
-    );
-    assert!(response.body.contains("resp_retry_fresh"));
 }
 
 #[tokio::test]

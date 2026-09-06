@@ -401,7 +401,7 @@ async fn codex_backend_client_stream_should_keep_fresh_socket_after_structural_a
         first_websocket.close(None).await.unwrap();
     });
     let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
-        initial_event_timeout: Some(Duration::from_millis(30)),
+        stream_idle_timeout: Some(Duration::from_millis(200)),
         ..websocket_pool_config_for_tests(None, None, None)
     }));
     let backend = CodexBackendClient::new(
@@ -490,7 +490,7 @@ async fn codex_backend_client_stream_should_keep_reused_socket_after_structural_
         first_websocket.close(None).await.unwrap();
     });
     let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
-        initial_event_timeout: Some(Duration::from_millis(30)),
+        stream_idle_timeout: Some(Duration::from_millis(200)),
         ..websocket_pool_config_for_tests(None, None, None)
     }));
     let backend = CodexBackendClient::new(
@@ -548,7 +548,7 @@ async fn codex_backend_client_stream_should_use_http_when_connecting_limit_is_ex
     });
     let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
         max_connecting: 0,
-        initial_event_timeout: Some(Duration::from_millis(30)),
+        stream_idle_timeout: Some(Duration::from_millis(200)),
         ..websocket_pool_config_for_tests(None, None, None)
     }));
     let backend = CodexBackendClient::new(

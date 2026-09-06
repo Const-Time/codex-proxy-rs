@@ -6,23 +6,7 @@ use tokio::time::timeout;
 use tungstenite::Message;
 
 use super::super::pump::PumpedWebSocket;
-use super::{
-    CodexWebSocketExchangeError, WEBSOCKET_ACTIVE_STREAM_IDLE_TIMEOUT,
-    WEBSOCKET_RECEIVE_IDLE_TIMEOUT,
-};
-
-pub(super) fn receive_idle_timeout(
-    saw_upstream_activity: bool,
-    initial_event_timeout: Option<Duration>,
-) -> Duration {
-    if saw_upstream_activity {
-        WEBSOCKET_ACTIVE_STREAM_IDLE_TIMEOUT
-    } else {
-        initial_event_timeout
-            .filter(|timeout| !timeout.is_zero())
-            .unwrap_or(WEBSOCKET_RECEIVE_IDLE_TIMEOUT)
-    }
-}
+use super::CodexWebSocketExchangeError;
 
 pub(super) async fn next_websocket_message(
     websocket: &mut PumpedWebSocket,

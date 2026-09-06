@@ -1,7 +1,5 @@
 //! WebSocket 连接池 reservation、handoff 与 lease 生命周期。
 
-use std::time::Duration;
-
 use tokio::{
     sync::{OwnedSemaphorePermit, watch},
     time::Instant,
@@ -40,8 +38,8 @@ pub(crate) struct WebSocketPoolConnectWaiter {
 }
 
 impl WebSocketPoolConnectWaiter {
-    pub(crate) fn remaining_budget(&self, budget: Duration) -> Duration {
-        budget.saturating_sub(self.started_at.elapsed())
+    pub(crate) fn started_at(&self) -> Instant {
+        self.started_at
     }
 
     pub(crate) async fn wait(mut self) -> WebSocketPoolConnectOutcome {

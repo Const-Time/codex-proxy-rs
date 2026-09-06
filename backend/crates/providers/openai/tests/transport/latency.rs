@@ -59,7 +59,7 @@ async fn record_websocket_origin_failures(
         let request_id = format!("req_{scenario}_{attempt}");
         let error = backend
             .create_response(
-                &explicit_websocket_warmup_request(&conversation_id),
+                &new_chain_request(&conversation_id),
                 request_context(&request_id, Some("chatgpt-account")),
             )
             .await
@@ -998,7 +998,7 @@ async fn concurrent_same_key_should_singleflight_websocket_opening() {
 }
 
 #[tokio::test]
-async fn websocket_failure_before_first_delivery_should_use_same_account_http() {
+async fn websocket_failure_before_first_delivery_should_not_replay_payload() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -1061,18 +1061,12 @@ async fn websocket_failure_before_first_delivery_should_use_same_account_http() 
             .await
             .unwrap();
 
-        let (mut http, _) = listener.accept().await.unwrap();
-        let request = read_http_request(&mut http).await;
-        assert!(request.starts_with("POST /codex/responses HTTP/1.1"));
-        assert_eq!(
-            read_header_value(&request, "authorization"),
-            Some("Bearer access-token")
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "transport must not replay over HTTP or WS"
         );
-        assert_eq!(
-            read_header_value(&request, "chatgpt-account-id"),
-            Some("chatgpt-account")
-        );
-        write_completed_sse_response(&mut http).await;
     });
     let backend = CodexBackendClient::new(
         reqwest::Client::builder().no_proxy().build().unwrap(),
@@ -1081,22 +1075,16 @@ async fn websocket_failure_before_first_delivery_should_use_same_account_http() 
     )
     .with_websocket_pool(Arc::new(CodexWebSocketPool::default()));
 
-    let response = backend
+    let error = backend
         .create_response(
             &new_chain_request("conversation-pre-delivery-fallback"),
             request_context("req_pre_delivery_fallback", Some("chatgpt-account")),
         )
         .await
-        .expect("pre-delivery WebSocket failure should use same-account HTTP");
+        .expect_err("sent payload must not be replayed");
     server.await.unwrap();
 
-    assert_eq!(response.transport, CodexBackendTransport::HttpSse);
-    assert_eq!(
-        response.transport_metrics.decision,
-        Some(CodexTransportDecision::Http2PreDeliveryFailure)
-    );
-    assert!(response.body.contains("resp_http_fallback"));
-    assert!(!response.body.contains("resp_abandoned_websocket"));
+    assert!(matches!(error, CodexClientError::WebSocket(_)));
 }
 
 #[tokio::test]
@@ -1477,5 +1465,65 @@ async fn half_open_upstream_response_should_close_origin_breaker() {
 
     assert_eq!(response.transport, CodexBackendTransport::WebSocket);
     assert!(response.body.contains("resp_after_half_open_success"));
+    pool.shutdown().await;
+}
+
+#[tokio::test]
+async fn open_fast_path_breaker_should_allow_required_warmup_and_hot_reuse() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let threshold = WebSocketOriginBreakerConfig::default().failure_threshold;
+    let server = tokio::spawn(async move {
+        reject_websocket_openings(&listener, threshold).await;
+        let (mut http, _) = listener.accept().await.unwrap();
+        assert!(
+            read_http_request(&mut http)
+                .await
+                .starts_with("POST /codex/responses")
+        );
+        write_completed_sse_response(&mut http).await;
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        for id in ["resp_required_warmup", "resp_hot_after_breaker"] {
+            websocket.next().await.unwrap().unwrap();
+            websocket
+                .send(Message::Text(completed_websocket_response(id, 2, 1).into()))
+                .await
+                .unwrap();
+        }
+    });
+    let pool = Arc::new(CodexWebSocketPool::default());
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::clone(&pool));
+    record_websocket_origin_failures(&backend, threshold, "required-warmup").await;
+    let fallback = backend
+        .create_response(
+            &new_chain_request("ordinary-cold"),
+            request_context("req_cold_suppressed", Some("chatgpt-account")),
+        )
+        .await
+        .expect("open fast path selects HTTP");
+    assert_eq!(fallback.transport, CodexBackendTransport::HttpSse);
+    let warmup = backend
+        .create_response(
+            &explicit_websocket_warmup_request("required-warmup"),
+            request_context("req_required_warmup", Some("chatgpt-account")),
+        )
+        .await
+        .expect("required WS bypasses optional fast path breaker");
+    assert_eq!(warmup.transport, CodexBackendTransport::WebSocket);
+    let hot = backend
+        .create_response(
+            &new_chain_request("required-warmup"),
+            request_context("req_hot_after_breaker", Some("chatgpt-account")),
+        )
+        .await
+        .expect("hot socket remains reusable");
+    assert_eq!(hot.websocket_pool_decision.unwrap().kind(), "reuse");
+    server.await.unwrap();
     pool.shutdown().await;
 }

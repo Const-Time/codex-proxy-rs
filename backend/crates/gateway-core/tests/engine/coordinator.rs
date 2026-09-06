@@ -2909,7 +2909,7 @@ fn ambiguous_pre_delivery_retry_marker_does_not_rotate_account() {
 }
 
 #[test]
-fn ambiguous_transport_retry_uses_provider_session_checkpoint_on_same_account() {
+fn ambiguous_transport_retry_is_rejected_even_with_provider_session_state() {
     let operation = generate_operation();
     let route_plan = plan(&operation);
     let checkpoint = ProviderSessionState::new(
@@ -2920,7 +2920,7 @@ fn ambiguous_transport_retry_uses_provider_session_checkpoint_on_same_account() 
     let mut checkpoint_event = ProviderEvent::observation(ProviderResponseObservation::new(
         UpstreamTransport::new("websocket").expect("transport"),
     ));
-    checkpoint_event.attach_session_update(checkpoint.clone());
+    checkpoint_event.attach_session_update(checkpoint);
     let retry_index = NonZeroU32::new(1).expect("retry index");
     let (coordinator, store, provider) = coordinator(vec![
         Script::ObservedStream {
@@ -2949,27 +2949,14 @@ fn ambiguous_transport_retry_uses_provider_session_checkpoint_on_same_account() 
         CancellationToken::new(),
     ))
     .expect("start execution");
-    block_on(session.collect_uncommitted()).expect("checkpointed retry succeeds");
-    block_on(session.commit_downstream(Some(200))).expect("commit winning response");
-
-    let original = ProviderAccountId::new("acct_first").expect("account id");
-    let contexts = provider.contexts.lock().expect("contexts lock");
-    assert_eq!(contexts.len(), 2);
-    assert_eq!(
-        contexts[1].transport(),
-        AttemptTransport::Retry(retry_index)
-    );
-    assert_eq!(contexts[1].required_account(), Some(&original));
-    drop(contexts);
-    let operations = provider.operations.lock().expect("operations lock");
-    assert_eq!(
-        operations[1].provider_session_state("openai"),
-        Some(&checkpoint)
-    );
+    let error =
+        block_on(session.collect_uncommitted()).expect_err("ambiguous send cannot be replayed");
+    assert!(matches!(error, EngineError::Provider(_)));
+    assert_eq!(provider.contexts.lock().expect("contexts lock").len(), 1);
     let state = store.state.lock().expect("store lock");
-    assert_eq!(state.intermediate_failures, 1);
-    assert_eq!(state.finalizations[0].attempt_count, 2);
-    assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
+    assert_eq!(state.intermediate_failures, 0);
+    assert_eq!(state.finalizations[0].attempt_count, 1);
+    assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Failed);
 }
 
 #[test]

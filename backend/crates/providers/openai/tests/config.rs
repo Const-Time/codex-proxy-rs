@@ -97,7 +97,7 @@ fn openai_config_restricts_upstream_base_url_to_https_or_loopback_http() {
 #[test]
 fn openai_config_defaults_to_the_provider_owned_operating_values() {
     let config = OpenAiConfig::default();
-    assert_eq!(DEFAULT_STREAM_MAX_RETRIES, 3);
+    assert_eq!(DEFAULT_STREAM_MAX_RETRIES, 5);
 
     assert_eq!(
         (
@@ -105,7 +105,7 @@ fn openai_config_defaults_to_the_provider_owned_operating_values() {
             config.ws_pool.enabled,
             config.ws_pool.max_age_ms,
             config.ws_pool.max_connecting,
-            config.ws_pool.initial_event_timeout_ms,
+            config.ws_pool.stream_idle_timeout_ms,
             config.quota.refresh_interval_minutes,
             config.auth.refresh_enabled,
             config.auth.oauth_client_id.as_str(),
@@ -117,7 +117,7 @@ fn openai_config_defaults_to_the_provider_owned_operating_values() {
             true,
             3_300_000,
             8,
-            20_000,
+            300_000,
             15,
             true,
             "app_EMoamEEZ73f0CkXaXp7hrann",

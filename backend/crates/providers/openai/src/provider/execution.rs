@@ -147,7 +147,6 @@ pub(super) struct ColdResponse {
     pub(super) request: CodexResponsesRequest,
     pub(super) upstream_model: UpstreamModelId,
     pub(super) transport_policy: CodexProviderTransport,
-    pub(super) websocket_connection_preference: WebSocketConnectionPreference,
     pub(super) context: AttemptContext,
     pub(super) selector: Arc<CodexCredentialSelector>,
     pub(super) quota: Arc<CodexCredentialQuotaService>,
@@ -157,7 +156,6 @@ pub(super) struct ColdResponse {
     pub(super) session_affinity_key: Option<ProviderSessionAffinityKey>,
     pub(super) session_affinity_key_hash: Option<String>,
     pub(super) session_transport_recovery: CodexSessionTransportRecovery,
-    pub(super) session_recovery_probe: Option<CodexSessionWebSocketProbe>,
     pub(super) websocket_retry_count: u32,
     pub(super) stream_max_retries: u32,
     pub(super) session_capture: Option<OpenAiSessionCapture>,
@@ -186,13 +184,6 @@ pub(super) struct OpenAiSessionState {
     #[serde(default)]
     pub(super) client_turn_id: Option<String>,
     pub(super) continuation_scope: OpenAiContinuationScope,
-    /// 该状态来自同一业务请求的 metadata 检查点，只允许被紧随其后的恢复 attempt 消费。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(super) retry_checkpoint: bool,
-}
-
-const fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +232,6 @@ pub(super) fn encode_openai_session_state(
 
 fn encode_openai_session_capture(
     capture: &OpenAiSessionCapture,
-    retry_checkpoint: bool,
 ) -> Result<ProviderSessionState, ProviderError> {
     let Some(continuation_scope) = capture.continuation_scope else {
         return Err(provider_error(
@@ -255,7 +245,6 @@ fn encode_openai_session_capture(
         turn_state: capture.turn_state.clone(),
         client_turn_id: capture.client_turn_id.clone(),
         continuation_scope,
-        retry_checkpoint,
     })
 }
 
@@ -272,7 +261,7 @@ pub(super) fn attach_openai_session_update(
     let Some(capture) = capture.take() else {
         return;
     };
-    let Ok(update) = encode_openai_session_capture(&capture, false) else {
+    let Ok(update) = encode_openai_session_capture(&capture) else {
         return;
     };
     events[terminal_index].attach_session_update(update);
@@ -312,7 +301,6 @@ pub(super) async fn create_response_attempt(
     account_id: &str,
     deadline: SystemTime,
     cancellation: &CancellationToken,
-    connection_preference: WebSocketConnectionPreference,
 ) -> Result<CodexBackendStreamingResponse, CodexHandshakeAttemptError> {
     let Some(handshake_deadline) = remaining(deadline) else {
         return Err(CodexHandshakeAttemptError::Timeout);
@@ -321,11 +309,10 @@ pub(super) async fn create_response_attempt(
         biased;
         _ = cancellation.cancelled() => Err(CodexHandshakeAttemptError::Cancelled),
         _ = tokio::time::sleep(handshake_deadline) => Err(CodexHandshakeAttemptError::Timeout),
-        response = client.create_response_stream_with_deferred_websocket_recovery(
+        response = client.create_response_stream_with_pool_account(
             request,
             request_context,
             Some(account_id),
-            connection_preference,
         ) => response.map_err(CodexHandshakeAttemptError::Client),
     }
 }
@@ -496,7 +483,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         request,
         upstream_model,
         transport_policy,
-        websocket_connection_preference,
         context,
         selector,
         quota,
@@ -506,7 +492,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         session_affinity_key,
         session_affinity_key_hash,
         session_transport_recovery,
-        mut session_recovery_probe,
         websocket_retry_count,
         stream_max_retries,
         mut session_capture,
@@ -557,7 +542,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             active_account.id().as_str(),
             context.deadline(),
             &cancellation,
-            websocket_connection_preference,
         )
         .await;
         let websocket_failure_policy = match &response {
@@ -584,7 +568,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         WebSocketRecoveryContext {
                             policy,
                             requirement: request_transport_requirement,
-                            replay_checkpoint_available: false,
                             retry_count: websocket_retry_count,
                             max_retries: stream_max_retries,
                             request_id: context.request_id().as_str(),
@@ -593,7 +576,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                             session_affinity_key: session_affinity_key.as_ref(),
                             session_affinity_key_hash: session_affinity_key_hash.as_deref(),
                             session_transport_recovery: &session_transport_recovery,
-                            session_recovery_probe: &mut session_recovery_probe,
                         },
                     );
                 }
@@ -616,9 +598,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             Err(failure.error)?;
             return;
         }
-        let mut turn_state_checkpoint_observed = response.transport
-            == CodexBackendTransport::WebSocket
-            && response.turn_state.is_some();
         if let Some(capture) = session_capture.as_mut() {
             capture.continuation_scope = Some(if capture.response_store {
                 OpenAiContinuationScope::Persisted
@@ -744,35 +723,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         &mut observation_state,
                     )
                     .await;
-                    turn_state_checkpoint_observed |= turn_state_merge.is_some();
-                    let retry_checkpoint_update = if turn_state_checkpoint_observed
-                        && failure.websocket_checkpoint_retryable
-                    {
-                        session_capture
-                            .as_ref()
-                            .and_then(|capture| encode_openai_session_capture(capture, true).ok())
+                    let observation_event = if rate_limits_changed || turn_state_merge.is_some() {
+                        observation_state.observation().map(ProviderEvent::observation)
                     } else {
                         None
                     };
-                    let mut observation_event = if rate_limits_changed
-                        || turn_state_merge.is_some()
-                        || retry_checkpoint_update.is_some()
-                    {
-                        observation_state
-                            .observation()
-                            .map(ProviderEvent::observation)
-                    } else {
-                        None
-                    };
-                    if let (Some(event), Some(update)) =
-                        (observation_event.as_mut(), retry_checkpoint_update)
-                    {
-                        event.attach_session_update(update);
-                    }
-                    let replay_checkpoint_available = observation_event
-                        .as_ref()
-                        .and_then(ProviderEvent::session_update)
-                        .is_some();
                     if failure.websocket_transport_retryable
                         && response_transport == CodexBackendTransport::WebSocket
                         && (matches!(
@@ -785,7 +740,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                             WebSocketRecoveryContext {
                                 policy: WebSocketFailurePolicy::Budgeted,
                                 requirement: request_transport_requirement,
-                                replay_checkpoint_available,
                                 retry_count: websocket_retry_count,
                                 max_retries: stream_max_retries,
                                 request_id: context.request_id().as_str(),
@@ -794,7 +748,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                                 session_affinity_key: session_affinity_key.as_ref(),
                                 session_affinity_key_hash: session_affinity_key_hash.as_deref(),
                                 session_transport_recovery: &session_transport_recovery,
-                                session_recovery_probe: &mut session_recovery_probe,
                             },
                         );
                     }
@@ -829,7 +782,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &mut observation_state,
             )
             .await;
-            turn_state_checkpoint_observed |= turn_state_merge.is_some();
             let turn_state_changed = turn_state_merge.unwrap_or(false);
             let first_event_changed =
                 observation_state.observe_stream_chunk(&chunk, output_started_at);
@@ -879,19 +831,10 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             let terminal_changed = completed
                 && observation_state.mark_completed(terminal_response_is_incomplete(&events));
             if response_transport == CodexBackendTransport::WebSocket
-                && completed
-                && terminal_failure.is_none()
-                && let Some(probe) = session_recovery_probe.take()
+                && completed && terminal_failure.is_none()
+                && let Some(key) = session_affinity_key.as_ref()
             {
-                let session_recovery_cleared = probe.succeed();
-                tracing::info!(
-                    request_id = %context.request_id(),
-                    attempt_index = context.attempt_index().get(),
-                    session_affinity_key_hash = session_affinity_key_hash.as_deref().unwrap_or(""),
-                    session_transport_action = "websocket_recovered",
-                    session_recovery_cleared,
-                    "OpenAI session fresh WebSocket probe reached a terminal response"
-                );
+                session_transport_recovery.websocket_succeeded(key);
             }
             if allows_account_state_mutation && (completed || terminal_failure.is_some()) {
                 synchronize_passive_quota(
@@ -1022,19 +965,10 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let terminal_changed = completed
             && observation_state.mark_completed(terminal_response_is_incomplete(&events));
         if response_transport == CodexBackendTransport::WebSocket
-            && completed
-            && terminal_failure.is_none()
-            && let Some(probe) = session_recovery_probe.take()
+            && completed && terminal_failure.is_none()
+            && let Some(key) = session_affinity_key.as_ref()
         {
-            let session_recovery_cleared = probe.succeed();
-            tracing::info!(
-                request_id = %context.request_id(),
-                attempt_index = context.attempt_index().get(),
-                session_affinity_key_hash = session_affinity_key_hash.as_deref().unwrap_or(""),
-                session_transport_action = "websocket_recovered",
-                session_recovery_cleared,
-                "OpenAI session fresh WebSocket probe reached a terminal response"
-            );
+            session_transport_recovery.websocket_succeeded(key);
         }
         if allows_account_state_mutation && completed && terminal_failure.is_none() {
             // 同上：尾部 finish() 也可能产出 completed，亲和记录必须先于任何下游 yield。

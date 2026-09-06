@@ -2,10 +2,7 @@ use gateway_protocol::openai::sse::encode_sse_event;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::transport::protocol::responses::{
-    CodexResponsesRequest, PREVIOUS_RESPONSE_NOT_FOUND_CODE,
-    is_bare_invalid_previous_response_id_error, transport_requirement,
-};
+use crate::transport::protocol::responses::{CodexResponsesRequest, transport_requirement};
 
 const REDACTED_PAYLOAD_VALUE: &str = "<redacted>";
 
@@ -57,49 +54,13 @@ pub fn websocket_event_to_sse_frame(raw: &str) -> Option<String> {
     websocket_event_frame(&value, raw)
 }
 
-/// 同上，复用已解析的事件 JSON；`data` 段通常逐字节内嵌 `raw` 原文。
-///
-/// 仅剥离传输层内部帧：`codex.rate_limits` 与承载 turn_state 的
-/// `response.metadata` 不下发客户端。唯一的业务帧适配是为上游省略错误码的
-/// `Invalid previous_response_id` 补齐官方客户端用于完整历史重放的稳定错误码；
-/// 原始 status、type 与 message 均保持不变。
+/// 复用已解析的 JSON，剥离内部帧并原样转发公开事件。
 pub(crate) fn websocket_event_frame(value: &Value, raw: &str) -> Option<String> {
     let event = websocket_event_type(value)?;
     if is_internal_websocket_event(event) || event == "response.metadata" {
         return None;
     }
-    let normalized = previous_response_not_found_event(value);
-    Some(encode_sse_event(
-        event,
-        normalized.as_deref().unwrap_or(raw),
-    ))
-}
-
-fn previous_response_not_found_event(value: &Value) -> Option<String> {
-    if websocket_event_type(value) != Some("error")
-        || value
-            .get("status")
-            .or_else(|| value.get("status_code"))
-            .and_then(Value::as_u64)
-            != Some(400)
-    {
-        return None;
-    }
-    let error = value.get("error")?.as_object()?;
-    if !is_bare_invalid_previous_response_id_error(
-        error.get("code"),
-        error.get("type").and_then(Value::as_str),
-        error.get("message").and_then(Value::as_str),
-    ) {
-        return None;
-    }
-
-    let mut normalized = value.clone();
-    normalized.get_mut("error")?.as_object_mut()?.insert(
-        "code".to_owned(),
-        Value::String(PREVIOUS_RESPONSE_NOT_FOUND_CODE.to_owned()),
-    );
-    serde_json::to_string(&normalized).ok()
+    Some(encode_sse_event(event, raw))
 }
 
 pub(crate) fn websocket_event_type(value: &Value) -> Option<&str> {

@@ -1,8 +1,14 @@
 //! Responses WebSocket pre-send/post-send 与 pool/breaker 编排。
 
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 
-use tokio::{sync::oneshot, time::timeout};
+use tokio::{
+    sync::oneshot,
+    time::{Instant as TokioInstant, timeout_at},
+};
 
 use super::{
     breaker::{
@@ -43,7 +49,7 @@ pub(crate) struct PreparedWebSocket {
     binding: PoolBinding,
     connect_elapsed: Option<Duration>,
     decision_wait_elapsed: Duration,
-    initial_event_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
 }
 
 enum PoolBinding {
@@ -111,7 +117,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
     origin_key: &str,
     fast_path_budget: Option<Duration>,
     require_pool: bool,
-    fallback_initial_event_timeout: Option<Duration>,
+    fallback_stream_idle_timeout: Option<Duration>,
 ) -> Result<WebSocketFastPath<PreparedWebSocket>, CodexWebSocketExchangeError> {
     let decision_started_at = Instant::now();
     let Some((pool, key)) = pool else {
@@ -125,7 +131,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
             breaker,
             origin_key,
             fast_path_budget,
-            fallback_initial_event_timeout,
+            fallback_stream_idle_timeout,
             decision_started_at,
         )
         .await;
@@ -159,7 +165,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
                 },
                 connect_elapsed: None,
                 decision_wait_elapsed: decision_started_at.elapsed(),
-                initial_event_timeout: pool.initial_event_timeout(),
+                stream_idle_timeout: pool.stream_idle_timeout(),
             }))
         }
         WebSocketPoolAcquire::Connect(connect_lease) => {
@@ -209,10 +215,10 @@ async fn prepare_unpooled_websocket(
     breaker: &WebSocketOriginBreaker,
     origin_key: &str,
     fast_path_budget: Option<Duration>,
-    initial_event_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     decision_started_at: Instant,
 ) -> Result<WebSocketFastPath<PreparedWebSocket>, CodexWebSocketExchangeError> {
-    let permit = acquire_breaker_permit(breaker, origin_key)?;
+    let permit = acquire_breaker_permit(breaker, origin_key, fast_path_budget.is_some())?;
     let context = pump_log_context_from_connection(request.connection());
     let connected = connect_with_budget(
         request.connection(),
@@ -224,7 +230,9 @@ async fn prepare_unpooled_websocket(
     let connected = match connected {
         Ok(WebSocketFastPath::Ready(connection)) => Ok(connection),
         Ok(WebSocketFastPath::Missed) => {
-            permit.fast_timeout();
+            if let Some(permit) = permit {
+                permit.fast_timeout();
+            }
             return Ok(WebSocketFastPath::Missed);
         }
         Err(error) => Err(error),
@@ -235,7 +243,7 @@ async fn prepare_unpooled_websocket(
         binding: PoolBinding::Unpooled,
         connect_elapsed: Some(connect_elapsed),
         decision_wait_elapsed: decision_started_at.elapsed(),
-        initial_event_timeout,
+        stream_idle_timeout,
     }))
 }
 
@@ -248,7 +256,7 @@ async fn prepare_pooled_websocket(
     fast_path_budget: Option<Duration>,
     decision_started_at: Instant,
 ) -> Result<WebSocketFastPath<PreparedWebSocket>, CodexWebSocketExchangeError> {
-    let permit = match acquire_breaker_permit(breaker, origin_key) {
+    let permit = match acquire_breaker_permit(breaker, origin_key, fast_path_budget.is_some()) {
         Ok(permit) => permit,
         Err(error) => {
             connect_lease.failed().await;
@@ -271,7 +279,7 @@ async fn prepare_pooled_websocket(
             },
             connect_elapsed: Some(handoff.connect_elapsed),
             decision_wait_elapsed: decision_started_at.elapsed(),
-            initial_event_timeout: pool.initial_event_timeout(),
+            stream_idle_timeout: pool.stream_idle_timeout(),
         })),
         WebSocketFastPath::Missed => Ok(WebSocketFastPath::Missed),
     }
@@ -280,7 +288,7 @@ async fn prepare_pooled_websocket(
 struct PooledWebSocketConnectWaiter {
     started_at: tokio::time::Instant,
     receiver: oneshot::Receiver<Result<PooledWebSocketHandoff, CodexWebSocketExchangeError>>,
-    fast_path_reporter: WebSocketOriginFastPathReporter,
+    fast_path_reporter: Option<WebSocketOriginFastPathReporter>,
 }
 
 struct PooledWebSocketHandoff {
@@ -294,19 +302,16 @@ impl PooledWebSocketConnectWaiter {
         &mut self,
         fast_path_budget: Option<Duration>,
     ) -> Result<WebSocketFastPath<PooledWebSocketHandoff>, CodexWebSocketExchangeError> {
-        let received = match fast_path_budget {
-            Some(budget) => {
-                let remaining = budget.saturating_sub(self.started_at.elapsed());
-                match timeout(remaining, &mut self.receiver).await {
-                    Ok(received) => received,
-                    Err(_) => {
-                        self.fast_path_reporter.missed();
-                        return Ok(WebSocketFastPath::Missed);
+        let received =
+            match wait_for_fast_path(self.started_at, fast_path_budget, &mut self.receiver).await {
+                WebSocketFastPath::Ready(received) => received,
+                WebSocketFastPath::Missed => {
+                    if let Some(reporter) = &self.fast_path_reporter {
+                        reporter.missed();
                     }
+                    return Ok(WebSocketFastPath::Missed);
                 }
-            }
-            None => (&mut self.receiver).await,
-        };
+            };
         received
             .map_err(|_| CodexWebSocketExchangeError::SharedConnectFailed)?
             .map(WebSocketFastPath::Ready)
@@ -317,12 +322,14 @@ fn start_pooled_websocket_connect(
     connection: CodexWebSocketConnection,
     pool: CodexWebSocketPool,
     connect_lease: WebSocketPoolConnectLease,
-    permit: WebSocketOriginBreakerPermit,
+    permit: Option<WebSocketOriginBreakerPermit>,
 ) -> PooledWebSocketConnectWaiter {
     let task_key = connect_lease.key().clone();
     let started_at = connect_lease.started_at();
     let cancellation = connect_lease.cancellation_token();
-    let fast_path_reporter = permit.fast_path_reporter();
+    let fast_path_reporter = permit
+        .as_ref()
+        .map(WebSocketOriginBreakerPermit::fast_path_reporter);
     let keepalive = pool.keepalive();
     let context = PumpLogContext::new(
         Some(task_key.account_id().to_owned()),
@@ -333,7 +340,7 @@ fn start_pooled_websocket_connect(
         let connected = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                permit.cancel();
+                if let Some(permit) = permit { permit.cancel(); }
                 let _ = sender.send(Err(CodexWebSocketExchangeError::SharedConnectFailed));
                 connect_lease.failed().await;
                 tracing::info!(
@@ -450,21 +457,15 @@ async fn connect_with_budget(
     fast_path_budget: Option<Duration>,
     context: PumpLogContext,
 ) -> Result<WebSocketFastPath<(PooledWebSocketConnection, Duration)>, CodexWebSocketExchangeError> {
-    match fast_path_budget {
-        Some(budget) => {
-            let Ok(connected) = timeout(
-                budget,
-                connect_websocket_connection(connection, keepalive, context),
-            )
-            .await
-            else {
-                return Ok(WebSocketFastPath::Missed);
-            };
-            connected.map(WebSocketFastPath::Ready)
-        }
-        None => connect_websocket_connection(connection, keepalive, context)
-            .await
-            .map(WebSocketFastPath::Ready),
+    match wait_for_fast_path(
+        TokioInstant::now(),
+        fast_path_budget,
+        connect_websocket_connection(connection, keepalive, context),
+    )
+    .await
+    {
+        WebSocketFastPath::Ready(connected) => connected.map(WebSocketFastPath::Ready),
+        WebSocketFastPath::Missed => Ok(WebSocketFastPath::Missed),
     }
 }
 
@@ -489,9 +490,13 @@ async fn connect_websocket_connection(
 fn acquire_breaker_permit(
     breaker: &WebSocketOriginBreaker,
     origin_key: &str,
-) -> Result<WebSocketOriginBreakerPermit, CodexWebSocketExchangeError> {
+    allow_http_fallback: bool,
+) -> Result<Option<WebSocketOriginBreakerPermit>, CodexWebSocketExchangeError> {
+    if !allow_http_fallback {
+        return Ok(None);
+    }
     match breaker.try_acquire(origin_key) {
-        WebSocketOriginBreakerDecision::Allowed(permit) => Ok(permit),
+        WebSocketOriginBreakerDecision::Allowed(permit) => Ok(Some(permit)),
         WebSocketOriginBreakerDecision::Open => Err(CodexWebSocketExchangeError::OriginCircuitOpen),
         WebSocketOriginBreakerDecision::HalfOpenBusy => {
             Err(CodexWebSocketExchangeError::OriginHalfOpenBusy)
@@ -500,9 +505,12 @@ fn acquire_breaker_permit(
 }
 
 fn finish_breaker_attempt(
-    permit: WebSocketOriginBreakerPermit,
+    permit: Option<WebSocketOriginBreakerPermit>,
     connected: Result<(PooledWebSocketConnection, Duration), CodexWebSocketExchangeError>,
 ) -> Result<(PooledWebSocketConnection, Duration), CodexWebSocketExchangeError> {
+    let Some(permit) = permit else {
+        return connected;
+    };
     match connected {
         Ok(connection) => {
             permit.succeed();
@@ -524,15 +532,21 @@ async fn wait_for_shared_connect(
     waiter: pool::WebSocketPoolConnectWaiter,
     fast_path_budget: Option<Duration>,
 ) -> WebSocketFastPath<WebSocketPoolConnectOutcome> {
-    match fast_path_budget {
-        Some(budget) => {
-            let remaining = waiter.remaining_budget(budget);
-            match timeout(remaining, waiter.wait()).await {
-                Ok(outcome) => WebSocketFastPath::Ready(outcome),
-                Err(_) => WebSocketFastPath::Missed,
-            }
-        }
-        None => WebSocketFastPath::Ready(waiter.wait().await),
+    wait_for_fast_path(waiter.started_at(), fast_path_budget, waiter.wait()).await
+}
+
+// 同一次 opening 的所有等待者共享截止时间；后来的请求不会重置 800ms 预算。
+async fn wait_for_fast_path<F: Future>(
+    started_at: TokioInstant,
+    budget: Option<Duration>,
+    future: F,
+) -> WebSocketFastPath<F::Output> {
+    let Some(budget) = budget else {
+        return WebSocketFastPath::Ready(future.await);
+    };
+    match timeout_at(started_at + budget, future).await {
+        Ok(value) => WebSocketFastPath::Ready(value),
+        Err(_) => WebSocketFastPath::Missed,
     }
 }
 
@@ -564,7 +578,7 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
     let PreparedWebSocket {
         connection,
         binding,
-        initial_event_timeout,
+        stream_idle_timeout,
         ..
     } = prepared;
     let (lease, reused, pool_decision) = binding.into_parts();
@@ -607,7 +621,7 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
         metadata,
         pool_return,
         reused,
-        initial_event_timeout,
+        stream_idle_timeout,
         trace,
     );
     exchange.pool_decision = pool_decision;

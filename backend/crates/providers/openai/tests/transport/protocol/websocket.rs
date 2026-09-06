@@ -161,7 +161,7 @@ fn websocket_event_to_sse_should_forward_public_events_and_strip_internal_events
 }
 
 #[test]
-fn websocket_event_to_sse_should_add_missing_previous_response_recovery_code() {
+fn websocket_event_to_sse_should_preserve_errors_without_inventing_recovery_codes() {
     let event = json!({
         "type": "error",
         "status": 400,
@@ -174,7 +174,7 @@ fn websocket_event_to_sse_should_add_missing_previous_response_recovery_code() {
 
     let frame = websocket_event_to_sse_frame(&event).expect("public error event");
 
-    assert!(frame.contains(r#""code":"previous_response_not_found""#));
+    assert_eq!(frame, format!("event: error\ndata: {event}\n\n"));
 }
 
 #[test]

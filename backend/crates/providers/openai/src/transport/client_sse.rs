@@ -33,7 +33,7 @@ use crate::transport::{
     response_meta,
     websocket::{
         CodexWebSocketConnection, CodexWebSocketExchangeError, CodexWebSocketPool,
-        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, DEFAULT_INITIAL_EVENT_TIMEOUT,
+        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, DEFAULT_STREAM_IDLE_TIMEOUT,
         WEBSOCKET_FAST_PATH_BUDGET, WebSocketFastPath, WebSocketOriginBreaker,
         execute_prepared_response_create_request_stream, post_send_ambiguous,
         prepare_response_create_request_with_pool, websocket_audit_dir,
@@ -42,16 +42,6 @@ use crate::transport::{
 };
 
 use super::client::*;
-
-/// 单次 Responses WebSocket opening 是否可以使用会话连接池。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum WebSocketConnectionPreference {
-    /// 优先复用匹配的空闲连接，否则建立并登记一条新连接。
-    #[default]
-    ReuseOrConnect,
-    /// 绕过连接池建立独立连接，用于根会话恢复探针。
-    Fresh,
-}
 
 impl CodexBackendClient {
     /// 构造客户端。
@@ -216,27 +206,6 @@ impl CodexBackendClient {
             .await
     }
 
-    /// Provider 生产路径：保留所有 WebSocket 失败，交由统一重试预算处理。
-    pub(crate) async fn create_response_stream_with_deferred_websocket_recovery(
-        &self,
-        request: &CodexResponsesRequest,
-        context: CodexRequestContext<'_>,
-        pool_account_id: Option<&str>,
-        connection_preference: WebSocketConnectionPreference,
-    ) -> CodexClientResult<CodexBackendStreamingResponse> {
-        let prepared = self
-            .prepare_response_transport(
-                request,
-                context,
-                pool_account_id,
-                connection_preference,
-                true,
-            )
-            .await?;
-        self.create_response_stream_with_prepared(request, context, prepared)
-            .await
-    }
-
     /// 在发送 payload 前完成 transport 选择和可取消的 WebSocket opening。
     #[doc(hidden)]
     pub(crate) async fn prepare_response_transport_with_pool_account(
@@ -245,35 +214,17 @@ impl CodexBackendClient {
         context: CodexRequestContext<'_>,
         pool_account_id: Option<&str>,
     ) -> CodexClientResult<PreparedResponseTransport> {
-        self.prepare_response_transport(
-            request,
-            context,
-            pool_account_id,
-            WebSocketConnectionPreference::ReuseOrConnect,
-            false,
-        )
-        .await
-    }
-
-    /// 与 [`Self::prepare_response_transport_with_pool_account`] 相同；
-    /// fresh 偏好会绕过连接池，为受控恢复探针强制新建连接。
-    async fn prepare_response_transport(
-        &self,
-        request: &CodexResponsesRequest,
-        context: CodexRequestContext<'_>,
-        pool_account_id: Option<&str>,
-        connection_preference: WebSocketConnectionPreference,
-        defer_websocket_recovery: bool,
-    ) -> CodexClientResult<PreparedResponseTransport> {
         let requirement = transport_requirement(request);
-        context.trace.cloned().unwrap_or_default().record("transport.preparing", serde_json::json!({
-            "requirement": requirement.as_str(), "connectionPreference": format!("{connection_preference:?}"),
-        }));
+        context.trace.cloned().unwrap_or_default().record(
+            "transport.preparing",
+            serde_json::json!({
+                "requirement": requirement.as_str(),
+            }),
+        );
         if requirement == TransportRequirement::HttpRequired {
             return Ok(PreparedResponseTransport {
                 requirement,
                 route: PreparedResponseRoute::Http,
-                defer_websocket_recovery,
                 metrics: CodexTransportMetrics {
                     decision: Some(CodexTransportDecision::HttpRequired),
                     ..CodexTransportMetrics::default()
@@ -315,12 +266,7 @@ impl CodexBackendClient {
         let pool_key =
             self.websocket_pool_key(request, context, pool_account_id, &connection_profile);
         let pool_log_context = pool_key.as_ref().map(WebSocketPoolLogContext::from_key);
-        let pool = match connection_preference {
-            WebSocketConnectionPreference::ReuseOrConnect => {
-                self.websocket_pool.as_deref().zip(pool_key)
-            }
-            WebSocketConnectionPreference::Fresh => None,
-        };
+        let pool = self.websocket_pool.as_deref().zip(pool_key);
         let fast_path_budget = match requirement {
             TransportRequirement::PersistedContinuation | TransportRequirement::NewChain => {
                 Some(WEBSOCKET_FAST_PATH_BUDGET)
@@ -338,7 +284,7 @@ impl CodexBackendClient {
             &self.websocket_origin_key,
             fast_path_budget,
             requirement.requires_websocket(),
-            Some(DEFAULT_INITIAL_EVENT_TIMEOUT),
+            Some(DEFAULT_STREAM_IDLE_TIMEOUT),
         )
         .await;
         let prepared = match prepared {
@@ -363,15 +309,12 @@ impl CodexBackendClient {
                         transport_decision_wait_ms: Some(wait_ms),
                         ..CodexTransportMetrics::default()
                     },
-                    defer_websocket_recovery,
                 });
             }
             Err(error)
-                if (!defer_websocket_recovery || error.requires_immediate_pool_fallback())
-                    && requirement.allows_pre_send_http_fallback()
-                    && error.allows_pre_send_http_fallback() =>
+                if requirement.allows_pre_send_http_fallback()
+                    && let Some(decision) = local_http_fallback_decision(&error) =>
             {
-                let decision = http_fallback_decision(&error);
                 let wait_ms = elapsed_duration_millis(prepare_started_at.elapsed());
                 context.trace.cloned().unwrap_or_default().record(
                     "transport.fallback", serde_json::json!({
@@ -390,7 +333,6 @@ impl CodexBackendClient {
                         transport_decision_wait_ms: Some(wait_ms),
                         ..CodexTransportMetrics::default()
                     },
-                    defer_websocket_recovery,
                 });
             }
             Err(error) => return Err(websocket_exchange_error_to_client_error(error)),
@@ -428,7 +370,6 @@ impl CodexBackendClient {
                 prepared,
             })),
             metrics,
-            defer_websocket_recovery,
         })
     }
 
@@ -443,7 +384,6 @@ impl CodexBackendClient {
             requirement,
             route,
             metrics,
-            defer_websocket_recovery,
         } = prepared;
         context.trace.cloned().unwrap_or_default().record(
             "transport.selected",
@@ -465,8 +405,7 @@ impl CodexBackendClient {
                     request: websocket_request,
                     prepared,
                 } = *route;
-                let delivery_wait_started_at = Instant::now();
-                let mut exchange = match execute_prepared_response_create_request_stream(
+                let mut exchange = execute_prepared_response_create_request_stream(
                     &websocket_request,
                     prepared,
                     context
@@ -476,161 +415,19 @@ impl CodexBackendClient {
                         .exchange("websocket"),
                 )
                 .await
-                {
-                    Ok(exchange) => exchange,
-                    Err(error)
-                        if !defer_websocket_recovery
-                            && requirement.allows_pre_delivery_http_fallback()
-                            && error.allows_pre_delivery_http_fallback() =>
-                    {
-                        return self
-                            .fallback_to_http_before_websocket_delivery(
-                                request,
-                                context,
-                                requirement,
-                                metrics,
-                                delivery_wait_started_at,
-                                error,
-                            )
-                            .await;
-                    }
-                    Err(error) => return Err(websocket_exchange_error_to_client_error(error)),
-                };
-                if requirement.allows_pre_delivery_http_fallback() {
-                    let mut fresh_retry_used = false;
-                    loop {
-                        match await_websocket_delivery_boundary(&mut exchange).await {
-                            Ok(DeliveryBoundary::Ready) => break,
-                            Ok(DeliveryBoundary::ConnectionLimitReached)
-                                if defer_websocket_recovery =>
-                            {
-                                return Err(CodexClientError::WebSocket(
-                                    CodexWebSocketExchangeError::ConnectionLimitReached,
-                                ));
-                            }
-                            Ok(DeliveryBoundary::ConnectionLimitReached) => {
-                                if fresh_retry_used {
-                                    return self
-                                        .http_fallback_before_delivery(
-                                            request,
-                                            context,
-                                            requirement,
-                                            metrics,
-                                            delivery_wait_started_at,
-                                            "websocket connection limit reached",
-                                        )
-                                        .await;
-                                }
-                                fresh_retry_used = true;
-                                context.trace.cloned().unwrap_or_default().record(
-                                    "transport.retry",
-                                    serde_json::json!({
-                                        "reason": "websocket_connection_limit_reached",
-                                        "connectionPreference": "fresh",
-                                    }),
-                                );
-                                drop(exchange);
-                                match self
-                                    .prepare_response_transport(
-                                        request,
-                                        context,
-                                        None,
-                                        WebSocketConnectionPreference::Fresh,
-                                        false,
-                                    )
-                                    .await
-                                {
-                                    Ok(PreparedResponseTransport {
-                                        route: PreparedResponseRoute::WebSocket(route),
-                                        ..
-                                    }) => {
-                                        match execute_prepared_response_create_request_stream(
-                                            &route.request,
-                                            route.prepared,
-                                            context
-                                                .trace
-                                                .cloned()
-                                                .unwrap_or_default()
-                                                .exchange("websocket"),
-                                        )
-                                        .await
-                                        {
-                                            Ok(next_exchange) => {
-                                                exchange = next_exchange;
-                                                continue;
-                                            }
-                                            Err(error)
-                                                if error.allows_pre_delivery_http_fallback() =>
-                                            {
-                                                return self
-                                                    .fallback_to_http_before_websocket_delivery(
-                                                        request,
-                                                        context,
-                                                        requirement,
-                                                        metrics,
-                                                        delivery_wait_started_at,
-                                                        error,
-                                                    )
-                                                    .await;
-                                            }
-                                            Err(error) => {
-                                                return Err(
-                                                    websocket_exchange_error_to_client_error(
-                                                        post_send_ambiguous(error),
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Ok(PreparedResponseTransport {
-                                        route: PreparedResponseRoute::Http,
-                                        ..
-                                    }) => {
-                                        return self
-                                            .create_response_stream_http_sse(request, context)
-                                            .await
-                                            .map(|mut response| {
-                                                merge_preparation_metrics(
-                                                    &mut response.transport_metrics,
-                                                    metrics,
-                                                );
-                                                response
-                                            });
-                                    }
-                                    Err(error) => {
-                                        return self
-                                            .http_fallback_before_delivery(
-                                                request,
-                                                context,
-                                                requirement,
-                                                metrics,
-                                                delivery_wait_started_at,
-                                                &error.to_string(),
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
-                            Err(error)
-                                if !defer_websocket_recovery
-                                    && error.allows_pre_delivery_http_fallback() =>
-                            {
-                                return self
-                                    .fallback_to_http_before_websocket_delivery(
-                                        request,
-                                        context,
-                                        requirement,
-                                        metrics,
-                                        delivery_wait_started_at,
-                                        error,
-                                    )
-                                    .await;
-                            }
-                            Err(error) => {
-                                return Err(websocket_exchange_error_to_client_error(
-                                    post_send_ambiguous(error),
-                                ));
-                            }
+                .map_err(websocket_exchange_error_to_client_error)?;
+                if requirement.allows_connection_restart() {
+                    match await_websocket_delivery_boundary(&mut exchange).await {
+                        Ok(DeliveryBoundary::Ready) => {}
+                        Ok(DeliveryBoundary::ConnectionLimitReached) => {
+                            return Err(CodexClientError::WebSocket(
+                                CodexWebSocketExchangeError::ConnectionLimitReached,
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(websocket_exchange_error_to_client_error(
+                                post_send_ambiguous(error),
+                            ));
                         }
                     }
                 }
@@ -656,59 +453,6 @@ impl CodexBackendClient {
                 })
             }
         }
-    }
-
-    async fn fallback_to_http_before_websocket_delivery(
-        &self,
-        request: &CodexResponsesRequest,
-        context: CodexRequestContext<'_>,
-        requirement: TransportRequirement,
-        metrics: CodexTransportMetrics,
-        delivery_wait_started_at: Instant,
-        error: CodexWebSocketExchangeError,
-    ) -> CodexClientResult<CodexBackendStreamingResponse> {
-        self.http_fallback_before_delivery(
-            request,
-            context,
-            requirement,
-            metrics,
-            delivery_wait_started_at,
-            &error.to_string(),
-        )
-        .await
-    }
-
-    async fn http_fallback_before_delivery(
-        &self,
-        request: &CodexResponsesRequest,
-        context: CodexRequestContext<'_>,
-        requirement: TransportRequirement,
-        mut metrics: CodexTransportMetrics,
-        delivery_wait_started_at: Instant,
-        detail: &str,
-    ) -> CodexClientResult<CodexBackendStreamingResponse> {
-        let decision_wait_ms = metrics
-            .transport_decision_wait_ms
-            .unwrap_or_default()
-            .saturating_add(elapsed_duration_millis(delivery_wait_started_at.elapsed()));
-        metrics.decision = Some(CodexTransportDecision::Http2PreDeliveryFailure);
-        metrics.transport_decision_wait_ms = Some(decision_wait_ms);
-        context.trace.cloned().unwrap_or_default().record(
-            "transport.fallback",
-            serde_json::json!({
-                "to": "http_sse", "reason": "websocket_pre_delivery_failure",
-                "requirement": requirement.as_str(),
-                "decision": CodexTransportDecision::Http2PreDeliveryFailure.as_str(),
-                "waitMs": decision_wait_ms,
-                "detail": diagnostic_json(&serde_json::json!({"message": detail})),
-            }),
-        );
-        self.create_response_stream_http_sse(request, context)
-            .await
-            .map(|mut response| {
-                merge_preparation_metrics(&mut response.transport_metrics, metrics);
-                response
-            })
     }
 
     fn websocket_pool_key(

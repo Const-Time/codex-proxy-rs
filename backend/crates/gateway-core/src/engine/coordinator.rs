@@ -223,8 +223,6 @@ struct CurrentAttempt {
     index: NonZeroU32,
     started_at: SystemTime,
     send_observed: bool,
-    /// Provider 已为当前 attempt 交付可供同请求恢复的不透明状态检查点。
-    session_checkpoint_observed: bool,
     response_observation: Option<ProviderResponseObservation>,
 }
 
@@ -596,7 +594,7 @@ where
                             .wire_event(wire.protocol(), wire.event_type());
                     }
                     if let Some(state) = event.session_update() {
-                        self.observe_session_checkpoint(state);
+                        self.observe_session_update(state);
                     }
                     if let Some(observation) = event.take_observation() {
                         self.observe_response(observation);
@@ -978,7 +976,6 @@ where
             index: next_attempt,
             started_at: SystemTime::now(),
             send_observed: false,
-            session_checkpoint_observed: false,
             response_observation: None,
         });
         Ok(None)
@@ -1004,14 +1001,13 @@ where
         self.mark_send_observed().await;
     }
 
-    fn observe_session_checkpoint(&mut self, state: &ProviderSessionState) {
+    fn observe_session_update(&mut self, state: &ProviderSessionState) {
         let Some(current) = self.current.as_mut() else {
             return;
         };
         if state.provider() != current.metadata.provider().as_str() {
             return;
         }
-        current.session_checkpoint_observed = true;
         self.operation.set_provider_session_state(state.clone());
     }
 
@@ -1081,11 +1077,6 @@ where
             .await;
         }
         let provider_proved_replay_safe = provider_proved_replay_safe(&error);
-        // Ambiguous 仍是默认 fail-closed。唯一例外是 Provider 在同一 attempt 中先
-        // 交付了不透明恢复检查点，并明确证明从该检查点重放安全；该例外只用于
-        // 固定原账号的 transport recovery，不放开普通换号或 continuation 重放。
-        let checkpointed_transport_replay =
-            current.session_checkpoint_observed && error.replay_is_safe();
         let continuation_retry = self.prepare_continuation_retry(
             &current,
             &error,
@@ -1108,16 +1099,14 @@ where
                 delay,
             }) if self.downstream_committed_at.is_none()
                 && !self.delivery_pending
-                && (attempt_send_state != UpstreamSendState::Ambiguous
-                    || checkpointed_transport_replay) =>
+                && attempt_send_state != UpstreamSendState::Ambiguous =>
             {
                 Some((AttemptTransport::Retry(retry_index), delay))
             }
             Some(crate::error::PreDeliveryRetry::SameAccountTransportFallback)
                 if self.downstream_committed_at.is_none()
                     && !self.delivery_pending
-                    && (attempt_send_state != UpstreamSendState::Ambiguous
-                        || checkpointed_transport_replay) =>
+                    && attempt_send_state != UpstreamSendState::Ambiguous =>
             {
                 Some((AttemptTransport::Fallback, Duration::ZERO))
             }

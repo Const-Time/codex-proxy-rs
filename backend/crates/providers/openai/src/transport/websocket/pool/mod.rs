@@ -37,7 +37,7 @@ const DEFAULT_MAX_AGE: Duration = Duration::from_mins(55);
 const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(25);
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(25);
 const DEFAULT_PING_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const DEFAULT_INITIAL_EVENT_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// WebSocket 连接池。
 #[derive(Clone)]
@@ -73,8 +73,8 @@ pub struct CodexWebSocketPoolConfig {
     pub ping_timeout: Duration,
     /// idle socket 无活动多久后视为失活。
     pub liveness_timeout: Option<Duration>,
-    /// 建连并发送后首个上游事件到达前的超时；`None` 表示禁用。
-    pub initial_event_timeout: Option<Duration>,
+    /// 等待下一条上游消息的空闲超时；`None` 或零值使用默认 300 秒。
+    pub stream_idle_timeout: Option<Duration>,
 }
 
 impl Default for CodexWebSocketPoolConfig {
@@ -87,9 +87,9 @@ impl Default for CodexWebSocketPoolConfig {
             ping_interval: Some(DEFAULT_PING_INTERVAL),
             ping_timeout: DEFAULT_PING_TIMEOUT,
             // idle 连接不设失活截断：靠 ping/pong 保活，只在 max_age（55 分钟）
-            // 或 ping 失败时关闭，最大化跨轮复用（对齐 Codex CLI 的长连接策略）。
+            // 或 ping 失败时关闭，维持跨轮可复用连接。
             liveness_timeout: None,
-            initial_event_timeout: Some(DEFAULT_INITIAL_EVENT_TIMEOUT),
+            stream_idle_timeout: Some(DEFAULT_STREAM_IDLE_TIMEOUT),
         }
     }
 }
@@ -136,9 +136,9 @@ impl CodexWebSocketPool {
         self.config.keepalive()
     }
 
-    /// 建连并发送后首个上游事件到达前的超时；`None` 表示禁用。
-    pub(crate) fn initial_event_timeout(&self) -> Option<Duration> {
-        self.config.initial_event_timeout
+    /// 等待下一条上游消息的空闲超时；`None` 或零值使用默认 300 秒。
+    pub(crate) fn stream_idle_timeout(&self) -> Option<Duration> {
+        self.config.stream_idle_timeout
     }
 
     /// 注册由连接池生命周期托管的 opening 任务。

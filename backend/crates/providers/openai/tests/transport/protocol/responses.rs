@@ -289,28 +289,9 @@ fn new_chain_should_allow_pre_delivery_http_fallback() {
     request.use_websocket = true;
 
     assert!(
-        transport_requirement(&request).allows_pre_delivery_http_fallback(),
-        "new chains may follow the TS same-account fallback behavior"
+        transport_requirement(&request).allows_connection_restart(),
+        "new chains have no connection-bound state to lose on an explicit rejection"
     );
-}
-
-#[test]
-fn session_transport_recovery_should_only_apply_to_new_chains() {
-    assert!(TransportRequirement::NewChain.allows_session_transport_recovery());
-
-    for requirement in [
-        TransportRequirement::HttpRequired,
-        TransportRequirement::ExplicitWebSocketWarmup,
-        TransportRequirement::ExactWebSocketContinuation,
-        TransportRequirement::PersistedContinuation,
-        TransportRequirement::ExternalUnknown,
-    ] {
-        assert!(
-            !requirement.allows_session_transport_recovery(),
-            "session recovery must not override {}",
-            requirement.as_str()
-        );
-    }
 }
 
 #[test]
@@ -331,7 +312,7 @@ fn previous_response_should_forbid_pre_delivery_http_fallback() {
     request.set_previous_response_id(Some("resp_previous".to_owned()));
 
     assert!(
-        !transport_requirement(&request).allows_pre_delivery_http_fallback(),
+        !transport_requirement(&request).allows_connection_restart(),
         "a sent continuation must not be replayed on another transport"
     );
 }

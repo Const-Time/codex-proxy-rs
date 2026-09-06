@@ -511,8 +511,6 @@ pub enum CodexTransportDecision {
     Http2WebSocketBudgetExhausted,
     Http2BreakerOpen,
     Http2PoolUnavailable,
-    Http2PreSendFailure,
-    Http2PreDeliveryFailure,
 }
 
 impl CodexTransportDecision {
@@ -526,8 +524,6 @@ impl CodexTransportDecision {
             Self::Http2WebSocketBudgetExhausted => "http2_ws_budget_exhausted",
             Self::Http2BreakerOpen => "http2_breaker_open",
             Self::Http2PoolUnavailable => "http2_pool_unavailable",
-            Self::Http2PreSendFailure => "http2_ws_pre_send_failure",
-            Self::Http2PreDeliveryFailure => "http2_ws_pre_delivery_failure",
         }
     }
 }
@@ -615,7 +611,6 @@ pub(crate) struct PreparedResponseTransport {
     pub(super) requirement: TransportRequirement,
     pub(super) route: PreparedResponseRoute,
     pub(super) metrics: CodexTransportMetrics,
-    pub(super) defer_websocket_recovery: bool,
 }
 
 pub(super) enum PreparedResponseRoute {
@@ -862,19 +857,18 @@ pub(super) fn websocket_success_decision(
     }
 }
 
-pub(super) fn http_fallback_decision(
+pub(super) fn local_http_fallback_decision(
     error: &CodexWebSocketExchangeError,
-) -> CodexTransportDecision {
+) -> Option<CodexTransportDecision> {
     match error.classified() {
         CodexWebSocketExchangeError::OriginCircuitOpen
         | CodexWebSocketExchangeError::OriginHalfOpenBusy => {
-            CodexTransportDecision::Http2BreakerOpen
+            Some(CodexTransportDecision::Http2BreakerOpen)
         }
-        CodexWebSocketExchangeError::ContinuationUnavailable { .. }
-        | CodexWebSocketExchangeError::SharedConnectFailed => {
-            CodexTransportDecision::Http2PoolUnavailable
+        CodexWebSocketExchangeError::ContinuationUnavailable { .. } => {
+            Some(CodexTransportDecision::Http2PoolUnavailable)
         }
-        _ => CodexTransportDecision::Http2PreSendFailure,
+        _ => None,
     }
 }
 

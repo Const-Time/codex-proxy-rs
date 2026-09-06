@@ -90,12 +90,6 @@ pub enum CodexWebSocketExchangeError {
         #[source]
         source: Option<Box<CodexWebSocketExchangeError>>,
     },
-    /// 建连并发送后，上游在配置时间内没有产生任何事件。
-    #[error("websocket first upstream event not received within {timeout:?}")]
-    InitialEventTimeout {
-        /// 首个上游事件超时时长。
-        timeout: Duration,
-    },
     /// 将一个已分类交互错误与物理连接生命周期快照绑定。
     #[error("{source}")]
     ConnectionObserved {
@@ -324,39 +318,5 @@ impl CodexWebSocketExchangeError {
             diagnostics,
             send_phase,
         }))
-    }
-
-    /// opening 阶段只有明确的 transport 可用性失败才能切到同账号 HTTP。
-    pub(in crate::transport) fn allows_pre_send_http_fallback(&self) -> bool {
-        if let Self::ConnectionObserved { source, .. } = self {
-            return source.allows_pre_send_http_fallback();
-        }
-        matches!(
-            self,
-            Self::Connect(_)
-                | Self::ConnectTimeout { .. }
-                | Self::OriginCircuitOpen
-                | Self::OriginHalfOpenBusy
-                | Self::SharedConnectFailed
-                | Self::ContinuationUnavailable { .. }
-        )
-    }
-
-    /// 精确连接状态不可用属于本地池路由事实，不消耗上游 WS 重试预算。
-    pub(in crate::transport) fn requires_immediate_pool_fallback(&self) -> bool {
-        matches!(self.classified(), Self::ContinuationUnavailable { .. })
-    }
-
-    /// 首个业务事件交付前，普通 WebSocket 失败可切到同账号 HTTP。
-    pub(in crate::transport) fn allows_pre_delivery_http_fallback(&self) -> bool {
-        match self {
-            Self::Upstream(_) => false,
-            Self::PostSendAmbiguous {
-                source: Some(source),
-                ..
-            } => source.allows_pre_delivery_http_fallback(),
-            Self::ConnectionObserved { source, .. } => source.allows_pre_delivery_http_fallback(),
-            _ => true,
-        }
     }
 }

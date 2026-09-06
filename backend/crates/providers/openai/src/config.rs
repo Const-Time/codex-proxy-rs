@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// 本服务的流式请求默认重试次数。
-pub const DEFAULT_STREAM_MAX_RETRIES: u64 = 3;
+pub const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 /// 防止错误配置产生无界隐藏重放；与官方 Codex 的硬上限一致。
 pub const MAX_STREAM_MAX_RETRIES: u64 = 100;
 
@@ -175,7 +175,7 @@ pub struct CodexWebSocketPoolSettings {
     pub enabled: bool,
     pub max_age_ms: u64,
     pub max_connecting: usize,
-    pub initial_event_timeout_ms: u64,
+    pub stream_idle_timeout_ms: u64,
 }
 
 impl Default for CodexWebSocketPoolSettings {
@@ -184,7 +184,7 @@ impl Default for CodexWebSocketPoolSettings {
             enabled: true,
             max_age_ms: 55 * 60 * 1000,
             max_connecting: 8,
-            initial_event_timeout_ms: 20_000,
+            stream_idle_timeout_ms: 300_000,
         }
     }
 }
@@ -202,8 +202,8 @@ impl CodexWebSocketPoolSettings {
             enabled: self.enabled,
             max_age: Duration::from_millis(self.max_age_ms),
             max_connecting: self.max_connecting,
-            initial_event_timeout: (self.initial_event_timeout_ms != 0)
-                .then(|| Duration::from_millis(self.initial_event_timeout_ms)),
+            stream_idle_timeout: (self.stream_idle_timeout_ms != 0)
+                .then(|| Duration::from_millis(self.stream_idle_timeout_ms)),
             ..CodexWebSocketPoolConfig::default()
         }
     }

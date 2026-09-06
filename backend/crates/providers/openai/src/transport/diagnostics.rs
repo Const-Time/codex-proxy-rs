@@ -1,10 +1,7 @@
 //! 在 transport 边界采集的上游响应诊断信息。
 
 use super::client::CodexClientVisibleUpstreamResponse;
-use super::protocol::responses::{
-    PREVIOUS_RESPONSE_NOT_FOUND_CODE, ResponsesSseFailure,
-    is_bare_invalid_previous_response_id_error,
-};
+use super::protocol::responses::ResponsesSseFailure;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use reqwest::{StatusCode, header::HeaderMap};
@@ -146,7 +143,7 @@ impl CodexUpstreamFailure {
         rate_limit_headers: &[(String, String)],
         send_phase: CodexUpstreamSendPhase,
     ) -> Self {
-        let fields = ParsedUpstreamError::from_http_response(status, body);
+        let fields = ParsedUpstreamError::from_http_response(body);
         let category = classify_upstream_failure(
             UpstreamFailureSource::HttpResponse,
             Some(status),
@@ -268,7 +265,7 @@ struct ParsedUpstreamError {
 }
 
 impl ParsedUpstreamError {
-    fn from_http_response(status: StatusCode, body: &str) -> Self {
+    fn from_http_response(body: &str) -> Self {
         let Ok(value) = serde_json::from_str::<Value>(body) else {
             return Self {
                 code: None,
@@ -294,16 +291,7 @@ impl ParsedUpstreamError {
             .or_else(|| value.get("message"))
             .and_then(Value::as_str)
             .and_then(non_empty_owned);
-        let code = if status == StatusCode::BAD_REQUEST
-            && is_bare_invalid_previous_response_id_error(
-                code_value,
-                error_type.as_deref(),
-                client_message.as_deref(),
-            ) {
-            Some(PREVIOUS_RESPONSE_NOT_FOUND_CODE.to_owned())
-        } else {
-            code_value.and_then(Value::as_str).and_then(non_empty_owned)
-        };
+        let code = code_value.and_then(Value::as_str).and_then(non_empty_owned);
         let message = client_message
             .clone()
             .or_else(|| error.as_str().and_then(non_empty_owned))

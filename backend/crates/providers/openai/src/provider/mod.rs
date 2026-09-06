@@ -61,10 +61,7 @@ use crate::credential::{
     derive_codex_cyber_policy_session_key, derive_codex_session_affinity,
     derive_previous_response_id_hash,
 };
-use crate::session_transport::{
-    CodexSessionRecoveryTransition, CodexSessionTransportDecision, CodexSessionTransportRecovery,
-    CodexSessionWebSocketProbe, SessionWebSocketFallback,
-};
+use crate::session_transport::CodexSessionTransportRecovery;
 use crate::transport::canonical::{
     CodexCanonicalDecoder, CodexCanonicalError, CodexCanonicalOutcome,
 };
@@ -94,7 +91,7 @@ use crate::transport::{
     CodexBackendJsonResponse, CodexBackendStreamingResponse, CodexBackendTransport,
     CodexClientError, CodexRateLimitUpdates, CodexRequestContext, CodexResponseMetadata,
     CodexTransportMetrics, CodexTurnStateUpdate, CodexUpstreamDiagnostics, CodexWebSocketPool,
-    WebSocketConnectionPreference, endpoint_url,
+    endpoint_url,
 };
 
 mod execution;
@@ -321,14 +318,10 @@ impl Provider for CodexProvider {
             identity.prepare_local_conversation(&mut upstream_request);
         }
         if let Some(previous_session) = previous_session.as_ref() {
-            upstream_request.turn_state = if previous_session.retry_checkpoint
-                || same_client_turn(
-                    previous_session.client_turn_id.as_deref(),
-                    upstream_request.client_turn_id.as_deref(),
-                ) {
-                // 客户端可能携带 metadata-close 失败后才拿到的新状态；同一
-                // turn 内显式回传值比最后一次成功响应保存的状态更新。同请求
-                // 内部恢复由一次性 retry checkpoint 明确证明，不依赖客户端 turn ID。
+            upstream_request.turn_state = if same_client_turn(
+                previous_session.client_turn_id.as_deref(),
+                upstream_request.client_turn_id.as_deref(),
+            ) {
                 upstream_request
                     .turn_state
                     .take()
@@ -453,60 +446,17 @@ impl Provider for CodexProvider {
         );
         let requirement = transport_requirement(&upstream_request);
         let requested_transport = selected_transport(&upstream_request);
-        let session_transport_decision = if matches!(
-            context.transport(),
-            AttemptTransport::Default | AttemptTransport::Retry(_)
-        ) && requested_transport
-            == CodexProviderTransport::PreferWebSocket
-            && requirement.allows_session_transport_recovery()
-            && let Some(affinity) = session_affinity.as_ref()
-        {
-            self.session_transport_recovery.decide(affinity.key())
-        } else {
-            CodexSessionTransportDecision::Default
-        };
-        let session_transport_action = session_transport_decision.action();
-        let session_websocket_failure_count = session_transport_decision.failure_count();
-        let session_http_cooldown_ms = session_transport_decision
-            .retry_after()
-            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
-        let mut websocket_connection_preference = WebSocketConnectionPreference::ReuseOrConnect;
-        let mut session_recovery_probe = None;
+        let session_http_fallback = requirement.allows_pre_send_http_fallback()
+            && session_affinity
+                .as_ref()
+                .is_some_and(|affinity| self.session_transport_recovery.uses_http(affinity.key()));
         let transport = if requirement.requires_websocket() {
             CodexProviderTransport::PreferWebSocket
+        } else if context.transport() == AttemptTransport::Fallback || session_http_fallback {
+            CodexProviderTransport::HttpOnly
         } else {
-            match context.transport() {
-                AttemptTransport::Default | AttemptTransport::Retry(_) => {
-                    match session_transport_decision {
-                        CodexSessionTransportDecision::Default => requested_transport,
-                        CodexSessionTransportDecision::FreshWebSocket { probe, .. } => {
-                            websocket_connection_preference = WebSocketConnectionPreference::Fresh;
-                            session_recovery_probe = Some(probe);
-                            CodexProviderTransport::PreferWebSocket
-                        }
-                        CodexSessionTransportDecision::HttpSse { .. } => {
-                            CodexProviderTransport::HttpOnly
-                        }
-                    }
-                }
-                AttemptTransport::Fallback => CodexProviderTransport::HttpOnly,
-            }
+            requested_transport
         };
-        if let Some(session_transport_action) = session_transport_action {
-            tracing::info!(
-                request_id = %context.request_id(),
-                attempt_index = context.attempt_index().get(),
-                session_affinity_key_hash = session_affinity
-                    .as_ref()
-                    .map_or("", CodexSessionAffinity::key_hash),
-                transport_requirement = requirement.as_str(),
-                session_transport_action,
-                session_websocket_failure_count = session_websocket_failure_count.unwrap_or_default(),
-                session_http_cooldown_ms = session_http_cooldown_ms.unwrap_or_default(),
-                session_http_cooldown_present = session_http_cooldown_ms.is_some(),
-                "Applied OpenAI session transport recovery decision"
-            );
-        }
         apply_transport(&mut upstream_request, transport);
         let metadata = ProviderCallMetadata::new(
             provider_kind,
@@ -553,9 +503,7 @@ impl Provider for CodexProvider {
             output_started_at,
             session_affinity_key,
             session_affinity_key_hash,
-            websocket_connection_preference,
             session_transport_recovery: self.session_transport_recovery.clone(),
-            session_recovery_probe,
             websocket_retry_count,
             stream_max_retries: self.stream_max_retries,
             session_capture,

@@ -506,7 +506,7 @@ fn websocket_pool_config_for_tests(
         ping_interval,
         ping_timeout: Duration::from_secs(1),
         liveness_timeout,
-        initial_event_timeout: None,
+        stream_idle_timeout: None,
     }
 }
 

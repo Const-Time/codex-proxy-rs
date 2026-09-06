@@ -17,7 +17,7 @@ use super::super::{
         PumpExitReason, PumpedWebSocket, WebSocketConnectionObservation, transport_metric_reason,
     },
 };
-use super::io::{next_websocket_message, receive_idle_timeout, reused_stream_receive_error};
+use super::io::{next_websocket_message, reused_stream_receive_error};
 use super::reducer::{ExchangeAction, WebSocketTerminalKind, reduce_websocket_event};
 use super::{
     CodexWebSocketExchangeError, CodexWebSocketRateLimitUpdates, CodexWebSocketStreamingExchange,
@@ -62,7 +62,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
     metadata: CodexWebSocketConnectionMetadata,
     pool_return: Option<WebSocketStreamPoolReturn>,
     reused_connection: bool,
-    initial_event_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     trace: TraceContext,
 ) -> CodexWebSocketStreamingExchange {
     let websocket_connection_id = websocket.connection_id();
@@ -85,7 +85,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
             metadata,
             pool_return,
             reused_connection,
-            initial_event_timeout,
+            stream_idle_timeout,
             trace,
             shutdown,
             rate_limit_updates: rate_limit_updates_for_task,
@@ -125,7 +125,7 @@ struct WebSocketStreamForwardState {
     metadata: CodexWebSocketConnectionMetadata,
     pool_return: Option<WebSocketStreamPoolReturn>,
     reused_connection: bool,
-    initial_event_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     shutdown: CancellationToken,
     rate_limit_updates: CodexWebSocketRateLimitUpdates,
     turn_state_update: CodexWebSocketTurnStateUpdate,
@@ -139,7 +139,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         mut metadata,
         pool_return,
         reused_connection,
-        initial_event_timeout,
+        stream_idle_timeout,
         shutdown,
         rate_limit_updates,
         turn_state_update,
@@ -150,7 +150,6 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         .as_mut()
         .map(|pool_return| std::mem::take(&mut pool_return.continuation))
         .unwrap_or_default();
-    let mut saw_upstream_activity = false;
     let mut last_event_type = None;
     loop {
         let message = tokio::select! {
@@ -177,20 +176,12 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             }
             message = next_websocket_message(
                 &mut websocket,
-                receive_idle_timeout(saw_upstream_activity, initial_event_timeout),
+                stream_idle_timeout.filter(|timeout| !timeout.is_zero()).unwrap_or(super::super::pool::DEFAULT_STREAM_IDLE_TIMEOUT),
             ) => message,
         };
         let message = match message {
             Ok(message) => message,
             Err(error) => {
-                let error = match error {
-                    CodexWebSocketExchangeError::ReceiveIdleTimeout { timeout }
-                        if !saw_upstream_activity =>
-                    {
-                        CodexWebSocketExchangeError::InitialEventTimeout { timeout }
-                    }
-                    error => error,
-                };
                 trace.record(
                     "upstream.read.failed",
                     json!({
@@ -223,10 +214,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             break;
         };
         let raw = match message {
-            tungstenite::Message::Text(text) => {
-                saw_upstream_activity = true;
-                text.to_string()
-            }
+            tungstenite::Message::Text(text) => text.to_string(),
             tungstenite::Message::Binary(bytes) => {
                 trace.capture("upstream.binary", &bytes);
                 let error = CodexWebSocketExchangeError::UnexpectedBinaryEvent;
@@ -475,7 +463,6 @@ fn exchange_exit_reason(error: &CodexWebSocketExchangeError) -> &'static str {
             }
         }
         CodexWebSocketExchangeError::ReceiveIdleTimeout { .. } => "receive_idle_timeout",
-        CodexWebSocketExchangeError::InitialEventTimeout { .. } => "initial_event_timeout",
         CodexWebSocketExchangeError::UnexpectedBinaryEvent => "unexpected_binary_event",
         _ => "exchange_failure",
     }

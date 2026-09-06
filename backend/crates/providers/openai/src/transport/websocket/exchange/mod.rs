@@ -4,7 +4,7 @@ mod io;
 mod reducer;
 mod stream;
 
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{pin::Pin, sync::Arc};
 
 use bytes::Bytes;
 use futures::Stream;
@@ -19,8 +19,6 @@ use crate::transport::{
 use super::error::CodexWebSocketExchangeError;
 use super::pool::{CodexWebSocketConnectionMetadata, WebSocketPoolDecision};
 
-const WEBSOCKET_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-const WEBSOCKET_ACTIVE_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const WEBSOCKET_STREAM_BUFFER: usize = 16;
 
 pub(super) use self::stream::{WebSocketStreamPoolReturn, stream_websocket_response};
