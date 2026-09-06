@@ -1,5 +1,8 @@
 //! 唯一的账号重试、发送与下游 commit barrier owner。
 
+use crate::diagnostics::TraceContext;
+use serde_json::json;
+
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::num::NonZeroU32;
@@ -144,12 +147,26 @@ where
                     .position(|candidate| candidate.provider() == pin.provider())
                     .ok_or(EngineError::ContinuationPinMismatch)
             })?;
+        let trace = TraceContext::new(request_id.as_str());
+        trace.record(
+            "request.routed",
+            json!({
+                "endpoint": request.endpoint, "protocol": request.protocol,
+                "clientTransport": request.client_transport,
+                "model": request.requested_model.as_ref().map(|model| model.as_str()),
+                "configRevision": format!("{:?}", request.config_revision),
+                "admissionMs": request.admission_decision_ms,
+                "continuation": format!("{continuation_attempt:?}"),
+                "candidateCount": plan.candidates().len(),
+            }),
+        );
         let image_generation_requested = operation.image_generation_requested();
         let mut session = ResponseExecutionSession {
             engine: Arc::clone(&self.engine),
             request_id,
             client_api_key_ref,
             observation: ResponseObservation::new(timing_started_at),
+            trace,
             deadline,
             deadline_timer: Delay::new(
                 deadline
@@ -238,6 +255,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     request_id: ModelRequestId,
     client_api_key_ref: crate::policy::ClientApiKeyId,
     observation: ResponseObservation,
+    trace: TraceContext,
     deadline: SystemTime,
     /// 会话级 deadline 计时器；deadline 固定，帧循环内复用而非逐事件新建。
     deadline_timer: Fuse<Delay>,
@@ -291,6 +309,11 @@ impl<S: ?Sized> ResponseExecutionSession<S>
 where
     S: ExecutionStore,
 {
+    /// 当前请求共享的诊断上下文。
+    pub fn trace(&self) -> TraceContext {
+        self.trace.clone()
+    }
+
     /// 读取下一条 canonical event；首条未提交事件会携带 commit 要求。
     ///
     /// # Errors
@@ -398,6 +421,10 @@ where
             return Err(EngineError::InvalidDeliveryState);
         }
         let committed_at = SystemTime::now();
+        self.trace.record(
+            "downstream.committed",
+            json!({"status": client_status_code}),
+        );
         if self.request_persisted {
             best_effort_store_write(
                 "mark_downstream_committed",
@@ -563,6 +590,11 @@ where
                     return Err(EngineError::Deadline);
                 }
                 PollBoundary::Item(Some(Ok(mut event))) => {
+                    if let Some(wire) = event.wire_event() {
+                        self.trace
+                            .attempt(self.attempts)
+                            .wire_event(wire.protocol(), wire.event_type());
+                    }
                     if let Some(state) = event.session_update() {
                         self.observe_session_checkpoint(state);
                     }
@@ -682,7 +714,8 @@ where
         }));
         let context = AttemptContext::new(
             RequestAttemptContext::new(self.request_id.clone(), self.client_api_key_ref.clone())
-                .with_timing_started_at(self.observation.timing_started_at),
+                .with_timing_started_at(self.observation.timing_started_at)
+                .with_trace(self.trace.clone()),
             next_attempt,
             self.deadline,
             self.plan.account_selection_policy(),
@@ -705,6 +738,18 @@ where
             .ok_or_else(|| EngineError::ProviderNotRegistered {
                 provider: candidate.provider().as_str().to_owned(),
             })?;
+        let attempt_trace = self.trace.attempt(next_attempt.get());
+        attempt_trace.record(
+            "attempt.started",
+            json!({
+                "provider": candidate.provider().as_str(),
+                "model": candidate.upstream_model().map(|model| model.as_str()),
+                "transportPolicy": format!("{attempt_transport:?}"),
+                "continuation": format!("{:?}", self.continuation_attempt),
+                "pinnedAccount": pinned_account.as_ref().map(|id| id.as_str()),
+                "transportRecovery": is_transport_recovery,
+            }),
+        );
         let provider_request = ProviderRequest::new(self.operation.clone(), candidate.clone());
         let stream = match poll_provider(
             provider,
@@ -729,6 +774,7 @@ where
             ProviderBoundary::Result(result) => match *result {
                 Ok(stream) => stream,
                 Err(error) => {
+                    record_trace_error(&attempt_trace, &error);
                     if self.prepare_unavailable_native_continuation_replay(&error) {
                         return Ok(Some(PullOutcome::AttemptDiscarded));
                     }
@@ -800,6 +846,11 @@ where
         }
 
         let metadata = stream.metadata().clone();
+        attempt_trace.record("account.selected", json!({
+            "provider": metadata.provider().as_str(), "accountId": metadata.provider_account_id().as_str(),
+            "transport": metadata.transport().as_str(),
+            "selectionMs": metadata.selection_observation().map(|o| o.account_selection_wait_ms()),
+        }));
         let selection_observation = metadata.selection_observation();
         let capacity = selection_observation.and_then(|observation| observation.capacity());
         if !self.account_selection.is_diagnostic()
@@ -1006,6 +1057,7 @@ where
     ) -> Result<StreamErrorOutcome, EngineError> {
         // 原始 wire 只活在 request-local 决策状态；clone、attempt 记录与持久化终态
         // 均只接触已剥离的稳定错误字段。
+        record_trace_error(&self.trace.attempt(self.attempts), &error);
         let mut atomic_client_events = error.take_atomic_client_events();
         let current = self.current.take().ok_or(EngineError::NoActiveAttempt)?;
         self.record_provider_failure(current.metadata.provider().clone(), error.kind());
@@ -1093,6 +1145,14 @@ where
             || account_rotation_retry
             || transport_recovery.is_some();
 
+        self.trace.attempt(current.index.get()).record("retry.decided", json!({
+            "retryable": retryable, "continuationRetry": continuation_retry,
+            "sameAccountRetry": same_account_retry, "accountRotationRetry": account_rotation_retry,
+            "ordinaryRetry": ordinary_retry, "transportRecovery": transport_recovery.is_some(),
+            "delayMs": transport_recovery.map(|(_, delay)| duration_ms(delay)),
+            "downstreamCommitted": self.downstream_committed_at.is_some(),
+            "sendState": format!("{attempt_send_state:?}"),
+        }));
         if retryable {
             // 普通 clone 只保留稳定事实；原始 wire/HTTP response 由 request-local
             // 所有权保留到下一次 attempt 成功，或最终空选路时返回客户端。
@@ -1303,6 +1363,10 @@ where
             self.current_transport_observation();
         let service_tier = self.current_service_tier();
         let provider_metadata_json = self.current_provider_metadata_json();
+        self.trace.record(
+            "request.finished",
+            json!({"outcome": "succeeded", "attempts": self.attempts}),
+        );
         if self.request_persisted {
             best_effort_store_write(
                 "finalize_model_request",
@@ -1325,6 +1389,7 @@ where
                         websocket_pool,
                         service_tier,
                         provider_metadata_json,
+                        diagnostic_trace_json: self.trace.snapshot().map(|value| value.to_string()),
                         error: None,
                         provider_error_code: None,
                         raw_upstream_error: None,
@@ -1443,6 +1508,14 @@ where
         if self.finalized {
             return Ok(());
         }
+        self.trace.record(
+            "request.finished",
+            json!({
+                "outcome": format!("{:?}", finalization.outcome),
+                "errorKind": finalization.error.kind().as_str(),
+                "sendState": format!("{:?}", finalization.send_state), "attempts": self.attempts,
+            }),
+        );
         if !self.request_persisted {
             self.finalized = true;
             return Ok(());
@@ -1497,6 +1570,7 @@ where
                     websocket_pool,
                     service_tier,
                     provider_metadata_json,
+                    diagnostic_trace_json: self.trace.snapshot().map(|value| value.to_string()),
                     error: Some(finalization.error),
                     provider_error_code: finalization.provider_error_code,
                     raw_upstream_error: finalization.raw_upstream_error,
@@ -1786,4 +1860,16 @@ const fn escalate_send_state(a: UpstreamSendState, b: UpstreamSendState) -> Upst
 
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn record_trace_error(trace: &TraceContext, error: &ProviderError) {
+    trace.record("attempt.failed", json!({
+        "kind": error.kind().as_str(), "sendState": format!("{:?}", error.send_state()),
+        "upstreamStatus": error.upstream_status(),
+        "upstreamCode": error.upstream_code().map(|code| code.as_str()),
+        "rawError": error.raw_upstream_error().map(|raw| {
+            let value = serde_json::from_str(raw.as_str()).unwrap_or_else(|_| json!(raw.as_str()));
+            crate::diagnostics::diagnostic_json(&value)
+        }),
+    }));
 }

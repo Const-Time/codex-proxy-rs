@@ -316,6 +316,7 @@ pub struct RequestAttemptContext {
     request_id: ModelRequestId,
     client_api_key_ref: ClientApiKeyId,
     timing_started_at: Instant,
+    trace: crate::diagnostics::TraceContext,
 }
 
 impl RequestAttemptContext {
@@ -325,7 +326,14 @@ impl RequestAttemptContext {
             request_id,
             client_api_key_ref,
             timing_started_at: Instant::now(),
+            trace: crate::diagnostics::TraceContext::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_trace(mut self, trace: crate::diagnostics::TraceContext) -> Self {
+        self.trace = trace;
+        self
     }
 
     /// 覆盖本次请求的单调计时原点。
@@ -367,6 +375,12 @@ pub struct AttemptContext {
 }
 
 impl AttemptContext {
+    /// 当前 attempt 的诊断关联；克隆后可传给后台 transport 任务。
+    #[must_use]
+    pub fn trace(&self) -> crate::diagnostics::TraceContext {
+        self.request.trace.attempt(self.attempt_index.get())
+    }
+
     #[must_use]
     pub const fn new(
         request: RequestAttemptContext,
@@ -612,6 +626,8 @@ pub struct ModelRequestFinalization {
     pub service_tier: Option<String>,
     /// Provider 已筛选的专有观测 JSON；Core 不解释字段。
     pub provider_metadata_json: Option<String>,
+    /// 请求全程的有界诊断快照，跨 Provider 与重试保留。
+    pub diagnostic_trace_json: Option<String>,
     pub error: Option<GatewayError>,
     pub provider_error_code: Option<String>,
     /// Provider 返回的原始错误正文或 WebSocket close/error frame。

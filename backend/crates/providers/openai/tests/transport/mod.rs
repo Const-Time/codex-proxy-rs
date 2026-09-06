@@ -55,9 +55,11 @@ mod http_client;
 mod latency;
 mod profile;
 mod profile_avatar;
+mod profile_contract;
 mod protocol;
 mod request;
 mod reset_credits;
+mod tls;
 mod usage;
 mod websocket;
 mod websocket_pool;
@@ -126,6 +128,7 @@ fn test_wire_profile() -> CodexWireProfileState {
         os_version: "6.8".to_owned(),
         arch: "x86_64".to_owned(),
         terminal: "transport-test".to_owned(),
+        residency: None,
         verified_at: Utc::now(),
     })
 }
@@ -135,6 +138,7 @@ fn request_context<'a>(
     account_id: Option<&'a str>,
 ) -> CodexRequestContext<'a> {
     CodexRequestContext {
+        trace: None,
         authorization: "Bearer access-token",
         account_id,
         request_id,

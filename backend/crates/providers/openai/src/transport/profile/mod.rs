@@ -32,6 +32,13 @@ const MAX_APPCAST_BYTES: usize = 1024 * 1024;
 const ARTIFACT_PROFILE_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const ARTIFACT_PROFILE_SCHEMA_VERSION: u64 = 1;
 
+/// 与官方 managed residency requirement 相同的可选请求约束。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexResidency {
+    Us,
+}
+
 /// Codex Desktop 上游请求身份。
 ///
 /// 启动配置提供经源码审计的 Core、运行环境和 Desktop 启动版本。运行时只会使用
@@ -40,7 +47,7 @@ const ARTIFACT_PROFILE_SCHEMA_VERSION: u64 = 1;
 pub struct CodexWireProfile {
     /// `originator` 请求头及 User-Agent 产品名。
     pub originator: String,
-    /// Desktop ZIP 内嵌 Core 版本；用于 `/codex/models?client_version=` 与 UA。
+    /// Desktop ZIP 内嵌 Core 版本；用于模型请求的 version、client_version 与 UA。
     pub codex_version: String,
     /// Desktop 应用版本，用于 app-server `clientInfo.version` 对应的 UA 后缀。
     pub desktop_version: String,
@@ -54,7 +61,9 @@ pub struct CodexWireProfile {
     pub arch: String,
     /// Codex Core UA 中的终端标记。
     pub terminal: String,
-    /// 此画像最后一次经制品与源码核验的时间。
+    /// 未配置时不发送 residency 头；不随制品版本更新而改变。
+    pub residency: Option<CodexResidency>,
+    /// 版本元组最后一次经制品核验的时间；不表示 TLS 传输已重新核验。
     pub verified_at: DateTime<Utc>,
 }
 

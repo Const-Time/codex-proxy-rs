@@ -1,5 +1,7 @@
 use futures::TryStreamExt as _;
-use provider_openai::transport::{CodexProfileAvatarFetchError, fetch_profile_avatar};
+use provider_openai::transport::{
+    CodexProfileAvatarFetchError, CodexRequestContext, fetch_profile_avatar,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -30,8 +32,14 @@ async fn profile_avatar_streams_unrestricted_content_type_and_body_size() {
     let avatar = fetch_profile_avatar(
         &client,
         &server.uri(),
-        "codex_cli_rs/1.0.0 (linux; x86_64)",
+        &super::test_wire_profile().snapshot(),
         OFFICIAL_AVATAR_SOURCE,
+        CodexRequestContext::auxiliary(
+            "Bearer avatar-token",
+            Some("avatar-account"),
+            "avatar",
+            None,
+        ),
     )
     .await
     .expect("profile avatar");
@@ -52,14 +60,18 @@ async fn profile_avatar_streams_unrestricted_content_type_and_body_size() {
     assert_eq!(streamed, body);
     assert_eq!(
         headers.get("accept").and_then(|value| value.to_str().ok()),
-        Some("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        Some("*/*")
     );
     assert_eq!(
         headers
             .get("user-agent")
             .and_then(|value| value.to_str().ok()),
-        Some("codex_cli_rs/1.0.0 (linux; x86_64)")
+        Some("codex_cli_rs/1.2.3 (linux; x86_64)")
     );
+    assert_eq!(headers["authorization"], "Bearer avatar-token");
+    assert_eq!(headers["chatgpt-account-id"], "avatar-account");
+    assert_eq!(headers["originator"], "codex_cli_rs");
+    assert!(!headers.contains_key("version"));
 }
 
 #[tokio::test]
@@ -72,9 +84,20 @@ async fn profile_avatar_rejects_non_official_sources_before_request() {
         "https://chatgpt.com/backend-api/estuary/public_content/enc/token?next=1",
         "https://chatgpt.com/backend-api/estuary/public_content/enc/",
     ] {
-        let error = fetch_profile_avatar(&client, "http://127.0.0.1:9", "test-agent", source)
-            .await
-            .expect_err("invalid source");
+        let error = fetch_profile_avatar(
+            &client,
+            "http://127.0.0.1:9",
+            &super::test_wire_profile().snapshot(),
+            source,
+            CodexRequestContext::auxiliary(
+                "Bearer avatar-token",
+                Some("avatar-account"),
+                "avatar",
+                None,
+            ),
+        )
+        .await
+        .expect_err("invalid source");
         assert!(matches!(error, CodexProfileAvatarFetchError::InvalidSource));
     }
 }

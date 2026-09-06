@@ -429,6 +429,8 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
         .lock()
         .expect("usage detail")
         .replace(UsageDetail {
+            trace: None,
+            related_requests: Vec::new(),
             request: usage_record_with_account(
                 "req_detail",
                 "acct_snap_a",

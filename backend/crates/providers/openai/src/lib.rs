@@ -146,8 +146,11 @@ pub async fn initialize(
         .with_session_identity(session_identity),
     );
     let token_client = Arc::new(
-        credential::token_client::openai_token_client(config.token_client_config())
-            .map_err(|_| OpenAiInitializeError::TokenClient)?,
+        credential::token_client::openai_token_client(
+            config.token_client_config(),
+            profile.clone(),
+        )
+        .map_err(|_| OpenAiInitializeError::TokenClient)?,
     );
     let refresher: Arc<dyn TokenRefresher> = token_client.clone();
     let exchanger: Arc<dyn AuthorizationCodeExchanger> = token_client;

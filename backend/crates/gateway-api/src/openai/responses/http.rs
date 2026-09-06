@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::stream;
+use gateway_core::diagnostics::TraceContext;
 use gateway_core::engine::execution::{ClientTransport, ExecutionSession, StartedExecution};
 use gateway_core::engine::{CommitRequirement, EngineError};
 use gateway_core::error::{GatewayError, GatewayErrorKind};
@@ -39,6 +40,7 @@ use super::{
 pub(crate) async fn responses(
     State(state): State<ApiState>,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    ingress_id: Option<Extension<tower_http::request_id::RequestId>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -83,28 +85,25 @@ pub(crate) async fn responses(
         Ok(started) => started,
         Err(error) => return gateway_error_response(&error),
     };
-    tracing::info!(
-        target: "request_dump",
-        provider = "openai",
-        request_id = %started.request_id,
-        request_direction = "downstream",
-        request_transport = if streaming { "http_sse" } else { "http_json" },
-        request_method = "POST",
-        request_path = "/v1/responses",
-        request_headers = ?headers,
-        request_body = %String::from_utf8_lossy(&body),
-        contains_sensitive_data = true,
-        "request dump (unredacted)"
-    );
+    let trace = started.session.trace();
+    trace.headers("client.request", serde_json::json!({
+        "ingressRequestId": ingress_id.as_ref().and_then(|Extension(id)| id.header_value().to_str().ok()),
+    }), headers.iter().map(|(name, value)| (name.as_str(), value.as_bytes())));
+    trace.capture("client.request.body", &body);
+    let request_id_header = HeaderValue::from_str(started.request_id.as_str()).ok();
     let StartedExecution {
         stream, session, ..
     } = started;
-    if stream {
+    let mut response = if stream {
         stream_execution_response(session, connection_guard).await
     } else {
         drop(connection_guard);
         collect_execution_response(session).await
+    };
+    if let Some(id) = request_id_header {
+        response.headers_mut().insert("x-gateway-request-id", id);
     }
+    response
 }
 
 /// 从 socket 与标准转发头提取旧 Usage 页面使用的诊断事实。
@@ -182,6 +181,11 @@ pub async fn collect_execution_response(session: Box<dyn ExecutionSession>) -> R
         }
     };
     let response_headers = session.response_headers().to_vec();
+    session.trace().record(
+        "downstream.encoded",
+        serde_json::json!({"transport": "http_json", "bytes": encoded.len()}),
+    );
+    session.trace().dump("downstream.body", &encoded);
     let response = json_body_response(encoded, &response_headers);
 
     let Some(session) = execution.session_mut() else {
@@ -334,6 +338,8 @@ pub async fn stream_execution_response(
     let body = Body::from_stream(stream::unfold(state, |mut state| async move {
         loop {
             if let Some(chunk) = state.pending.pop_front() {
+                state.trace.dump("downstream.chunk", &chunk);
+                state.handed_off_bytes += chunk.len() as u64;
                 return Some((Ok::<Bytes, Infallible>(chunk), state));
             }
             if state.output_finished {
@@ -416,12 +422,18 @@ impl Drop for PendingExecution {
         if session.is_finalized() {
             return;
         }
+        session.trace().record(
+            "downstream.cancelled",
+            serde_json::json!({"reason": "response_guard_dropped"}),
+        );
         session.cancel();
         detach_finalize(session);
     }
 }
 
 struct ResponsesStreamState {
+    trace: TraceContext,
+    handed_off_bytes: u64,
     session: Option<Box<dyn ExecutionSession>>,
     encoder: OpenAiResponsesEncoder,
     pending: VecDeque<Bytes>,
@@ -438,6 +450,8 @@ impl ResponsesStreamState {
         connection_guard: Option<Box<dyn ConnectionGuard>>,
     ) -> Self {
         Self {
+            trace: session.trace(),
+            handed_off_bytes: 0,
             session: Some(session),
             encoder,
             pending: initial_frames.into_iter().collect(),
@@ -593,6 +607,11 @@ impl ResponsesStreamState {
 
 impl Drop for ResponsesStreamState {
     fn drop(&mut self) {
+        self.trace.record("downstream.body.closed", serde_json::json!({
+            "handedOffBytes": self.handed_off_bytes,
+            "pendingChunks": self.pending.len(),
+            "outputFinished": self.output_finished, "executionTerminal": self.execution_terminal,
+        }));
         if self.execution_terminal {
             return;
         }

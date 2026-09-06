@@ -505,6 +505,8 @@ pub(crate) fn usage_attempt_view(attempt: domain::UsageAttempt) -> UsageAttemptV
 
 pub(crate) fn usage_detail_view(detail: domain::UsageDetail) -> UsageRecordDetailView {
     UsageRecordDetailView {
+        trace: detail.trace,
+        related_requests: detail.related_requests,
         request: usage_record_view(detail.request),
         attempts: detail
             .attempts

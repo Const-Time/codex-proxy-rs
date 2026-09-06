@@ -277,6 +277,7 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer access-token",
                 account_id: Some("chatgpt-account"),
                 request_id: "req_ws_security",
@@ -317,12 +318,8 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
     );
     let headers = received_headers.lock().expect("headers lock");
     for (name, expected) in [
-        ("x-client-request-id", "req_ws_security"),
-        ("content-type", "application/json"),
-        ("accept", "text/event-stream"),
-        ("x-codex-installation-id", "install-123"),
+        ("x-client-request-id", "cp_derived"),
         ("openai-beta", "responses_websockets=2026-02-06"),
-        ("x-openai-internal-codex-residency", "us"),
         ("x-codex-turn-state", "turn-state"),
         ("x-codex-turn-metadata", "{\"thread_source\":\"subagent\"}"),
         ("x-codex-beta-features", "feature-a"),
@@ -341,6 +338,11 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
         );
     }
     for forbidden in [
+        "x-codex-installation-id",
+        "x-codex-turn-id",
+        "x-openai-internal-codex-residency",
+        "accept",
+        "content-type",
         "session_id",
         "thread-id",
         "x-openai-internal-codex-responses-lite",
@@ -365,7 +367,7 @@ async fn backend_http_should_restore_opaque_multivalue_header_bytes_and_lease_id
     let profile = test_wire_profile();
     let profile_snapshot = profile.snapshot();
     let expected_user_agent = profile_snapshot.user_agent();
-    let expected_desktop_version = profile_snapshot.desktop_version;
+    let expected_core_version = profile_snapshot.codex_version;
     let client = CodexBackendClient::new(
         reqwest::Client::builder()
             .no_proxy()
@@ -379,6 +381,7 @@ async fn backend_http_should_restore_opaque_multivalue_header_bytes_and_lease_id
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer lease-token",
                 account_id: Some("lease-account"),
                 installation_id: Some("lease-installation"),
@@ -401,16 +404,11 @@ async fn backend_http_should_restore_opaque_multivalue_header_bytes_and_lease_id
         vec![b"turn-ascii".to_vec(), b"turn-\x80".to_vec()]
     );
     for (name, value) in [
-        ("accept", b"application/vnd.openai.future+json".as_slice()),
-        (
-            "content-type",
-            b"application/vnd.openai.request+json".as_slice(),
-        ),
-        ("x-openai-internal-codex-residency", b"us".as_slice()),
+        ("accept", b"text/event-stream".as_slice()),
+        ("content-type", b"application/json".as_slice()),
         ("x-still-valid", b"after-invalid".as_slice()),
         ("authorization", b"Bearer lease-token".as_slice()),
         ("chatgpt-account-id", b"lease-account".as_slice()),
-        ("x-codex-installation-id", b"lease-installation".as_slice()),
     ] {
         assert_eq!(raw_header_values(&raw, name), vec![value.to_vec()]);
     }
@@ -425,7 +423,7 @@ async fn backend_http_should_restore_opaque_multivalue_header_bytes_and_lease_id
     );
     assert_eq!(
         raw_header_values(&raw, "version"),
-        vec![expected_desktop_version.into_bytes()]
+        vec![expected_core_version.into_bytes()]
     );
     for dropped in [
         "openai-beta",
@@ -501,6 +499,7 @@ async fn backend_websocket_should_drop_only_unrepresentable_opaque_header_values
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer lease-token",
                 account_id: Some("lease-account"),
                 installation_id: Some("lease-installation"),
@@ -529,24 +528,15 @@ async fn backend_websocket_should_drop_only_unrepresentable_opaque_header_values
         values("openai-beta"),
         vec![b"responses_websockets=2026-02-06".to_vec()]
     );
-    assert_eq!(
-        values("accept"),
-        vec![b"application/vnd.openai.future+json".to_vec()]
-    );
-    assert_eq!(
-        values("content-type"),
-        vec![b"application/vnd.openai.request+json".to_vec()]
-    );
+    assert!(values("accept").is_empty());
+    assert!(values("content-type").is_empty());
     assert_eq!(
         values("user-agent"),
         vec![test_wire_profile().snapshot().user_agent().into_bytes()]
     );
     assert_eq!(values("originator"), vec![b"codex_cli_rs".to_vec()]);
     assert_eq!(values("version"), vec![b"1.2.3".to_vec()]);
-    assert_eq!(
-        values("x-openai-internal-codex-residency"),
-        vec![b"us".to_vec()]
-    );
+    assert!(values("x-openai-internal-codex-residency").is_empty());
     for dropped in [
         "x-openai-actor-authorization",
         "x-oai-attestation",
@@ -563,10 +553,7 @@ async fn backend_websocket_should_drop_only_unrepresentable_opaque_header_values
         values("chatgpt-account-id"),
         vec![b"lease-account".to_vec()]
     );
-    assert_eq!(
-        values("x-codex-installation-id"),
-        vec![b"lease-installation".to_vec()]
-    );
+    assert!(values("x-codex-installation-id").is_empty());
     assert_eq!(values("x-codex-turn-state"), vec![b"turn-ascii".to_vec()]);
 }
 
@@ -593,7 +580,7 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
     let profile = test_wire_profile();
     let profile_snapshot = profile.snapshot();
     let expected_user_agent = profile_snapshot.user_agent();
-    let expected_desktop_version = profile_snapshot.desktop_version;
+    let expected_core_version = profile_snapshot.codex_version;
     let client = CodexBackendClient::new(
         reqwest::Client::builder()
             .no_proxy()
@@ -607,6 +594,7 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer access-token",
                 account_id: Some("chatgpt-account"),
                 request_id: "req_order",
@@ -648,14 +636,14 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
             Some("codex_cli_rs"),
             Some(expected_user_agent.as_str()),
             Some("text/event-stream"),
-            Some("us"),
-            Some("req_order"),
+            None,
+            Some("session-1"),
             Some("turn-state"),
         )
     );
     assert_eq!(
         read_header_value(&raw_request, "version"),
-        Some(expected_desktop_version.as_str())
+        Some(expected_core_version.as_str())
     );
     for required in [
         "authorization",
@@ -665,9 +653,7 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
         "content-type",
         "cookie",
         "accept",
-        "x-openai-internal-codex-residency",
         "x-client-request-id",
-        "x-codex-installation-id",
         "session-id",
         "x-codex-window-id",
         "x-codex-turn-state",
@@ -680,6 +666,9 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
         assert!(header_names.iter().any(|name| name == required));
     }
     for forbidden in [
+        "x-codex-installation-id",
+        "x-codex-turn-id",
+        "x-openai-internal-codex-residency",
         "sec-ch-ua",
         "sec-ch-ua-mobile",
         "sec-ch-ua-platform",
@@ -729,6 +718,7 @@ async fn backend_http_should_ignore_unrepresentable_protocol_headers_without_blo
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 client_request_id: Some("opaque\nclient-request-id"),
                 session_id: Some("opaque\nsession"),
                 thread_id: Some("opaque\nthread"),
@@ -751,6 +741,7 @@ async fn backend_http_should_ignore_unrepresentable_protocol_headers_without_blo
         read_header_value(&raw_request, "x-client-request-id"),
         Some("req_protocol_fallback")
     );
+    assert_eq!(read_header_value(&raw_request, "version"), Some("1.2.3"));
     for omitted in [
         "session-id",
         "thread-id",
@@ -760,7 +751,6 @@ async fn backend_http_should_ignore_unrepresentable_protocol_headers_without_blo
         "x-codex-turn-metadata",
         "x-codex-beta-features",
         "x-responsesapi-include-timing-metrics",
-        "version",
         "x-codex-parent-thread-id",
         "x-openai-subagent",
         "x-openai-internal-codex-responses-lite",
@@ -897,7 +887,14 @@ async fn websocket_should_keep_an_exact_chain_while_new_connections_adopt_the_la
     let server = tokio::spawn(async move {
         let (first_stream, _) = listener.accept().await.expect("first websocket");
         let mut first_user_agent = String::new();
+        let mut first_version = String::new();
         let mut first = accept_codex_test_websocket_with(first_stream, |request, _response| {
+            first_version = request.headers()["version"]
+                .to_str()
+                .expect("Core version")
+                .to_owned();
+            assert!(!request.headers().contains_key("accept"));
+            assert!(!request.headers().contains_key("content-type"));
             first_user_agent = request
                 .headers()
                 .get("user-agent")
@@ -935,7 +932,14 @@ async fn websocket_should_keep_an_exact_chain_while_new_connections_adopt_the_la
             .expect("new chain should use a new wire profile connection")
             .expect("second websocket");
         let mut second_user_agent = String::new();
+        let mut second_version = String::new();
         let mut second = accept_codex_test_websocket_with(second_stream, |request, _response| {
+            second_version = request.headers()["version"]
+                .to_str()
+                .expect("Core version")
+                .to_owned();
+            assert!(!request.headers().contains_key("accept"));
+            assert!(!request.headers().contains_key("content-type"));
             second_user_agent = request
                 .headers()
                 .get("user-agent")
@@ -956,7 +960,12 @@ async fn websocket_should_keep_an_exact_chain_while_new_connections_adopt_the_la
             .await
             .expect("second response.completed");
 
-        (first_user_agent, second_user_agent)
+        (
+            first_user_agent,
+            second_user_agent,
+            first_version,
+            second_version,
+        )
     });
 
     let profile = test_wire_profile();
@@ -983,7 +992,7 @@ async fn websocket_should_keep_an_exact_chain_while_new_connections_adopt_the_la
         .expect("first response");
     profile.update_bundled_release(&CodexBundledReleaseProfile {
         codex_version: "1.2.4".to_owned(),
-        desktop_version: "1.2.4".to_owned(),
+        desktop_version: "26.999.10000".to_owned(),
         desktop_build: "124".to_owned(),
         verified_at: Utc::now(),
     });
@@ -1006,8 +1015,12 @@ async fn websocket_should_keep_an_exact_chain_while_new_connections_adopt_the_la
         .await
         .expect("second response");
 
-    let (first_user_agent, second_user_agent) = server.await.expect("profile server task");
+    let (first_user_agent, second_user_agent, first_version, second_version) =
+        server.await.expect("profile server task");
     assert!(first_user_agent.contains("1.2.3"));
     assert!(second_user_agent.contains("1.2.4"));
+    assert!(second_user_agent.contains("26.999.10000"));
+    assert_eq!(first_version, "1.2.3");
+    assert_eq!(second_version, "1.2.4");
     assert_ne!(first_user_agent, second_user_agent);
 }

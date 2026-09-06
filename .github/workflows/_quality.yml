@@ -33,6 +33,8 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
+      # Rust 1.97 编译 AWS SDK 调试信息需要更大的 codegen 线程栈。
+      RUST_MIN_STACK: 16777216
       CPR_TEST_DATABASE_URL: postgres://codex_proxy:codex_proxy@127.0.0.1:5432/codex_proxy
       CPR_TEST_REDIS_URL: redis://127.0.0.1:6379
     services:

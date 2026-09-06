@@ -358,12 +358,14 @@ pub(super) async fn create_json_attempt(
         return Err(CodexHandshakeAttemptError::Timeout);
     };
     let request_id = request.context.request_id().as_str();
+    let trace = request.context.trace();
     let mut request_context = CodexRequestContext::auxiliary(
         authorization.expose_secret(),
         account.upstream_account_id(),
         request_id,
         Some(installation_id),
     );
+    request_context.trace = Some(&trace);
     request_context.cookie_header = cookie_header.map(ExposeSecret::expose_secret);
     request_context.turn_metadata = request.turn_metadata.as_deref();
     request_context.account_selection = account_selection;
@@ -539,6 +541,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             lease.account_switch(),
         );
         let request_transport_requirement = transport_requirement(&request);
+        let trace = context.trace();
         let response = create_response_attempt(
             &client,
             &request,
@@ -550,7 +553,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &authorization,
                 cookie_header.as_ref(),
                 account_selection,
-            ),
+            ).with_trace(&trace),
             active_account.id().as_str(),
             context.deadline(),
             &cancellation,

@@ -583,6 +583,7 @@ impl ExecutionObservationWrite {
                     finalization.websocket_pool.as_deref(),
                     finalization.service_tier.as_deref(),
                     finalization.provider_metadata_json.as_deref(),
+                    finalization.diagnostic_trace_json.as_deref(),
                     finalization.provider_error_code.as_deref(),
                 ])
                 .saturating_add(error_bytes)

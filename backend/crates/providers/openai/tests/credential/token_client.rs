@@ -6,6 +6,73 @@ use secrecy::{ExposeSecret, SecretString};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[tokio::test]
+async fn refresh_tracks_the_online_profile_without_contaminating_code_exchange() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "audit-access", "refresh_token": "audit-refresh", "id_token": "header.e30.signature"
+        })))
+        .expect(4)
+        .mount(&server)
+        .await;
+    let profile = provider_openai::OpenAiConfig::default().wire_profile_state();
+    let client = provider_openai::credential::token_client::openai_token_client(
+        TokenClientConfig {
+            client_id: "audit-client".to_owned(),
+            token_endpoint: format!("{}/oauth/token", server.uri()),
+        },
+        profile.clone(),
+    )
+    .expect("production auth transport");
+    for (core, desktop, build) in [
+        ("1.2.3", "26.800.10000", "8000"),
+        ("1.2.4", "26.901.10000", "8109"),
+    ] {
+        profile.update_bundled_release(
+            &provider_openai::transport::profile::CodexBundledReleaseProfile {
+                codex_version: core.to_owned(),
+                desktop_version: desktop.to_owned(),
+                desktop_build: build.to_owned(),
+                verified_at: chrono::Utc::now(),
+            },
+        );
+        client.refresh("audit-refresh").await.expect("refresh");
+        client
+            .exchange_authorization_code(AuthorizationCodeGrant {
+                code: SecretString::from("audit-code"),
+                code_verifier: SecretString::from("audit-verifier"),
+            })
+            .await
+            .expect("code exchange");
+        let requests = server.received_requests().await.expect("requests");
+        let refresh = &requests[requests.len() - 2];
+        let exchange = &requests[requests.len() - 1];
+        assert_eq!(
+            refresh.headers["user-agent"],
+            profile.snapshot().user_agent()
+        );
+        assert_eq!(refresh.headers["originator"], "Codex Desktop");
+        assert_eq!(refresh.headers["content-type"], "application/json");
+        assert_eq!(
+            exchange.headers["content-type"],
+            "application/x-www-form-urlencoded"
+        );
+        for name in [
+            "originator",
+            "user-agent",
+            "version",
+            "x-openai-internal-codex-residency",
+        ] {
+            assert!(!exchange.headers.contains_key(name), "raw exchange: {name}");
+        }
+        for name in ["authorization", "chatgpt-account-id", "version"] {
+            assert!(!refresh.headers.contains_key(name), "refresh: {name}");
+        }
+    }
+}
+
 fn client(server: &MockServer) -> OpenAiTokenClient {
     OpenAiTokenClient::new(
         reqwest::Client::builder()
@@ -16,6 +83,7 @@ fn client(server: &MockServer) -> OpenAiTokenClient {
             client_id: "test-public-client".to_owned(),
             token_endpoint: format!("{}/oauth/token", server.uri()),
         },
+        provider_openai::OpenAiConfig::default().wire_profile_state(),
     )
 }
 

@@ -136,6 +136,7 @@ fn wire_profile() -> CodexWireProfileState {
         os_version: "6.8".to_owned(),
         arch: "x86_64".to_owned(),
         terminal: "provider-contract".to_owned(),
+        residency: None,
         verified_at: Utc::now(),
     })
 }
@@ -1004,6 +1005,8 @@ async fn image_endpoints_bypass_only_the_text_catalog_and_preserve_the_current_c
             .and(path(*endpoint))
             .and(header("originator", "codex_cli_rs"))
             .and(header("x-codex-image-turn-id", "turn_image_contract"))
+            .and(header("version", "0.144.0"))
+            .and(header("accept", "*/*"))
             .and(body_bytes(body.to_vec()))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -1143,6 +1146,8 @@ async fn standalone_search_preserves_wire_and_scopes_turn_metadata_to_the_select
     Mock::given(method("POST"))
         .and(path("/codex/alpha/search"))
         .and(header("originator", "codex_cli_rs"))
+        .and(header("version", "0.144.0"))
+        .and(header("accept", "*/*"))
         .and(body_bytes(request_body.to_vec()))
         .respond_with(
             ResponseTemplate::new(200)
@@ -2731,6 +2736,15 @@ async fn same_account_scope_preserves_future_protocol_shapes() {
         body.get("installation_id"),
         Some(&json!("client-installation"))
     );
+    assert_eq!(
+        body.get("installation_id"),
+        body.pointer("/client_metadata/installation_id")
+    );
+    assert!(
+        body.pointer("/client_metadata/x-codex-installation-id")
+            .is_none()
+    );
+    assert!(captured_header_values(&request, "x-codex-installation-id").is_empty());
 }
 
 #[tokio::test]

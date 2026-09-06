@@ -155,6 +155,9 @@ pub struct StartedExecution {
 }
 
 pub trait ExecutionSession: Send {
+    fn trace(&self) -> crate::diagnostics::TraceContext {
+        crate::diagnostics::TraceContext::default()
+    }
     fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>>;
     fn collect_uncommitted(&mut self) -> BoxFuture<'_, Result<Vec<ProviderEvent>, EngineError>>;
     fn response_headers(&self) -> &[ProviderResponseHeader];
@@ -1035,6 +1038,12 @@ impl Drop for DefaultExecutionSession {
 }
 
 impl ExecutionSession for DefaultExecutionSession {
+    fn trace(&self) -> crate::diagnostics::TraceContext {
+        self.core
+            .as_ref()
+            .map(ResponseExecutionSession::trace)
+            .unwrap_or_default()
+    }
     fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>> {
         Box::pin(async move {
             let result = self.core_mut()?.next_event().await;

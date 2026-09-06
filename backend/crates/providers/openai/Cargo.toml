@@ -21,27 +21,28 @@ gateway-core = { path = "../../gateway-core" }
 gateway-protocol = { path = "../../gateway-protocol" }
 getrandom = "0.4.3"
 hex = "0.4.3"
-# 与官方 Codex Desktop app-server 的 TLS 栈逐版本对齐（2026-08 核实：
-# ChatGPT.app Resources/codex 二进制内为 hyper-rustls 0.27.7 + rustls 0.23.36 +
-# reqwest 0.12.28 + ring）。rustls 0.23.37 起 ClientHello 扩展顺序变化，JA3
-# 会偏离官方指纹；升级前必须重新抓握手对比扩展顺序。
+# TLS 依赖按官方 Core 锁文件固定，包含用于约束传递依赖的直接声明。
+# 升级前须重复采样 ClientHello，核对算法、扩展集合及排序约束、key_share 与 ALPN。
+aws-lc-rs = "=1.16.2"
+hyper = { version = "=1.8.1", default-features = false }
 hyper-rustls = "=0.27.7"
 # 与官方 Codex Desktop 一致：reqwest 不启用压缩特性，上游请求不带 accept-encoding。
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream", "cookies", "rustls-tls-native-roots", "http2"] }
 roxmltree = "0.21.1"
 semver = "1.0.27"
-# 保持 ring provider：reqwest rustls-tls-native-roots 即 __rustls-ring，与官方一致；
-# 不要给 TLS 客户端路径启用 aws_lc_rs，否则密钥共享/扩展集可能变化。
-rustls = { version = "=0.23.36", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-native-certs = "0.8.4"
-rustls-pki-types = "1.14.1"
+# 与官方 rustls 路径一致：aws-lc 支持 P-521，优先提供 X25519MLKEM768。
+# reqwest 的 roots feature 仍会编译 ring；实际 provider 由 TLS 初始化显式选择。
+rustls = { version = "=0.23.36", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "tls12"] }
+rustls-native-certs = "=0.8.3"
+rustls-pki-types = "=1.14.0"
 secrecy = "0.10.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.11.0"
 subtle = "2.6.1"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", default-features = false, features = ["fs", "macros", "rt", "sync", "time"] }
+tokio = { version = "=1.52.3", default-features = false, features = ["fs", "macros", "rt", "sync", "time"] }
+tokio-rustls = { version = "=0.26.4", default-features = false }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 # 官方 Codex WebSocket 需要上游尚未发布的 proxy 与 permessage-deflate 实现，固定到已审计提交。
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186", features = ["proxy", "rustls-tls-native-roots"] }
@@ -51,7 +52,7 @@ url = "2.5.8"
 uuid = { version = "1.23.3", features = ["v4", "v7"] }
 # 官方 Codex app-server 对 /v1/responses 请求体默认做 zstd 压缩（level 3），
 # 并携带 Content-Encoding: zstd；保持同版本同级别以对齐上游指纹。
-zstd = "0.13"
+zstd = "=0.13.3"
 
 [dev-dependencies]
 tempfile = "3.27.0"

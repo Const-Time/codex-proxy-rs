@@ -645,6 +645,8 @@ pub struct UsageAttemptObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecordDetail {
+    pub trace: Option<serde_json::Value>,
+    pub related_requests: Vec<serde_json::Value>,
     pub request: UsageRecord,
     pub attempts: Vec<UsageAttemptObservation>,
 }

@@ -310,7 +310,7 @@ async fn authorize_url_matches_the_official_desktop_parameter_contract() {
     );
     assert_eq!(
         parameters.get("codex_app_version").map(String::as_str),
-        Some("26.803.81509")
+        Some("26.901.51231")
     );
     let surface_stable_id = parameters
         .get("source_surface_stable_id")

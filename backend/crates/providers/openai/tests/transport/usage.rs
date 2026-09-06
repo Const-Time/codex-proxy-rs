@@ -253,6 +253,7 @@ async fn fetch_should_use_wham_usage_headers_only() {
 
     let usage = client(&server.uri())
         .fetch_usage(CodexRequestContext {
+            trace: None,
             authorization: "Bearer oauth-access",
             account_id: Some("acct_123"),
             request_id: "req_usage_headers",
@@ -283,7 +284,7 @@ async fn fetch_should_use_wham_usage_headers_only() {
     for (name, expected) in [
         ("authorization", "Bearer oauth-access"),
         ("chatgpt-account-id", "acct_123"),
-        ("accept", "application/json"),
+        ("accept", "*/*"),
         ("cookie", "session=old"),
     ] {
         assert_eq!(
@@ -576,6 +577,7 @@ fn profile() -> CodexWireProfileState {
         os_version: "6.8".to_owned(),
         arch: "x86_64".to_owned(),
         terminal: "xterm".to_owned(),
+        residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 7, 18, 0, 0, 0)
             .single()
@@ -585,6 +587,7 @@ fn profile() -> CodexWireProfileState {
 
 fn context() -> CodexRequestContext<'static> {
     CodexRequestContext {
+        trace: None,
         authorization: "Bearer oauth-access",
         account_id: Some("acct_123"),
         request_id: "req_usage_limit",

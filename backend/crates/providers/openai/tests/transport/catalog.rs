@@ -223,9 +223,8 @@ async fn fetch_should_send_official_catalog_headers_and_query() {
             "user-agent",
             "codex_cli_rs/0.144.0 (linux 6.8; x86_64) xterm (codex_cli_rs; 1.0.0)",
         ))
-        .and(header("x-openai-internal-codex-residency", "us"))
-        .and(header("accept", "application/json"))
-        .and(header("x-codex-installation-id", "installation-123"))
+        .and(header("accept", "*/*"))
+        .and(header("version", "0.144.0"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "application/json")
@@ -306,6 +305,7 @@ fn profile() -> CodexWireProfileState {
         os_version: "6.8".to_owned(),
         arch: "x86_64".to_owned(),
         terminal: "xterm".to_owned(),
+        residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 7, 18, 0, 0, 0)
             .single()
@@ -315,6 +315,7 @@ fn profile() -> CodexWireProfileState {
 
 fn context() -> CodexRequestContext<'static> {
     CodexRequestContext {
+        trace: None,
         authorization: "Bearer oauth-access",
         account_id: Some("acct_123"),
         request_id: "req_catalog",

@@ -7,17 +7,18 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt as _};
 use reqwest::{
     Client, Url,
-    header::{ACCEPT, CONTENT_TYPE, ETAG, USER_AGENT},
+    header::{CONTENT_TYPE, ETAG},
 };
 use tokio::time::timeout;
 
 use super::endpoints::endpoint_url;
+use super::{
+    CodexRequestContext, headers::build_codex_download_headers, profile::CodexWireProfile,
+};
 
 const OFFICIAL_AVATAR_ORIGIN: &str = "https://chatgpt.com";
 const OFFICIAL_AVATAR_PATH_PREFIX: &str = "/backend-api/estuary/public_content/enc/";
 const PROVIDER_AVATAR_PATH_PREFIX: &str = "/estuary/public_content/enc/";
-const PROFILE_AVATAR_ACCEPT: &str =
-    "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
 const PROFILE_AVATAR_HEADERS_TIMEOUT: Duration = Duration::from_secs(15);
 const PROFILE_AVATAR_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -68,19 +69,18 @@ pub enum CodexProfileAvatarFetchError {
 pub async fn fetch_profile_avatar(
     client: &Client,
     base_url: &str,
-    desktop_user_agent: &str,
+    profile: &CodexWireProfile,
     source: &str,
+    context: CodexRequestContext<'_>,
 ) -> Result<CodexProfileAvatar, CodexProfileAvatarFetchError> {
     let source_path = official_avatar_source_path(source)?;
     let target = Url::parse(&endpoint_url(base_url, &source_path))
         .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?;
+    let headers = build_codex_download_headers(profile, context.authorization, context.account_id)
+        .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?;
     let response = timeout(
         PROFILE_AVATAR_HEADERS_TIMEOUT,
-        client
-            .get(target)
-            .header(ACCEPT, PROFILE_AVATAR_ACCEPT)
-            .header(USER_AGENT, desktop_user_agent)
-            .send(),
+        client.get(target).headers(headers).send(),
     )
     .await
     .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?

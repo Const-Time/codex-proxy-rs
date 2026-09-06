@@ -180,13 +180,16 @@ pub fn initialize(
                 "request",
                 request_id = %request_id,
                 method = %request.method().as_str(),
-                uri = %request
-                    .uri()
-                    .path_and_query()
-                    .map(axum::http::uri::PathAndQuery::as_str)
-                    .unwrap_or_default(),
+                uri = %request.uri().path(),
             )
         }
+    })
+    .on_request(|_request: &Request<_>, _span: &tracing::Span| {
+        tracing::info!(target: "request_trace", stage = "http.received", "HTTP request received");
+    })
+    .on_response(|response: &axum::http::Response<_>, latency: Duration, _span: &tracing::Span| {
+        tracing::info!(target: "request_trace", stage = "http.response", status = response.status().as_u16(),
+            headers_ms = latency.as_millis(), "HTTP response headers ready");
     });
     let router = router
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))

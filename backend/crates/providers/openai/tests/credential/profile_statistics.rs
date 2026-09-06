@@ -21,6 +21,7 @@ fn wire_profile() -> CodexWireProfileState {
         os_version: "6.8".to_owned(),
         arch: "x86_64".to_owned(),
         terminal: "profile-statistics-contract".to_owned(),
+        residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 8, 28, 0, 0, 0)
             .single()
@@ -59,7 +60,7 @@ async fn service(
 async fn profile_statistics_uses_one_profile_request_and_preserves_official_fields() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/wham/profiles/me"))
+        .and(path("/api/codex/profiles/me"))
         .and(header(
             "chatgpt-account-id",
             "chatgpt-acct_profile_statistics",
@@ -135,7 +136,7 @@ async fn profile_statistics_uses_one_profile_request_and_preserves_official_fiel
 async fn profile_statistics_keeps_profile_when_stats_are_unavailable() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/wham/profiles/me"))
+        .and(path("/api/codex/profiles/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "profile": {"display_name": "Ada"},
             "stats": {},
@@ -158,10 +159,10 @@ async fn profile_statistics_keeps_profile_when_stats_are_unavailable() {
 }
 
 #[tokio::test]
-async fn profile_avatar_reuses_cached_source_and_sends_no_account_credentials() {
+async fn profile_avatar_reuses_cached_source_with_the_accounts_rotated_token() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/wham/profiles/me"))
+        .and(path("/api/codex/profiles/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "profile": {
                 "display_name": "Ada",
@@ -192,6 +193,11 @@ async fn profile_avatar_reuses_cached_source_and_sends_no_account_credentials() 
         .profile_statistics(account.id())
         .await
         .expect("profile statistics");
+    store
+        .repository()
+        .rotate_refreshed_oauth_secret(&account, secret("rotated-avatar-token"), None, None)
+        .await
+        .expect("rotate avatar account token");
     let avatar = service
         .profile_avatar(account.id())
         .await
@@ -211,7 +217,13 @@ async fn profile_avatar_reuses_cached_source_and_sends_no_account_credentials() 
 
     assert_eq!(content_type.as_deref(), Some("image/svg+xml"));
     assert_eq!(body, b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>");
-    assert!(!avatar_request.headers.contains_key("authorization"));
+    assert_eq!(
+        avatar_request.headers["authorization"],
+        "Bearer rotated-avatar-token"
+    );
     assert!(!avatar_request.headers.contains_key("cookie"));
-    assert!(!avatar_request.headers.contains_key("chatgpt-account-id"));
+    assert_eq!(
+        avatar_request.headers["chatgpt-account-id"],
+        "chatgpt-acct_profile_avatar"
+    );
 }

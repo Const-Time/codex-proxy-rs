@@ -2150,6 +2150,7 @@ async fn codex_backend_client_should_use_websocket_when_previous_response_id_is_
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer access-token",
                 account_id: Some("chatgpt-account"),
                 request_id: "req_ws_client",
@@ -2189,4 +2190,91 @@ async fn codex_backend_client_should_use_websocket_when_previous_response_id_is_
             .iter()
             .any(|(name, value)| name == "x-ratelimit-remaining-requests" && value == "17")
     );
+}
+
+#[tokio::test]
+async fn diagnostics_capture_metadata_and_unknown_events_before_normal_close() {
+    use gateway_core::diagnostics::TraceContext;
+    use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket.next().await.unwrap().unwrap();
+        for event in [
+            json!({"type": "future.metadata", "detail": "private-data"}),
+            json!({"type": "codex.response.metadata", "headers": {
+                "x-request-id": "upstream-metadata-request", "x-codex-turn-state": "opaque-turn-secret",
+            }}),
+        ] {
+            websocket
+                .send(Message::Text(event.to_string().into()))
+                .await
+                .unwrap();
+        }
+        websocket
+            .close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            }))
+            .await
+            .unwrap();
+    });
+    let trace = TraceContext::new("req_metadata_close");
+    let attempt = trace.attempt(2);
+    let mut request = codex_request("gpt-5.5", "be brief", Vec::new());
+    request.set_previous_response_id(Some("resp_previous".to_owned()));
+    request.previous_response_scope = Some(PreviousResponseScope::Persisted);
+    request.force_http_sse = false;
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    );
+    let result = backend
+        .create_response_stream(
+            &request,
+            request_context("req_metadata_close", Some("chatgpt-account")).with_trace(&attempt),
+        )
+        .await;
+    let mut failed = result.is_err();
+    if let Ok(response) = result {
+        let mut body = response.body;
+        while let Some(chunk) = body.next().await {
+            if chunk.is_err() {
+                failed = true;
+                break;
+            }
+        }
+    }
+    assert!(failed, "close before terminal must fail the exchange");
+    server.await.unwrap();
+    let snapshot = trace.snapshot().unwrap();
+    let events = snapshot["events"].as_array().unwrap();
+    let metadata = events
+        .iter()
+        .find(|event| event["data"]["eventType"] == "codex.response.metadata")
+        .unwrap();
+    assert_eq!(metadata["attemptIndex"], 2);
+    assert_eq!(metadata["exchangeId"], 1);
+    assert_eq!(
+        metadata["data"]["metadata"]["headers"]["x-request-id"],
+        "upstream-metadata-request"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["data"]["eventType"] == "future.metadata")
+    );
+    let close = events
+        .iter()
+        .find(|event| event["stage"] == "upstream.close")
+        .unwrap();
+    assert_eq!(close["data"]["code"], 1000);
+    assert_eq!(close["data"]["lastEventType"], "codex.response.metadata");
+    assert_eq!(close["data"]["terminalSeen"], false);
+    assert!(!snapshot.to_string().contains("opaque-turn-secret"));
+    assert!(!snapshot.to_string().contains("private-data"));
 }

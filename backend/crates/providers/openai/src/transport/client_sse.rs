@@ -1,17 +1,16 @@
+use gateway_core::diagnostics::{StreamCapture, StreamFormat, TraceContext, diagnostic_json};
+
 use std::{sync::Arc, time::Instant};
 
 use futures::{StreamExt, TryStreamExt};
 use gateway_protocol::openai::{
-    X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, X_OPENAI_MEMGEN_REQUEST_HEADER,
+    X_OPENAI_MEMGEN_REQUEST_HEADER,
     events::{self, retry_after_seconds_from_body},
     sse::{SseEventDecoder, SseFrame},
 };
 use reqwest::{
     Client, Response as ReqwestResponse,
-    header::{
-        ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName,
-        HeaderValue, USER_AGENT,
-    },
+    header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue},
 };
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
@@ -22,11 +21,8 @@ use crate::transport::{
     },
     diagnostics::CodexUpstreamSendPhase,
     endpoints::{CODEX_RESPONSES_PATH, endpoint_url},
-    headers::{
-        build_codex_base_headers, insert_optional_header, insert_optional_protocol_header,
-        websocket_header_pairs,
-    },
-    profile::{CodexWireProfile, CodexWireProfileState},
+    headers::websocket_header_pairs,
+    profile::CodexWireProfileState,
     protocol::{
         responses::{CodexResponsesRequest, TransportRequirement, transport_requirement},
         websocket::{
@@ -37,9 +33,8 @@ use crate::transport::{
     response_meta,
     websocket::{
         CodexWebSocketConnection, CodexWebSocketExchangeError, CodexWebSocketPool,
-        CodexWebSocketPoolKey, CodexWebSocketRequest, CodexWebSocketStreamingExchange,
-        DEFAULT_INITIAL_EVENT_TIMEOUT, WEBSOCKET_FAST_PATH_BUDGET, WebSocketFastPath,
-        WebSocketOriginBreaker, WebSocketPoolDecision,
+        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, DEFAULT_INITIAL_EVENT_TIMEOUT,
+        WEBSOCKET_FAST_PATH_BUDGET, WebSocketFastPath, WebSocketOriginBreaker,
         execute_prepared_response_create_request_stream, post_send_ambiguous,
         prepare_response_create_request_with_pool, websocket_audit_dir,
         write_websocket_audit_artifact_from_env,
@@ -106,20 +101,21 @@ impl CodexBackendClient {
         let body =
             serde_json::to_vec(&upstream_body).map_err(CodexClientError::RequestBodyEncode)?;
         let endpoint = endpoint_url(&self.base_url, CODEX_RESPONSES_PATH);
-        tracing::info!(
-            target: "request_dump",
-            provider = "openai",
-            request_id = %context.request_id,
-            account_id = context.account_id.unwrap_or_default(),
-            request_direction = "upstream",
-            request_transport = "http_sse",
-            request_method = "POST",
-            request_url = %endpoint,
-            request_headers = ?headers,
-            request_body = %String::from_utf8_lossy(&body),
-            contains_sensitive_data = true,
-            "request dump (unredacted)"
+        let trace = context
+            .trace
+            .cloned()
+            .unwrap_or_default()
+            .exchange("http_sse");
+        trace.headers(
+            "upstream.request.headers",
+            serde_json::json!({
+                "method": "POST", "endpoint": CODEX_RESPONSES_PATH,
+            }),
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
         );
+        trace.capture("upstream.request.body", &body);
         let body = zstd::stream::encode_all(std::io::Cursor::new(body), 3)
             .map_err(CodexClientError::RequestCompression)?;
         let response = self
@@ -133,6 +129,17 @@ impl CodexBackendClient {
         let upstream_headers_ms = elapsed_duration_millis(headers_started_at.elapsed());
         let http_version = http_version_name(response.version()).to_string();
         let status = response.status();
+        trace.headers(
+            "upstream.response.headers",
+            serde_json::json!({
+                "status": status.as_u16(), "httpVersion": http_version,
+                "headersMs": upstream_headers_ms,
+            }),
+            response
+                .headers()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
+        );
         let diagnostics = response_meta::diagnostics(Some(status.as_u16()), response.headers());
         let turn_state = response_meta::turn_state(response.headers());
         let set_cookie_headers = response_meta::set_cookie_headers(response.headers());
@@ -147,6 +154,7 @@ impl CodexBackendClient {
                 .map(|value| value.as_bytes().to_vec());
             let client_headers = response_meta::client_headers(response.headers());
             let raw_body = read_error_response_body(response).await?;
+            trace.capture("upstream.error.body", &raw_body);
             let body = String::from_utf8_lossy(&raw_body).into_owned();
             let retry_after_seconds =
                 retry_after_seconds.or_else(|| retry_after_seconds_from_body(&body));
@@ -175,7 +183,7 @@ impl CodexBackendClient {
 
         let rate_limit_updates = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         Ok(CodexBackendStreamingResponse {
-            body: http_sse_stream(response, Arc::clone(&rate_limit_updates)),
+            body: http_sse_stream(response, Arc::clone(&rate_limit_updates), trace),
             transport: CodexBackendTransport::HttpSse,
             websocket_connection_id: None,
             turn_state,
@@ -258,6 +266,9 @@ impl CodexBackendClient {
         defer_websocket_recovery: bool,
     ) -> CodexClientResult<PreparedResponseTransport> {
         let requirement = transport_requirement(request);
+        context.trace.cloned().unwrap_or_default().record("transport.preparing", serde_json::json!({
+            "requirement": requirement.as_str(), "connectionPreference": format!("{connection_preference:?}"),
+        }));
         if requirement == TransportRequirement::HttpRequired {
             return Ok(PreparedResponseTransport {
                 requirement,
@@ -279,6 +290,15 @@ impl CodexBackendClient {
             &websocket_request,
         )
         .map_err(CodexClientError::WebSocketEncode)?;
+        context.trace.cloned().unwrap_or_default().headers(
+            "upstream.request.headers",
+            serde_json::json!({"transport": "websocket", "phase": "prepared_opening"}),
+            websocket_create
+                .connection()
+                .headers()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
+        );
         // 审计未启用时跳过 artifact 构造：payload 快照会深拷贝整个请求 body，
         // 且位于首字节前的关键路径上。
         if websocket_audit_dir().is_some() {
@@ -326,14 +346,13 @@ impl CodexBackendClient {
             Ok(WebSocketFastPath::Missed) => {
                 let decision = CodexTransportDecision::Http2WebSocketBudgetExhausted;
                 let wait_ms = elapsed_duration_millis(prepare_started_at.elapsed());
-                tracing::info!(
-                    request_id = %context.request_id,
-                    account_id = pool_account_id.or(context.account_id).unwrap_or_default(),
-                    transport_requirement = requirement.as_str(),
-                    transport_decision = decision.as_str(),
-                    transport_decision_wait_ms = wait_ms,
-                    websocket_preconnect_continues = pool_log_context.is_some(),
-                    "WebSocket fast path missed; using same-account HTTP"
+                context.trace.cloned().unwrap_or_default().record(
+                    "transport.fallback",
+                    serde_json::json!({
+                        "to": "http_sse", "reason": "websocket_fast_path_budget",
+                        "requirement": requirement.as_str(), "decision": decision.as_str(),
+                        "waitMs": wait_ms, "preconnectContinues": pool_log_context.is_some(),
+                    }),
                 );
                 return Ok(PreparedResponseTransport {
                     requirement,
@@ -354,14 +373,13 @@ impl CodexBackendClient {
             {
                 let decision = http_fallback_decision(&error);
                 let wait_ms = elapsed_duration_millis(prepare_started_at.elapsed());
-                tracing::warn!(
-                    request_id = %context.request_id,
-                    account_id = pool_account_id.or(context.account_id).unwrap_or_default(),
-                    transport_requirement = requirement.as_str(),
-                    transport_decision = decision.as_str(),
-                    transport_decision_wait_ms = wait_ms,
-                    error = %error,
-                    "WebSocket preparation failed before payload send; using same-account HTTP"
+                context.trace.cloned().unwrap_or_default().record(
+                    "transport.fallback", serde_json::json!({
+                        "to": "http_sse", "reason": "websocket_pre_send_failure",
+                        "requirement": requirement.as_str(), "decision": decision.as_str(),
+                        "waitMs": wait_ms,
+                        "detail": diagnostic_json(&serde_json::json!({"message": error.to_string()})),
+                    }),
                 );
                 return Ok(PreparedResponseTransport {
                     requirement,
@@ -378,6 +396,15 @@ impl CodexBackendClient {
             Err(error) => return Err(websocket_exchange_error_to_client_error(error)),
         };
         let decision = websocket_success_decision(requirement, &prepared);
+        context.trace.cloned().unwrap_or_default().record(
+            "transport.prepared",
+            serde_json::json!({
+                "decision": decision.as_str(),
+                "requirement": requirement.as_str(),
+                "connectMs": prepared.connect_elapsed().map(elapsed_duration_millis),
+                "waitMs": elapsed_duration_millis(prepared.decision_wait_elapsed()),
+            }),
+        );
         let metrics = CodexTransportMetrics {
             decision: Some(decision),
             ws_connect_ms: prepared.connect_elapsed().map(elapsed_duration_millis),
@@ -393,15 +420,6 @@ impl CodexBackendClient {
             pool_account_id,
             pool_log_context.as_ref(),
             prepared.pool_decision(),
-        );
-        tracing::info!(
-            request_id = %context.request_id,
-            account_id = pool_account_id.or(context.account_id).unwrap_or_default(),
-            transport_requirement = requirement.as_str(),
-            transport_decision = decision.as_str(),
-            ws_connect_ms = ?metrics.ws_connect_ms,
-            transport_decision_wait_ms = ?metrics.transport_decision_wait_ms,
-            "Responses transport prepared"
         );
         Ok(PreparedResponseTransport {
             requirement,
@@ -427,6 +445,13 @@ impl CodexBackendClient {
             metrics,
             defer_websocket_recovery,
         } = prepared;
+        context.trace.cloned().unwrap_or_default().record(
+            "transport.selected",
+            serde_json::json!({
+                "decision": metrics.decision.map(|decision| decision.as_str()),
+                "requirement": requirement.as_str(), "waitMs": metrics.transport_decision_wait_ms,
+            }),
+        );
         match route {
             PreparedResponseRoute::Http => self
                 .create_response_stream_http_sse(request, context)
@@ -441,10 +466,14 @@ impl CodexBackendClient {
                     prepared,
                 } = *route;
                 let delivery_wait_started_at = Instant::now();
-                log_unredacted_websocket_request(&websocket_request, context);
                 let mut exchange = match execute_prepared_response_create_request_stream(
                     &websocket_request,
                     prepared,
+                    context
+                        .trace
+                        .cloned()
+                        .unwrap_or_default()
+                        .exchange("websocket"),
                 )
                 .await
                 {
@@ -493,9 +522,12 @@ impl CodexBackendClient {
                                         .await;
                                 }
                                 fresh_retry_used = true;
-                                tracing::warn!(
-                                    request_id = %context.request_id,
-                                    "WebSocket connection limit reached; retrying on a fresh connection"
+                                context.trace.cloned().unwrap_or_default().record(
+                                    "transport.retry",
+                                    serde_json::json!({
+                                        "reason": "websocket_connection_limit_reached",
+                                        "connectionPreference": "fresh",
+                                    }),
                                 );
                                 drop(exchange);
                                 match self
@@ -512,10 +544,14 @@ impl CodexBackendClient {
                                         route: PreparedResponseRoute::WebSocket(route),
                                         ..
                                     }) => {
-                                        log_unredacted_websocket_request(&route.request, context);
                                         match execute_prepared_response_create_request_stream(
                                             &route.request,
                                             route.prepared,
+                                            context
+                                                .trace
+                                                .cloned()
+                                                .unwrap_or_default()
+                                                .exchange("websocket"),
                                         )
                                         .await
                                         {
@@ -575,8 +611,9 @@ impl CodexBackendClient {
                                     }
                                 }
                             }
-                            Err(error) if !defer_websocket_recovery
-                                && error.allows_pre_delivery_http_fallback() =>
+                            Err(error)
+                                if !defer_websocket_recovery
+                                    && error.allows_pre_delivery_http_fallback() =>
                             {
                                 return self
                                     .fallback_to_http_before_websocket_delivery(
@@ -597,12 +634,6 @@ impl CodexBackendClient {
                         }
                     }
                 }
-                tracing::info!(
-                    request_id = %context.request_id,
-                    websocket_connection_id = %exchange.websocket_connection_id,
-                    ws_pool = exchange.pool_decision.map_or("unpooled", WebSocketPoolDecision::kind),
-                    "WebSocket response stream established"
-                );
                 Ok(CodexBackendStreamingResponse {
                     body: Box::pin(
                         exchange
@@ -625,15 +656,6 @@ impl CodexBackendClient {
                 })
             }
         }
-        .inspect_err(|error| {
-            tracing::warn!(
-                request_id = %context.request_id,
-                transport_requirement = requirement.as_str(),
-                failure_phase = "post_send_or_explicit_response",
-                error = %error,
-                "Responses stream transport failed after preparation"
-            );
-        })
     }
 
     async fn fallback_to_http_before_websocket_delivery(
@@ -671,14 +693,15 @@ impl CodexBackendClient {
             .saturating_add(elapsed_duration_millis(delivery_wait_started_at.elapsed()));
         metrics.decision = Some(CodexTransportDecision::Http2PreDeliveryFailure);
         metrics.transport_decision_wait_ms = Some(decision_wait_ms);
-        tracing::warn!(
-            request_id = %context.request_id,
-            account_id = context.account_id.unwrap_or_default(),
-            transport_requirement = requirement.as_str(),
-            transport_decision = CodexTransportDecision::Http2PreDeliveryFailure.as_str(),
-            transport_decision_wait_ms = decision_wait_ms,
-            error = %detail,
-            "WebSocket failed before first deliverable event; using same-account HTTP"
+        context.trace.cloned().unwrap_or_default().record(
+            "transport.fallback",
+            serde_json::json!({
+                "to": "http_sse", "reason": "websocket_pre_delivery_failure",
+                "requirement": requirement.as_str(),
+                "decision": CodexTransportDecision::Http2PreDeliveryFailure.as_str(),
+                "waitMs": decision_wait_ms,
+                "detail": diagnostic_json(&serde_json::json!({"message": detail})),
+            }),
         );
         self.create_response_stream_http_sse(request, context)
             .await
@@ -715,7 +738,7 @@ impl CodexBackendClient {
     ) -> CodexClientResult<CodexModelCatalogSnapshot> {
         let endpoint = endpoint_url(&self.base_url, "codex/models");
         let profile = self.profile.snapshot();
-        let headers = self.auxiliary_request_headers(&profile, context)?;
+        let headers = self.model_request_headers(&profile, context)?;
         let response = self
             .client
             .get(endpoint)
@@ -751,182 +774,6 @@ impl CodexBackendClient {
         }
         Ok(parse_codex_model_catalog(&body, etag.as_deref())?)
     }
-
-    fn request_headers_for_http_response(
-        &self,
-        request: &CodexResponsesRequest,
-        context: CodexRequestContext<'_>,
-    ) -> CodexClientResult<HeaderMap> {
-        let profile = self.profile.snapshot();
-        let mut headers = self.request_headers(&profile, context)?;
-        if let Some(subagent) = openai_subagent_from_metadata(request.client_metadata()) {
-            insert_optional_protocol_header(&mut headers, "x-openai-subagent", Some(&subagent));
-        }
-        insert_optional_protocol_header(
-            &mut headers,
-            X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER,
-            request.responses_lite.as_deref(),
-        );
-        insert_optional_protocol_header(
-            &mut headers,
-            X_OPENAI_MEMGEN_REQUEST_HEADER,
-            request.memgen_request.as_deref(),
-        );
-        // 客户端确实携带的普通协议头优先；画像身份头只能由 Codex profile 生成。
-        for name in request.passthrough_headers.keys() {
-            // 上游指纹必须由运行时画像统一生成：originator/User-Agent/version 即使
-            // 绕过 API 透传黑名单也不能覆盖画像，避免下游客户端暴露不一致指纹。
-            if matches!(
-                name.as_str(),
-                "openai-beta"
-                    | "originator"
-                    | "user-agent"
-                    | "version"
-                    | "x-oai-attestation"
-                    | "x-oai-is"
-                    | "x-oai-is-update"
-                    | "x-openai-internal-codex-residency"
-            ) {
-                continue;
-            }
-            headers.remove(name);
-            for value in request.passthrough_headers.get_all(name) {
-                headers.append(name.clone(), value.clone());
-            }
-        }
-        Ok(headers)
-    }
-
-    fn request_headers_for_websocket_response(
-        &self,
-        request: &CodexResponsesRequest,
-        context: CodexRequestContext<'_>,
-    ) -> CodexClientResult<HeaderMap> {
-        let mut headers = self.request_headers_for_http_response(request, context)?;
-        headers.remove(X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER);
-        headers.insert(
-            HeaderName::from_static("openai-beta"),
-            HeaderValue::from_static("responses_websockets=2026-02-06"),
-        );
-        Ok(headers)
-    }
-
-    fn request_headers(
-        &self,
-        profile: &CodexWireProfile,
-        context: CodexRequestContext<'_>,
-    ) -> CodexClientResult<HeaderMap> {
-        let mut headers =
-            build_codex_base_headers(profile, context.authorization, context.account_id)?;
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        insert_optional_header(&mut headers, "cookie", context.cookie_header)?;
-        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        headers.insert(
-            HeaderName::from_static("x-client-request-id"),
-            HeaderValue::from_str(context.request_id)?,
-        );
-        insert_optional_protocol_header(
-            &mut headers,
-            "x-client-request-id",
-            context.client_request_id,
-        );
-        insert_optional_header(
-            &mut headers,
-            "x-codex-installation-id",
-            context.installation_id,
-        )?;
-        insert_optional_protocol_header(&mut headers, "session-id", context.session_id);
-        insert_optional_protocol_header(&mut headers, "thread-id", context.thread_id);
-        insert_optional_protocol_header(&mut headers, "x-codex-turn-id", context.turn_id);
-        insert_optional_protocol_header(&mut headers, "x-codex-window-id", context.codex_window_id);
-        insert_optional_protocol_header(&mut headers, "x-codex-turn-state", context.turn_state);
-        insert_optional_protocol_header(
-            &mut headers,
-            "x-codex-turn-metadata",
-            context.turn_metadata,
-        );
-        insert_optional_protocol_header(
-            &mut headers,
-            "x-codex-beta-features",
-            context.beta_features,
-        );
-        insert_optional_protocol_header(
-            &mut headers,
-            "x-responsesapi-include-timing-metrics",
-            context.include_timing_metrics,
-        );
-        // 官方 Desktop 的版本画像来自 clientInfo.version。保留下游是否携带
-        // `version` 扩展头的协议形状，但上游值统一使用当前 Desktop 制品版本。
-        if context
-            .version
-            .is_some_and(|version| HeaderValue::from_str(version).is_ok())
-        {
-            headers.insert(
-                HeaderName::from_static("version"),
-                HeaderValue::from_str(&profile.desktop_version)?,
-            );
-        }
-        insert_optional_protocol_header(
-            &mut headers,
-            "x-codex-parent-thread-id",
-            context.parent_thread_id,
-        );
-
-        Ok(headers)
-    }
-
-    fn auxiliary_request_headers(
-        &self,
-        profile: &CodexWireProfile,
-        context: CodexRequestContext<'_>,
-    ) -> CodexClientResult<HeaderMap> {
-        let mut headers =
-            build_codex_base_headers(profile, context.authorization, context.account_id)?;
-        if let Some(cookie_header) = context.cookie_header {
-            headers.insert(COOKIE, HeaderValue::from_str(cookie_header)?);
-        }
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        insert_optional_header(
-            &mut headers,
-            "x-codex-installation-id",
-            context.installation_id,
-        )?;
-        Ok(headers)
-    }
-
-    pub(in crate::transport) fn usage_request_headers(
-        &self,
-        context: CodexRequestContext<'_>,
-    ) -> CodexClientResult<HeaderMap> {
-        let profile = self.profile.snapshot();
-        let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_str(&profile.user_agent())?);
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(context.authorization)?);
-        insert_optional_header(&mut headers, "chatgpt-account-id", context.account_id)?;
-        insert_optional_header(&mut headers, "cookie", context.cookie_header)?;
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        Ok(headers)
-    }
-}
-
-fn log_unredacted_websocket_request(
-    request: &CodexWebSocketRequest,
-    context: CodexRequestContext<'_>,
-) {
-    tracing::info!(
-        target: "request_dump",
-        provider = "openai",
-        request_id = %context.request_id,
-        account_id = context.account_id.unwrap_or_default(),
-        request_direction = "upstream",
-        request_transport = "websocket",
-        request_method = "GET + response.create",
-        request_url = request.connection().endpoint(),
-        request_headers = ?request.connection().headers(),
-        request_payload = request.payload_text(),
-        contains_sensitive_data = true,
-        "request dump (unredacted)"
-    );
 }
 
 /// 首个可投递帧前的交付边界结果。
@@ -1011,6 +858,7 @@ fn websocket_connection_profile(headers: &HeaderMap) -> String {
 fn http_sse_stream(
     response: ReqwestResponse,
     rate_limit_updates: CodexRateLimitUpdates,
+    trace: TraceContext,
 ) -> CodexBackendSseStream {
     let stream: CodexBackendSseStream =
         Box::pin(response.bytes_stream().map_err(CodexClientError::Http));
@@ -1028,6 +876,20 @@ fn http_sse_stream(
                 )),
             }
         }));
+    let stream = Box::pin(async_stream::stream! {
+        let mut stream = stream;
+        let mut capture = StreamCapture::new(trace.clone(), StreamFormat::Sse);
+        while let Some(chunk) = stream.next().await {
+            match &chunk {
+                Ok(bytes) => capture.push(bytes),
+                Err(error) => trace.record("upstream.read.failed", diagnostic_json(&serde_json::json!({"error": error.to_string()}))),
+            }
+            let failed = chunk.is_err();
+            yield chunk;
+            if failed { return; }
+        }
+        capture.finish();
+    });
     observe_http_sse_rate_limits(stream, rate_limit_updates)
 }
 

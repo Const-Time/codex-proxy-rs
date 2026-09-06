@@ -283,6 +283,7 @@ pub struct ModelRequestFinalization {
     pub websocket_pool: Option<String>,
     pub service_tier: Option<String>,
     pub provider_metadata_json: Option<Value>,
+    pub diagnostic_trace_json: Option<Value>,
     pub error_kind: Option<String>,
     pub provider_error_code: Option<String>,
     pub error_message: Option<String>,
@@ -352,6 +353,15 @@ impl ModelRequestFinalization {
             .is_some_and(|metadata| !metadata.is_object())
         {
             return Err(invalid("provider observation must be a JSON object"));
+        }
+        if self
+            .diagnostic_trace_json
+            .as_ref()
+            .is_some_and(|trace| !trace.is_object() || trace.to_string().len() > 64 * 1024)
+        {
+            return Err(invalid(
+                "diagnostic trace must be a JSON object within 64 KiB",
+            ));
         }
         validate_optional_stable_reason(
             self.continuation_unavailable_reason.as_deref(),
@@ -725,7 +735,7 @@ impl ModelRequestRepository for PgExecutionStore {
                  upstream_connection_id = $44,
                  upstream_connection_exit_reason = $45,
                  upstream_connection_age_ms = $46,
-                 upstream_connection_idle_ms = $47
+                 upstream_connection_idle_ms = $47, diagnostic_trace_json = $48
              where id = $1 and outcome = 'running'
              returning id, client_api_key_ref, continuation_affinity_hash,
                        continuation_requested, provider_kind, upstream_transport,
@@ -916,6 +926,7 @@ impl ModelRequestRepository for PgExecutionStore {
             finalization.upstream_connection_idle_ms,
             "upstream_connection_idle_ms",
         )?)
+        .bind(finalization.diagnostic_trace_json.map(sqlx::types::Json))
         .fetch_one(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("finalize model request"))?;
@@ -1215,6 +1226,12 @@ impl ExecutionStore for PgExecutionStore {
                 websocket_pool: finalization.websocket_pool,
                 service_tier: finalization.service_tier,
                 provider_metadata_json,
+                diagnostic_trace_json: finalization
+                    .diagnostic_trace_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::InvalidData))?,
                 error_kind,
                 provider_error_code: finalization.provider_error_code,
                 error_message,

@@ -1,10 +1,7 @@
 //! Codex Desktop 主动额度重置卡 HTTP contract。
 
 use chrono::{DateTime, Utc};
-use reqwest::{
-    StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
-};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -15,11 +12,7 @@ use super::{
         retry_after_seconds,
     },
     diagnostics::CodexUpstreamSendPhase,
-    endpoints::{
-        WHAM_RATE_LIMIT_RESET_CREDITS_CONSUME_PATH, WHAM_RATE_LIMIT_RESET_CREDITS_PATH,
-        endpoint_url,
-    },
-    headers::insert_optional_header,
+    endpoints::account_endpoint_url,
     response_meta,
 };
 
@@ -94,11 +87,11 @@ impl CodexBackendClient {
     ) -> CodexClientResult<CodexRateLimitResetCredits> {
         let response = self
             .client
-            .get(endpoint_url(
+            .get(account_endpoint_url(
                 &self.base_url,
-                WHAM_RATE_LIMIT_RESET_CREDITS_PATH,
+                "rate-limit-reset-credits",
             ))
-            .headers(self.reset_credits_headers(context, false)?)
+            .headers(self.account_request_headers(context)?)
             .send()
             .await
             .map_err(CodexClientError::HttpJson)?;
@@ -131,11 +124,11 @@ impl CodexBackendClient {
     ) -> CodexClientResult<CodexRateLimitResetCreditsConsumeResult> {
         let response = self
             .client
-            .post(endpoint_url(
+            .post(account_endpoint_url(
                 &self.base_url,
-                WHAM_RATE_LIMIT_RESET_CREDITS_CONSUME_PATH,
+                "rate-limit-reset-credits/consume",
             ))
-            .headers(self.reset_credits_headers(context, true)?)
+            .headers(self.account_request_headers(context)?)
             .json(&ConsumeRequest {
                 credit_id,
                 redeem_request_id: redeem_request_id.to_string(),
@@ -150,36 +143,6 @@ impl CodexBackendClient {
             code: required_text(wire.code, MAX_IDENTIFIER_BYTES, "reset-credit result code")?,
             credit: wire.credit.map(parse_credit).transpose()?,
         })
-    }
-
-    fn reset_credits_headers(
-        &self,
-        context: CodexRequestContext<'_>,
-        json_body: bool,
-    ) -> CodexClientResult<HeaderMap> {
-        let profile = self.profile.snapshot();
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(context.authorization)?);
-        insert_optional_header(&mut headers, "chatgpt-account-id", context.account_id)?;
-        headers.insert(
-            HeaderName::from_static("originator"),
-            HeaderValue::from_str(&profile.originator)?,
-        );
-        headers.insert(
-            HeaderName::from_static("oai-language"),
-            HeaderValue::from_static("en"),
-        );
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_str(&profile.desktop_user_agent())?,
-        );
-        // Electron `net.fetch` 为 renderer 请求附加的默认 Accept；该 endpoint 的
-        // renderer 并没有显式改写为 Core auxiliary 请求的 application/json 画像。
-        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-        if json_body {
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
-        Ok(headers)
     }
 }
 

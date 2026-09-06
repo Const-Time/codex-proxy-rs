@@ -19,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use gateway_core::{
+    diagnostics::{TraceContext, diagnostic_json},
     engine::execution::{AuthenticatedClient, ClientTransport},
     lifecycle::{ConnectionGuard, ConnectionLifecycle},
 };
@@ -98,17 +99,12 @@ impl ResponsesWebSocketAdapter {
             Err(_) => return runtime_unavailable_response().into_response(),
         };
         let connection_id = self.service.next_request_id().replacen("req_", "ws_", 1);
-        tracing::info!(
-            target: "request_dump",
-            provider = "openai",
-            websocket_connection_id = %connection_id,
-            request_direction = "downstream",
-            request_transport = "websocket_handshake",
-            request_method = "GET",
-            request_path = "/v1/responses",
-            request_headers = ?raw_headers,
-            contains_sensitive_data = true,
-            "request dump (unredacted)"
+        TraceContext::new(&connection_id).headers(
+            "client.connection.headers",
+            serde_json::json!({"transport": "websocket", "method": "GET", "path": "/v1/responses"}),
+            raw_headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
         );
         let session = ResponsesWebSocketSession {
             service: self.service.clone(),
@@ -187,26 +183,15 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
         }
         request_count = request_count.saturating_add(1);
         let correlation_id = Arc::<str>::from(service.next_request_id());
-        tracing::info!(
-            target: "request_dump",
-            provider = "openai",
-            websocket_connection_id = connection.id(),
-            correlation_id = %correlation_id,
-            request_index = request_count,
-            request_direction = "downstream",
-            request_transport = "websocket",
-            request_payload = %payload,
-            contains_sensitive_data = true,
-            "request dump (unredacted)"
-        );
         let decoded = match decode_response_create_with_context(&payload, &request_headers) {
             Ok(decoded) => decoded.with_client_context(client_ip, user_agent.clone()),
             Err(error) => {
-                tracing::info!(
-                    websocket_connection_id = connection.id(),
-                    request_id = %correlation_id,
-                    error = %error,
-                    "Responses WebSocket request rejected"
+                trace_rejected_request(
+                    &correlation_id,
+                    connection.id(),
+                    &payload,
+                    "decode",
+                    &error.to_string(),
                 );
                 if send_protocol_error(
                     &mut connection,
@@ -225,6 +210,13 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
         let decoded = replay.prepare(decoded);
         // deadline 与 Text 可能同时就绪；在任何上游执行开始前再次封住该竞争窗口。
         if connection.is_expired() {
+            trace_rejected_request(
+                &correlation_id,
+                connection.id(),
+                &payload,
+                "connection_expired",
+                "",
+            );
             expire_connection(&mut connection).await;
             break;
         }
@@ -239,6 +231,13 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
         {
             Ok(started) => started,
             Err(error) => {
+                trace_rejected_request(
+                    &correlation_id,
+                    connection.id(),
+                    &payload,
+                    "start",
+                    &error.to_string(),
+                );
                 if send_gateway_error(&mut connection, &error, &correlation_id).await
                     == ForwardOutcome::Disconnect
                 {
@@ -247,14 +246,14 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
                 continue;
             }
         };
-        tracing::info!(
-            target: "request_dump",
-            provider = "openai",
-            websocket_connection_id = connection.id(),
-            correlation_id = %correlation_id,
-            request_id = %started.request_id,
-            "request dump correlation"
-        );
+        started.session.trace().record("client.connection", serde_json::json!({
+            "transport": "websocket", "connectionId": connection.id(), "correlationId": correlation_id,
+            "requestIndex": request_count,
+        }));
+        started
+            .session
+            .trace()
+            .capture("client.request.body", payload.as_bytes());
 
         if forward_execution(&mut connection, started, &mut replay).await
             == ForwardOutcome::Disconnect
@@ -268,6 +267,28 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
     }
 
     connection.log_summary(request_count);
+}
+
+// 尚未建立模型请求的拒绝也保留原文入口，用返回给客户端的 correlation ID 检索。
+fn trace_rejected_request(
+    correlation_id: &str,
+    connection_id: &str,
+    payload: &str,
+    phase: &'static str,
+    error: &str,
+) {
+    let trace = TraceContext::new(correlation_id);
+    trace.record(
+        "client.connection",
+        serde_json::json!({"connectionId": connection_id}),
+    );
+    trace.capture("client.request.body", payload.as_bytes());
+    trace.record(
+        "client.request.rejected",
+        serde_json::json!({
+            "phase": phase, "detail": diagnostic_json(&serde_json::json!({"message": error})),
+        }),
+    );
 }
 
 async fn expire_connection(connection: &mut ResponsesWebSocketConnection) {

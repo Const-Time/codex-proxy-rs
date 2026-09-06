@@ -3,6 +3,8 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use gateway_core::diagnostics::{TraceContext, diagnostic_json};
+use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -61,6 +63,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
     pool_return: Option<WebSocketStreamPoolReturn>,
     reused_connection: bool,
     initial_event_timeout: Option<Duration>,
+    trace: TraceContext,
 ) -> CodexWebSocketStreamingExchange {
     let websocket_connection_id = websocket.connection_id();
     let response_metadata = metadata.clone();
@@ -83,6 +86,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
             pool_return,
             reused_connection,
             initial_event_timeout,
+            trace,
             shutdown,
             rate_limit_updates: rate_limit_updates_for_task,
             turn_state_update: turn_state_update_for_task,
@@ -116,6 +120,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
 }
 
 struct WebSocketStreamForwardState {
+    trace: TraceContext,
     websocket: PumpedWebSocket,
     metadata: CodexWebSocketConnectionMetadata,
     pool_return: Option<WebSocketStreamPoolReturn>,
@@ -129,6 +134,7 @@ struct WebSocketStreamForwardState {
 
 async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
     let WebSocketStreamForwardState {
+        trace,
         mut websocket,
         mut metadata,
         pool_return,
@@ -152,6 +158,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             // 客户端断开下游 SSE 流：立即丢弃连接并释放池 slot，
             // 不再傻等上游 idle 超时（否则同会话后续请求会一直 bypass/busy）。
             () = tx.closed() => {
+                trace.record("upstream.cancelled", json!({"reason": "receiver_dropped"}));
                 discard_stream_websocket(
                     websocket,
                     pool_return,
@@ -160,6 +167,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                 return;
             }
             () = shutdown.cancelled() => {
+                trace.record("upstream.cancelled", json!({"reason": "pool_shutdown"}));
                 discard_stream_websocket(
                     websocket,
                     pool_return,
@@ -183,6 +191,13 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                     }
                     error => error,
                 };
+                trace.record(
+                    "upstream.read.failed",
+                    json!({
+                        "lastEventType": last_event_type,
+                        "error": diagnostic_json(&json!({"message": error.to_string()})),
+                    }),
+                );
                 let observation = connection_observation(&websocket, &error);
                 discard_stream_websocket(
                     websocket,
@@ -201,6 +216,10 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             }
         };
         let Some(message) = message else {
+            trace.record(
+                "upstream.eof",
+                json!({"lastEventType": last_event_type, "terminalSeen": false}),
+            );
             break;
         };
         let raw = match message {
@@ -208,7 +227,8 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                 saw_upstream_activity = true;
                 text.to_string()
             }
-            tungstenite::Message::Binary(_) => {
+            tungstenite::Message::Binary(bytes) => {
+                trace.capture("upstream.binary", &bytes);
                 let error = CodexWebSocketExchangeError::UnexpectedBinaryEvent;
                 let observation = connection_observation(&websocket, &error);
                 discard_stream_websocket(
@@ -223,6 +243,15 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                 return;
             }
             tungstenite::Message::Close(frame) => {
+                if let Some(frame) = &frame {
+                    trace.dump("upstream.close.reason", frame.reason.as_bytes());
+                }
+                trace.record("upstream.close", json!({
+                    "code": frame.as_ref().map(|frame| u16::from(frame.code)),
+                    "reason": frame.as_ref().map(|frame| diagnostic_json(&json!({"message": frame.reason.as_str()}))),
+                    "lastEventType": last_event_type, "terminalSeen": false,
+                    "connectionId": websocket.connection_id().to_string(),
+                }));
                 let websocket_connection_id = websocket.connection_id();
                 let error = CodexWebSocketExchangeError::closed_before_terminal_on(
                     websocket_connection_id,
@@ -248,6 +277,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             }
             _ => continue,
         };
+        trace.capture("upstream.event", raw.as_bytes());
         let reduced = match reduce_websocket_event(&raw, &mut metadata, &mut continuation) {
             Ok(reduced) => reduced,
             Err(error) => {
@@ -286,6 +316,10 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             ExchangeAction::Ignore => continue,
         };
         if tx.send(Ok(Bytes::from(frame))).await.is_err() {
+            trace.record(
+                "upstream.forward.failed",
+                json!({"reason": "receiver_dropped"}),
+            );
             discard_stream_websocket(
                 websocket,
                 pool_return,
@@ -295,6 +329,10 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             return;
         }
         if let Some(terminal) = terminal {
+            trace.record(
+                "upstream.terminal",
+                json!({"kind": format!("{terminal:?}")}),
+            );
             match terminal {
                 WebSocketTerminalKind::Completed => {
                     finish_stream_websocket(websocket, metadata, continuation, pool_return.take())

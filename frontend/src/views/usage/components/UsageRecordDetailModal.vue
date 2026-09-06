@@ -26,6 +26,7 @@ import {
   visibleRequestText,
   visibleResponseText,
 } from '../utils/records'
+import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
 import UsageStatusCodeBadge from './UsageStatusCodeBadge.vue'
@@ -469,6 +470,8 @@ const tokenDonutOption = computed<EChartsOption>(() => {
         />
       </section>
     </div>
+
+    <RequestDiagnosticsPanel v-if="open && record" :request-id="record.requestId" />
 
     <template #footer>
       <BaseButton variant="primary" @click="open = false">

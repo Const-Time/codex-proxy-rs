@@ -42,7 +42,7 @@ pub use self::{
         WHAM_RATE_LIMIT_RESET_CREDITS_CONSUME_PATH, WHAM_RATE_LIMIT_RESET_CREDITS_PATH,
         WHAM_USAGE_PATH, endpoint_url, usage_endpoint_url,
     },
-    headers::build_codex_base_headers,
+    headers::build_codex_model_headers,
     profile_avatar::{
         CodexProfileAvatar, CodexProfileAvatarFetchError, CodexProfileAvatarStreamError,
         fetch_profile_avatar,

@@ -1,5 +1,10 @@
 //! OpenAI token 续期 Reqwest 适配器。
 
+use crate::transport::{
+    headers::build_codex_profile_headers,
+    profile::CodexWireProfileState,
+    tls::{build_reqwest_client_with_custom_ca, ensure_rustls_provider},
+};
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode, redirect::Policy};
 use secrecy::{ExposeSecret, SecretString};
@@ -243,6 +248,7 @@ pub struct TokenClientConfig {
 pub struct OpenAiTokenClient {
     client: Client,
     config: TokenClientConfig,
+    profile: CodexWireProfileState,
 }
 
 /// 官方 Codex token client 无法安全构建。
@@ -251,9 +257,13 @@ pub struct OpenAiTokenClient {
 pub struct TokenClientBuildError;
 
 impl OpenAiTokenClient {
-    /// 使用 Reqwest 客户端和静态配置构造 token 续期客户端。
-    pub fn new(client: Client, config: TokenClientConfig) -> Self {
-        Self { client, config }
+    /// 共享运行时画像；刷新时取快照，授权码交换仍使用 raw auth 请求。
+    pub fn new(client: Client, config: TokenClientConfig, profile: CodexWireProfileState) -> Self {
+        Self {
+            client,
+            config,
+            profile,
+        }
     }
 }
 
@@ -264,14 +274,17 @@ impl OpenAiTokenClient {
 /// 本地 TLS/HTTP client 初始化失败时返回脱敏错误。
 pub fn openai_token_client(
     config: TokenClientConfig,
+    profile: CodexWireProfileState,
 ) -> Result<OpenAiTokenClient, TokenClientBuildError> {
-    let client = Client::builder()
+    ensure_rustls_provider();
+    let builder = Client::builder()
+        .use_rustls_tls()
+        .no_proxy()
         .redirect(Policy::none())
         .connect_timeout(TOKEN_CONNECT_TIMEOUT)
-        .timeout(TOKEN_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|_| TokenClientBuildError)?;
-    Ok(OpenAiTokenClient::new(client, config))
+        .timeout(TOKEN_REQUEST_TIMEOUT);
+    let client = build_reqwest_client_with_custom_ca(builder).map_err(|_| TokenClientBuildError)?;
+    Ok(OpenAiTokenClient::new(client, config, profile))
 }
 
 #[derive(Deserialize)]
@@ -345,9 +358,16 @@ struct AuthorizationCodeResponse {
 #[async_trait]
 impl TokenRefresher for OpenAiTokenClient {
     async fn refresh(&self, refresh_token: &str) -> Result<TokenPair, RefreshFailure> {
+        let headers = build_codex_profile_headers(&self.profile.snapshot()).map_err(|_| {
+            RefreshFailure::Transport {
+                message: Some("OpenAI OAuth refresh profile is invalid".to_owned()),
+                upstream: None,
+            }
+        })?;
         let response = self
             .client
             .post(&self.config.token_endpoint)
+            .headers(headers)
             .json(&RefreshTokenRequest {
                 client_id: self.config.client_id.as_str(),
                 grant_type: "refresh_token",

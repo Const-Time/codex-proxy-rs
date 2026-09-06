@@ -584,6 +584,8 @@ pub(crate) fn admin_usage_detail(
     detail: UsageRecordDetail,
 ) -> AdminStoreResult<admin_observability::UsageDetail> {
     Ok(admin_observability::UsageDetail {
+        trace: detail.trace,
+        related_requests: detail.related_requests,
         request: admin_usage_record(detail.request)?,
         attempts: detail
             .attempts

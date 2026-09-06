@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import { failureClassText } from '../utils/opsErrorPresentation'
+import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
 
@@ -130,6 +131,7 @@ function visibleFields(items: DetailField[]) {
     size="xl"
   >
     <template v-if="record">
+      <RequestDiagnosticsPanel v-if="open && record.requestId" class="mb-3" :request-id="record.requestId" />
       <section :class="panelClass">
         <h3 :class="panelTitleClass">
           错误
@@ -142,7 +144,7 @@ function visibleFields(items: DetailField[]) {
 
       <section v-if="record.rawUpstreamError" class="mt-3" :class="panelClass">
         <UsageDetailCodePanel
-          title="上游返回原文"
+          title="上游错误与关闭信息"
           max-height="360px"
           :content="record.rawUpstreamError"
         />

@@ -395,6 +395,8 @@ impl<'a> CodexAccountSelectionTelemetry<'a> {
 /// 单次 Codex 上游请求的上下文。
 #[derive(Clone, Copy)]
 pub struct CodexRequestContext<'a> {
+    /// 显式传递的请求诊断上下文，跨连接任务共享。
+    pub trace: Option<&'a gateway_core::diagnostics::TraceContext>,
     /// Provider 已构造并脱敏持有的完整 Authorization 值。
     pub authorization: &'a str,
     /// ChatGPT 账号 ID。
@@ -440,6 +442,7 @@ impl<'a> CodexRequestContext<'a> {
         installation_id: Option<&'a str>,
     ) -> Self {
         Self {
+            trace: None,
             authorization,
             account_id,
             request_id,
@@ -458,6 +461,12 @@ impl<'a> CodexRequestContext<'a> {
             turn_id: None,
             account_selection: CodexAccountSelectionTelemetry::NONE,
         }
+    }
+
+    #[must_use]
+    pub const fn with_trace(mut self, trace: &'a gateway_core::diagnostics::TraceContext) -> Self {
+        self.trace = Some(trace);
+        self
     }
 }
 

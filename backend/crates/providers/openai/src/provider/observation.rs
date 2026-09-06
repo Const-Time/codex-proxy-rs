@@ -687,6 +687,7 @@ pub(super) fn codex_request_context<'a>(
     account_selection: CodexAccountSelectionTelemetry<'a>,
 ) -> CodexRequestContext<'a> {
     CodexRequestContext {
+        trace: None,
         authorization: authorization.expose_secret(),
         account_id: account.upstream_account_id(),
         request_id,

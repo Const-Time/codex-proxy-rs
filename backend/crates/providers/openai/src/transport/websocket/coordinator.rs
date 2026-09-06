@@ -559,6 +559,7 @@ fn continuation_unavailable(
 pub(crate) async fn execute_prepared_response_create_request_stream(
     request: &CodexWebSocketRequest,
     prepared: PreparedWebSocket,
+    trace: gateway_core::diagnostics::TraceContext,
 ) -> Result<CodexWebSocketStreamingExchange, CodexWebSocketExchangeError> {
     let PreparedWebSocket {
         connection,
@@ -573,7 +574,19 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
         continuation,
         created_at,
     } = connection;
+    trace.record("upstream.connection", serde_json::json!({
+        "connectionId": websocket.connection_id().to_string(), "reused": reused,
+        "pool": pool_decision.map_or("unpooled", WebSocketPoolDecision::kind),
+        "status": metadata.diagnostics.status_code,
+        "upstreamRequestId": metadata.diagnostics.request_id,
+        "headers": gateway_core::diagnostics::diagnostic_headers(metadata.diagnostics.trace_headers.iter().map(|(name, value)| (name.as_str(), value.as_str()))),
+    }));
+    trace.capture("upstream.request.body", request.payload_text().as_bytes());
     if let Err(error) = send_websocket_request(&websocket, request.payload_text()).await {
+        trace.record(
+            "upstream.send.failed",
+            serde_json::json!({"phase": "websocket_payload", "sendState": "ambiguous"}),
+        );
         let observation = websocket
             .observation()
             .with_exit_reason("outbound_transport_error");
@@ -582,6 +595,7 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
             error.with_connection_observation(observation),
         ));
     }
+    trace.record("upstream.payload.sent", serde_json::json!({}));
     let connection_local_available = lease.is_some();
     let pool_return = lease.map(|lease| WebSocketStreamPoolReturn {
         lease,
@@ -594,6 +608,7 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
         pool_return,
         reused,
         initial_event_timeout,
+        trace,
     );
     exchange.pool_decision = pool_decision;
     exchange.connection_local_continuation = connection_local_available;

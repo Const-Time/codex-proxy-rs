@@ -1,5 +1,6 @@
 //! 关闭 redirect、proxy 与业务重试的生产 reqwest transport。
 
+use gateway_core::diagnostics::{StreamCapture, StreamFormat, TraceContext};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io;
@@ -371,6 +372,18 @@ impl GrokInferenceTransport for ReqwestGrokInferenceTransport {
                     UpstreamSendState::NotSent,
                 ));
             }
+            let trace = request.trace().exchange("http_sse");
+            trace.headers(
+                "upstream.request.headers",
+                serde_json::json!({
+                    "method": "POST", "endpoint": request.endpoint().path(),
+                }),
+                request
+                    .headers()
+                    .iter()
+                    .map(|header| (header.name(), header.value().expose().as_bytes())),
+            );
+            trace.capture("upstream.request.body", request.body());
             let (client, client_cache_status) = self.client_for(request.binding())?;
             let mut builder = client
                 .post(request.endpoint().clone())
@@ -393,8 +406,12 @@ impl GrokInferenceTransport for ReqwestGrokInferenceTransport {
                 Some(elapsed_millis(headers_started_at.elapsed())),
                 &dns_observer,
             );
+            trace.headers("upstream.response.headers", serde_json::json!({
+                "status": response.status().as_u16(), "httpVersion": format!("{:?}", response.version()),
+                "headersMs": elapsed_millis(headers_started_at.elapsed()),
+            }), response.headers().iter().map(|(name, value)| (name.as_str(), value.as_bytes())));
             if !response.status().is_success() {
-                return Err(classify_inference_status(response)
+                return Err(classify_inference_status(response, &trace)
                     .await
                     .with_transport_metrics(transport_metrics));
             }
@@ -424,6 +441,20 @@ impl GrokInferenceTransport for ReqwestGrokInferenceTransport {
                     };
                     std::future::ready(Some(item))
                 });
+            let body = async_stream::stream! {
+                let mut body = Box::pin(body);
+                let mut capture = StreamCapture::new(trace.clone(), StreamFormat::Sse);
+                while let Some(chunk) = body.next().await {
+                    match &chunk {
+                        Ok(bytes) => capture.push(bytes),
+                        Err(_) => trace.record("upstream.read.failed", serde_json::json!({"phase": "response_body"})),
+                    }
+                    let failed = chunk.is_err();
+                    yield chunk;
+                    if failed { return; }
+                }
+                capture.finish();
+            };
             Ok(
                 GrokInferenceResponse::new(Box::pin(body), http_version, status_code, request_id)
                     .with_transport_metrics(transport_metrics),
@@ -981,7 +1012,10 @@ fn classify_inference_stream_error(error: &reqwest::Error) -> GrokInferenceTrans
     )
 }
 
-async fn classify_inference_status(response: Response) -> GrokInferenceTransportError {
+async fn classify_inference_status(
+    response: Response,
+    trace: &TraceContext,
+) -> GrokInferenceTransportError {
     let status = response.status();
     let retry_after = retry_after(&response);
     let http_version = upstream_http_version(response.version());
@@ -989,8 +1023,15 @@ async fn classify_inference_status(response: Response) -> GrokInferenceTransport
     let status_code = status.as_u16();
     let body = match collect_bounded(response, MAX_ERROR_BODY_BYTES).await {
         Ok(BoundedBody::Body(body)) => body,
-        Ok(BoundedBody::TooLarge) | Err(_) => Vec::new(),
+        Ok(BoundedBody::TooLarge) | Err(_) => {
+            trace.record(
+                "capture.gap",
+                serde_json::json!({"reason": "error_body_unavailable_or_too_large"}),
+            );
+            Vec::new()
+        }
     };
+    trace.capture("upstream.error.body", &body);
     let metadata = inference_error_metadata(&body);
     let body_failure = classify_grok_body_failure(&metadata, &body);
     let kind = match status {

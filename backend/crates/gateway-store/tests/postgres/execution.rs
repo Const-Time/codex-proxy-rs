@@ -8,7 +8,8 @@ use gateway_core::error::{GatewayError, GatewayErrorKind, ProviderConnectionObse
 use gateway_core::metering::{CalculatedCost, CostEstimate, Usage};
 use gateway_core::upstream::UpstreamSendState;
 use gateway_store::postgres::{
-    ModelRequestAttemptStart, ModelRequestRepository, NewModelRequest, PgExecutionStore,
+    ModelRequestAttemptStart, ModelRequestRepository, NewModelRequest, ObservabilityRepository,
+    PgExecutionStore,
 };
 
 use super::TestDatabase;
@@ -463,6 +464,7 @@ async fn expired_image_request_should_be_recovered_as_failed() {
 
 fn successful_core_finalization(id: &str) -> CoreModelRequestFinalization {
     CoreModelRequestFinalization {
+        diagnostic_trace_json: None,
         request_id: ModelRequestId::new(id).expect("request id"),
         outcome: ExecutionOutcome::Succeeded,
         send_state: UpstreamSendState::Sent,
@@ -804,6 +806,30 @@ async fn successful_http_downgrade_should_mark_pending_websocket_failures_recove
         assert_eq!(row.4, Some(expected_delay_ms));
         assert!(row.5.is_some_and(|latency| latency >= expected_delay_ms));
     }
+    let repository = super::observability_repository(&database.pool);
+    let failed_detail = repository
+        .usage_record_detail("req_websocket_failed_first")
+        .await
+        .unwrap();
+    assert_eq!(
+        failed_detail.related_requests[0]["requestId"],
+        "req_http_fallback_succeeded"
+    );
+    assert_eq!(
+        failed_detail.related_requests[0]["relation"],
+        "recovered_by"
+    );
+    let recovered_detail = repository
+        .usage_record_detail("req_http_fallback_succeeded")
+        .await
+        .unwrap();
+    assert_eq!(recovered_detail.related_requests.len(), 2);
+    assert!(
+        recovered_detail
+            .related_requests
+            .iter()
+            .all(|related| related["relation"] == "recovers")
+    );
     database.close().await;
 }
 
@@ -1071,4 +1097,41 @@ async fn seed_running_request(pool: &sqlx::PgPool, id: &str) -> Result<(), sqlx:
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn diagnostic_trace_is_finalized_atomically_and_available_for_failed_request_details() {
+    let Some(database) = TestDatabase::create("diagnostic_trace").await else {
+        return;
+    };
+    seed_running_request(&database.pool, "req_diagnostic_failed")
+        .await
+        .unwrap();
+    let store = PgExecutionStore::new(database.pool.clone());
+    let mut finalization = successful_core_finalization("req_diagnostic_failed");
+    finalization.outcome = ExecutionOutcome::Failed;
+    finalization.client_status_code = Some(502);
+    finalization.error = Some(GatewayError::new(
+        GatewayErrorKind::UpstreamUnavailable,
+        "upstream closed",
+    ));
+    let trace = serde_json::json!({"schemaVersion": 1, "requestId": "req_diagnostic_failed", "events": [
+        {"attemptIndex": 1, "stage": "upstream.close", "data": {"code": 1000}},
+    ]});
+    finalization.diagnostic_trace_json = Some(trace.to_string());
+    ExecutionStore::finalize_model_request(&store, finalization)
+        .await
+        .unwrap();
+    let persisted: (String, serde_json::Value) = sqlx::query_as(
+        "select outcome, diagnostic_trace_json from model_requests where id = 'req_diagnostic_failed'"
+    ).fetch_one(&database.pool).await.unwrap();
+    assert_eq!(persisted, ("failed".to_owned(), trace.clone()));
+    let repository = super::observability_repository(&database.pool);
+    let detail = repository
+        .usage_record_detail("req_diagnostic_failed")
+        .await
+        .unwrap();
+    assert_eq!(detail.trace, Some(trace));
+    assert!(detail.related_requests.is_empty());
+    database.close().await;
 }

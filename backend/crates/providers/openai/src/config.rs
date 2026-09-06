@@ -8,7 +8,7 @@ use serde::Deserialize;
 use url::{Host, Url};
 
 use crate::credential::CodexQuotaRefreshPolicy;
-use crate::transport::profile::{CodexWireProfile, CodexWireProfileState};
+use crate::transport::profile::{CodexResidency, CodexWireProfile, CodexWireProfileState};
 use crate::transport::session::{CodexSessionIdentity, CodexSessionIdentityError};
 use crate::transport::websocket::CodexWebSocketPoolConfig;
 use crate::{
@@ -287,6 +287,8 @@ pub struct CodexWireProfileConfig {
     pub os_version: String,
     pub arch: String,
     pub terminal: String,
+    #[serde(default)]
+    pub residency: Option<CodexResidency>,
     pub verified_at: DateTime<Utc>,
 }
 
@@ -294,14 +296,16 @@ impl Default for CodexWireProfileConfig {
     fn default() -> Self {
         Self {
             originator: "Codex Desktop".to_owned(),
-            codex_version: "0.147.0-alpha.6.6".to_owned(),
-            desktop_version: "26.803.81509".to_owned(),
-            desktop_build: "6415".to_owned(),
+            codex_version: "0.153.4".to_owned(),
+            desktop_version: "26.901.51231".to_owned(),
+            desktop_build: "8109".to_owned(),
             os_type: "Mac OS".to_owned(),
             os_version: "15.7.1".to_owned(),
             arch: "arm64".to_owned(),
             terminal: "unknown".to_owned(),
-            verified_at: Utc::now(),
+            residency: None,
+            // 制品核验于 2026-09-06T03:26:12.084Z；进程启动不构成重新核验。
+            verified_at: DateTime::UNIX_EPOCH + chrono::Duration::milliseconds(1_788_665_172_084),
         }
     }
 }
@@ -361,6 +365,7 @@ impl From<CodexWireProfileConfig> for CodexWireProfile {
             os_version: value.os_version,
             arch: value.arch,
             terminal: value.terminal,
+            residency: value.residency,
             verified_at: value.verified_at,
         }
     }

@@ -115,7 +115,7 @@ pub(super) fn cold_compaction_http_sse_stream(
                 headers.clone(),
                 body,
                 session.binding().clone(),
-            );
+            ).with_trace(context.trace());
             let Some(handshake_deadline) = remaining(context.deadline()) else {
                 Err(mark_transient_compaction_failure(provider_error(
                     ProviderErrorKind::Timeout,
@@ -403,7 +403,7 @@ pub(super) fn cold_http_sse_stream(
                 headers.clone(),
                 body,
                 session.binding().clone(),
-            );
+            ).with_trace(context.trace());
             let Some(handshake_deadline) = remaining(context.deadline()) else {
                 Err(provider_error(
                     ProviderErrorKind::Timeout,

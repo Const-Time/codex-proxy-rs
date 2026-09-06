@@ -338,7 +338,12 @@ async fn next_active_input(
     // pump 继续接收有界业务帧和处理 Ping/Pong；退出通过独立通知取消本轮。
     tokio::select! {
         biased;
-        _ = connection.wait_for_exit() => ActiveInput::Disconnect,
+        _ = connection.wait_for_exit() => {
+            session.trace().record("downstream.cancelled", serde_json::json!({
+                "reason": "websocket_connection_exit", "connectionId": connection.id(),
+            }));
+            ActiveInput::Disconnect
+        },
         event = session.next_event() => ActiveInput::Event(event),
     }
 }
@@ -451,6 +456,7 @@ fn log_terminal_write_success(
     provider_terminal_to_write: std::time::Duration,
 ) {
     tracing::info!(
+        target: "request_trace", stage = "downstream.terminal.written",
         websocket_connection_id = connection.id(),
         request_id = %request_id,
         provider_terminal_to_terminal_write_ms = provider_terminal_to_write.as_millis(),
@@ -465,6 +471,7 @@ fn log_terminal_write_failure(
     provider_terminal_to_write: std::time::Duration,
 ) {
     tracing::info!(
+        target: "request_trace", stage = "downstream.terminal.write_failed",
         websocket_connection_id = connection.id(),
         request_id = %request_id,
         provider_terminal_to_terminal_write_ms = provider_terminal_to_write.as_millis(),

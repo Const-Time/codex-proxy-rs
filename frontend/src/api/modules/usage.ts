@@ -186,7 +186,39 @@ export interface UsageAttempt {
   completedAt: string | null
 }
 
+export interface RequestTraceEvent {
+  sequence: number
+  lastSequence: number
+  elapsedMs: number
+  lastElapsedMs: number
+  attemptIndex: number
+  exchangeId: number | null
+  stage: string
+  count: number
+  data: Record<string, unknown>
+}
+
+export interface RequestTrace {
+  schemaVersion: number
+  requestId: string
+  startedAtUnixMs: number
+  totalEvents: number
+  droppedEvents: number
+  maxEvents: number
+  captureMode: string
+  events: RequestTraceEvent[]
+}
+
+export interface RelatedRequest {
+  requestId: string
+  relation: 'recovered_by' | 'recovers'
+  outcome: string
+  completedAt: string | null
+}
+
 export type UsageRecordDetail = UsageRecord & {
+  trace: RequestTrace | null
+  relatedRequests: RelatedRequest[]
   attempts: UsageAttempt[]
   /** 尝试列表是否完整；best-effort 下恒为 false。 */
   attemptsComplete: boolean

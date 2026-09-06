@@ -676,7 +676,7 @@ pub const MAX_CODEX_USAGE_BODY_BYTES: usize = 1024 * 1024;
 impl CodexBackendClient {
     /// 获取 Codex usage JSON。
     pub async fn fetch_usage(&self, context: CodexRequestContext<'_>) -> CodexClientResult<Value> {
-        let headers = self.usage_request_headers(context)?;
+        let headers = self.account_request_headers(context)?;
         let response = self
             .client
             .get(usage_endpoint_url(&self.base_url))

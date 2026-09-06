@@ -261,7 +261,7 @@ async fn openai_admin_provider_exposes_live_wire_profile_and_validated_billing()
 async fn reset_credit_success_with_invalid_body_should_remain_an_unknown_consume_result() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/wham/rate-limit-reset-credits/consume"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
         .respond_with(ResponseTemplate::new(200).set_body_raw("{}", "application/json"))
         .expect(1)
         .mount(&server)
@@ -287,7 +287,7 @@ async fn reset_credit_success_with_invalid_body_should_remain_an_unknown_consume
 async fn reset_credit_explicit_http_rejection_should_preserve_the_raw_body() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/wham/rate-limit-reset-credits/consume"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
         .respond_with(ResponseTemplate::new(409).set_body_raw(
             r#"{"code":"nothing_to_reset","detail":"window is fresh"}"#,
             "application/json",
@@ -1152,6 +1152,7 @@ fn valid_config() -> TestOpenAiConfig {
         os_version: "15.5.0".to_owned(),
         arch: "arm64".to_owned(),
         terminal: "xterm-256color".to_owned(),
+        residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 7, 19, 0, 0, 0)
             .single()

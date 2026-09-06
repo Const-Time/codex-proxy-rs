@@ -853,13 +853,13 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
         store
             .usage_record_detail("req_observe_failed")
             .await
-            .is_err()
+            .is_ok()
     );
     assert!(
         store
             .usage_record_detail("req_observe_uncommitted")
             .await
-            .is_err()
+            .is_ok()
     );
 
     let overview = store
@@ -1243,7 +1243,7 @@ async fn observability_queries_preserve_request_account_cost_and_diagnostic_fact
         repository
             .usage_record_detail("req_observe_failed")
             .await
-            .is_err()
+            .is_ok()
     );
 
     let overview = repository

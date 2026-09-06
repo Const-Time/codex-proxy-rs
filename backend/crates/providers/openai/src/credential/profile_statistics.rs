@@ -8,7 +8,7 @@ use std::{
 
 use gateway_core::account::ProviderAccountId;
 use reqwest::Client;
-use secrecy::ExposeSecret as _;
+use secrecy::{ExposeSecret as _, SecretString};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -133,6 +133,30 @@ impl CodexCredentialProfileService {
         &self,
         account_id: &ProviderAccountId,
     ) -> Result<CodexProfileStatistics, CodexProfileStatisticsError> {
+        let (authorization, upstream_account_id) = self.account_authentication(account_id).await?;
+        let request_id = format!("profile_statistics_{}", Uuid::now_v7().simple());
+        let statistics = CodexBackendClient::new(
+            self.http.clone(),
+            self.base_url.clone(),
+            self.profile.clone(),
+        )
+        .fetch_profile_statistics(CodexRequestContext::auxiliary(
+            authorization.expose_secret(),
+            upstream_account_id.as_deref(),
+            &request_id,
+            None,
+        ))
+        .await
+        .map_err(map_client_error)?;
+        self.remember_avatar_source(account_id, statistics.image_url.as_deref());
+        Ok(statistics)
+    }
+
+    /// URL 缓存不缓存认证；每次下载都重新读取所属账号当前的 token。
+    async fn account_authentication(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<(SecretString, Option<String>), CodexProfileStatisticsError> {
         let account = self
             .repository
             .store()
@@ -160,22 +184,10 @@ impl CodexCredentialProfileService {
             .authentication
             .authorization_header()
             .map_err(|_| CodexProfileStatisticsError::InvalidCredentialData)?;
-        let request_id = format!("profile_statistics_{}", Uuid::now_v7().simple());
-        let statistics = CodexBackendClient::new(
-            self.http.clone(),
-            self.base_url.clone(),
-            self.profile.clone(),
-        )
-        .fetch_profile_statistics(CodexRequestContext::auxiliary(
-            authorization.expose_secret(),
-            account.upstream_account_id(),
-            &request_id,
-            None,
+        Ok((
+            authorization,
+            account.upstream_account_id().map(str::to_owned),
         ))
-        .await
-        .map_err(map_client_error)?;
-        self.remember_avatar_source(account_id, statistics.image_url.as_deref());
-        Ok(statistics)
     }
 
     pub async fn profile_avatar(
@@ -190,10 +202,21 @@ impl CodexCredentialProfileService {
                 .image_url
                 .ok_or(CodexProfileAvatarError::Missing)?,
         };
-        let desktop_user_agent = self.profile.snapshot().desktop_user_agent();
-        fetch_profile_avatar(&self.http, &self.base_url, &desktop_user_agent, &source)
-            .await
-            .map_err(map_avatar_fetch_error)
+        let (authorization, upstream_account_id) = self.account_authentication(account_id).await?;
+        fetch_profile_avatar(
+            &self.http,
+            &self.base_url,
+            &self.profile.snapshot(),
+            &source,
+            CodexRequestContext::auxiliary(
+                authorization.expose_secret(),
+                upstream_account_id.as_deref(),
+                "profile_avatar",
+                None,
+            ),
+        )
+        .await
+        .map_err(map_avatar_fetch_error)
     }
 
     fn cached_avatar_source(&self, account_id: &ProviderAccountId) -> Option<String> {

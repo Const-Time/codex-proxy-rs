@@ -12,7 +12,7 @@ use super::{
         retry_after_seconds,
     },
     diagnostics::CodexUpstreamSendPhase,
-    endpoints::{WHAM_PROFILE_STATISTICS_PATH, endpoint_url},
+    endpoints::account_endpoint_url,
     response_meta,
 };
 
@@ -167,8 +167,8 @@ impl CodexBackendClient {
     ) -> CodexClientResult<CodexProfileStatistics> {
         let response = self
             .client
-            .get(endpoint_url(&self.base_url, WHAM_PROFILE_STATISTICS_PATH))
-            .headers(self.usage_request_headers(context)?)
+            .get(account_endpoint_url(&self.base_url, "profiles/me"))
+            .headers(self.account_request_headers(context)?)
             .send()
             .await?;
         let status = response.status();

@@ -15,13 +15,13 @@ const CA_CERT_HINT: &str = "If you set CODEX_CA_CERTIFICATE or SSL_CERT_FILE, en
 
 type PemSection = (SectionKind, Vec<u8>);
 
-/// rustls 0.23 在同时编译 `ring` 与 `aws-lc-rs` 时无法自动选择进程级
-/// CryptoProvider；本工程固定使用 ring（与官方 Codex Desktop JA3 一致），
-/// 因此在首次 TLS 使用前显式安装一次。重复安装会被 rustls 忽略。
+/// 与官方 Codex 的 rustls 路径一致，安装支持 P-521 和混合后量子密钥交换的
+/// aws-lc provider。依赖图也包含 ring，因此不能让 rustls 自动选择 provider。
+/// 与官方嵌入场景一致，保留宿主在初始化之前已经安装的 provider。
 pub fn ensure_rustls_provider() {
     static INSTALL: OnceLock<()> = OnceLock::new();
     INSTALL.get_or_init(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     });
 }
 

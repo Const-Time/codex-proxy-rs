@@ -49,6 +49,7 @@ use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FinalState {
+    diagnostic_trace_json: Option<String>,
     outcome: ExecutionOutcome,
     send_state: UpstreamSendState,
     attempt_count: u32,
@@ -207,6 +208,7 @@ impl ExecutionStore for FakeStore {
             .expect("store lock")
             .finalizations
             .push(FinalState {
+                diagnostic_trace_json: finalization.diagnostic_trace_json,
                 outcome: finalization.outcome,
                 send_state: finalization.send_state,
                 attempt_count: finalization.attempt_count,
@@ -1314,6 +1316,21 @@ fn discarded_attempt_observation_does_not_leak_into_retry_result() {
 
     let state = store.state.lock().expect("store lock");
     let finalization = &state.finalizations[0];
+    let trace: Value =
+        serde_json::from_str(finalization.diagnostic_trace_json.as_deref().unwrap()).unwrap();
+    let events = trace["events"].as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["stage"] == "attempt.failed" && event["attemptIndex"] == 1)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["stage"] == "attempt.started" && event["attemptIndex"] == 2)
+    );
+    assert_eq!(events.last().unwrap()["stage"], "request.finished");
+
     assert_eq!(finalization.upstream_transport.as_deref(), Some("http_sse"));
     assert_eq!(finalization.http_version.as_deref(), Some("HTTP/2"));
     assert_eq!(

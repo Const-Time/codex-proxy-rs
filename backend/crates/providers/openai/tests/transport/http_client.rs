@@ -137,6 +137,7 @@ async fn codex_backend_client_should_preserve_oversized_error_response() {
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer access-token",
                 account_id: Some("chatgpt-account"),
                 request_id: "req_large_error",
@@ -236,6 +237,7 @@ async fn codex_backend_client_should_parse_retry_after_from_rate_limit_error_bod
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer access-token",
                 account_id: Some("chatgpt-account"),
                 request_id: "req_http_retry_after_body",
@@ -294,10 +296,11 @@ async fn codex_backend_http_sse_should_capture_structured_rate_limit_event_updat
     let mut request = codex_request("gpt-5.5", "", Vec::new());
     request.force_http_sse = true;
 
+    let trace = gateway_core::diagnostics::TraceContext::new("req_http_rate_limit_event");
     let response = client
         .create_response(
             &request,
-            request_context("req_http_rate_limit_event", Some("acct")),
+            request_context("req_http_rate_limit_event", Some("acct")).with_trace(&trace),
         )
         .await
         .expect("HTTP SSE response");
@@ -314,6 +317,18 @@ async fn codex_backend_http_sse_should_capture_structured_rate_limit_event_updat
             ("x-codex-allowed".to_owned(), "true".to_owned()),
             ("x-codex-limit-reached".to_owned(), "false".to_owned()),
         ]
+    );
+    let snapshot = trace.snapshot().unwrap();
+    let events = snapshot["events"].as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["data"]["eventType"] == "codex.rate_limits")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["data"]["eventType"] == "response.completed")
     );
 }
 
@@ -407,6 +422,7 @@ async fn codex_backend_client_should_capture_forwardable_response_metadata() {
         .create_response(
             &request,
             CodexRequestContext {
+                trace: None,
                 authorization: "Bearer access-token",
                 account_id: Some("chatgpt-account"),
                 request_id: "req_response_metadata",

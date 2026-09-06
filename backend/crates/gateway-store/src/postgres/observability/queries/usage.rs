@@ -1,6 +1,7 @@
 //! Usage 明细、诊断与过滤查询族。
 
 use super::super::*;
+use serde_json::Value;
 
 pub(crate) fn push_usage_filter(
     query: &mut QueryBuilder<Postgres>,
@@ -145,7 +146,7 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             mr.provider_account_authentication_kind_snapshot
               as provider_account_authentication_kind,
             mr.upstream_model_id, mr.upstream_transport, mr.http_version, mr.websocket_pool,
-            mr.service_tier, mr.provider_observation_json,
+            mr.service_tier, mr.provider_observation_json, mr.diagnostic_trace_json,
             mr.attempt_count, mr.upstream_send_state, mr.downstream_committed_at,
             mr.outcome, mr.client_status_code, mr.upstream_status_code,
             mr.client_response_id, mr.upstream_request_id, mr.upstream_response_id,
@@ -237,7 +238,6 @@ pub(crate) async fn usage_record_detail(
     let mut statement = QueryBuilder::<Postgres>::new(USAGE_RECORD_DETAIL_SELECT);
     statement.push(" where mr.id = ");
     statement.push_bind(request_id.to_owned());
-    push_completed_usage_fact_filter(&mut statement, "mr");
     let row = statement
         .build()
         .fetch_optional(pool)
@@ -272,7 +272,24 @@ pub(crate) async fn usage_record_detail(
     if request.attempt_count > 0 {
         attempts.push(final_attempt_from_request(&request));
     }
-    Ok(UsageRecordDetail { request, attempts })
+    let trace: Option<Value> = row
+        .try_get("diagnostic_trace_json")
+        .map_err(|_| postgres_unavailable("decode request trace"))?;
+    let related_requests = sqlx::query_scalar::<_, Value>(
+        "select jsonb_build_object('requestId', related.id, 'outcome', related.outcome,
+             'relation', case when related.id = current.recovery_request_id then 'recovered_by' else 'recovers' end,
+             'completedAt', related.completed_at)
+         from model_requests current join model_requests related
+           on related.id = current.recovery_request_id or related.recovery_request_id = current.id
+         where current.id = $1 order by related.started_at limit 20"
+    ).bind(request_id).fetch_all(pool).await
+        .map_err(|_| postgres_unavailable("load related recovery requests"))?;
+    Ok(UsageRecordDetail {
+        request,
+        attempts,
+        trace,
+        related_requests,
+    })
 }
 
 pub(crate) fn intermediate_attempt_from_row(

@@ -14,6 +14,7 @@ use super::{GrokHeader, GrokSessionBinding};
 
 /// 交给注入的 HTTP SSE transport 的自持有请求。
 pub struct GrokInferenceRequest {
+    trace: gateway_core::diagnostics::TraceContext,
     endpoint: Url,
     headers: Vec<GrokHeader>,
     body: Zeroizing<Vec<u8>>,
@@ -28,11 +29,22 @@ impl GrokInferenceRequest {
         binding: GrokSessionBinding,
     ) -> Self {
         Self {
+            trace: gateway_core::diagnostics::TraceContext::default(),
             endpoint,
             headers,
             body: Zeroizing::new(body),
             binding,
         }
+    }
+
+    #[must_use]
+    pub fn with_trace(mut self, trace: gateway_core::diagnostics::TraceContext) -> Self {
+        self.trace = trace;
+        self
+    }
+
+    pub(crate) fn trace(&self) -> &gateway_core::diagnostics::TraceContext {
+        &self.trace
     }
 
     /// 返回严格限定的官方 Responses 端点。

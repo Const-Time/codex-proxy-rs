@@ -29,12 +29,17 @@ pub fn endpoint_url(base_url: &str, endpoint_path: &str) -> String {
 
 /// 返回与 base path 对应的唯一 usage endpoint。
 pub fn usage_endpoint_url(base_url: &str) -> String {
-    let path = if has_backend_api_base_path(base_url) {
-        WHAM_USAGE_PATH
+    account_endpoint_url(base_url, "usage")
+}
+
+/// Core backend-client 的两个官方路径风格，供所有账号接口共用。
+pub fn account_endpoint_url(base_url: &str, resource: &str) -> String {
+    let prefix = if has_backend_api_base_path(base_url) {
+        "wham"
     } else {
-        CODEX_USAGE_API_PATH
+        "api/codex"
     };
-    endpoint_url(base_url, path)
+    endpoint_url(base_url, &format!("{prefix}/{resource}"))
 }
 
 fn has_backend_api_base_path(base_url: &str) -> bool {

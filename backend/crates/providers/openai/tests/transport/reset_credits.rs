@@ -26,6 +26,7 @@ fn client(base_url: &str) -> CodexBackendClient {
             os_version: "15.5.0".to_owned(),
             arch: "arm64".to_owned(),
             terminal: "xterm-256color".to_owned(),
+            residency: None,
             verified_at: Utc
                 .with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
                 .single()
@@ -44,10 +45,10 @@ fn context() -> CodexRequestContext<'static> {
 }
 
 #[tokio::test]
-async fn list_should_match_official_desktop_surface_profile() {
+async fn list_should_match_official_core_account_profile() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/wham/rate-limit-reset-credits"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "available_count": 1,
             "credits": [{
@@ -81,11 +82,13 @@ async fn list_should_match_official_desktop_surface_profile() {
         header(request, "chatgpt-account-id"),
         Some("acct_workspace")
     );
-    assert_eq!(header(request, "originator"), Some("Codex Desktop"));
-    assert_eq!(header(request, "oai-language"), Some("en"));
+    assert_eq!(header(request, "originator"), None);
+    assert_eq!(header(request, "oai-language"), None);
     assert_eq!(
         header(request, "user-agent"),
-        Some("Codex Desktop/26.818.21641 (Mac OS; arm64)")
+        Some(
+            "Codex Desktop/0.115.0-alpha.11 (Mac OS 15.5.0; arm64) xterm-256color (Codex Desktop; 26.818.21641)"
+        )
     );
     assert_eq!(header(request, "accept"), Some("*/*"));
     for name in [
@@ -110,7 +113,7 @@ async fn list_should_match_official_desktop_surface_profile() {
 async fn consume_should_send_exact_credit_and_redeem_request_id_without_retry() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/wham/rate-limit-reset-credits/consume"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "code": "reset",
             "credit": {
@@ -147,7 +150,7 @@ async fn consume_should_send_exact_credit_and_redeem_request_id_without_retry() 
 async fn consume_should_preserve_raw_upstream_error_and_never_retry() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/wham/rate-limit-reset-credits/consume"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
         .respond_with(
             ResponseTemplate::new(429)
                 .insert_header("retry-after", "17")
@@ -188,7 +191,7 @@ async fn consume_should_preserve_raw_upstream_error_and_never_retry() {
 async fn list_should_reject_oversized_success_body() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/wham/rate-limit-reset-credits"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(
             "x".repeat(MAX_CODEX_RESET_CREDITS_BODY_BYTES + 1),
             "application/json",

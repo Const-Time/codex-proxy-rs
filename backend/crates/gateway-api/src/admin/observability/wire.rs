@@ -247,6 +247,8 @@ pub struct UsageAttemptView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageRecordDetailView {
+    pub trace: Option<serde_json::Value>,
+    pub related_requests: Vec<serde_json::Value>,
     #[serde(flatten)]
     pub request: UsageRecordView,
     pub attempts: Vec<UsageAttemptView>,

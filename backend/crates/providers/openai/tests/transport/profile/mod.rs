@@ -141,6 +141,7 @@ fn wire_profile_should_generate_bundled_core_app_server_user_agent() {
         os_version: "15.7.1".to_owned(),
         arch: "arm64".to_owned(),
         terminal: "unknown".to_owned(),
+        residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 8, 3, 0, 0, 0)
             .single()
@@ -360,6 +361,7 @@ fn wire_profile() -> CodexWireProfile {
         os_version: "15.7.1".to_owned(),
         arch: "arm64".to_owned(),
         terminal: "unknown".to_owned(),
+        residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 8, 3, 0, 0, 0)
             .single()

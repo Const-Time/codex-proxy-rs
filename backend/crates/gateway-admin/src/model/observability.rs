@@ -704,6 +704,8 @@ pub struct UsageAttempt {
 /// 一条请求及其全部尝试。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageDetail {
+    pub trace: Option<serde_json::Value>,
+    pub related_requests: Vec<serde_json::Value>,
     pub request: UsageRecord,
     pub attempts: Vec<UsageAttempt>,
 }

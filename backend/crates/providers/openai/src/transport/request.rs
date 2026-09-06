@@ -320,8 +320,8 @@ fn normalize_conversation_anchor_text(text: &str) -> String {
 
 /// 把客户端正文收敛到当前 lease 的账号身份边界。
 ///
-/// 真实 account ID 与 installation ID 由随后构造的 `CodexRequestContext` 注入
-/// 请求头；正文只替换客户端原本声明过的 installation 字段，绝不接受客户端
+/// 真实 account ID 由随后构造的 `CodexRequestContext` 注入请求头；installation ID
+/// 统一写入 Core client_metadata，并替换原有兼容字段，绝不接受客户端
 /// 提供的 token、cookie 或账号身份。`input` 是 Responses 的可回放会话正文，
 /// item ID、encrypted content 和 compaction 都必须原样保留。
 pub(crate) fn scope_request_to_account(
@@ -371,59 +371,57 @@ pub(crate) fn scope_request_to_account(
         replace_existing_body_string(request, key, scoped.as_deref());
     }
 
-    if let Some(client_metadata) = request.client_metadata().cloned() {
-        let scoped = match client_metadata {
-            Value::Object(mut metadata) => {
-                let scoped_turn_metadata =
-                    ["turnMetadata", "turn_metadata", "x-codex-turn-metadata"].map(|key| {
-                        (
-                            key,
-                            metadata.get(key).and_then(Value::as_str).and_then(|value| {
-                                scope_turn_metadata(value, installation_id, reset_account_state)
-                            }),
-                        )
-                    });
-                if reset_account_state {
-                    for key in CROSS_ACCOUNT_IDENTITY_KEYS
-                        .iter()
-                        .chain(ACCOUNT_BOUND_STATE_KEYS)
-                    {
-                        metadata.remove(*key);
-                    }
+    let client_metadata = request
+        .client_metadata()
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let scoped = match client_metadata {
+        Value::Object(mut metadata) => {
+            let scoped_turn_metadata = ["turnMetadata", "turn_metadata", "x-codex-turn-metadata"]
+                .map(|key| {
+                    (
+                        key,
+                        metadata.get(key).and_then(Value::as_str).and_then(|value| {
+                            scope_turn_metadata(value, installation_id, reset_account_state)
+                        }),
+                    )
+                });
+            if reset_account_state {
+                for key in CROSS_ACCOUNT_IDENTITY_KEYS
+                    .iter()
+                    .chain(ACCOUNT_BOUND_STATE_KEYS)
+                {
+                    metadata.remove(*key);
                 }
-                metadata.insert(
-                    "x-codex-installation-id".to_owned(),
-                    Value::String(installation_id.to_owned()),
-                );
-                replace_existing_metadata_field(
-                    &mut metadata,
-                    "installation_id",
-                    Some(installation_id),
-                );
-                replace_existing_metadata_field(
-                    &mut metadata,
-                    "installationId",
-                    Some(installation_id),
-                );
-                replace_metadata_field(
-                    &mut metadata,
-                    "x-codex-turn-state",
-                    client_metadata_turn_state.as_deref(),
-                );
-                replace_metadata_field(
-                    &mut metadata,
-                    "x-codex-turn-metadata",
-                    client_metadata_turn_metadata.as_deref(),
-                );
-                for (key, value) in scoped_turn_metadata {
-                    replace_existing_metadata_field(&mut metadata, key, value.as_deref());
-                }
-                (!metadata.is_empty()).then_some(Value::Object(metadata))
             }
-            value => Some(value),
-        };
-        request.set_client_metadata(scoped);
-    }
+            metadata.insert(
+                "installation_id".to_owned(),
+                Value::String(installation_id.to_owned()),
+            );
+            replace_existing_metadata_field(
+                &mut metadata,
+                "x-codex-installation-id",
+                Some(installation_id),
+            );
+            replace_existing_metadata_field(&mut metadata, "installationId", Some(installation_id));
+            replace_metadata_field(
+                &mut metadata,
+                "x-codex-turn-state",
+                client_metadata_turn_state.as_deref(),
+            );
+            replace_metadata_field(
+                &mut metadata,
+                "x-codex-turn-metadata",
+                client_metadata_turn_metadata.as_deref(),
+            );
+            for (key, value) in scoped_turn_metadata {
+                replace_existing_metadata_field(&mut metadata, key, value.as_deref());
+            }
+            (!metadata.is_empty()).then_some(Value::Object(metadata))
+        }
+        value => Some(value),
+    };
+    request.set_client_metadata(scoped);
 
     request.turn_state = turn_state;
     request.turn_metadata = turn_metadata;
