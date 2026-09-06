@@ -104,7 +104,7 @@ function quotaWindowCode(windowSeconds: number | null, role: AccountQuotaWindow[
     </template>
 
     <section class="w-84 overflow-hidden rounded-cp-lg" role="dialog" :aria-label="`${detailTitle}详情`">
-      <header v-if="detailHeading" class="bg-cp-fill-tertiary px-3 py-2.5">
+      <header v-if="detailHeading" class="bg-cp-fill-secondary px-3 py-2.5">
         <h3 class="m-0 truncate text-cp leading-5 font-heavy text-cp-text" :title="detailHeading">
           {{ detailHeading }}
         </h3>

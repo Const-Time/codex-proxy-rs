@@ -14,7 +14,7 @@ const props = defineProps<{
 }>()
 
 const healthPopoverArrowSurfaceClasses = {
-  top: 'bg-cp-fill-tertiary',
+  top: 'bg-cp-fill-secondary',
   bottom: 'bg-cp-bg-elevated',
 }
 

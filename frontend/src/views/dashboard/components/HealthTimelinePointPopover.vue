@@ -62,7 +62,7 @@ const metricItems = outcomeMeta
     :aria-label="`${point.time} 请求健康详情`"
     class="overflow-hidden rounded-cp-lg bg-cp-bg-elevated"
   >
-    <header class="flex items-center justify-between gap-3 bg-cp-fill-tertiary px-3.5 py-3">
+    <header class="flex items-center justify-between gap-3 bg-cp-fill-secondary px-3.5 py-3">
       <div class="flex min-w-0 items-center gap-2">
         <span class="size-2 shrink-0 rounded-full" :class="status.cellClass" />
         <strong class="font-mono text-cp leading-none font-heavy text-cp-text">
