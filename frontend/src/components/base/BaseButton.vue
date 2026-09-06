@@ -35,7 +35,7 @@ const variantClasses: Record<ButtonVariant, string> = {
     'bg-cp-fill-tertiary text-cp-text shadow-cp-tertiary hover:bg-cp-bg-text-active active:bg-cp-bg-text-active',
   ghost:
     'bg-transparent text-cp-text-secondary shadow-none hover:bg-cp-fill-quaternary hover:text-cp-text active:bg-cp-fill-tertiary',
-  destructive: 'bg-cp-error-bg text-cp-error-text shadow-none hover:bg-cp-error-bg-hover active:bg-cp-error-bg-active',
+  destructive: 'bg-cp-error-bg text-cp-error-text-on-bg shadow-none hover:bg-cp-error-bg-hover active:bg-cp-error-bg-active',
 }
 
 const sizeClasses: Record<ButtonSize, string> = {

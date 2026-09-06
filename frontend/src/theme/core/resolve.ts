@@ -100,7 +100,7 @@ function deriveThemeMap(
   const aliases = deriveThemeAliasMap(surfaces)
   const primary = deriveThemePrimaryMap(seed, name, surfaces.colorBgContainer)
   const link = deriveThemeLinkMap(seedTokens.colorLink, name, surfaces.colorBgContainer)
-  const semantics = deriveThemeSemanticMap(name, surfaces.colorBgContainer, seedTokens)
+  const semantics = deriveThemeSemanticMap(name, surfaces, seedTokens)
 
   return {
     surfaces,

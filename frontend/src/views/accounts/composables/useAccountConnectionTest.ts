@@ -191,7 +191,7 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
         label: '正在测试',
         description: '正在向所选模型发送请求并接收流式响应',
         icon: Clock3,
-        badge: 'bg-cp-info-bg text-cp-info-text',
+        badge: 'bg-cp-info-bg text-cp-info-text-on-bg',
         iconClass: 'text-cp-info',
       }
     }
@@ -200,7 +200,7 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
         label: '连接正常',
         description: '请求已完成，可在下方查看模型、耗时和事件轨迹',
         icon: CheckCircle2,
-        badge: 'bg-cp-success-bg text-cp-success-text',
+        badge: 'bg-cp-success-bg text-cp-success-text-on-bg',
         iconClass: 'text-cp-success',
       }
     }
@@ -209,7 +209,7 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
         label: '测试失败',
         description: '请求未完成，请在下方查看失败来源与原始诊断',
         icon: XCircle,
-        badge: 'bg-cp-error-bg text-cp-error-text',
+        badge: 'bg-cp-error-bg text-cp-error-text-on-bg',
         iconClass: 'text-cp-error',
       }
     }

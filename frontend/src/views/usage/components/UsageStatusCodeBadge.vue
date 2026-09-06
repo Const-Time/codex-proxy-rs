@@ -9,14 +9,14 @@ function statusClass(statusCode?: number | null) {
   }
 
   if (statusCode >= 200 && statusCode < 300) {
-    return 'bg-cp-success-bg text-cp-success-text'
+    return 'bg-cp-success-bg text-cp-success-text-on-bg'
   }
 
   if (statusCode >= 300 && statusCode < 400) {
-    return 'bg-cp-warning-bg text-cp-warning-text'
+    return 'bg-cp-warning-bg text-cp-warning-text-on-bg'
   }
 
-  return 'bg-cp-error-bg text-cp-error-text'
+  return 'bg-cp-error-bg text-cp-error-text-on-bg'
 }
 </script>
 

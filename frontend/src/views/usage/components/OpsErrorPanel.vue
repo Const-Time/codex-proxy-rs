@@ -130,7 +130,7 @@ function upstreamSendStateText(value: string | null | undefined) {
               </code>
               <span
                 v-if="row.metadata.recoveredAt"
-                class="inline-flex h-5 shrink-0 items-center rounded-full bg-cp-success-bg px-2 text-cp-xs leading-none font-heavy text-cp-success-text"
+                class="inline-flex h-5 shrink-0 items-center rounded-full bg-cp-success-bg px-2 text-cp-xs leading-none font-heavy text-cp-success-text-on-bg"
               >
                 已自动恢复
               </span>

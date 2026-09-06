@@ -111,7 +111,7 @@ const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key'
   >
     <div class="flex flex-col gap-4">
       <div class="rounded-cp border border-cp-warning-border bg-cp-warning-bg px-4 py-3">
-        <p class="m-0 text-cp font-semibold text-cp-warning-text">
+        <p class="m-0 text-cp font-semibold text-cp-warning-text-on-bg">
           该密钥具有网关访问权限，请仅发送给可信调用方
         </p>
       </div>

@@ -75,7 +75,7 @@ const releaseStatus = computed(() => {
     return {
       label: '当前生效',
       title: '当前 Provider 请求正在使用此运行时画像',
-      tone: 'bg-cp-info-bg text-cp-info-text',
+      tone: 'bg-cp-info-bg text-cp-info-text-on-bg',
       icon: ShieldCheck,
     }
   }
@@ -85,7 +85,7 @@ const releaseStatus = computed(() => {
     return {
       label: '制品一致',
       title: '当前生效版本与官方最新发布一致',
-      tone: 'bg-cp-success-bg text-cp-success-text',
+      tone: 'bg-cp-success-bg text-cp-success-text-on-bg',
       icon: CheckCircle2,
     }
   }
@@ -93,7 +93,7 @@ const releaseStatus = computed(() => {
     return {
       label: '发现新版',
       title: `官方最新版本 ${releaseLabel.value}`,
-      tone: 'bg-cp-warning-bg text-cp-warning-text',
+      tone: 'bg-cp-warning-bg text-cp-warning-text-on-bg',
       icon: TriangleAlert,
     }
   }
@@ -101,7 +101,7 @@ const releaseStatus = computed(() => {
     return {
       label: '检查失败',
       title: current.release.error || '官方版本检查失败',
-      tone: 'bg-cp-error-bg text-cp-error-text',
+      tone: 'bg-cp-error-bg text-cp-error-text-on-bg',
       icon: TriangleAlert,
     }
   }

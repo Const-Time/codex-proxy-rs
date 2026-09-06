@@ -36,10 +36,10 @@ const variantClasses: Record<IconButtonVariant, string> = {
   secondary:
     'bg-cp-bg-container text-cp-text-secondary shadow-cp-tertiary hover:bg-cp-bg-text-hover hover:text-cp-text active:bg-cp-bg-text-active',
   success:
-    'bg-cp-success-bg text-cp-success-text shadow-none hover:bg-cp-success-bg-hover active:bg-cp-success-bg-active',
+    'bg-cp-success-bg text-cp-success-text-on-bg shadow-none hover:bg-cp-success-bg-hover active:bg-cp-success-bg-active',
   ghost:
     'bg-transparent text-cp-text-secondary shadow-none hover:bg-cp-fill-quaternary hover:text-cp-text active:bg-cp-fill-tertiary',
-  destructive: 'bg-transparent text-cp-error-text shadow-none hover:bg-cp-error-bg-hover active:bg-cp-error-bg-active',
+  destructive: 'bg-transparent text-cp-error-text shadow-none hover:bg-cp-error-bg-hover hover:text-cp-error-text-on-bg active:bg-cp-error-bg-active active:text-cp-error-text-on-bg',
 }
 
 const sizeClasses: Record<IconButtonSize, string> = {

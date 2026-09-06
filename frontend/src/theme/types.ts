@@ -90,6 +90,7 @@ export interface ThemeColorRoleRecipe {
   active: ThemePaletteSource
   textHover: ThemePaletteSource
   text: ThemePaletteSource
+  textOnBackground?: ThemePaletteSource
   textActive: ThemePaletteSource
   backgroundMix: number
   backgroundHoverMix: number
@@ -211,7 +212,10 @@ export interface FunctionalColorMap {
   border: string
   borderHover: string
   textHover: string
+  /** 语义色在中性表面上的强调文字。 */
   text: string
+  /** 语义色在自身背景上的高对比文字。 */
+  textOnBackground: string
   textActive: string
 }
 
@@ -308,6 +312,7 @@ export type FunctionalTokenSuffix
     | '-border-hover'
     | '-text-hover'
     | '-text'
+    | '-text-on-bg'
     | '-text-active'
 
 type SemanticColorName = Extract<keyof ThemeSemanticMap, string>

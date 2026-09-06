@@ -92,14 +92,14 @@ function formatFileSize(value: number | null): string {
 
     <p
       v-if="downloads?.warning"
-      class="m-0 rounded-cp bg-cp-warning-bg px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-warning-text"
+      class="m-0 rounded-cp bg-cp-warning-bg px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-warning-text-on-bg"
     >
       {{ downloads.warning }}
     </p>
 
     <p
       v-if="error && downloads"
-      class="m-0 rounded-cp bg-cp-error-bg px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-error-text"
+      class="m-0 rounded-cp bg-cp-error-bg px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-error-text-on-bg"
       role="alert"
     >
       {{ error }}，当前仍显示上次成功结果。

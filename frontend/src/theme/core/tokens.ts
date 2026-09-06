@@ -38,6 +38,7 @@ const FUNCTIONAL_TOKEN_ROLES = [
   ['active', '-active'],
   ['textHover', '-text-hover'],
   ['text', '-text'],
+  ['textOnBackground', '-text-on-bg'],
   ['textActive', '-text-active'],
 ] as const satisfies readonly (readonly [keyof FunctionalColorMap, FunctionalTokenSuffix])[]
 

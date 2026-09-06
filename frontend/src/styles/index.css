@@ -72,6 +72,7 @@
   --color-cp-info-active: var(--cp-color-info-active);
   --color-cp-info-text-hover: var(--cp-color-info-text-hover);
   --color-cp-info-text: var(--cp-color-info-text);
+  --color-cp-info-text-on-bg: var(--cp-color-info-text-on-bg);
   --color-cp-info-text-active: var(--cp-color-info-text-active);
   --color-cp-success-bg: var(--cp-color-success-bg);
   --color-cp-success-bg-hover: var(--cp-color-success-bg-hover);
@@ -83,6 +84,7 @@
   --color-cp-success-active: var(--cp-color-success-active);
   --color-cp-success-text-hover: var(--cp-color-success-text-hover);
   --color-cp-success-text: var(--cp-color-success-text);
+  --color-cp-success-text-on-bg: var(--cp-color-success-text-on-bg);
   --color-cp-success-text-active: var(--cp-color-success-text-active);
   --color-cp-warning-bg: var(--cp-color-warning-bg);
   --color-cp-warning-bg-hover: var(--cp-color-warning-bg-hover);
@@ -94,6 +96,7 @@
   --color-cp-warning-active: var(--cp-color-warning-active);
   --color-cp-warning-text-hover: var(--cp-color-warning-text-hover);
   --color-cp-warning-text: var(--cp-color-warning-text);
+  --color-cp-warning-text-on-bg: var(--cp-color-warning-text-on-bg);
   --color-cp-warning-text-active: var(--cp-color-warning-text-active);
   --color-cp-error-bg: var(--cp-color-error-bg);
   --color-cp-error-bg-hover: var(--cp-color-error-bg-hover);
@@ -105,6 +108,7 @@
   --color-cp-error-active: var(--cp-color-error-active);
   --color-cp-error-text-hover: var(--cp-color-error-text-hover);
   --color-cp-error-text: var(--cp-color-error-text);
+  --color-cp-error-text-on-bg: var(--cp-color-error-text-on-bg);
   --color-cp-error-text-active: var(--cp-color-error-text-active);
 
   /* 颜色 · 预设（色系按字母排序，角色顺序固定） */

@@ -50,7 +50,7 @@ function overviewIconClass(tone: string) {
     return 'bg-cp-orange-bg text-cp-orange-text-on-bg'
   }
   if (tone === 'danger') {
-    return 'bg-cp-error-bg text-cp-error-text'
+    return 'bg-cp-error-bg text-cp-error-text-on-bg'
   }
   return 'bg-cp-blue-bg text-cp-blue-text-on-bg'
 }

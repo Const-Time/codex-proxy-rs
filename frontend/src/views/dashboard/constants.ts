@@ -7,7 +7,7 @@ export const metricToneIconClasses: Record<MetricTone, string> = {
   info: 'bg-cp-blue-bg text-cp-blue-text-on-bg',
   success: 'bg-cp-green-bg text-cp-green-text-on-bg',
   warning: 'bg-cp-orange-bg text-cp-orange-text-on-bg',
-  danger: 'bg-cp-error-bg text-cp-error-text',
+  danger: 'bg-cp-error-bg text-cp-error-text-on-bg',
 }
 
 export const metricToneValueClasses: Record<MetricTone, string> = {
@@ -71,12 +71,12 @@ export const healthStatusMeta: Record<HealthStatus, HealthStatusMeta> = {
   unavailable: {
     label: '不可达',
     cellClass: 'bg-cp-error',
-    badgeClass: 'bg-cp-error-bg text-cp-error-text',
+    badgeClass: 'bg-cp-error-bg text-cp-error-text-on-bg',
   },
   unstable: {
     label: '不稳定',
     cellClass: 'bg-cp-warning',
-    badgeClass: 'bg-cp-warning-bg text-cp-warning-text',
+    badgeClass: 'bg-cp-warning-bg text-cp-warning-text-on-bg',
   },
   low_sample: {
     label: '低样本',
@@ -86,7 +86,7 @@ export const healthStatusMeta: Record<HealthStatus, HealthStatusMeta> = {
   stable: {
     label: '稳定',
     cellClass: 'bg-cp-success',
-    badgeClass: 'bg-cp-success-bg text-cp-success-text',
+    badgeClass: 'bg-cp-success-bg text-cp-success-text-on-bg',
   },
 }
 

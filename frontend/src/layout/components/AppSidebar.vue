@@ -342,7 +342,7 @@ onBeforeUnmount(() => {
             class="inline-flex h-4.5 min-w-0 cursor-pointer items-center gap-1 rounded-cp-sm border-0 px-1.5 font-mono text-[10px] leading-none font-bold transition-colors outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container"
             :class="[
               hasUpdate
-                ? 'bg-cp-success-bg text-cp-success-text hover:bg-cp-success-bg-hover'
+                ? 'bg-cp-success-bg text-cp-success-text-on-bg hover:bg-cp-success-bg-hover'
                 : 'bg-cp-fill-quaternary text-cp-text-quaternary hover:bg-cp-fill-tertiary hover:text-cp-text-secondary',
             ]"
             :title="updateButtonLabel"
@@ -399,7 +399,7 @@ onBeforeUnmount(() => {
       >
         <span
           v-if="!isCollapsed"
-          class="inline-flex whitespace-nowrap h-7 items-center gap-1.5 rounded-lg bg-cp-success-bg px-2.5 text-xs leading-none font-emphasis text-cp-success-text"
+          class="inline-flex whitespace-nowrap h-7 items-center gap-1.5 rounded-lg bg-cp-success-bg px-2.5 text-xs leading-none font-emphasis text-cp-success-text-on-bg"
         >
           <i class="size-1.5 rounded-full bg-cp-success" />
           在线

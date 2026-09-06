@@ -257,7 +257,7 @@ watch(
 
         <p
           v-if="updateError || updateInfo?.warning"
-          class="m-0 rounded-cp bg-cp-error-bg px-3 py-2 text-cp-sm leading-normal font-bold text-cp-error-text"
+          class="m-0 rounded-cp bg-cp-error-bg px-3 py-2 text-cp-sm leading-normal font-bold text-cp-error-text-on-bg"
         >
           {{ updateError || updateInfo?.warning }}
         </p>

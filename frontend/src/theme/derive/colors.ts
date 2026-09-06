@@ -133,16 +133,51 @@ export function deriveThemeLinkMap(
 
 export function deriveThemeSemanticMap(
   theme: ThemeName,
-  containerBg: string,
+  surfaces: ThemeSurfaceMap,
   seedTokens: ResolvedThemeSeedTokens,
 ): ThemeSemanticMap {
   const recipe = THEME_COLOR_ROLE_RECIPES[theme].semantic
+  const containerBg = surfaces.colorBgContainer
+  const textBackgrounds = [
+    surfaces.colorBgLayout,
+    surfaces.colorBgContainer,
+    surfaces.colorBgElevated,
+    surfaces.colorBgTextHover,
+    surfaces.colorBgTextActive,
+    surfaces.colorFillSecondary,
+    surfaces.colorFillTertiary,
+    surfaces.colorFillQuaternary,
+  ]
 
   return {
-    info: deriveColorRoleMap(seedTokens.colorInfo, theme, containerBg, recipe),
-    success: deriveColorRoleMap(seedTokens.colorSuccess, theme, containerBg, recipe),
-    warning: deriveColorRoleMap(seedTokens.colorWarning, theme, containerBg, recipe),
-    error: deriveColorRoleMap(seedTokens.colorError, theme, containerBg, recipe),
+    info: deriveColorRoleMap(
+      seedTokens.colorInfo,
+      theme,
+      containerBg,
+      recipe,
+      textBackgrounds,
+    ),
+    success: deriveColorRoleMap(
+      seedTokens.colorSuccess,
+      theme,
+      containerBg,
+      recipe,
+      textBackgrounds,
+    ),
+    warning: deriveColorRoleMap(
+      seedTokens.colorWarning,
+      theme,
+      containerBg,
+      recipe,
+      textBackgrounds,
+    ),
+    error: deriveColorRoleMap(
+      seedTokens.colorError,
+      theme,
+      containerBg,
+      recipe,
+      textBackgrounds,
+    ),
   }
 }
 
@@ -409,6 +444,7 @@ function deriveColorRoleMap(
   theme: ThemeName,
   containerBg: string,
   recipe: ThemeColorRoleRecipe,
+  textBackgrounds: string | readonly string[] = containerBg,
 ): FunctionalColorMap {
   const normalizedSeed = normalizeHexColor(seed) ?? DEFAULT_CUSTOM_THEME_COLOR
   const palette = generateColorPalette(normalizedSeed, theme, containerBg)
@@ -421,13 +457,16 @@ function deriveColorRoleMap(
   const background = mix(containerBg, color, recipe.backgroundMix)
   const backgroundHover = mix(containerBg, hover, recipe.backgroundHoverMix)
   const backgroundActive = mix(containerBg, active, recipe.backgroundActiveMix)
-  const textBackgrounds = [containerBg, background, backgroundHover, backgroundActive]
-  const resolveText = (source: ThemePaletteSource): string => {
+  const semanticBackgrounds = [background, backgroundHover, backgroundActive]
+  const resolveText = (
+    source: ThemePaletteSource,
+    backgrounds: string | readonly string[] = textBackgrounds,
+  ): string => {
     const value = resolve(source)
     const toned = recipe.minimumTextLightness === undefined
       ? value
       : ensureLightness(value, recipe.minimumTextLightness)
-    return ensureContrast(toned, textBackgrounds, 4.5)
+    return ensureContrast(toned, backgrounds, 4.5)
   }
 
   return {
@@ -445,6 +484,10 @@ function deriveColorRoleMap(
       : ensureContrast(active, containerBg, recipe.activeContrast),
     textHover: resolveText(recipe.textHover),
     text: resolveText(recipe.text),
+    textOnBackground: resolveText(
+      recipe.textOnBackground ?? recipe.text,
+      semanticBackgrounds,
+    ),
     textActive: resolveText(recipe.textActive),
   }
 }
