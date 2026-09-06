@@ -1,12 +1,43 @@
 use futures::TryStreamExt as _;
 use provider_openai::transport::{
     CodexProfileAvatarFetchError, CodexRequestContext, fetch_profile_avatar,
+    profile_avatar::build_profile_avatar_request,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OFFICIAL_AVATAR_SOURCE: &str =
     "https://chatgpt.com/backend-api/estuary/public_content/enc/opaque-token=";
+
+#[test]
+fn auth0_default_avatar_uses_the_public_origin_without_account_credentials() {
+    let source = "https://cdn.auth0.com/avatars/te.png";
+    let mut context = CodexRequestContext::auxiliary(
+        "Bearer private-token",
+        Some("private-account"),
+        "avatar",
+        None,
+    );
+    context.cookie_header = Some("private-cookie=value");
+    let request = build_profile_avatar_request(
+        &reqwest::Client::new(),
+        "http://127.0.0.1:9/backend-api",
+        &super::test_wire_profile().snapshot(),
+        source,
+        context,
+    )
+    .expect("public avatar request");
+    assert_eq!(request.url().as_str(), source);
+    for name in [
+        "authorization",
+        "chatgpt-account-id",
+        "cookie",
+        "originator",
+        "version",
+    ] {
+        assert!(!request.headers().contains_key(name), "public CDN: {name}");
+    }
+}
 
 #[tokio::test]
 async fn profile_avatar_streams_unrestricted_content_type_and_body_size() {
@@ -83,6 +114,15 @@ async fn profile_avatar_rejects_non_official_sources_before_request() {
         "https://chatgpt.com/other/token",
         "https://chatgpt.com/backend-api/estuary/public_content/enc/token?next=1",
         "https://chatgpt.com/backend-api/estuary/public_content/enc/",
+        "http://cdn.auth0.com/avatars/te.png",
+        "https://cdn.auth0.com:444/avatars/te.png",
+        "https://cdn.auth0.com.evil.test/avatars/te.png",
+        "https://cdn.auth0.com@evil.test/avatars/te.png",
+        "https://user:password@cdn.auth0.com/avatars/te.png",
+        "https://cdn.auth0.com/other/te.png",
+        "https://cdn.auth0.com/avatars/",
+        "https://cdn.auth0.com/avatars/te.png?next=1",
+        "https://cdn.auth0.com/avatars/te.png#fragment",
     ] {
         let error = fetch_profile_avatar(
             &client,

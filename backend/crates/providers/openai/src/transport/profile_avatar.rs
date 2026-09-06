@@ -6,8 +6,8 @@ use async_stream::try_stream;
 use bytes::Bytes;
 use futures::{Stream, StreamExt as _};
 use reqwest::{
-    Client, Url,
-    header::{CONTENT_TYPE, ETAG},
+    Client, Request, Url,
+    header::{CONTENT_TYPE, ETAG, USER_AGENT},
 };
 use tokio::time::timeout;
 
@@ -19,6 +19,8 @@ use super::{
 const OFFICIAL_AVATAR_ORIGIN: &str = "https://chatgpt.com";
 const OFFICIAL_AVATAR_PATH_PREFIX: &str = "/backend-api/estuary/public_content/enc/";
 const PROVIDER_AVATAR_PATH_PREFIX: &str = "/estuary/public_content/enc/";
+const AUTH0_AVATAR_ORIGIN: &str = "https://cdn.auth0.com";
+const AUTH0_AVATAR_PATH_PREFIX: &str = "/avatars/";
 const PROFILE_AVATAR_HEADERS_TIMEOUT: Duration = Duration::from_secs(15);
 const PROFILE_AVATAR_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -61,11 +63,57 @@ pub enum CodexProfileAvatarFetchError {
     TransportUnavailable,
 }
 
-/// 校验官方来源后，通过当前 Provider base URL 打开头像字节流。
+/// 校验来源并构造头像请求；账号凭据仅用于 ChatGPT Estuary。
 ///
 /// # Errors
 ///
-/// 来源不是固定的 ChatGPT Estuary 路径、请求失败或上游返回非成功状态时返回错误。
+/// 来源不受支持或请求头无法编码时返回脱敏错误。
+pub fn build_profile_avatar_request(
+    client: &Client,
+    base_url: &str,
+    profile: &CodexWireProfile,
+    source: &str,
+    context: CodexRequestContext<'_>,
+) -> Result<Request, CodexProfileAvatarFetchError> {
+    let source = Url::parse(source).map_err(|_| CodexProfileAvatarFetchError::InvalidSource)?;
+    if !source.username().is_empty()
+        || source.password().is_some()
+        || source.query().is_some()
+        || source.fragment().is_some()
+    {
+        return Err(CodexProfileAvatarFetchError::InvalidSource);
+    }
+    let request = match source.origin().ascii_serialization().as_str() {
+        OFFICIAL_AVATAR_ORIGIN => {
+            let opaque_path = avatar_path(&source, OFFICIAL_AVATAR_PATH_PREFIX)?;
+            let target = endpoint_url(
+                base_url,
+                &format!("{PROVIDER_AVATAR_PATH_PREFIX}{opaque_path}"),
+            );
+            let headers =
+                build_codex_download_headers(profile, context.authorization, context.account_id)
+                    .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?;
+            client.get(target).headers(headers)
+        }
+        AUTH0_AVATAR_ORIGIN => {
+            avatar_path(&source, AUTH0_AVATAR_PATH_PREFIX)?;
+            // Auth0 的默认头像是公开 CDN 资源，不能携带 ChatGPT 账号凭据。
+            client
+                .get(source)
+                .header(USER_AGENT, profile.desktop_user_agent())
+        }
+        _ => return Err(CodexProfileAvatarFetchError::InvalidSource),
+    };
+    request
+        .build()
+        .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)
+}
+
+/// 打开已校验来源的头像字节流。
+///
+/// # Errors
+///
+/// 来源不受支持、请求失败或上游返回非成功状态时返回错误。
 pub async fn fetch_profile_avatar(
     client: &Client,
     base_url: &str,
@@ -73,18 +121,11 @@ pub async fn fetch_profile_avatar(
     source: &str,
     context: CodexRequestContext<'_>,
 ) -> Result<CodexProfileAvatar, CodexProfileAvatarFetchError> {
-    let source_path = official_avatar_source_path(source)?;
-    let target = Url::parse(&endpoint_url(base_url, &source_path))
+    let request = build_profile_avatar_request(client, base_url, profile, source, context)?;
+    let response = timeout(PROFILE_AVATAR_HEADERS_TIMEOUT, client.execute(request))
+        .await
+        .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?
         .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?;
-    let headers = build_codex_download_headers(profile, context.authorization, context.account_id)
-        .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?;
-    let response = timeout(
-        PROFILE_AVATAR_HEADERS_TIMEOUT,
-        client.get(target).headers(headers).send(),
-    )
-    .await
-    .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?
-    .map_err(|_| CodexProfileAvatarFetchError::TransportUnavailable)?;
     let status = response.status();
     if !status.is_success() {
         return Err(CodexProfileAvatarFetchError::Upstream {
@@ -122,20 +163,10 @@ pub async fn fetch_profile_avatar(
     })
 }
 
-fn official_avatar_source_path(source: &str) -> Result<String, CodexProfileAvatarFetchError> {
-    let source = Url::parse(source).map_err(|_| CodexProfileAvatarFetchError::InvalidSource)?;
-    if source.origin().ascii_serialization() != OFFICIAL_AVATAR_ORIGIN
-        || !source.username().is_empty()
-        || source.password().is_some()
-        || source.query().is_some()
-        || source.fragment().is_some()
-    {
-        return Err(CodexProfileAvatarFetchError::InvalidSource);
-    }
-    let opaque_path = source
+fn avatar_path<'a>(source: &'a Url, prefix: &str) -> Result<&'a str, CodexProfileAvatarFetchError> {
+    source
         .path()
-        .strip_prefix(OFFICIAL_AVATAR_PATH_PREFIX)
+        .strip_prefix(prefix)
         .filter(|path| !path.is_empty())
-        .ok_or(CodexProfileAvatarFetchError::InvalidSource)?;
-    Ok(format!("{PROVIDER_AVATAR_PATH_PREFIX}{opaque_path}"))
+        .ok_or(CodexProfileAvatarFetchError::InvalidSource)
 }
