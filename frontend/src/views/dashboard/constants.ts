@@ -3,11 +3,11 @@ import { formatInteger } from '@/utils/number'
 
 // tone 到 Tailwind 类的唯一映射；仪表盘各卡片共用。
 export const metricToneIconClasses: Record<MetricTone, string> = {
-  normal: 'bg-cp-cyan-bg text-cp-cyan-text-on-bg',
-  info: 'bg-cp-blue-bg text-cp-blue-text-on-bg',
-  success: 'bg-cp-green-bg text-cp-green-text-on-bg',
-  warning: 'bg-cp-orange-bg text-cp-orange-text-on-bg',
-  danger: 'bg-cp-error-bg text-cp-error-text-on-bg',
+  normal: 'bg-cp-cyan-container text-cp-cyan-on-container',
+  info: 'bg-cp-blue-container text-cp-blue-on-container',
+  success: 'bg-cp-green-container text-cp-green-on-container',
+  warning: 'bg-cp-orange-container text-cp-orange-on-container',
+  danger: 'bg-cp-error-container text-cp-error-on-container',
 }
 
 export const metricToneValueClasses: Record<MetricTone, string> = {
@@ -71,22 +71,22 @@ export const healthStatusMeta: Record<HealthStatus, HealthStatusMeta> = {
   unavailable: {
     label: '不可达',
     cellClass: 'bg-cp-error',
-    badgeClass: 'bg-cp-error-bg text-cp-error-text-on-bg',
+    badgeClass: 'bg-cp-error-container text-cp-error-on-container',
   },
   unstable: {
     label: '不稳定',
     cellClass: 'bg-cp-warning',
-    badgeClass: 'bg-cp-warning-bg text-cp-warning-text-on-bg',
+    badgeClass: 'bg-cp-warning-container text-cp-warning-on-container',
   },
   low_sample: {
     label: '低样本',
     cellClass: 'bg-cp-cyan-solid',
-    badgeClass: 'bg-cp-cyan-bg text-cp-cyan-text-on-bg',
+    badgeClass: 'bg-cp-cyan-container text-cp-cyan-on-container',
   },
   stable: {
     label: '稳定',
     cellClass: 'bg-cp-success',
-    badgeClass: 'bg-cp-success-bg text-cp-success-text-on-bg',
+    badgeClass: 'bg-cp-success-container text-cp-success-on-container',
   },
 }
 

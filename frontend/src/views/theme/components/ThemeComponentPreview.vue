@@ -112,11 +112,11 @@ const pagination: BaseTablePaginationState = {
 
 function statusClass(status: PreviewTableRow['status']) {
   if (status === '正常')
-    return 'bg-cp-success-bg text-cp-success-text-on-bg'
+    return 'bg-cp-success-container text-cp-success-on-container'
   if (status === '限流')
-    return 'bg-cp-warning-bg text-cp-warning-text-on-bg'
+    return 'bg-cp-warning-container text-cp-warning-on-container'
   if (status === '异常')
-    return 'bg-cp-error-bg text-cp-error-text-on-bg'
+    return 'bg-cp-error-container text-cp-error-on-container'
   return 'bg-cp-fill-tertiary text-cp-text-secondary'
 }
 </script>
@@ -137,7 +137,7 @@ function statusClass(status: PreviewTableRow['status']) {
       </div>
 
       <div class="flex shrink-0 items-center gap-6">
-        <span class="rounded-full bg-cp-primary-bg px-3 py-1.5 font-mono text-[10px] font-heavy tracking-wide text-cp-primary-text uppercase">
+        <span class="rounded-full bg-cp-primary-container px-3 py-1.5 font-mono text-[10px] font-heavy tracking-wide text-cp-primary-on-container uppercase">
           20 Base Components
         </span>
         <div class="flex items-center gap-5" aria-label="当前主题语义色">
@@ -300,16 +300,16 @@ function statusClass(status: PreviewTableRow['status']) {
       <BaseCard padding="compact" class="col-span-4 h-full min-w-0 bg-cp-fill-quaternary! shadow-none!" title="反馈语义" description="Success · Warning · Error · Info">
         <template #body>
           <div class="grid gap-2.5">
-            <div class="flex items-center gap-3 rounded-cp bg-cp-success-bg px-3.5 py-3 text-cp-success-text-on-bg">
+            <div class="flex items-center gap-3 rounded-cp bg-cp-success-container px-3.5 py-3 text-cp-success-on-container">
               <Check class="size-4 shrink-0" /><strong class="text-cp-sm">主题设置已保存</strong>
             </div>
-            <div class="flex items-center gap-3 rounded-cp bg-cp-warning-bg px-3.5 py-3 text-cp-warning-text-on-bg">
+            <div class="flex items-center gap-3 rounded-cp bg-cp-warning-container px-3.5 py-3 text-cp-warning-on-container">
               <TriangleAlert class="size-4 shrink-0" /><strong class="text-cp-sm">3 个账号额度接近上限</strong>
             </div>
-            <div class="flex items-center gap-3 rounded-cp bg-cp-error-bg px-3.5 py-3 text-cp-error-text-on-bg">
+            <div class="flex items-center gap-3 rounded-cp bg-cp-error-container px-3.5 py-3 text-cp-error-on-container">
               <CircleAlert class="size-4 shrink-0" /><strong class="text-cp-sm">连接测试未通过</strong>
             </div>
-            <div class="flex items-center gap-3 rounded-cp bg-cp-info-bg px-3.5 py-3 text-cp-info-text-on-bg">
+            <div class="flex items-center gap-3 rounded-cp bg-cp-info-container px-3.5 py-3 text-cp-info-on-container">
               <Info class="size-4 shrink-0" /><strong class="text-cp-sm">调度规则将在下次请求生效</strong>
             </div>
           </div>
@@ -320,10 +320,10 @@ function statusClass(status: PreviewTableRow['status']) {
         <template #body>
           <div class="grid gap-4">
             <div class="flex flex-wrap gap-2">
-              <span class="rounded-full bg-cp-success-bg px-3 py-1.5 text-cp-xs font-heavy text-cp-success-text-on-bg">运行正常</span>
-              <span class="rounded-full bg-cp-warning-bg px-3 py-1.5 text-cp-xs font-heavy text-cp-warning-text-on-bg">额度受限</span>
-              <span class="rounded-full bg-cp-error-bg px-3 py-1.5 text-cp-xs font-heavy text-cp-error-text-on-bg">需要处理</span>
-              <span class="rounded-full bg-cp-info-bg px-3 py-1.5 text-cp-xs font-heavy text-cp-info-text-on-bg">同步中</span>
+              <span class="rounded-full bg-cp-success-container px-3 py-1.5 text-cp-xs font-heavy text-cp-success-on-container">运行正常</span>
+              <span class="rounded-full bg-cp-warning-container px-3 py-1.5 text-cp-xs font-heavy text-cp-warning-on-container">额度受限</span>
+              <span class="rounded-full bg-cp-error-container px-3 py-1.5 text-cp-xs font-heavy text-cp-error-on-container">需要处理</span>
+              <span class="rounded-full bg-cp-info-container px-3 py-1.5 text-cp-xs font-heavy text-cp-info-on-container">同步中</span>
             </div>
             <div v-for="item in progressItems" :key="item.label" class="grid gap-2">
               <div class="flex justify-between text-cp-sm font-heavy text-cp-text-secondary">

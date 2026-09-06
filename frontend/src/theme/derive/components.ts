@@ -150,7 +150,7 @@ function deriveDarkComponentMap(
   error: FunctionalColorMap,
   shadowStrength: number,
 ): SurfaceComponentMap {
-  const inputOutlineColor = 'var(--cp-color-primary-bg-hover)'
+  const inputOutlineColor = 'var(--cp-color-primary-container-hover)'
   const appearanceInfluence = deriveComponentAppearanceInfluence(
     surfaces.colorBgContainer,
     DARK_CONTAINER_BASE,
@@ -167,7 +167,7 @@ function deriveDarkComponentMap(
       mix(surfaces.colorBgContainer, surfaces.colorBgElevated, 0.4),
       appearanceInfluence,
     ),
-    inputErrorActiveBg: error.background,
+    inputErrorActiveBg: error.container,
     brandMarkBg: surfaces.colorBgElevated,
     cardBg: surfaces.colorBgContainer,
     modalBg: surfaces.colorBgContainer,
@@ -175,7 +175,7 @@ function deriveDarkComponentMap(
     tableRowBg: surfaces.colorBgContainer,
     tableRowStripeBg: aliases.colorFillAlter,
     tableRowHoverBg: surfaces.colorBgTextHover,
-    tableRowSelectedBg: primary.colorPrimaryBg,
+    tableRowSelectedBg: primary.colorPrimaryContainer,
     progressRemainingColor: mix(surfaces.colorBgContainer, surfaces.colorBorderSecondary, 0.92),
     layoutSiderBg: surfaces.colorBgContainer,
     cardShadow: scaleShadowAlpha(`0 18px 34px -26px ${withAlpha(BLACK, 0.64)}`, shadowStrength),
@@ -199,7 +199,7 @@ function deriveLightComponentMap(
   error: FunctionalColorMap,
   shadowStrength: number,
 ): SurfaceComponentMap {
-  const inputOutlineColor = 'var(--cp-color-primary-bg-hover)'
+  const inputOutlineColor = 'var(--cp-color-primary-container-hover)'
   const appearanceInfluence = deriveComponentAppearanceInfluence(
     surfaces.colorBgContainer,
     LIGHT_CONTAINER_BASE,
@@ -220,7 +220,7 @@ function deriveLightComponentMap(
       aliases.colorFillAlter,
       appearanceInfluence,
     ),
-    inputErrorActiveBg: error.background,
+    inputErrorActiveBg: error.container,
     brandMarkBg: surfaces.colorBgSpotlight,
     cardBg: surfaces.colorBgContainer,
     modalBg: surfaces.colorBgContainer,
@@ -228,7 +228,7 @@ function deriveLightComponentMap(
     tableRowBg: surfaces.colorBgContainer,
     tableRowStripeBg: aliases.colorFillAlter,
     tableRowHoverBg: surfaces.colorBgTextHover,
-    tableRowSelectedBg: primary.colorPrimaryBg,
+    tableRowSelectedBg: primary.colorPrimaryContainer,
     progressRemainingColor: surfaces.colorBorderSecondary,
     layoutSiderBg: surfaces.colorBgContainer,
     cardShadow: scaleShadowAlpha(`0 10px 22px -18px ${withAlpha(LIGHT_SHADOW_BASE, 0.08)}`, shadowStrength),

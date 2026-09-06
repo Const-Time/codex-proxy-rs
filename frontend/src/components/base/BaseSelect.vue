@@ -98,7 +98,7 @@ const triggerClasses = computed(() => [
   props.disabled
     ? 'cursor-not-allowed bg-cp-bg-container-disabled text-cp-text-disabled shadow-none'
     : invalid.value
-      ? 'cursor-pointer bg-(--cp-input-error-active-bg) text-cp-error-text-on-bg shadow-cp-input-error-active'
+      ? 'cursor-pointer bg-(--cp-input-error-active-bg) text-cp-error-on-container shadow-cp-input-error-active'
       : open.value
         ? 'cursor-pointer bg-(--cp-input-active-bg) text-cp-text shadow-cp-input-active'
         : [

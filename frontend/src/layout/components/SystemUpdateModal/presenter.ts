@@ -47,7 +47,7 @@ function resolveStatus(input: SystemUpdatePresentationInput) {
     return {
       label: input.restarting ? '重启中' : '更新中',
       icon: RefreshCw,
-      badge: 'bg-cp-info-bg text-cp-info-text-on-bg',
+      badge: 'bg-cp-info-container text-cp-info-on-container',
       iconClass: 'text-cp-info',
     }
   }
@@ -55,7 +55,7 @@ function resolveStatus(input: SystemUpdatePresentationInput) {
     return {
       label: '异常',
       icon: XCircle,
-      badge: 'bg-cp-error-bg text-cp-error-text-on-bg',
+      badge: 'bg-cp-error-container text-cp-error-on-container',
       iconClass: 'text-cp-error',
     }
   }
@@ -63,7 +63,7 @@ function resolveStatus(input: SystemUpdatePresentationInput) {
     return {
       label: input.updateSuccess ? '已更新' : input.hasUpdate ? '有新版本' : '已是最新',
       icon: input.hasUpdate ? ArrowUpCircle : CheckCircle2,
-      badge: 'bg-cp-success-bg text-cp-success-text-on-bg',
+      badge: 'bg-cp-success-container text-cp-success-on-container',
       iconClass: 'text-cp-success',
     }
   }

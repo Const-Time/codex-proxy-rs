@@ -288,7 +288,7 @@ function presetSwatches(preset: ThemeColorPreset) {
 
     <section v-else class="grid gap-2" aria-label="风格 Token">
       <div
-        class="rounded-cp-lg bg-cp-primary-bg px-3 py-3 text-[10px] leading-normal font-emphasis text-cp-primary-text"
+        class="rounded-cp-lg bg-cp-primary-container px-3 py-3 text-[10px] leading-normal font-emphasis text-cp-primary-on-container"
       >
         固定无边设计；圆角塑形，阴影分层。
       </div>

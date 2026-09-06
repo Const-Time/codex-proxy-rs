@@ -20,19 +20,19 @@ const titleMap = {
 
 const colorClasses = {
   success: {
-    iconBg: 'bg-cp-success-bg',
+    iconBg: 'bg-cp-success-container',
     icon: 'text-cp-success',
   },
   error: {
-    iconBg: 'bg-cp-error-bg',
+    iconBg: 'bg-cp-error-container',
     icon: 'text-cp-error',
   },
   warning: {
-    iconBg: 'bg-cp-warning-bg',
+    iconBg: 'bg-cp-warning-container',
     icon: 'text-cp-warning',
   },
   info: {
-    iconBg: 'bg-cp-info-bg',
+    iconBg: 'bg-cp-info-container',
     icon: 'text-cp-info',
   },
 }

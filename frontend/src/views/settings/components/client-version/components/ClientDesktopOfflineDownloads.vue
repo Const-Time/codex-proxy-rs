@@ -59,7 +59,7 @@ function formatFileSize(value: number | null): string {
   <section class="grid gap-3.5 rounded-cp-card bg-cp-fill-quaternary p-4" aria-labelledby="windows-offline-download-title">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="flex min-w-0 items-start gap-3">
-        <span class="inline-grid size-9 shrink-0 place-items-center rounded-cp bg-cp-info-bg text-cp-info">
+        <span class="inline-grid size-9 shrink-0 place-items-center rounded-cp bg-cp-info-container text-cp-info">
           <ArrowDownToLine class="size-4.5" />
         </span>
         <div class="min-w-0">
@@ -92,14 +92,14 @@ function formatFileSize(value: number | null): string {
 
     <p
       v-if="downloads?.warning"
-      class="m-0 rounded-cp bg-cp-warning-bg px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-warning-text-on-bg"
+      class="m-0 rounded-cp bg-cp-warning-container px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-warning-on-container"
     >
       {{ downloads.warning }}
     </p>
 
     <p
       v-if="error && downloads"
-      class="m-0 rounded-cp bg-cp-error-bg px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-error-text-on-bg"
+      class="m-0 rounded-cp bg-cp-error-container px-3 py-2.5 text-cp-sm leading-[1.45] font-bold text-cp-error-on-container"
       role="alert"
     >
       {{ error }}，当前仍显示上次成功结果。

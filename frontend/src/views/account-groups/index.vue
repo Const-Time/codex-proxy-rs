@@ -121,7 +121,7 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
               <span
                 class="inline-flex h-6 items-center rounded-lg px-2 text-cp-xs font-bold"
                 :class="row.enabled
-                  ? 'bg-cp-success-bg text-cp-success-text-on-bg'
+                  ? 'bg-cp-success-container text-cp-success-on-container'
                   : 'bg-cp-fill-tertiary text-cp-text-quaternary'"
               >
                 {{ row.enabled ? '已启用' : '已禁用' }}

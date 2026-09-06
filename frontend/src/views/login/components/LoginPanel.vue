@@ -167,7 +167,7 @@ function togglePasswordVisible(): void {
   --cp-color-text: var(--cp-login-title-color);
   --cp-color-text-secondary: var(--cp-login-description-color);
   --cp-color-text-quaternary: var(--cp-login-placeholder-color);
-  --cp-color-error-bg: var(--cp-login-error-bg);
+  --cp-color-error-container: var(--cp-login-error-bg);
   --cp-color-error-border: transparent;
   --cp-color-error-text: var(--cp-login-error-text-color);
   --cp-color-error: var(--cp-login-error-icon-color);

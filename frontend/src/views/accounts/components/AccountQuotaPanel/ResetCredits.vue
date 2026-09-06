@@ -139,10 +139,10 @@ async function handleConfirmConsume() {
     </div>
 
     <div v-else class="grid gap-4">
-      <section v-if="ambiguous" class="flex items-start gap-3 rounded-cp bg-cp-warning-bg px-4 py-3.5" role="status">
-        <AlertTriangle class="mt-0.5 size-4 shrink-0 text-cp-warning-text-on-bg" />
+      <section v-if="ambiguous" class="flex items-start gap-3 rounded-cp bg-cp-warning-container px-4 py-3.5" role="status">
+        <AlertTriangle class="mt-0.5 size-4 shrink-0 text-cp-warning-on-container" />
         <div class="min-w-0">
-          <p class="m-0 text-cp-sm font-heavy text-cp-warning-text-on-bg">
+          <p class="m-0 text-cp-sm font-heavy text-cp-warning-on-container">
             上次操作结果待确认
           </p>
           <p class="mt-1 mb-0 text-cp-xs leading-normal font-emphasis text-cp-text-secondary">
@@ -193,7 +193,7 @@ async function handleConfirmConsume() {
 
         <p
           v-if="loadError"
-          class="m-0 rounded-cp bg-cp-error-bg px-4 py-3 text-cp-xs leading-normal font-emphasis text-cp-error-text-on-bg"
+          class="m-0 rounded-cp bg-cp-error-container px-4 py-3 text-cp-xs leading-normal font-emphasis text-cp-error-on-container"
           role="status"
         >
           {{ loadError }}，请刷新重试。

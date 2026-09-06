@@ -164,9 +164,9 @@ export function usageTransportType(transport?: string | null) {
 export function usageTransportTypeClass(transport?: string | null) {
   const type = usageTransportType(transport)
   if (type === 'WS')
-    return 'bg-cp-blue-bg text-cp-blue-text-on-bg'
+    return 'bg-cp-blue-container text-cp-blue-on-container'
   if (type === 'SSE')
-    return 'bg-cp-green-bg text-cp-green-text-on-bg'
+    return 'bg-cp-green-container text-cp-green-on-container'
   return 'bg-cp-fill-tertiary text-cp-text-secondary'
 }
 

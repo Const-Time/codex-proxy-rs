@@ -29,8 +29,9 @@ Token 分层与十阶色板，再按项目的明暗角色规则派生；中性 S
 - **无边设计**：默认依靠表面色差、间距和轻阴影表达层级；边框只用于焦点、错误和必要分隔。
 - **运行时可定制**：用户输入在浏览器中实时派生，因此使用 CSS Variables，不使用构建时 SCSS 变量。
 - **单一事实源**：Store 只保存最小配置，所有 Map、Alias 与未覆盖的 Component Token 均由纯函数生成。
-- **行为透明**：任意自定义 Seed 都进入统一算法，页面只选择角色。功能色文字同时依据 Container 和自身背景三态做
-  对比度保护，不使用固定色相的文字锚点覆盖自定义 Seed；交互仍尊重 `prefers-reduced-motion`。
+- **行为透明**：任意自定义 Seed 都进入统一算法，页面只选择角色。功能色 `text` 与 `on-container` 分别依据中性
+  Surface 和自身 Container 三态做对比度保护，不使用固定色相的文字锚点覆盖自定义 Seed；交互仍尊重
+  `prefers-reduced-motion`。
 
 ## 架构概览
 
@@ -120,20 +121,23 @@ interface ThemeCustomization {
 | 功能色 Base | P6 | P6 |
 | Primary / 功能色 Hover、Active | P5、P7 | P8、P6 |
 | Primary Text Hover、Text、Text Active | P5、P6、P7 | P8、P7、P6 |
-| 功能色 Text Hover、Text、Text Active | P5、P6、P7 | P8、P9、P10 |
+| Primary On Container | P6 | P7 |
+| 功能色 Text Hover、Text、Text Active | P5、P7、P7 | P8、P7、P10 |
+| 功能色 On Container | P6 | P9 |
 
-弱背景由 Container 与对应 Base/Hover/Active 按 recipe 权重混合；描边同样混色，再相对 Container 保证 3:1。
-功能色 Hover/Active 相对 Container 保证 3:1，Base 不做该校正。每种文字状态都同时检查 Container、Background、
-Background Hover、Background Active，取最弱配对并校正到至少 4.5:1，兼容消费者在背景切换时保留同一文字角色。
+弱语义 Container 由中性 Container 与对应 Base/Hover/Active 按 recipe 权重混合；描边同样混色，再相对中性
+Container 保证 3:1。功能色 Hover/Active 相对中性 Container 保证 3:1，Base 不做该校正。`text` 依据页面、
+容器、浮层和交互填充等中性 Surface 校正；`on-container` 单独依据语义 Container 的默认、Hover、Active 三态
+校正到至少 4.5:1，避免为了彩色底对比度而削弱中性表面上的颜色辨识度。
 `ensureContrast` 以每步 1% 的黑/白混合寻找满足所有配对的颜色；不能满足全部约束时返回最弱配对表现最好的候选，
 因此不承诺任意互相矛盾的自定义前景/背景组合都能达标。
 
 分类、图表与数据强调继续使用 Ant Design Preset Color 的角色结构。Blue、Green、Orange、Red 分别复用
 `colorInfo`、`colorSuccess`、`colorWarning`、`colorError`，保证通用彩色与可编辑语义 Seed 同源；没有语义对应的
 Cyan、Purple 从 `@ant-design/colors` 的 `presetPrimaryColors` 取得 Seed。
-Preset 的实心色使用 P6，弱背景、较强背景与边界按 recipe 权重混合；浅色文字取 P7，深色取 P8 并保留 HSL
-最低明度 0.7。`text` 相对 Container 校正，`text-on-bg` 同时相对弱背景和较强背景校正到 4.5:1；彩色底上的文字
-应使用 `text-on-bg`，普通数值与标签不直接使用 `solid`。
+Preset 的实心色使用 P6，普通 Container、Strong Container 与边界按 recipe 权重混合；浅色文字取 P7，深色取 P8
+并保留 HSL 最低明度 0.7。`text` 相对中性 Container 校正，`on-container` 同时相对普通和 Strong Container
+校正到 4.5:1；彩色容器里的文字与图标应使用 `on-container`，普通数值与标签不直接使用 `solid`。
 
 背景与文本 Seed 进入独立的 Surface Map，生成：
 
@@ -151,11 +155,12 @@ Input、阴影与其他 Component Token 继续从 Surface、Primary 和 Semantic
 正常文字同时检查 Layout、Container、Elevated、文字交互背景与三级 Fill。正文、标题和 Secondary 至少 7:1，
 Tertiary 至少 5.5:1，Quaternary 至少 4.5:1；这些是相对全部上述表面的最低目标，对 Container 的实测比值通常更高。
 Disabled 保留独立的弱化颜色，不承担正常信息。输入背景主要从这些 Surface 混色派生，placeholder 继续消费
-Quaternary；主按钮白字与功能色文字遵循各自的背景配对规则。
+Quaternary；主按钮白字与功能色文字遵循各自的容器配对规则。
 
 ### Alias Token
 
-Alias 按视觉角色命名，使用 `--cp-` 命名空间，并优先对齐 Ant Design 的公开 Token 词汇：
+Alias 按视觉角色命名，使用 `--cp-` 命名空间；整体分层对齐 Ant Design，并以 Container / On Container 表达成对的
+语义表面与前景：
 
 | 角色 | CSS Token | 主要消费者 |
 | --- | --- | --- |
@@ -167,7 +172,7 @@ Alias 按视觉角色命名，使用 `--cp-` 命名空间，并优先对齐 Ant 
 | 选择 | `--cp-control-item-bg-active*` | Segmented、Select 和选择控件 |
 | 焦点 | `--cp-control-outline` | 键盘焦点和输入反馈 |
 | 功能色 | `--cp-color-info / success / warning / error-*` | 系统反馈与状态 |
-| 预设彩色 | `--cp-color-{blue,cyan,green,orange,purple,red}-{bg,bg-strong,border,solid,text,text-on-bg}` | 分类标签与数据强调 |
+| 预设彩色 | `--cp-color-{blue,cyan,green,orange,purple,red}-{container,container-strong,border,solid,text,on-container}` | 分类标签与数据强调 |
 
 Alias 不在页面中追加修色；中性与彩色文字在派生层执行各自的背景配对约束。Component
 Token 直接覆盖时不会自动重算同组件的其他状态；需要保持梯度关系时应修改 Seed，而不是逐个覆盖 Map Token。
@@ -201,9 +206,9 @@ Theme Editor 只开放真正由对应组件消费的 Component Token。全局 Al
 
 ### 通用颜色消费
 
-主题层禁止声明账号套餐、推理类型或具体页面名称。业务组件只能选择通用 Preset Color 角色，例如 Cyan 弱背景、
-Purple 强背景或 Purple 实心色；同一组颜色仍由运行时色板统一派生。`styles/tokens.css` 只保留白色、透明色与
-作用域 `color-scheme`，不保存可换肤值或业务标识色。账户活动热力图以 Success Background 为起点、Success Solid
+主题层禁止声明账号套餐、推理类型或具体页面名称。业务组件只能选择通用 Preset Color 角色，例如 Cyan Container、
+Purple Strong Container 或 Purple Solid；同一组颜色仍由运行时色板统一派生。`styles/tokens.css` 只保留白色、透明色与
+作用域 `color-scheme`，不保存可换肤值或业务标识色。账户活动热力图以 Success Container 为起点、Success Solid
 为终点，按 22% / 46% / 70% 生成中间密度；浅色与暗色使用同一规则，因此不会在浅色背景退化成近白方块。
 图表数据系列也只引用通用 Preset Color Token。
 
@@ -311,7 +316,7 @@ Alias 算法，避免主题配置逐渐退化成一份无法维护的完整 CSS 
 
 - 全局 Token：`--cp-color-bg-container`、`--cp-font-size`。
 - Component Token：`--cp-table-row-hover-bg`、`--cp-input-active-shadow`。
-- Preset Color Token：`--cp-color-purple-bg-strong`、`--cp-color-cyan-text-on-bg`。
+- Preset Color Token：`--cp-color-purple-container-strong`、`--cp-color-cyan-on-container`。
 - 主题层禁止业务域命名；套餐、模型或页面只能消费通用 Alias、Preset 或 Component Token。
 - Map 与 Component 字段由 `theme/core/tokens.ts` 统一生成 CSS Token；禁止在解析器中再写平行的逐项映射表。
 - 禁止继续引入 `accent`、`soft`、`current`、`subtle` 等与现有角色重叠的平行词汇。
@@ -331,7 +336,7 @@ Alias 算法，避免主题配置逐渐退化成一份无法维护的完整 CSS 
 
 `@theme inline` 只注册 Tailwind 名称，不保存主题值。注册表按基础、排版、颜色、圆角、阴影、间距与尺寸排序；
 颜色再按基元、表面、主色与链接、语义、预设、数据、组件分组。
-Preset 家族按字母排序，每个家族固定使用 `bg → bg-strong → border → solid → text → text-on-bg`。主题值由
+Preset 家族按字母排序，每个家族固定使用 `container → container-strong → border → solid → text → on-container`。主题值由
 `initializeTheme()` 在 Vue 挂载前动态生成并提交，不增加 `theme:generate`、`theme:check` 或构建期快照。
 
 全局元素基线统一放进 `styles/base.css` 的 `@layer base`，确保组件 utility 可以按 Tailwind 层级正常覆盖；可复用的

@@ -28,9 +28,9 @@ const DIRECT_THEME_MAP_KEYS = [
 ] as const satisfies readonly DirectThemeMapKey[]
 
 const FUNCTIONAL_TOKEN_ROLES = [
-  ['background', '-bg'],
-  ['backgroundHover', '-bg-hover'],
-  ['backgroundActive', '-bg-active'],
+  ['container', '-container'],
+  ['containerHover', '-container-hover'],
+  ['containerActive', '-container-active'],
   ['border', '-border'],
   ['borderHover', '-border-hover'],
   ['hover', '-hover'],
@@ -38,22 +38,22 @@ const FUNCTIONAL_TOKEN_ROLES = [
   ['active', '-active'],
   ['textHover', '-text-hover'],
   ['text', '-text'],
-  ['textOnBackground', '-text-on-bg'],
+  ['onContainer', '-on-container'],
   ['textActive', '-text-active'],
 ] as const satisfies readonly (readonly [keyof FunctionalColorMap, FunctionalTokenSuffix])[]
 
 const PRESET_TOKEN_ROLES = [
-  ['background', 'bg'],
-  ['backgroundStrong', 'bg-strong'],
+  ['container', 'container'],
+  ['containerStrong', 'container-strong'],
   ['border', 'border'],
   ['solid', 'solid'],
   ['text', 'text'],
-  ['textOnBackground', 'text-on-bg'],
+  ['onContainer', 'on-container'],
 ] as const satisfies readonly (readonly [keyof PresetColorRoleMap, PresetTokenSuffix])[]
 
 const CONTROL_TOKEN_BINDINGS = [
-  ['--cp-control-item-bg-active', 'colorPrimaryBg'],
-  ['--cp-control-item-bg-active-hover', 'colorPrimaryBgHover'],
+  ['--cp-control-item-bg-active', 'colorPrimaryContainer'],
+  ['--cp-control-item-bg-active-hover', 'colorPrimaryContainerHover'],
   ['--cp-control-outline', 'colorPrimaryBorder'],
 ] as const satisfies readonly (readonly [ControlTokenName, keyof ThemePrimaryMap])[]
 

@@ -40,32 +40,32 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
         <span class="text-cp-xs font-emphasis text-cp-text-quaternary">当前额度窗口</span>
       </div>
       <div class="grid gap-2 xl:min-h-0 xl:flex-1 xl:grid-rows-5">
-        <div class="flex items-center justify-between rounded-lg bg-cp-green-bg px-3 py-2">
-          <span class="text-cp-sm font-bold text-cp-green-text-on-bg">输入</span>
+        <div class="flex items-center justify-between rounded-lg bg-cp-green-container px-3 py-2">
+          <span class="text-cp-sm font-bold text-cp-green-on-container">输入</span>
           <strong class="font-mono text-cp text-cp-text">
             {{ account.usage.inputTokensDisplay }}
           </strong>
         </div>
-        <div class="flex items-center justify-between rounded-lg bg-cp-orange-bg px-3 py-2">
-          <span class="text-cp-sm font-bold text-cp-orange-text-on-bg">输出</span>
+        <div class="flex items-center justify-between rounded-lg bg-cp-orange-container px-3 py-2">
+          <span class="text-cp-sm font-bold text-cp-orange-on-container">输出</span>
           <strong class="font-mono text-cp text-cp-text">
             {{ account.usage.outputTokensDisplay }}
           </strong>
         </div>
-        <div class="flex items-center justify-between rounded-lg bg-cp-cyan-bg px-3 py-2">
-          <span class="text-cp-sm font-bold text-cp-cyan-text-on-bg">缓存</span>
+        <div class="flex items-center justify-between rounded-lg bg-cp-cyan-container px-3 py-2">
+          <span class="text-cp-sm font-bold text-cp-cyan-on-container">缓存</span>
           <strong class="font-mono text-cp text-cp-text">
             {{ account.usage.cachedTokensDisplay }}
           </strong>
         </div>
-        <div class="flex items-center justify-between rounded-lg bg-cp-blue-bg px-3 py-2">
-          <span class="text-cp-sm font-bold text-cp-blue-text-on-bg">推理</span>
+        <div class="flex items-center justify-between rounded-lg bg-cp-blue-container px-3 py-2">
+          <span class="text-cp-sm font-bold text-cp-blue-on-container">推理</span>
           <strong class="font-mono text-cp text-cp-text">
             {{ account.usage.reasoningTokensDisplay }}
           </strong>
         </div>
-        <div class="flex items-center justify-between rounded-lg bg-cp-blue-bg px-3 py-2">
-          <span class="text-cp-sm font-bold text-cp-blue-text-on-bg">读取</span>
+        <div class="flex items-center justify-between rounded-lg bg-cp-blue-container px-3 py-2">
+          <span class="text-cp-sm font-bold text-cp-blue-on-container">读取</span>
           <strong class="font-mono text-cp text-cp-text">
             {{ account.usage.readTokensDisplay }}
           </strong>

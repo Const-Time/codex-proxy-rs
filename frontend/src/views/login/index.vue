@@ -118,7 +118,7 @@ async function handleSubmit(): Promise<void> {
   --cp-login-input-active-bg: var(--cp-input-active-bg);
   --cp-login-input-icon-color: var(--cp-color-primary-text);
   --cp-login-placeholder-color: var(--cp-color-text-secondary);
-  --cp-login-error-bg: var(--cp-color-error-bg);
+  --cp-login-error-bg: var(--cp-color-error-container);
   --cp-login-error-icon-color: var(--cp-color-error);
   --cp-login-error-text-color: var(--cp-color-error-text);
   --cp-login-button-shadow-color: color-mix(in srgb, var(--cp-color-primary) 30%, transparent);
@@ -144,7 +144,7 @@ async function handleSubmit(): Promise<void> {
 :global(html[data-theme='dark'] .login-page) {
   --cp-login-page-bg-start: color-mix(in srgb, var(--cp-color-bg-layout) 86%, var(--cp-color-bg-spotlight));
   --cp-login-page-bg-middle: color-mix(in srgb, var(--cp-color-bg-container) 68%, var(--cp-color-bg-layout));
-  --cp-login-page-bg-end: color-mix(in srgb, var(--cp-color-bg-spotlight) 76%, var(--cp-color-primary-bg));
+  --cp-login-page-bg-end: color-mix(in srgb, var(--cp-color-bg-spotlight) 76%, var(--cp-color-primary-container));
   --cp-login-canvas-bg-start: color-mix(in srgb, var(--cp-color-bg-container) 82%, var(--cp-color-fill-tertiary));
   --cp-login-canvas-bg-middle: color-mix(in srgb, var(--cp-color-bg-layout) 88%, var(--cp-color-bg-container));
   --cp-login-canvas-bg-end: color-mix(in srgb, var(--cp-color-bg-spotlight) 88%, var(--cp-color-bg-layout));

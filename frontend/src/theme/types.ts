@@ -90,11 +90,11 @@ export interface ThemeColorRoleRecipe {
   active: ThemePaletteSource
   textHover: ThemePaletteSource
   text: ThemePaletteSource
-  textOnBackground?: ThemePaletteSource
+  onContainer?: ThemePaletteSource
   textActive: ThemePaletteSource
-  backgroundMix: number
-  backgroundHoverMix: number
-  backgroundActiveMix: number
+  containerMix: number
+  containerHoverMix: number
+  containerActiveMix: number
   borderMix: number
   borderHoverMix: number
   hoverContrast?: number
@@ -111,16 +111,16 @@ export interface ThemeColorRoleRecipes {
 export interface ThemePresetColorRoleRecipe {
   solid: ThemePaletteStep
   text: ThemePaletteStep
-  textOnBackground: ThemePaletteStep
-  backgroundMix: number
-  backgroundStrongMix: number
+  onContainer: ThemePaletteStep
+  containerMix: number
+  containerStrongMix: number
   borderMix: number
   minimumTextLightness?: number
 }
 
 export interface ThemePrimaryMap {
-  colorPrimaryBg: string
-  colorPrimaryBgHover: string
+  colorPrimaryContainer: string
+  colorPrimaryContainerHover: string
   colorPrimaryBorder: string
   colorPrimaryBorderHover: string
   colorPrimaryHover: string
@@ -128,6 +128,7 @@ export interface ThemePrimaryMap {
   colorPrimaryActive: string
   colorPrimaryTextHover: string
   colorPrimaryText: string
+  colorPrimaryOnContainer: string
   colorPrimaryTextActive: string
   colorTextLightSolid: string
 }
@@ -206,16 +207,16 @@ export interface FunctionalColorMap {
   color: string
   hover: string
   active: string
-  background: string
-  backgroundHover: string
-  backgroundActive: string
+  container: string
+  containerHover: string
+  containerActive: string
   border: string
   borderHover: string
   textHover: string
   /** 语义色在中性表面上的强调文字。 */
   text: string
-  /** 语义色在自身背景上的高对比文字。 */
-  textOnBackground: string
+  /** 语义色容器内文字与图标使用的高对比前景色。 */
+  onContainer: string
   textActive: string
 }
 
@@ -227,12 +228,12 @@ export interface ThemeSemanticMap {
 }
 
 export interface PresetColorRoleMap {
-  background: string
-  backgroundStrong: string
+  container: string
+  containerStrong: string
   border: string
   solid: string
   text: string
-  textOnBackground: string
+  onContainer: string
 }
 
 export type ThemePresetColorName
@@ -305,26 +306,26 @@ export type FunctionalTokenSuffix
   = ''
     | '-hover'
     | '-active'
-    | '-bg'
-    | '-bg-hover'
-    | '-bg-active'
+    | '-container'
+    | '-container-hover'
+    | '-container-active'
     | '-border'
     | '-border-hover'
     | '-text-hover'
     | '-text'
-    | '-text-on-bg'
+    | '-on-container'
     | '-text-active'
 
 type SemanticColorName = Extract<keyof ThemeSemanticMap, string>
 export type SemanticTokenName = `--cp-color-${SemanticColorName}${FunctionalTokenSuffix}`
 
 export type PresetTokenSuffix
-  = 'bg'
-    | 'bg-strong'
+  = 'container'
+    | 'container-strong'
     | 'border'
     | 'solid'
     | 'text'
-    | 'text-on-bg'
+    | 'on-container'
 
 type PresetColorName = Extract<keyof ThemePresetColorMap, string>
 export type PresetTokenName = `--cp-color-${PresetColorName}-${PresetTokenSuffix}`

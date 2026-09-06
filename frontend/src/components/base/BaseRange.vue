@@ -118,11 +118,11 @@ function updateModel(event: Event) {
 }
 
 .base-range:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 3px var(--cp-color-primary-bg-hover);
+  box-shadow: 0 0 0 3px var(--cp-color-primary-container-hover);
 }
 
 .base-range:focus-visible::-moz-range-thumb {
-  box-shadow: 0 0 0 3px var(--cp-color-primary-bg-hover);
+  box-shadow: 0 0 0 3px var(--cp-color-primary-container-hover);
 }
 
 .base-range:disabled {

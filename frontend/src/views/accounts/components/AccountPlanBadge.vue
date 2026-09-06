@@ -15,16 +15,16 @@ const props = withDefaults(
 )
 
 const planPalettes: Record<string, string> = {
-  free: 'bg-cp-cyan-bg text-cp-cyan-text-on-bg',
-  pro: 'bg-cp-purple-bg-strong text-cp-purple-text-on-bg',
-  prolite: 'bg-cp-purple-bg text-cp-purple-text-on-bg',
+  free: 'bg-cp-cyan-container text-cp-cyan-on-container',
+  pro: 'bg-cp-purple-container-strong text-cp-purple-on-container',
+  prolite: 'bg-cp-purple-container text-cp-purple-on-container',
 }
 
 const fallbackPalettes = [
-  'bg-cp-blue-bg text-cp-blue-text-on-bg',
-  'bg-cp-green-bg text-cp-green-text-on-bg',
-  'bg-cp-cyan-bg text-cp-cyan-text-on-bg',
-  'bg-cp-orange-bg text-cp-orange-text-on-bg',
+  'bg-cp-blue-container text-cp-blue-on-container',
+  'bg-cp-green-container text-cp-green-on-container',
+  'bg-cp-cyan-container text-cp-cyan-on-container',
+  'bg-cp-orange-container text-cp-orange-on-container',
 ] as const
 
 const label = computed(() => props.planType?.trim() || 'Free')

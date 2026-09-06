@@ -18,7 +18,7 @@ defineProps<{
     <template #trigger>
       <button
         type="button"
-        class="inline-flex size-4 items-center justify-center rounded-full bg-cp-primary-bg text-cp-primary-text outline-none hover:bg-cp-primary-bg-hover focus-visible:ring-2 focus-visible:ring-cp-control-outline"
+        class="inline-flex size-4 items-center justify-center rounded-full bg-cp-primary-container text-cp-primary-on-container outline-none hover:bg-cp-primary-container-hover focus-visible:ring-2 focus-visible:ring-cp-control-outline"
         :aria-label="triggerLabel"
       >
         <Info class="size-3" />

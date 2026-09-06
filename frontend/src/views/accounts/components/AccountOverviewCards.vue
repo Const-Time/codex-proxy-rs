@@ -44,15 +44,15 @@ const overviewItems = computed(() => [
 
 function overviewIconClass(tone: string) {
   if (tone === 'success') {
-    return 'bg-cp-green-bg text-cp-green-text-on-bg'
+    return 'bg-cp-green-container text-cp-green-on-container'
   }
   if (tone === 'warning') {
-    return 'bg-cp-orange-bg text-cp-orange-text-on-bg'
+    return 'bg-cp-orange-container text-cp-orange-on-container'
   }
   if (tone === 'danger') {
-    return 'bg-cp-error-bg text-cp-error-text-on-bg'
+    return 'bg-cp-error-container text-cp-error-on-container'
   }
-  return 'bg-cp-blue-bg text-cp-blue-text-on-bg'
+  return 'bg-cp-blue-container text-cp-blue-on-container'
 }
 </script>
 

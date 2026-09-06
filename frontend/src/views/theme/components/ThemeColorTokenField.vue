@@ -28,7 +28,7 @@ const emit = defineEmits<{
     <div class="min-w-0">
       <div class="flex flex-wrap items-center gap-2">
         <strong class="text-cp-sm font-bold text-cp-text">{{ label }}</strong>
-        <span v-if="overridden" class="rounded-full bg-cp-primary-bg px-1.5 py-0.5 text-[9px] font-heavy text-cp-primary-text">
+        <span v-if="overridden" class="rounded-full bg-cp-primary-container px-1.5 py-0.5 text-[9px] font-heavy text-cp-primary-on-container">
           已修改
         </span>
       </div>

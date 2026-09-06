@@ -26,7 +26,7 @@ const classes = computed(() => [
   'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cp-control-outline',
   'disabled:cursor-not-allowed disabled:text-cp-text-disabled',
   props.tone === 'destructive'
-    ? 'text-cp-error-text hover:bg-cp-error-bg-hover hover:text-cp-error-text-on-bg'
+    ? 'text-cp-error-text hover:bg-cp-error-container-hover hover:text-cp-error-on-container'
     : 'text-cp-text hover:bg-cp-bg-text-hover',
 ])
 </script>

@@ -98,8 +98,8 @@ export function deriveThemePrimaryMap(
   )
 
   return {
-    colorPrimaryBg: roles.background,
-    colorPrimaryBgHover: roles.backgroundHover,
+    colorPrimaryContainer: roles.container,
+    colorPrimaryContainerHover: roles.containerHover,
     colorPrimaryBorder: roles.border,
     colorPrimaryBorderHover: roles.borderHover,
     colorPrimaryHover: roles.hover,
@@ -107,6 +107,7 @@ export function deriveThemePrimaryMap(
     colorPrimaryActive: roles.active,
     colorPrimaryTextHover: roles.textHover,
     colorPrimaryText: roles.text,
+    colorPrimaryOnContainer: roles.onContainer,
     colorPrimaryTextActive: roles.textActive,
     colorTextLightSolid: LIGHT_FOREGROUND,
   }
@@ -210,7 +211,7 @@ export function deriveThemeDataMap(
   aliases: ThemeAliasMap,
   semantics: ThemeSemanticMap,
 ): ThemeDataMap {
-  const activityBase = semantics.success.background
+  const activityBase = semantics.success.container
   const activitySolid = semantics.success.color
 
   return {
@@ -454,10 +455,10 @@ function deriveColorRoleMap(
   const color = resolve(recipe.color)
   const hover = resolve(recipe.hover)
   const active = resolve(recipe.active)
-  const background = mix(containerBg, color, recipe.backgroundMix)
-  const backgroundHover = mix(containerBg, hover, recipe.backgroundHoverMix)
-  const backgroundActive = mix(containerBg, active, recipe.backgroundActiveMix)
-  const semanticBackgrounds = [background, backgroundHover, backgroundActive]
+  const container = mix(containerBg, color, recipe.containerMix)
+  const containerHover = mix(containerBg, hover, recipe.containerHoverMix)
+  const containerActive = mix(containerBg, active, recipe.containerActiveMix)
+  const semanticContainers = [container, containerHover, containerActive]
   const resolveText = (
     source: ThemePaletteSource,
     backgrounds: string | readonly string[] = textBackgrounds,
@@ -470,9 +471,9 @@ function deriveColorRoleMap(
   }
 
   return {
-    background,
-    backgroundHover,
-    backgroundActive,
+    container,
+    containerHover,
+    containerActive,
     border: ensureContrast(mix(containerBg, color, recipe.borderMix), containerBg, 3),
     borderHover: ensureContrast(mix(containerBg, hover, recipe.borderHoverMix), containerBg, 3),
     hover: recipe.hoverContrast === undefined
@@ -484,15 +485,15 @@ function deriveColorRoleMap(
       : ensureContrast(active, containerBg, recipe.activeContrast),
     textHover: resolveText(recipe.textHover),
     text: resolveText(recipe.text),
-    textOnBackground: resolveText(
-      recipe.textOnBackground ?? recipe.text,
-      semanticBackgrounds,
+    onContainer: resolveText(
+      recipe.onContainer ?? recipe.text,
+      semanticContainers,
     ),
     textActive: resolveText(recipe.textActive),
   }
 }
 
-/** 背景、边框和实心色对齐 Colorful Tag；文字在当前 Surface 上保持可读。 */
+/** 容器、边框和实心色对齐 Colorful Tag；文字在当前 Surface 上保持可读。 */
 function derivePresetColorRoleMap(
   palette: readonly string[],
   containerBg: string,
@@ -501,20 +502,20 @@ function derivePresetColorRoleMap(
   const color = (step: number): string =>
     normalizeHexColor(palette[step - 1]) ?? DEFAULT_CUSTOM_THEME_COLOR
   const solid = color(recipe.solid)
-  const background = mix(containerBg, solid, recipe.backgroundMix)
-  const backgroundStrong = mix(containerBg, solid, recipe.backgroundStrongMix)
+  const container = mix(containerBg, solid, recipe.containerMix)
+  const containerStrong = mix(containerBg, solid, recipe.containerStrongMix)
   const text = color(recipe.text)
-  const textOnBackground = color(recipe.textOnBackground)
+  const onContainer = color(recipe.onContainer)
   const toneText = (value: string): string => recipe.minimumTextLightness === undefined
     ? value
     : ensureLightness(value, recipe.minimumTextLightness)
 
   return {
-    background,
-    backgroundStrong,
+    container,
+    containerStrong,
     border: ensureContrast(mix(containerBg, solid, recipe.borderMix), containerBg, 3),
     solid,
     text: ensureContrast(toneText(text), containerBg, 4.5),
-    textOnBackground: ensureContrast(toneText(textOnBackground), [background, backgroundStrong], 4.5),
+    onContainer: ensureContrast(toneText(onContainer), [container, containerStrong], 4.5),
   }
 }

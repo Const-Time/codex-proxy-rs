@@ -21,7 +21,7 @@ const items = computed(() => [
     icon: Activity,
     value: props.summary.totalRequests,
     detail: '筛选范围内',
-    tone: 'bg-cp-blue-bg text-cp-blue-text-on-bg',
+    tone: 'bg-cp-blue-container text-cp-blue-on-container',
   },
   {
     key: 'tokens',
@@ -29,7 +29,7 @@ const items = computed(() => [
     icon: FileText,
     value: props.summary.totalTokens,
     detail: `输入 ${props.summary.inputTokens} / 输出 ${props.summary.outputTokens}`,
-    tone: 'bg-cp-green-bg text-cp-green-text-on-bg',
+    tone: 'bg-cp-green-container text-cp-green-on-container',
   },
   {
     key: 'cached',
@@ -37,7 +37,7 @@ const items = computed(() => [
     icon: Database,
     value: props.summary.cachedTokens,
     detail: '缓存读取命中',
-    tone: 'bg-cp-orange-bg text-cp-orange-text-on-bg',
+    tone: 'bg-cp-orange-container text-cp-orange-on-container',
   },
   {
     key: 'latency',
@@ -45,7 +45,7 @@ const items = computed(() => [
     icon: Timer,
     value: averageLatencyDisplay(props.summary.averageLatencyMs),
     detail: '成功请求平均值',
-    tone: 'bg-cp-cyan-bg text-cp-cyan-text-on-bg',
+    tone: 'bg-cp-cyan-container text-cp-cyan-on-container',
   },
 ])
 </script>

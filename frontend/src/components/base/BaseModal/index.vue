@@ -78,19 +78,19 @@ const toneClasses: Record<ModalTone, { iconBg: string, icon: string }> = {
     icon: 'text-cp-text-secondary',
   },
   info: {
-    iconBg: 'bg-cp-info-bg',
+    iconBg: 'bg-cp-info-container',
     icon: 'text-cp-info',
   },
   warning: {
-    iconBg: 'bg-cp-warning-bg',
+    iconBg: 'bg-cp-warning-container',
     icon: 'text-cp-warning',
   },
   danger: {
-    iconBg: 'bg-cp-error-bg',
+    iconBg: 'bg-cp-error-container',
     icon: 'text-cp-error',
   },
   success: {
-    iconBg: 'bg-cp-success-bg',
+    iconBg: 'bg-cp-success-container',
     icon: 'text-cp-success',
   },
 }
