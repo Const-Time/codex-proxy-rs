@@ -85,6 +85,16 @@ Compose 默认只绑定 `127.0.0.1`。从其他设备访问时，在应用前配
 客户端使用 `https://你的域名/v1`，不要使用前端开发服务的 `5173/dev/v1`。
 当前应用只支持单副本，不能通过复制容器扩容。
 
+流式响应在首个上游事件提交后，每 15 秒无输出会发送一次 SSE 注释保活，
+并设置 `X-Accel-Buffering: no` 和 `Cache-Control: no-cache, no-transform`。
+反向代理仍需允许这些响应头生效；首个事件到达前的等待也需要足够的读取超时。
+
+若 Codex 在压缩或长时间生成时出现 `error decoding response body`，这表示
+客户端读取 HTTP 响应体失败。请结合网关请求诊断中的 `upstream.read.failed`、
+`downstream.body.closed` 和反向代理日志判断断开位置，不能仅凭此消息认定是 JSON 格式错误。
+SSE 注释保活用于防止传输链路空闲断开，不会重置 Codex 等待完整 SSE 事件的超时；
+若报错为 `idle timeout waiting for SSE`，再检查客户端的 `stream_idle_timeout_ms`。
+
 ## 客户端配置
 
 在管理端创建客户端密钥，打开「使用密钥」，按操作系统复制 `config.toml` 和 `auth.json`，

@@ -4,6 +4,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use axum::{
     body::{Body, to_bytes},
@@ -14,6 +15,7 @@ use axum::{
     },
 };
 use bytes::Bytes;
+use futures::StreamExt;
 use futures::future::{BoxFuture, pending};
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ExecutionService, ExecutionSession,
@@ -79,6 +81,7 @@ impl Trace {
 
 enum NextStep {
     Event(CoordinatedEvent),
+    DelayedEvent(Duration, CoordinatedEvent),
     Error(EngineError),
     FinalizeCancelled,
     FinalizeSuccess,
@@ -277,6 +280,12 @@ impl ExecutionSession for FakeSession {
         Box::pin(async move {
             match self.next.pop_front().unwrap_or(NextStep::End) {
                 NextStep::Event(event) => {
+                    self.trace.push("next_event");
+                    Ok(Some(event))
+                }
+                NextStep::DelayedEvent(delay, event) => {
+                    self.trace.push("wait_event");
+                    tokio::time::sleep(delay).await;
                     self.trace.push("next_event");
                     Ok(Some(event))
                 }
@@ -707,6 +716,154 @@ async fn streaming_encodes_first_frame_before_commit_and_http_delivery() {
     assert_eq!(trace.snapshot(), vec!["next_event", "commit"]);
     assert!(!trace.is_cancelled());
     std::mem::forget(response);
+}
+
+#[tokio::test(start_paused = true)]
+async fn streaming_should_keep_alive_during_silent_compaction_without_restarting_execution() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+            NextStep::DelayedEvent(
+                Duration::from_secs(240),
+                delivery(completed(), CommitRequirement::AlreadyCommitted),
+            ),
+            NextStep::FinalizeSuccess,
+        ],
+    );
+    let response = stream_execution_response(Box::new(session), None).await;
+    let mut body = response.into_body().into_data_stream();
+    let first = body.next().await.expect("first frame").expect("body bytes");
+    assert!(String::from_utf8_lossy(&first).contains("response.created"));
+    let start = tokio::time::Instant::now();
+
+    for heartbeat in 1..16 {
+        let chunk = tokio::time::timeout(Duration::from_secs(20), body.next())
+            .await
+            .expect("silent upstream must not leave the downstream idle")
+            .expect("heartbeat frame")
+            .expect("heartbeat bytes");
+        assert_eq!(chunk, Bytes::from_static(b": keep-alive\n\n"));
+        assert_eq!(start.elapsed(), Duration::from_secs(15 * heartbeat));
+    }
+
+    let terminal = body
+        .next()
+        .await
+        .expect("terminal frame")
+        .expect("body bytes");
+    assert!(String::from_utf8_lossy(&terminal).contains("response.completed"));
+    assert_eq!(start.elapsed(), Duration::from_secs(240));
+    assert_eq!(
+        body.next().await.expect("done frame").expect("body bytes"),
+        Bytes::from_static(b"data: [DONE]\n\n")
+    );
+    assert!(body.next().await.is_none());
+    assert_eq!(
+        trace.snapshot(),
+        vec![
+            "next_event",
+            "commit",
+            "wait_event",
+            "next_event",
+            "next_end"
+        ]
+    );
+    assert!(!trace.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_stream_during_keepalive_should_cancel_and_finalize_execution() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+            NextStep::DelayedEvent(
+                Duration::from_secs(240),
+                delivery(completed(), CommitRequirement::AlreadyCommitted),
+            ),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let response = stream_execution_response(Box::new(session), None).await;
+    let mut body = response.into_body().into_data_stream();
+    let _ = body.next().await.expect("first frame").expect("body bytes");
+    let heartbeat = tokio::time::timeout(Duration::from_secs(20), body.next())
+        .await
+        .expect("heartbeat before client disconnect")
+        .expect("heartbeat frame")
+        .expect("heartbeat bytes");
+    assert_eq!(heartbeat, Bytes::from_static(b": keep-alive\n\n"));
+
+    drop(body);
+    tokio::task::yield_now().await;
+
+    assert!(trace.is_cancelled());
+    assert_eq!(
+        trace.snapshot(),
+        vec!["next_event", "commit", "wait_event", "cancel_finalize"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn streaming_keepalive_should_wait_for_first_event_before_committing_http_status() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::DelayedEvent(
+                Duration::from_secs(45),
+                delivery(started(), CommitRequirement::CommitBeforeDelivery),
+            ),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let response = tokio::spawn(stream_execution_response(Box::new(session), None));
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    assert!(!response.is_finished());
+    assert!(trace.client_statuses().is_empty());
+    let response = response.await.expect("response task");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(trace.snapshot(), vec!["wait_event", "next_event", "commit"]);
+}
+
+#[tokio::test]
+async fn streaming_response_should_disable_proxy_buffering_and_cache_transformation() {
+    let session = FakeSession::streaming(
+        Arc::new(Trace::default()),
+        vec![
+            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+            NextStep::FinalizeCancelled,
+        ],
+    )
+    .with_response_headers(vec![
+        ProviderResponseHeader::new("x-accel-buffering", Bytes::from_static(b"yes")),
+        ProviderResponseHeader::new("cache-control", Bytes::from_static(b"public, max-age=60")),
+    ]);
+
+    let response = stream_execution_response(Box::new(session), None).await;
+
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    assert_eq!(
+        response.headers()["cache-control"],
+        "no-cache, no-transform"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get_all("x-accel-buffering")
+            .iter()
+            .count(),
+        1
+    );
+    assert_eq!(
+        response.headers().get_all("cache-control").iter().count(),
+        1
+    );
 }
 
 #[tokio::test]

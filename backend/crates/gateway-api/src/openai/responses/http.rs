@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use axum::{
     body::{Body, Bytes},
@@ -13,7 +14,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use futures::stream;
+use futures::{StreamExt, stream};
 use gateway_core::diagnostics::TraceContext;
 use gateway_core::engine::execution::{ClientTransport, ExecutionSession, StartedExecution};
 use gateway_core::engine::{CommitRequirement, EngineError};
@@ -35,6 +36,8 @@ use super::{
     OpenAiResponsesEncoder, ProtocolErrorBody, ResponseEncodeError,
     request::decode_request_with_headers,
 };
+
+const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// `POST /v1/responses`。
 pub(crate) async fn responses(
@@ -335,7 +338,7 @@ pub async fn stream_execution_response(
     if state.encoder.is_completed() {
         state.finish_completed(Vec::new()).await;
     }
-    let body = Body::from_stream(stream::unfold(state, |mut state| async move {
+    let output = Box::pin(stream::unfold(state, |mut state| async move {
         loop {
             if let Some(chunk) = state.pending.pop_front() {
                 state.trace.dump("downstream.chunk", &chunk);
@@ -348,19 +351,35 @@ pub async fn stream_execution_response(
             state.advance().await;
         }
     }));
+    // 保活只轮询已固定的输出 stream；不能取消并重建 advance/next_event future，
+    // 否则一次心跳就可能丢失正在等待的上游事件或执行终态清理。
+    let body = Body::from_stream(stream::unfold(output, |mut output| async move {
+        let chunk = tokio::select! {
+            biased;
+            chunk = output.next() => chunk?,
+            () = tokio::time::sleep(SSE_KEEPALIVE_INTERVAL) => {
+                Ok(Bytes::from_static(b": keep-alive\n\n"))
+            }
+        };
+        Some((chunk, output))
+    }));
     event_stream_response(body, &response_headers)
 }
 
 fn event_stream_response(body: Body, response_headers: &[ProviderResponseHeader]) -> Response {
-    let mut response = Response::new(body);
+    let mut response = apply_response_headers(Response::new(body), response_headers);
     *response.status_mut() = StatusCode::OK;
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
     response
         .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    apply_response_headers(response, response_headers)
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    response
 }
 
 fn internal_gateway_response(message: &'static str) -> Response {
