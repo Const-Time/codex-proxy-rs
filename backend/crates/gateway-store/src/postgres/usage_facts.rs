@@ -2,16 +2,40 @@
 
 use sqlx::{Postgres, QueryBuilder};
 
-/// 只把已完整交付给客户端的成功响应投影为用量事实。
+/// 只把已完整交付给客户端、且存在用量证据的成功响应投影为用量事实。
 ///
 /// `model_requests` 同时承担执行审计：包括上游已发送、但尚未收到首个事件就断开的
 /// WebSocket 请求。这些失败仍必须留给 Ops Errors 和调度健康度分析，不能混入用量、
 /// 成本、账号使用次数或请求明细。
+/// Provider 原生端点也会写入执行审计；standalone search 没有模型、Token 或费用事实，
+/// 因此不属于用量记录。图片端点由请求意图证明其用量语义，不依赖文本模型字段。
 /// 客户端 WebSocket 的每个 `response.create` 没有独立 HTTP 状态码；成功终态与下游
 /// 提交边界已足以证明交付，连接握手的 101 不能冒充单次请求状态。
 pub(crate) fn completed_usage_fact_predicate(alias: &str) -> String {
+    let evidence = usage_evidence_predicate(alias);
     format!(
-        "{alias}.outcome = 'succeeded' and {alias}.downstream_committed_at is not null and (({alias}.client_transport = 'websocket' and {alias}.client_status_code is null) or {alias}.client_status_code between 200 and 399)"
+        "{alias}.outcome = 'succeeded'
+         and {alias}.downstream_committed_at is not null
+         and (({alias}.client_transport = 'websocket' and {alias}.client_status_code is null)
+              or {alias}.client_status_code between 200 and 399)
+         and ({evidence})"
+    )
+}
+
+fn usage_evidence_predicate(alias: &str) -> String {
+    format!(
+        "{alias}.requested_model_id is not null
+         or {alias}.upstream_model_id is not null
+         or {alias}.image_generation_requested
+         or {alias}.input_tokens is not null
+         or {alias}.output_tokens is not null
+         or {alias}.cached_tokens is not null
+         or {alias}.cache_write_tokens is not null
+         or {alias}.reasoning_tokens is not null
+         or {alias}.image_input_tokens is not null
+         or {alias}.image_output_tokens is not null
+         or {alias}.total_tokens is not null
+         or {alias}.cost_amount is not null"
     )
 }
 

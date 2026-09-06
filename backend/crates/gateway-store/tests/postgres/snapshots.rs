@@ -726,6 +726,121 @@ async fn failure_diagnostics_should_only_include_errored_requests() {
 }
 
 #[tokio::test]
+async fn model_diagnostics_should_exclude_provider_endpoints_without_a_model() {
+    let Some(database) = TestDatabase::create("snapshot_model_dimension").await else {
+        return;
+    };
+    let started_at = Utc::now();
+    seed_account(
+        &database.pool,
+        "acct_snap_a",
+        "Snapshot Alpha",
+        Some("alpha@example.invalid"),
+        "oauth",
+        started_at,
+    )
+    .await;
+    let store = PgExecutionStore::new(database.pool.clone());
+    store
+        .insert_model_request_with_first_attempt(
+            new_request("req_snap_model", started_at),
+            attempt("req_snap_model", 1, "acct_snap_a"),
+        )
+        .await
+        .expect("insert model request");
+    finalize_request(&database.pool, "req_snap_model", started_at).await;
+
+    let mut search_request = new_request(
+        "req_snap_provider_endpoint",
+        started_at + chrono::Duration::seconds(1),
+    );
+    search_request.operation = "search".to_owned();
+    search_request.endpoint = "/v1/alpha/search".to_owned();
+    search_request.client_transport = "http_json".to_owned();
+    search_request.requested_model_id = None;
+    let mut search_attempt = attempt("req_snap_provider_endpoint", 1, "acct_snap_a");
+    search_attempt.upstream_model_id = None;
+    search_attempt.upstream_transport = "http_json".to_owned();
+    store
+        .insert_model_request_with_first_attempt(search_request, search_attempt)
+        .await
+        .expect("insert provider endpoint request");
+    finalize_request(
+        &database.pool,
+        "req_snap_provider_endpoint",
+        started_at + chrono::Duration::seconds(1),
+    )
+    .await;
+
+    let diagnostics = observability_repository(&database.pool)
+        .usage_diagnostics(
+            range_around(started_at),
+            UsageRecordFilter::default(),
+            DiagnosticDimension::Model,
+        )
+        .await
+        .expect("model diagnostics");
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].key, "upstream-model");
+    assert_eq!(diagnostics[0].request_count, 1);
+
+    database.close().await;
+}
+
+#[tokio::test]
+async fn tokenless_provider_endpoints_should_remain_in_health_but_not_usage_records() {
+    let Some(database) = TestDatabase::create("snapshot_usage_fact_boundary").await else {
+        return;
+    };
+    let started_at = Utc::now();
+    seed_account(
+        &database.pool,
+        "acct_snap_a",
+        "Snapshot Alpha",
+        Some("alpha@example.invalid"),
+        "oauth",
+        started_at,
+    )
+    .await;
+    let store = PgExecutionStore::new(database.pool.clone());
+    let mut search_request = new_request("req_snap_search", started_at);
+    search_request.operation = "search".to_owned();
+    search_request.endpoint = "/v1/alpha/search".to_owned();
+    search_request.client_transport = "http_json".to_owned();
+    search_request.requested_model_id = None;
+    let mut search_attempt = attempt("req_snap_search", 1, "acct_snap_a");
+    search_attempt.upstream_model_id = None;
+    search_attempt.upstream_transport = "http_json".to_owned();
+    store
+        .insert_model_request_with_first_attempt(search_request, search_attempt)
+        .await
+        .expect("insert search request");
+    finalize_request(&database.pool, "req_snap_search", started_at).await;
+
+    let repository = observability_repository(&database.pool);
+    let page = repository
+        .list_usage_records(usage_query(started_at, UsageRecordFilter::default()))
+        .await
+        .expect("list usage records");
+    let overview = repository
+        .usage_summary(range_around(started_at), UsageRecordFilter::default())
+        .await
+        .expect("summarize request health");
+
+    assert_eq!(
+        (
+            page.total,
+            page.items.len(),
+            overview.requests.request_count
+        ),
+        (0, 0, 1)
+    );
+
+    database.close().await;
+}
+
+#[tokio::test]
 async fn api_key_diagnostics_should_display_key_name_and_fallback_to_ref() {
     let Some(database) = TestDatabase::create("snapshot_api_key_dimension").await else {
         return;

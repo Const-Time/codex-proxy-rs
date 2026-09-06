@@ -365,22 +365,22 @@ pub(crate) async fn attempt_metrics(
     filter: &UsageRecordFilter,
 ) -> StoreResult<AttemptMetrics> {
     filter.validate()?;
-    let fact = completed_usage_fact_predicate("sr");
+    let completed_usage = completed_usage_fact_predicate("mr");
     // PERF: `model_requests` 包含宽请求元数据。这里只物化两个聚合族会复用的列，
     // 避免生产基数下 `mr.*` 与多次标量子查询把 CTE 反复写入临时文件。
-    let mut query = QueryBuilder::<Postgres>::new(
+    let mut query = QueryBuilder::<Postgres>::new(format!(
         "with selected_requests as materialized (
            select mr.id, mr.attempt_count, mr.outcome, mr.error_kind,
                   mr.upstream_status_code, mr.client_status_code,
-                  mr.downstream_committed_at, mr.client_transport, mr.cost_source
-           from model_requests mr where mr.started_at >= ",
-    );
+                  mr.cost_source, ({completed_usage}) as is_completed_usage
+           from model_requests mr where mr.started_at >= "
+    ));
     query.push_bind(range.start);
     query.push(" and mr.started_at < ");
     query.push_bind(range.end);
     push_unrecovered_request_filter(&mut query, "mr");
     push_usage_filter(&mut query, filter, "mr");
-    query.push(format!(
+    query.push(
         "), request_aggregate as (
            select coalesce(sum(sr.attempt_count), 0)::bigint as attempt_count,
                   count(*) filter (
@@ -415,13 +415,13 @@ pub(crate) async fn attempt_metrics(
                                    sr.client_status_code) between 500 and 599
                   )::bigint as request_provider_5xx_count,
                   count(*) filter (
-                    where {fact} and sr.cost_source = 'provider_reported'
+                    where sr.is_completed_usage and sr.cost_source = 'provider_reported'
                   )::bigint as provider_reported_count,
                   count(*) filter (
-                    where {fact} and sr.cost_source = 'calculated'
+                    where sr.is_completed_usage and sr.cost_source = 'calculated'
                   )::bigint as calculated_count,
                   count(*) filter (
-                    where {fact} and sr.cost_source = 'unavailable'
+                    where sr.is_completed_usage and sr.cost_source = 'unavailable'
                   )::bigint as unavailable_count
            from selected_requests sr
          ), ops_aggregate as (
@@ -457,8 +457,8 @@ pub(crate) async fn attempt_metrics(
                 requests.calculated_count,
                 requests.unavailable_count
          from request_aggregate requests
-         cross join ops_aggregate ops"
-    ));
+         cross join ops_aggregate ops",
+    );
     let row = query
         .build()
         .fetch_one(pool)

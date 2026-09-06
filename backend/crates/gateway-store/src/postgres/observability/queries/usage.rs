@@ -3,6 +3,9 @@
 use super::super::*;
 use serde_json::Value;
 
+const MODEL_DIAGNOSTIC_DIMENSION_SQL: &str =
+    "coalesce(mr.upstream_model_id, mr.requested_model_id)";
+
 pub(crate) fn push_usage_filter(
     query: &mut QueryBuilder<Postgres>,
     filter: &UsageRecordFilter,
@@ -581,9 +584,7 @@ pub(crate) async fn diagnostic_api_key_display_names(
 pub(crate) fn diagnostic_dimension_sql(dimension: DiagnosticDimension) -> &'static str {
     match dimension {
         DiagnosticDimension::Provider => "coalesce(mr.provider_kind, 'unrouted')",
-        DiagnosticDimension::Model => {
-            "coalesce(mr.upstream_model_id, mr.requested_model_id, 'unknown')"
-        }
+        DiagnosticDimension::Model => MODEL_DIAGNOSTIC_DIMENSION_SQL,
         DiagnosticDimension::Account => "coalesce(mr.provider_account_ref, 'unrouted')",
         DiagnosticDimension::ApiKey => "mr.client_api_key_ref",
         DiagnosticDimension::Transport => {
@@ -604,12 +605,16 @@ pub(crate) fn push_diagnostic_dimension_filter(
         DiagnosticDimension::Failure => {
             statement.push(" and mr.error_kind is not null");
         }
+        DiagnosticDimension::Model => {
+            statement.push(" and ");
+            statement.push(MODEL_DIAGNOSTIC_DIMENSION_SQL);
+            statement.push(" is not null");
+        }
         DiagnosticDimension::Status => {
             statement
                 .push(" and coalesce(mr.upstream_status_code, mr.client_status_code) is not null");
         }
         DiagnosticDimension::Provider
-        | DiagnosticDimension::Model
         | DiagnosticDimension::Account
         | DiagnosticDimension::ApiKey
         | DiagnosticDimension::Transport => {}
