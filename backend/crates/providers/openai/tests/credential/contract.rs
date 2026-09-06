@@ -512,7 +512,7 @@ async fn record_success_should_not_overwrite_a_newer_session_winner() {
 }
 
 #[tokio::test]
-async fn selector_should_reuse_the_account_bound_to_the_same_session() {
+async fn selector_should_reuse_and_renew_the_account_bound_to_the_same_session() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_first", "at-first");
     create_account(&store, "acct_second", "at-second");
@@ -566,6 +566,11 @@ async fn selector_should_reuse_the_account_bound_to_the_same_session() {
             .await
             .expect("load affinity"),
         Some(first_account)
+    );
+    assert_eq!(
+        affinity.renewal_ttls(),
+        vec![Duration::from_secs(24 * 60 * 60); 2],
+        "successful response and next selection both renew the binding"
     );
 }
 
@@ -625,10 +630,15 @@ async fn selector_should_replace_a_busy_affinity_binding_after_the_fallback_succ
 }
 
 #[tokio::test]
-async fn selector_should_keep_a_schedulable_affinity_account_despite_soft_health_signals() {
+async fn selector_should_prefer_session_over_weight_and_soft_health() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_first", "at-first");
     create_account(&store, "acct_second", "at-second");
+    store.set_scheduling(
+        "acct_second",
+        None,
+        AccountWeight::new(100).expect("weight"),
+    );
     let affinity = Arc::new(MemorySessionAffinity::default());
     let provider = ProviderKind::new("openai").expect("provider");
     let key = ProviderSessionAffinityKey::try_new("unhealthy-session").expect("affinity key");

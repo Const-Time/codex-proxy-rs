@@ -18,5 +18,5 @@ pub mod sse;
 
 pub use codex::{
     CodexResponsesRequestSemantics, codex_responses_request_semantics,
-    codex_responses_request_semantics_with_turn_metadata,
+    codex_responses_request_semantics_with_turn_metadata, codex_session_id, codex_thread_id,
 };

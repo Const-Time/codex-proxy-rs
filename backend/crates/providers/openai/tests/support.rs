@@ -610,9 +610,14 @@ impl ProviderLeasePort for TestLeaseCoordinator {
 pub(crate) struct MemorySessionAffinity {
     bindings: Mutex<BTreeMap<(String, String), ProviderAccountId>>,
     lookups: Mutex<Vec<String>>,
+    renewal_ttls: Mutex<Vec<Duration>>,
 }
 
 impl MemorySessionAffinity {
+    pub(crate) fn renewal_ttls(&self) -> Vec<Duration> {
+        self.renewal_ttls.lock().expect("affinity TTL lock").clone()
+    }
+
     pub(crate) fn lookup_keys(&self) -> Vec<String> {
         self.lookups.lock().expect("session affinity lock").clone()
     }
@@ -701,7 +706,7 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         key: &'a ProviderSessionAffinityKey,
         expected_account_id: &'a ProviderAccountId,
         replacement_account_id: &'a ProviderAccountId,
-        _ttl: Duration,
+        ttl: Duration,
     ) -> BoxFuture<'a, Result<ProviderAccountId, ProviderStoreError>> {
         Box::pin(async move {
             let binding_key = (
@@ -714,6 +719,10 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
                 .is_none_or(|current| current == expected_account_id)
             {
                 bindings.insert(binding_key, replacement_account_id.clone());
+                self.renewal_ttls
+                    .lock()
+                    .expect("affinity TTL lock")
+                    .push(ttl);
                 return Ok(replacement_account_id.clone());
             }
             bindings.get(&binding_key).cloned().ok_or_else(|| {

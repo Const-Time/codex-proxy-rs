@@ -194,6 +194,7 @@ impl GrokAccountSessionSelector {
             now: SystemTime::now(),
             excluded_accounts: request.excluded_accounts().clone(),
             preferred_account: request.required_account().cloned().or(affinity_account),
+            preferred_account_overrides_weight: false,
             round_robin_cursor: scheduling.round_robin_cursor(),
             eligibility: request.eligibility(),
             account_scope: (!diagnostic).then(|| Arc::clone(request.account_scope())),

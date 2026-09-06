@@ -4,6 +4,41 @@ const MULTI_AGENT_MODE_OPEN_TAG: &str = "<multi_agent_mode>";
 const MULTI_AGENT_MODE_CLOSE_TAG: &str = "</multi_agent_mode>";
 const PROACTIVE_MULTI_AGENT_MODE_PREFIX: &str = "Proactive multi-agent delegation is active.";
 
+/// 各 Codex 端点共用的显式根会话身份。连接边界的 session_id 优先，
+/// 正文及官方 metadata 只做回退；不从 turn、window 或请求内容猜测归属。
+#[must_use]
+pub fn codex_session_id(body: &Map<String, Value>, context: &Map<String, Value>) -> Option<String> {
+    codex_identity_field(body, context, "session_id")
+}
+
+/// 各 Codex 端点共用的显式线程身份，与根会话采用相同的来源优先级。
+#[must_use]
+pub fn codex_thread_id(body: &Map<String, Value>, context: &Map<String, Value>) -> Option<String> {
+    codex_identity_field(body, context, "thread_id")
+}
+
+fn codex_identity_field(
+    body: &Map<String, Value>,
+    context: &Map<String, Value>,
+    field: &str,
+) -> Option<String> {
+    non_empty_string(context.get(field))
+        .or_else(|| non_empty_string(body.get(field)))
+        .or_else(|| client_metadata_string(body, field))
+        .map(str::to_owned)
+        .or_else(|| {
+            let metadata = non_empty_string(context.get("turn_metadata"))
+                .or_else(|| request_turn_metadata(body))?;
+            let metadata: Value = serde_json::from_str(metadata).ok()?;
+            non_empty_string(metadata.get(field)).map(str::to_owned)
+        })
+        .or_else(|| {
+            body.get("context")
+                .and_then(|context| non_empty_string(context.get(field)))
+                .map(str::to_owned)
+        })
+}
+
 /// 从 OpenAI Responses 请求中提取的稳定 Codex 请求语义。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodexResponsesRequestSemantics {

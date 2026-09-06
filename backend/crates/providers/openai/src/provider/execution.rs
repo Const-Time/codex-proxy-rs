@@ -28,6 +28,11 @@ impl CodexProvider {
             .get("image_turn_id")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let session_affinity = derive_codex_endpoint_session_affinity(
+            image.payload(),
+            context.client_api_key_ref(),
+            "session_id",
+        );
         self.execute_raw_json_endpoint(
             context,
             RawJsonEndpointRequest {
@@ -36,6 +41,7 @@ impl CodexProvider {
                 body: image.payload().body().clone(),
                 image_turn_id,
                 turn_metadata: None,
+                session_affinity,
             },
         )
         .await
@@ -59,6 +65,11 @@ impl CodexProvider {
             .get("turn_metadata")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let session_affinity = derive_codex_endpoint_session_affinity(
+            search.payload(),
+            context.client_api_key_ref(),
+            "id",
+        );
         self.execute_raw_json_endpoint(
             context,
             RawJsonEndpointRequest {
@@ -67,6 +78,7 @@ impl CodexProvider {
                 body: search.payload().body().clone(),
                 image_turn_id: None,
                 turn_metadata,
+                session_affinity,
             },
         )
         .await
@@ -83,6 +95,7 @@ impl CodexProvider {
             .select_for_provider_endpoint(&SelectCodexProviderEndpointCredential {
                 request_url: &request.response_origin,
                 attempt: &context,
+                session_affinity: request.session_affinity.as_ref(),
             })
             .await
             .map_err(map_selection_error)?;
@@ -120,6 +133,7 @@ impl CodexProvider {
             quota: Arc::clone(&self.quota),
             lease: Arc::clone(&lease),
             output_started_at: Instant::now(),
+            session_affinity_key: request.session_affinity.map(CodexSessionAffinity::into_key),
         });
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {
@@ -139,6 +153,7 @@ struct RawJsonEndpointRequest {
     body: Bytes,
     image_turn_id: Option<String>,
     turn_metadata: Option<String>,
+    session_affinity: Option<CodexSessionAffinity>,
 }
 
 pub(super) struct ColdResponse {
@@ -173,6 +188,7 @@ pub(super) struct ColdJsonResponse {
     pub(super) quota: Arc<CodexCredentialQuotaService>,
     pub(super) lease: Arc<CodexCredentialLease>,
     pub(super) output_started_at: Instant,
+    pub(super) session_affinity_key: Option<ProviderSessionAffinityKey>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -424,6 +440,14 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             }
         };
 
+        if allows_account_state_mutation && let Some(key) = request.session_affinity_key.as_ref() {
+            // JSON 已完整接收；在首个 yield 前提交亲和迁移，避免下游取消漏掉更新。
+            request.selector.update_session_affinity(
+                key,
+                request.lease.affinity_expected_account_id(),
+                active_account.id(),
+            ).await;
+        }
         let mut metrics = response.transport_metrics.clone();
         metrics.first_event_ms = Some(
             i64::try_from(request.output_started_at.elapsed().as_millis()).unwrap_or(i64::MAX),

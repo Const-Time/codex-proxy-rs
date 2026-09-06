@@ -1,20 +1,23 @@
-//! OpenAI 根会话锚点到 Store 不透明账号亲和键及诊断上下文的单向派生。
+//! OpenAI 会话及子线程到 Store 不透明账号亲和键及诊断上下文的单向派生。
 
 use std::time::Duration;
 
+use gateway_core::operation::RawJsonPayload;
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::ProviderSessionAffinityKey;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::transport::protocol::responses::CodexResponsesRequest;
 use crate::transport::request::derive_conversation_anchor;
 
 const AFFINITY_KEY_HASH_LENGTH: usize = 12;
-pub(crate) const CODEX_ROOT_SESSION_TTL: Duration = Duration::from_secs(4 * 60 * 60);
+pub(crate) const CODEX_ROOT_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// 一次请求派生出的账号亲和键及其结构化日志上下文。
 pub(crate) struct CodexSessionAffinity {
     key: ProviderSessionAffinityKey,
+    root_key: Option<ProviderSessionAffinityKey>,
     key_hash: String,
     anchor_source: &'static str,
     anchor: String,
@@ -25,6 +28,30 @@ impl CodexSessionAffinity {
     #[must_use]
     pub(crate) const fn key(&self) -> &ProviderSessionAffinityKey {
         &self.key
+    }
+
+    pub(crate) fn root_key(&self) -> Option<&ProviderSessionAffinityKey> {
+        self.root_key.as_ref()
+    }
+
+    /// 子线程首次选号继承根会话偏好，之后仅更新自己的绑定。
+    fn with_thread(mut self, thread_id: Option<&str>) -> Option<Self> {
+        if let Some(thread_id) = non_empty(thread_id)
+            && self
+                .session_id
+                .as_deref()
+                .is_some_and(|root| root != thread_id)
+        {
+            let child_key = opaque_affinity_key(
+                "child-thread",
+                &format!("{}\0{thread_id}", self.key.expose_to_store()),
+            )?;
+            self.root_key = Some(std::mem::replace(&mut self.key, child_key));
+            self.key_hash = short_key_hash(&self.key);
+            self.anchor_source = "child-thread";
+            self.anchor = thread_id.to_owned();
+        }
+        Some(self)
     }
 
     #[must_use]
@@ -84,6 +111,37 @@ pub(crate) fn derive_codex_session_affinity(
 ) -> Option<CodexSessionAffinity> {
     let session_id = non_empty(request.client_session_id.as_deref()).map(str::to_owned);
     let (anchor_source, anchor) = derive_account_affinity_anchor(request)?;
+    session_affinity(anchor_source, anchor, session_id, client_api_key_id)?
+        .with_thread(request.client_thread_id.as_deref())
+}
+
+/// 原始 JSON 端点只读取会话身份，发送时仍保留原始字节。Search 的 `id` 是官方
+/// 根 session_id，必须与 Responses 共用命名空间，不能另建一份账号亲和。
+pub(crate) fn derive_codex_endpoint_session_affinity(
+    payload: &RawJsonPayload,
+    client_api_key_id: &ClientApiKeyId,
+    body_session_field: &str,
+) -> Option<CodexSessionAffinity> {
+    let body = serde_json::from_slice::<Map<String, Value>>(payload.body()).unwrap_or_default();
+    let session_id =
+        gateway_protocol::openai::codex_session_id(&body, payload.context()).or_else(|| {
+            non_empty(body.get(body_session_field).and_then(Value::as_str)).map(str::to_owned)
+        })?;
+    session_affinity(
+        "root-session",
+        session_id.clone(),
+        Some(session_id),
+        client_api_key_id,
+    )?
+    .with_thread(gateway_protocol::openai::codex_thread_id(&body, payload.context()).as_deref())
+}
+
+fn session_affinity(
+    anchor_source: &'static str,
+    anchor: String,
+    session_id: Option<String>,
+    client_api_key_id: &ClientApiKeyId,
+) -> Option<CodexSessionAffinity> {
     let session_key = opaque_affinity_key(anchor_source, &anchor)?;
     let key = opaque_affinity_key(
         "client-session",
@@ -93,14 +151,10 @@ pub(crate) fn derive_codex_session_affinity(
             session_key.expose_to_store()
         ),
     )?;
-    // 亲和键本身已经是 SHA-256；日志沿用 WebSocket 诊断的 12 位短哈希长度。
-    let key_hash = key
-        .expose_to_store()
-        .chars()
-        .take(AFFINITY_KEY_HASH_LENGTH)
-        .collect();
+    let key_hash = short_key_hash(&key);
     Some(CodexSessionAffinity {
         key,
+        root_key: None,
         key_hash,
         anchor_source,
         anchor,
@@ -108,9 +162,15 @@ pub(crate) fn derive_codex_session_affinity(
     })
 }
 
-/// 账号选择优先使用根会话事实；`local_conversation_id` 仍可按 child thread 隔离
-/// WebSocket 与 continuation 状态，但 child 身份不再拆分账号首选项。账号不可调度时
-/// selector 仍可按既有策略切换，并由 request scope 清理账号绑定状态。
+fn short_key_hash(key: &ProviderSessionAffinityKey) -> String {
+    // 亲和键本身已经是 SHA-256；日志沿用 WebSocket 诊断的 12 位短哈希长度。
+    key.expose_to_store()
+        .chars()
+        .take(AFFINITY_KEY_HASH_LENGTH)
+        .collect()
+}
+
+/// 先确定根会话锚点，显式子线程在此基础上派生自己的绑定。
 fn derive_account_affinity_anchor(
     request: &CodexResponsesRequest,
 ) -> Option<(&'static str, String)> {

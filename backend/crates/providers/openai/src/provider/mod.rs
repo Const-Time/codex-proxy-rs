@@ -58,8 +58,8 @@ use crate::credential::{
     CodexCredentialRefreshService, CodexCredentialSelector, CodexCyberPolicyScope,
     CodexQuotaRefreshPolicy, CodexSessionAffinity, CredentialSelectionError, RuntimeCodexCookie,
     SelectCodexCredential, SelectCodexProviderEndpointCredential,
-    derive_codex_cyber_policy_session_key, derive_codex_session_affinity,
-    derive_previous_response_id_hash,
+    derive_codex_cyber_policy_session_key, derive_codex_endpoint_session_affinity,
+    derive_codex_session_affinity, derive_previous_response_id_hash,
 };
 use crate::session_transport::CodexSessionTransportRecovery;
 use crate::transport::canonical::{
@@ -223,7 +223,26 @@ impl Provider for CodexProvider {
         client_api_key_id: &gateway_core::policy::ClientApiKeyId,
     ) -> ProviderRequestObservation {
         let Operation::Generate(request) = operation else {
-            return ProviderRequestObservation::default();
+            let affinity = match operation {
+                Operation::Search(request) => derive_codex_endpoint_session_affinity(
+                    request.payload(),
+                    client_api_key_id,
+                    "id",
+                ),
+                Operation::GenerateImage(request) => derive_codex_endpoint_session_affinity(
+                    request.payload(),
+                    client_api_key_id,
+                    "session_id",
+                ),
+                _ => None,
+            };
+            return ProviderRequestObservation {
+                continuation: ContinuationRequestObservation {
+                    affinity_hash: affinity.map(|affinity| affinity.persistence_hash().to_owned()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
         };
         let Ok(encoded) = encode_generate_request(request, "observability") else {
             return ProviderRequestObservation::default();

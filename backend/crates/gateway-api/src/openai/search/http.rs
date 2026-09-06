@@ -10,18 +10,16 @@ use axum::{
 };
 use gateway_core::error::{GatewayError, GatewayErrorKind};
 use gateway_core::operation::{Operation, RawJsonPayload, StandaloneSearchRequest};
-use serde_json::{Map, Value};
 
 use crate::ApiState;
 use crate::openai::{
     auth::{authenticate_client, client_access_error_response},
     error::gateway_error_response,
     provider_endpoint::collect_raw_json_response,
-    responses::request_client_context,
+    responses::{OpenAiRequestHeaders, request_client_context},
 };
 
 const OPENAI_PROTOCOL: &str = "openai";
-const TURN_METADATA_CONTEXT_KEY: &str = "turn_metadata";
 
 /// `POST /v1/alpha/search`。
 pub(crate) async fn standalone_search(
@@ -54,16 +52,7 @@ pub(crate) async fn standalone_search(
 }
 
 fn search_operation(body: Bytes, headers: &HeaderMap) -> Result<Operation, GatewayError> {
-    let mut context = Map::new();
-    if let Some(turn_metadata) = headers
-        .get("x-codex-turn-metadata")
-        .and_then(|value| value.to_str().ok())
-    {
-        context.insert(
-            TURN_METADATA_CONTEXT_KEY.to_owned(),
-            Value::String(turn_metadata.to_owned()),
-        );
-    }
+    let context = OpenAiRequestHeaders::from_headers(headers).session_context();
     let payload = RawJsonPayload::new(OPENAI_PROTOCOL, body)
         .map_err(|_| {
             GatewayError::new(

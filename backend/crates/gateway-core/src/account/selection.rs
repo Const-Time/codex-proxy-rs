@@ -386,6 +386,8 @@ pub struct AccountSelectionContext {
     pub now: SystemTime,
     pub excluded_accounts: BTreeSet<ProviderAccountId>,
     pub preferred_account: Option<ProviderAccountId>,
+    /// 优先账号可调度时，是否优先于其它账号的持久权重。
+    pub preferred_account_overrides_weight: bool,
     pub round_robin_cursor: u64,
     pub eligibility: AccountEligibilityPolicy,
     pub account_scope: Option<std::sync::Arc<crate::account::scope::FrozenAccountScope>>,
@@ -516,7 +518,9 @@ impl AccountSelector {
             {
                 Some(candidate) => match self.scheduling_blocker(candidate, context) {
                     Some(blocker) => PreferredAccountSelection::Blocked(blocker),
-                    None if candidate.account.weight() < highest_weight => {
+                    None if !context.preferred_account_overrides_weight
+                        && candidate.account.weight() < highest_weight =>
+                    {
                         PreferredAccountSelection::Blocked(AccountSchedulingBlocker::LowerWeight)
                     }
                     None => {

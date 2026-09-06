@@ -100,6 +100,7 @@ fn context(strategy: RotationStrategy) -> AccountSelectionContext {
         now: SystemTime::now(),
         excluded_accounts: BTreeSet::new(),
         preferred_account: None,
+        preferred_account_overrides_weight: false,
         round_robin_cursor: 0,
         eligibility: AccountEligibilityPolicy::Enforce,
         account_scope: None,
@@ -415,6 +416,84 @@ fn selector_should_not_let_soft_affinity_bypass_a_higher_weight_account() {
         selected.preferred(),
         PreferredAccountSelection::Blocked(AccountSchedulingBlocker::LowerWeight)
     );
+}
+
+#[test]
+fn selector_should_prioritize_affinity_over_weight_when_requested() {
+    let candidates = [
+        weighted_candidate("acct_preferred", 1, 0),
+        weighted_candidate("acct_higher", 100, 0),
+    ];
+    for strategy in [
+        RotationStrategy::Smart,
+        RotationStrategy::QuotaResetPriority,
+        RotationStrategy::RoundRobin,
+        RotationStrategy::Sticky,
+    ] {
+        let mut selection = context(strategy);
+        selection.preferred_account = Some(candidates[0].account.id().clone());
+        selection.preferred_account_overrides_weight = true;
+        let selected = AccountSelector
+            .select(&candidates, &selection)
+            .expect("preferred account");
+        assert_eq!(
+            (
+                selected.candidate().account.id().as_str(),
+                selected.preferred()
+            ),
+            ("acct_preferred", PreferredAccountSelection::Hit),
+            "{strategy:?}"
+        );
+    }
+}
+
+#[test]
+fn highest_priority_affinity_should_still_obey_existing_scheduling_constraints() {
+    for blocker in [
+        AccountSchedulingBlocker::Excluded,
+        AccountSchedulingBlocker::ConcurrencyLimit,
+        AccountSchedulingBlocker::RequestInterval,
+        AccountSchedulingBlocker::LocalAvailability,
+    ] {
+        let mut candidates = [
+            weighted_candidate("acct_preferred", 1, 0),
+            weighted_candidate("acct_higher", 100, 0),
+        ];
+        let mut selection = context(RotationStrategy::Smart);
+        selection.preferred_account = Some(candidates[0].account.id().clone());
+        selection.preferred_account_overrides_weight = true;
+        match blocker {
+            AccountSchedulingBlocker::Excluded => {
+                selection
+                    .excluded_accounts
+                    .insert(candidates[0].account.id().clone());
+            }
+            AccountSchedulingBlocker::ConcurrencyLimit => candidates[0].signals.in_flight = 3,
+            AccountSchedulingBlocker::RequestInterval => {
+                candidates[0].signals.last_started_at = Some(selection.now);
+                selection.policy = AccountSelectionPolicy::new(
+                    RotationStrategy::Smart,
+                    NonZeroU32::new(3).expect("limit"),
+                    Duration::from_secs(1),
+                );
+            }
+            AccountSchedulingBlocker::LocalAvailability => {
+                candidates[0].signals.rate_limited_until =
+                    Some(selection.now + Duration::from_secs(60))
+            }
+            _ => unreachable!("test cases"),
+        }
+        let selected = AccountSelector
+            .select(&candidates, &selection)
+            .expect("fallback account");
+        assert_eq!(
+            (
+                selected.candidate().account.id().as_str(),
+                selected.preferred()
+            ),
+            ("acct_higher", PreferredAccountSelection::Blocked(blocker))
+        );
+    }
 }
 
 #[test]

@@ -93,6 +93,15 @@ impl OpenAiRequestHeaders {
         }
     }
 
+    /// 独立端点只消费会话身份与 turn metadata，不携带 Responses 的连接状态。
+    pub(crate) fn session_context(&self) -> Map<String, Value> {
+        let mut context = Map::new();
+        insert_protocol_context(&mut context, "session_id", self.session_id.as_ref());
+        insert_protocol_context(&mut context, "thread_id", self.thread_id.as_ref());
+        insert_protocol_context(&mut context, "turn_metadata", self.turn_metadata.as_ref());
+        context
+    }
+
     fn protocol_context(
         &self,
         use_websocket: Option<bool>,

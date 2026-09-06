@@ -120,8 +120,6 @@ fn extract_request_context(request: &mut CodexResponsesRequest) {
     request.codex_window_id = context.codex_window_id;
     request.parent_thread_id = context.parent_thread_id;
     request.client_conversation_id = context.conversation_id;
-    request.client_session_id = context.session_id;
-    request.client_thread_id = context.thread_id;
     request.client_request_id = context.client_request_id;
     request.client_turn_id = context.turn_id;
     request.responses_lite = context.responses_lite;
@@ -137,8 +135,6 @@ struct ExtractedRequestContext {
     codex_window_id: Option<String>,
     parent_thread_id: Option<String>,
     conversation_id: Option<String>,
-    session_id: Option<String>,
-    thread_id: Option<String>,
     client_request_id: Option<String>,
     turn_id: Option<String>,
     responses_lite: Option<String>,
@@ -164,8 +160,6 @@ impl ExtractedRequestContext {
             codex_window_id: body_string(body, "codexWindowId"),
             parent_thread_id: body_string(body, "parentThreadId"),
             conversation_id: body_string(body, "conversation_id"),
-            session_id: body_string(body, "session_id"),
-            thread_id: body_string(body, "thread_id"),
             client_request_id: body_string(body, "x-client-request-id"),
             turn_id: body_string(body, "turn_id").or_else(|| {
                 client_metadata
@@ -221,8 +215,7 @@ pub(crate) fn derive_conversation_anchor(
 }
 
 /// `thread_spawn` 与父任务共享根会话，但它本身是独立的子任务执行。
-/// 因此子线程必须拥有独立的 continuation/WebSocket 传输身份；账号亲和则从共享的
-/// 根会话单独派生。
+/// 因此子线程必须拥有独立的 continuation/WebSocket 传输身份；账号亲和另行派生。
 fn thread_spawn_conversation_anchor(
     request: &CodexResponsesRequest,
 ) -> Option<(&'static str, String)> {
@@ -529,10 +522,8 @@ fn apply_protocol_context(request: &mut CodexResponsesRequest, context: &Map<Str
     request.client_conversation_id = context_string(context, "conversation_id")
         .or_else(|| request.client_conversation_id.take())
         .or(prompt_cache_key);
-    request.client_session_id =
-        context_string(context, "session_id").or_else(|| request.client_session_id.take());
-    request.client_thread_id =
-        context_string(context, "thread_id").or_else(|| request.client_thread_id.take());
+    request.client_session_id = gateway_protocol::openai::codex_session_id(request.body(), context);
+    request.client_thread_id = gateway_protocol::openai::codex_thread_id(request.body(), context);
     request.client_request_id =
         context_string(context, "client_request_id").or_else(|| request.client_request_id.take());
     request.client_turn_id =

@@ -10,14 +10,14 @@ use axum::{
 };
 use gateway_core::error::{GatewayError, GatewayErrorKind};
 use gateway_core::operation::{ImageRequest, ImageRequestKind, Operation, RawJsonPayload};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::ApiState;
 use crate::openai::{
     auth::{authenticate_client, client_access_error_response},
     error::gateway_error_response,
     provider_endpoint::collect_raw_json_response,
-    responses::request_client_context,
+    responses::{OpenAiRequestHeaders, request_client_context},
 };
 
 const OPENAI_PROTOCOL: &str = "openai";
@@ -95,7 +95,7 @@ fn image_operation(
     headers: &HeaderMap,
     kind: ImageRequestKind,
 ) -> Result<Operation, GatewayError> {
-    let mut context = Map::new();
+    let mut context = OpenAiRequestHeaders::from_headers(headers).session_context();
     if let Some(turn_id) = headers
         .get("x-codex-image-turn-id")
         .and_then(|value| value.to_str().ok())

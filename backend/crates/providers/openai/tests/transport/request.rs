@@ -163,7 +163,7 @@ fn encoder_should_restore_conversation_fallback_after_body_and_context_values() 
 }
 
 #[test]
-fn encoder_should_ignore_legacy_context_aliases_and_metadata_fallbacks() {
+fn encoder_should_accept_metadata_session_and_thread_ids_but_ignore_legacy_context_aliases() {
     let request = request(Map::from_iter([
         ("model".to_owned(), json!("client-model")),
         ("input".to_owned(), json!("prompt")),
@@ -222,7 +222,17 @@ fn encoder_should_ignore_legacy_context_aliases_and_metadata_fallbacks() {
             encoded.client_turn_id,
         ),
         (
-            None, None, None, None, None, None, None, None, None, None, None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("metadata-session".to_owned()),
+            Some("metadata-thread".to_owned()),
+            None,
+            None,
         )
     );
 }
