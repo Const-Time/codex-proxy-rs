@@ -72,6 +72,7 @@ pub(super) struct FakeProviderAdmin {
     import_account_ids: Mutex<Vec<String>>,
     quota_requests: Mutex<Vec<ProviderQuotaRequest>>,
     quota: Mutex<ProviderQuota>,
+    quota_refresh_account: Mutex<Option<(Arc<FakeAccountStore>, AccountRecord)>>,
     current_credential_revision: Mutex<Revision>,
     reset_credit_commands: Mutex<Vec<ConsumeProviderResetCredit>>,
 }
@@ -89,6 +90,7 @@ impl FakeProviderAdmin {
             import_account_ids: Mutex::new(vec!["acct_prepared".to_owned()]),
             quota_requests: Mutex::new(Vec::new()),
             quota: Mutex::new(empty_quota()),
+            quota_refresh_account: Mutex::new(None),
             current_credential_revision: Mutex::new(revision(1)),
             reset_credit_commands: Mutex::new(Vec::new()),
         })
@@ -346,6 +348,14 @@ impl ProviderAdmin for FakeProviderAdmin {
     ) -> Result<ProviderQuota, ProviderAdminError> {
         if request.refresh {
             self.record("provider.quota");
+            if let Some((store, account)) = self
+                .quota_refresh_account
+                .lock()
+                .expect("quota refresh account")
+                .take()
+            {
+                store.set_accounts(vec![account]);
+            }
         }
         self.quota_requests
             .lock()
@@ -1096,6 +1106,47 @@ async fn accounts_refresh_should_keep_guard_through_store_commit() {
         ]
     );
     assert_eq!(store.audit_requests(), ["refresh-request"]);
+}
+
+#[tokio::test]
+async fn accounts_quota_refresh_should_return_the_updated_account_status() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let mut account = account_record("openai");
+    account.quota = QuotaState::exhausted(
+        QuotaEvidence::UsageLimitReached,
+        std::time::SystemTime::now(),
+        None,
+    );
+    let store = FakeAccountStore::with_account(account.clone(), events.clone());
+    account.quota = QuotaState::allowed(std::time::SystemTime::now());
+    *provider
+        .quota_refresh_account
+        .lock()
+        .expect("quota refresh account") = Some((store.clone(), account));
+
+    let result = accounts_service(provider, store)
+        .await
+        .accounts()
+        .quota(
+            &ProviderAccountId::new("acct_test").expect("account ID"),
+            true,
+        )
+        .await
+        .expect("refresh quota");
+
+    assert_eq!(
+        result.account.quota.access(),
+        gateway_core::account::QuotaAccessState::Allowed
+    );
+    assert_eq!(
+        result.projection.status,
+        gateway_admin::model::accounts::AccountStatus::Normal
+    );
+    assert_eq!(
+        recorded(&events),
+        ["store.load_account", "provider.quota", "store.load_account"]
+    );
 }
 
 #[tokio::test]

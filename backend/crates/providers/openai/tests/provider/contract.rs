@@ -3690,8 +3690,8 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
     Mock::given(method("GET"))
         .and(path("/api/codex/usage"))
         .and(header("authorization", format!("Bearer at-{account_id}")))
-        // 生产环境会短暂返回互相矛盾的快照：98/99% 且布尔位仍声称可用。
-        // 后台同步不能覆盖真实请求已确认的额度耗尽。
+        // 失败后的补查只更新观察时间，即使响应满足恢复条件，
+        // 也不能覆盖本次推理刚确认的耗尽；恢复由独立的主动刷新判断。
         .respond_with(
             ResponseTemplate::new(200)
                 // 验证后台 usage 同步不能把原始的额度错误响应拖到查询完成之后。
@@ -3700,7 +3700,7 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
                     "rate_limit": {
                         "allowed": true,
                         "limit_reached": false,
-                        "primary_window": {"used_percent": 99, "reset_at": reset_at},
+                        "primary_window": {"used_percent": 0, "reset_at": reset_at + 18_000},
                         "secondary_window": {"used_percent": 0}
                     }
                 })),
@@ -3781,10 +3781,13 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
 
     timeout(Duration::from_secs(5), async {
         loop {
-            let requests = server.received_requests().await.expect("received requests");
-            if requests
-                .iter()
-                .any(|request| request.url.path() == "/api/codex/usage")
+            let observations = store
+                .get_quotas(&[account.id().clone()])
+                .await
+                .expect("quota observations");
+            if observations
+                .first()
+                .is_some_and(|observation| observation.observed_at > projected_observed_at)
             {
                 break;
             }
@@ -3792,7 +3795,7 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
         }
     })
     .await
-    .expect("background usage refresh must run");
+    .expect("background usage refresh must complete");
     let observation = store
         .get_quotas(&[account.id().clone()])
         .await
@@ -3800,7 +3803,7 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
         .into_iter()
         .next()
         .expect("authoritative quota projection");
-    assert_eq!(observation.observed_at, projected_observed_at);
+    assert!(observation.observed_at > projected_observed_at);
     let quota = Value::Object(observation.quota.into_inner());
     assert_eq!(
         quota
@@ -3836,7 +3839,7 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
             .quota()
             .access(),
         QuotaAccessState::Exhausted,
-        "a contradictory full usage snapshot must not unlock a confirmed exhausted account"
+        "a failure follow-up must preserve access even when the reset recovery condition is met"
     );
 }
 

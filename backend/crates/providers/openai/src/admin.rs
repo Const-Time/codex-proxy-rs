@@ -955,13 +955,7 @@ fn codex_quota_window_label(
     match kind {
         CodexQuotaWindowKind::Monthly => "月额度".to_owned(),
         CodexQuotaWindowKind::Weekly => "周额度".to_owned(),
-        CodexQuotaWindowKind::ShortTerm => {
-            if window_seconds.is_some_and(|seconds| seconds > 86_400) {
-                "周额度".to_owned()
-            } else {
-                "5小时额度".to_owned()
-            }
-        }
+        CodexQuotaWindowKind::ShortTerm => "5小时额度".to_owned(),
         CodexQuotaWindowKind::Other => custom_quota_window_label(window_seconds, role),
     }
 }

@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use super::document::{
     DEFAULT_CODEX_LIMIT_ID, RATE_LIMITS_BY_LIMIT_ID, canonicalize_rate_limit_document,
 };
+use super::recovery::{QuotaRecovery, RECOVERY_FIELD};
 use super::{CodexCredentialQuotaError, QUOTA_SCHEDULING_TTL};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,8 +103,8 @@ impl CodexQuotaWindow {
 
     /// 该窗口是否已触顶（`limit_reached` 或 `used_percent >= 100`）。
     #[must_use]
-    pub const fn limit_reached(&self) -> bool {
-        self.limit_reached
+    pub fn limit_reached(&self) -> bool {
+        self.limit_reached || self.used_percent.is_some_and(|used| used >= 100.0)
     }
 }
 
@@ -115,6 +116,7 @@ pub struct CodexAccountQuotaSnapshot {
     fact: CodexQuotaFact,
     quota: QuotaState,
     windows: Vec<CodexQuotaWindow>,
+    pub(super) recovery: Option<QuotaRecovery>,
 }
 
 impl CodexAccountQuotaSnapshot {
@@ -300,11 +302,9 @@ pub(crate) fn parse_account_quota_snapshot(
 ) -> Result<CodexAccountQuotaSnapshot, CodexCredentialQuotaError> {
     let object = canonical_quota_object(usage)?;
     let fact = parse_codex_quota_object(&object)?;
-    let quota = authoritative_quota_state(&object, observed_at)?;
     let mut windows = Vec::new();
     for limit in canonical_rate_limits(&object)? {
         parse_rate_limit_windows(
-            &limit.key,
             &limit.source,
             limit.account_wide,
             limit.limit_name.as_deref(),
@@ -317,6 +317,12 @@ pub(crate) fn parse_account_quota_snapshot(
             .cmp(&quota_source_order(right.source()))
             .then_with(|| left.key.cmp(&right.key))
     });
+    let quota = authoritative_quota_state(&object, &windows, observed_at)?;
+    let recovery = object
+        .get(RECOVERY_FIELD)
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|_| CodexCredentialQuotaError::InvalidCredentialData)?;
     Ok(CodexAccountQuotaSnapshot {
         account_id,
         credential_revision,
@@ -324,6 +330,7 @@ pub(crate) fn parse_account_quota_snapshot(
         fact,
         quota,
         windows,
+        recovery,
     })
 }
 
@@ -338,6 +345,7 @@ fn quota_source_order(source: &str) -> u8 {
 /// 默认 `codex` 桶是唯一可改变账号额度访问结论的 quota 响应字段。
 fn authoritative_quota_state(
     usage: &Map<String, Value>,
+    windows: &[CodexQuotaWindow],
     observed_at: SystemTime,
 ) -> Result<QuotaState, CodexCredentialQuotaError> {
     let Some(rate_limit) = usage
@@ -355,37 +363,28 @@ fn authoritative_quota_state(
         .ok_or(CodexCredentialQuotaError::InvalidCredentialData)?;
     let allowed = optional_bool(rate_limit, "allowed")?;
     let top_level_reached = optional_bool(rate_limit, "limit_reached")?.unwrap_or(false);
-    let primary_window = rate_limit
-        .get("primary_window")
-        .filter(|value| !value.is_null())
-        .map(|value| {
-            value
-                .as_object()
-                .ok_or(CodexCredentialQuotaError::InvalidCredentialData)
+    let window_reached = windows
+        .iter()
+        .any(|w| w.is_account_wide() && w.limit_reached);
+    let reset_at = windows
+        .iter()
+        .filter(|w| w.is_account_wide() && w.limit_reached())
+        .filter_map(CodexQuotaWindow::reset_at)
+        .min()
+        .or_else(|| {
+            windows
+                .iter()
+                .filter(|w| w.is_account_wide())
+                .filter_map(CodexQuotaWindow::reset_at)
+                .min()
         })
-        .transpose()?;
-    let primary_reached = primary_window
-        .map(|window| optional_bool(window, "limit_reached"))
-        .transpose()?
-        .flatten()
-        .unwrap_or(false);
-    let reset_at = primary_window
-        .and_then(|window| window.get("reset_at"))
-        .map(|value| {
-            value
-                .as_i64()
-                .filter(|value| *value > 0)
-                .and_then(|value| DateTime::<Utc>::from_timestamp(value, 0))
-                .map(SystemTime::from)
-                .ok_or(CodexCredentialQuotaError::InvalidCredentialData)
-        })
-        .transpose()?;
+        .map(SystemTime::from);
 
     if allowed == Some(true) {
-        if top_level_reached || primary_reached {
+        if top_level_reached || window_reached {
             tracing::warn!(
                 top_level_reached,
-                primary_reached,
+                window_reached,
                 "OpenAI quota returned contradictory access facts; explicit allowed=true wins"
             );
         }
@@ -398,7 +397,7 @@ fn authoritative_quota_state(
             reset_at,
         ));
     }
-    if top_level_reached || primary_reached {
+    if top_level_reached || window_reached {
         return Ok(QuotaState::exhausted(
             QuotaEvidence::AccountLimitReached,
             observed_at,
@@ -408,9 +407,8 @@ fn authoritative_quota_state(
     Ok(QuotaState::observed_unknown(observed_at))
 }
 
-/// 一个规范化后的限流桶：`key` 用于稳定区分窗口，`source` 用于展示分组。
+/// 一个规范化后的限流桶，source 是上游的稳定 limit_id。
 struct CanonicalRateLimit<'a> {
-    key: String,
     source: String,
     account_wide: bool,
     limit_name: Option<String>,
@@ -441,7 +439,6 @@ fn canonical_rate_limits(
             .and_then(Value::as_str)
             .map(str::to_owned);
         limits.push(CanonicalRateLimit {
-            key: source.clone(),
             account_wide: is_codex_limit_id(&source),
             source,
             limit_name,
@@ -456,7 +453,6 @@ fn is_codex_limit_id(value: &str) -> bool {
 }
 
 fn parse_rate_limit_windows(
-    key_source: &str,
     source: &str,
     account_wide: bool,
     limit_name: Option<&str>,
@@ -466,9 +462,7 @@ fn parse_rate_limit_windows(
     let object = value
         .as_object()
         .ok_or(CodexCredentialQuotaError::InvalidCredentialData)?;
-    let allowed = optional_bool(object, "allowed")?;
-    let top_level_reached = allowed != Some(true)
-        && (optional_bool(object, "limit_reached")?.unwrap_or(false) || allowed == Some(false));
+    let start = output.len();
     for (name, role) in [
         ("primary_window", CodexQuotaWindowRole::Primary),
         ("secondary_window", CodexQuotaWindowRole::Secondary),
@@ -506,15 +500,16 @@ fn parse_rate_limit_windows(
                     .ok_or(CodexCredentialQuotaError::InvalidCredentialData)
             })
             .transpose()?;
-        let limit_reached = allowed != Some(true)
-            && (top_level_reached
-                || window
-                    .get("limit_reached")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false));
+        let limit_reached = optional_bool(window, "limit_reached")?.unwrap_or(false);
         let kind = quota_window_kind(window_seconds);
+        // primary/secondary 是协议槽位，不代表固定周期。窗口身份使用上游
+        // limit_id 和实际时长，5h/周/月分类只参与展示。
+        let key = match window_seconds {
+            Some(seconds) => format!("{source}:{seconds}s"),
+            None => format!("{source}:{name}"),
+        };
         output.push(CodexQuotaWindow {
-            key: format!("{}-{}", quota_key(key_source), quota_role_name(role, kind)),
+            key,
             source: source.to_owned(),
             account_wide,
             limit_name: limit_name.map(str::to_owned),
@@ -525,6 +520,13 @@ fn parse_rate_limit_windows(
             reset_at,
             limit_reached,
         });
+    }
+    // 同桶同周期无法仅凭时长区分，保留官方槽位，避免合并两个独立限制。
+    if let [primary, secondary] = &mut output[start..]
+        && primary.key == secondary.key
+    {
+        primary.key.push_str(":primary_window");
+        secondary.key.push_str(":secondary_window");
     }
     Ok(())
 }
@@ -550,41 +552,6 @@ const fn quota_window_kind(seconds: Option<u64>) -> CodexQuotaWindowKind {
         Some(value) if value >= 574_560 && value <= 635_040 => CodexQuotaWindowKind::Weekly,
         Some(value) if value >= 2_462_400 && value <= 2_721_600 => CodexQuotaWindowKind::Monthly,
         _ => CodexQuotaWindowKind::Other,
-    }
-}
-
-fn quota_key(value: &str) -> String {
-    let mut key = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    while key.contains("--") {
-        key = key.replace("--", "-");
-    }
-    let key = key.trim_matches('-');
-    if key.is_empty() {
-        "quota".to_owned()
-    } else {
-        key.to_owned()
-    }
-}
-
-const fn quota_role_name(role: CodexQuotaWindowRole, kind: CodexQuotaWindowKind) -> &'static str {
-    match kind {
-        CodexQuotaWindowKind::ShortTerm => "five-hour",
-        CodexQuotaWindowKind::Weekly => "weekly",
-        CodexQuotaWindowKind::Monthly => "monthly",
-        CodexQuotaWindowKind::Other => match role {
-            CodexQuotaWindowRole::Primary => "primary",
-            CodexQuotaWindowRole::Secondary => "secondary",
-            CodexQuotaWindowRole::Monthly => "monthly",
-        },
     }
 }
 

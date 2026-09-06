@@ -3,9 +3,11 @@
 //! - [`document`]：上游 `/usage` 输入到多桶 map 的单向规范化。
 //! - [`snapshot`]：快照/窗口解析、聚合、O(1) 滚动与调度信号。
 //! - [`evidence`]：额度接口错误到凭据/额度事实的分类。
+//! - [`recovery`]：各额度窗口独立的恢复基准与访问结论。
 
 mod document;
 pub(crate) mod evidence;
+mod recovery;
 pub(crate) mod snapshot;
 
 pub use snapshot::{
@@ -46,6 +48,7 @@ use document::{
     canonicalize_rate_limit_document,
 };
 use evidence::{QuotaEndpointFailure, classify_quota_endpoint_failure};
+use recovery::{RECOVERY_FIELD, reconcile_refresh};
 use snapshot::{
     parse_account_quota_snapshot, quota_projection_ttl, quota_snapshot_from_observation,
     scheduling_signals_from_snapshot,
@@ -56,7 +59,6 @@ pub(crate) const QUOTA_SCHEDULING_TTL: Duration = Duration::from_secs(10 * 60);
 const QUOTA_HYDRATION_FAILURE_TTL: Duration = Duration::from_secs(5);
 const EXHAUSTED_QUOTA_FALLBACK_RECHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
-const RESET_RECOVERY_MAX_USED_PERCENT: f64 = 10.0;
 /// 首次 OAuth 异步观察失败时，由既有 quota worker 兜底重试的单轮上限。
 const INITIAL_QUOTA_SYNC_BATCH: usize = 100;
 // 5xx 上游拒绝的短退避重试预算；指数退避 1s/2s，吞掉瞬时抖动。
@@ -775,13 +777,14 @@ impl CodexCredentialQuotaService {
         observed_at: SystemTime,
         summary: &mut CodexQuotaSyncSummary,
     ) -> Result<(), CodexCredentialQuotaError> {
-        let object = normalize_quota_window_placeholders(
+        let mut object = normalize_quota_window_placeholders(
             value
                 .as_object()
                 .cloned()
                 .ok_or(CodexCredentialQuotaError::InvalidCredentialData)?,
         );
-        let snapshot = parse_account_quota_snapshot(
+        object.remove(RECOVERY_FIELD);
+        let mut snapshot = parse_account_quota_snapshot(
             account.id().clone(),
             account.revision(),
             observed_at,
@@ -792,33 +795,12 @@ impl CodexCredentialQuotaService {
         } else {
             None
         };
-        if account.quota().is_exhausted()
-            && !quota_refresh_allows_recovery(account, &snapshot, previous.as_ref())
-        {
-            let outcome = self
-                .store
-                .touch_quota_observation(QuotaObservationTouch {
-                    account_id: account.id().clone(),
-                    expected_revision: account.revision(),
-                    observed_at,
-                })
-                .await?;
-            if outcome == QuotaWriteOutcome::Conflict {
-                summary.stale += 1;
-                return Ok(());
-            }
-            if let Some(previous) = previous {
-                self.scheduling
-                    .observe(&previous.with_observed_at(observed_at));
-            }
-            summary.exhausted += 1;
-            return Ok(());
-        }
-        let state = if account.quota().is_exhausted() {
-            QuotaState::allowed(observed_at)
-        } else {
-            account.quota().merge_observation(snapshot.quota())
-        };
+        let state = reconcile_refresh(
+            account.quota(),
+            &mut snapshot,
+            previous.as_ref(),
+            &mut object,
+        )?;
         let snapshot = snapshot.with_quota_state(state);
         let outcome = self
             .store
@@ -1086,13 +1068,14 @@ impl CodexCredentialQuotaService {
                 });
             }
         };
-        let object = normalize_quota_window_placeholders(
+        let mut object = normalize_quota_window_placeholders(
             value
                 .as_object()
                 .cloned()
                 .ok_or(CodexCredentialQuotaError::InvalidCredentialData)?,
         );
-        let snapshot = parse_account_quota_snapshot(
+        object.remove(RECOVERY_FIELD);
+        let mut snapshot = parse_account_quota_snapshot(
             account.id().clone(),
             account.revision(),
             observed_at,
@@ -1103,7 +1086,9 @@ impl CodexCredentialQuotaService {
         } else {
             None
         };
-        if !quota_refresh_allows_recovery(&account, &snapshot, previous.as_ref()) {
+        if account.quota().is_exhausted()
+            && matches!(authority, QuotaRefreshAuthority::PreserveAccess)
+        {
             if self
                 .store
                 .touch_quota_observation(QuotaObservationTouch {
@@ -1127,15 +1112,14 @@ impl CodexCredentialQuotaService {
                     .with_observed_at(observed_at),
             });
         }
-        let state = if account.quota().is_exhausted() {
-            QuotaState::allowed(observed_at)
-        } else {
-            match authority {
-                QuotaRefreshAuthority::ObserveAccess => {
-                    account.quota().merge_observation(snapshot.quota())
-                }
-                QuotaRefreshAuthority::PreserveAccess => account.quota(),
-            }
+        let state = match authority {
+            QuotaRefreshAuthority::ObserveAccess => reconcile_refresh(
+                account.quota(),
+                &mut snapshot,
+                previous.as_ref(),
+                &mut object,
+            )?,
+            QuotaRefreshAuthority::PreserveAccess => account.quota(),
         };
         let snapshot = snapshot.with_quota_state(state);
         if self
@@ -1313,44 +1297,6 @@ fn reset_credit_response_was_explicit_rejection(
     diagnostics: &crate::transport::CodexUpstreamDiagnostics,
 ) -> bool {
     !status.is_success() && diagnostics.status_code == Some(status.as_u16())
-}
-
-fn quota_refresh_allows_recovery(
-    account: &ProviderAccount,
-    refreshed: &CodexAccountQuotaSnapshot,
-    previous: Option<&CodexAccountQuotaSnapshot>,
-) -> bool {
-    if !account.quota().is_exhausted() {
-        return true;
-    }
-    if refreshed.quota().is_exhausted() {
-        return false;
-    }
-    let previous_reset_at = account.quota().reset_at().or_else(|| {
-        previous?
-            .windows()
-            .iter()
-            .find(|window| {
-                window.source() == "codex" && window.role() == CodexQuotaWindowRole::Primary
-            })?
-            .reset_at()
-            .map(SystemTime::from)
-    });
-    let Some(previous_reset_at) = previous_reset_at else {
-        return false;
-    };
-    let Some(primary) = refreshed.windows().iter().find(|window| {
-        window.source() == "codex" && window.role() == CodexQuotaWindowRole::Primary
-    }) else {
-        return false;
-    };
-    let Some(refreshed_reset_at) = primary.reset_at().map(SystemTime::from) else {
-        return false;
-    };
-    let Some(used_percent) = primary.used_percent() else {
-        return false;
-    };
-    refreshed_reset_at > previous_reset_at && used_percent < RESET_RECOVERY_MAX_USED_PERCENT
 }
 
 async fn fetch_usage_once(

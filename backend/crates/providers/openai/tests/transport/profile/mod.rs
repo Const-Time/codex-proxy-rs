@@ -12,8 +12,7 @@ use gateway_core::routing::ProviderKind;
 use provider_openai::transport::profile::{
     CodexArtifactProfileCache, CodexBundledReleaseProfile, CodexDesktopRelease,
     CodexDesktopReleaseError, CodexDesktopReleaseService, CodexDesktopReleaseTransport,
-    CodexWireProfile, CodexWireProfileState, OfficialCodexDesktopReleaseTransport,
-    parse_desktop_release,
+    CodexWireProfile, CodexWireProfileState, parse_desktop_release,
 };
 
 mod desktop_artifact;
@@ -317,23 +316,6 @@ async fn cache_failure_should_not_publish_a_partially_verified_profile() {
 
     assert_eq!(state.snapshot(), original);
     assert!(service.status().snapshot().latest.is_none());
-}
-
-#[tokio::test]
-#[ignore = "downloads bounded ranges from the current official macOS artifact"]
-async fn official_desktop_artifact_should_expose_its_bundled_core_version() {
-    let transport = OfficialCodexDesktopReleaseTransport::new().expect("official transport");
-    let release = transport.fetch().await.expect("official appcast release");
-    let core_version = transport
-        .fetch_bundled_core_version(&release)
-        .await
-        .expect("bundled Core version");
-
-    semver::Version::parse(&core_version).expect("semantic bundled Core version");
-    eprintln!(
-        "official Desktop {} (build {}) bundles Core {core_version}",
-        release.version, release.build
-    );
 }
 
 fn service(

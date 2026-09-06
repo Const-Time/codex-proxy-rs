@@ -269,6 +269,11 @@ impl DefaultAccountsService {
             })
             .await
             .map_err(|error| map_provider_error(error, "provider quota"))?;
+        let stored = if refresh_quota {
+            self.load_account(account_id).await?
+        } else {
+            stored
+        };
         self.attach_quota_local_usage(
             std::slice::from_ref(&stored),
             std::slice::from_mut(&mut quota),

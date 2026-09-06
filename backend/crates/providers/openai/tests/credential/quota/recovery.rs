@@ -75,7 +75,7 @@ async fn quota_refresh_updates_access_fact_without_recovering_credential_error()
 }
 
 #[tokio::test]
-async fn exhausted_quota_worker_only_touches_refresh_time_when_recovery_is_rejected() {
+async fn exhausted_quota_worker_updates_usage_without_unlocking_at_high_usage() {
     let store = Arc::new(MemoryAccountStore::default());
     let account_id = "acct_worker_quota_recovery_gate";
     create_account(&store, account_id).await;
@@ -124,14 +124,14 @@ async fn exhausted_quota_worker_only_touches_refresh_time_when_recovery_is_rejec
 
     assert_eq!(summary.exhausted, 1);
     assert_eq!(summary.updated, 0);
-    assert_eq!(store.quota_json(account_id), Some(old_quota));
+    assert_ne!(store.quota_json(account_id), Some(old_quota));
     let refreshed = service
         .read_account(account.id())
         .await
         .expect("read refreshed quota")
         .expect("refreshed quota snapshot");
     assert!(refreshed.observed_at() > old_snapshot.observed_at());
-    assert_eq!(refreshed.fact(), old_snapshot.fact());
+    assert_eq!(refreshed.fact().remaining_percent(), Some(2));
     assert_eq!(refreshed.quota().access(), QuotaAccessState::Exhausted);
     assert_eq!(
         store
@@ -146,14 +146,7 @@ async fn exhausted_quota_worker_only_touches_refresh_time_when_recovery_is_rejec
 #[tokio::test]
 async fn manual_quota_refresh_only_recovers_after_reset_advances_below_ten_percent() {
     for (suffix, allowed, limit_reached, reset_at, used_percent, recovered) in [
-        (
-            "still_exhausted",
-            false,
-            true,
-            1_900_003_600_i64,
-            0_u8,
-            false,
-        ),
+        ("stale_denial", false, true, 1_900_003_600_i64, 0_u8, true),
         ("same_reset", true, false, 1_900_000_000_i64, 0_u8, false),
         ("exactly_ten", true, false, 1_900_003_600_i64, 10_u8, false),
         ("below_ten", true, false, 1_900_003_600_i64, 9_u8, true),
@@ -207,17 +200,13 @@ async fn manual_quota_refresh_only_recovers_after_reset_advances_below_ten_perce
             .expect("refresh exhausted quota");
         let current = store.account(&account_id).expect("refreshed account");
 
-        if recovered {
-            assert_eq!(snapshot.fact().remaining_percent(), Some(91));
-            assert_eq!(snapshot.quota().access(), QuotaAccessState::Allowed);
-            assert_ne!(store.quota_json(&account_id), Some(old_quota));
-            assert_eq!(current.quota().access(), QuotaAccessState::Allowed);
-        } else {
-            assert_eq!(snapshot.fact(), old_snapshot.fact());
-            assert_eq!(snapshot.quota().access(), QuotaAccessState::Exhausted);
-            assert_eq!(store.quota_json(&account_id), Some(old_quota));
-            assert_eq!(current.quota().access(), QuotaAccessState::Exhausted);
-        }
+        assert_eq!(
+            snapshot.fact().remaining_percent(),
+            Some(100 - used_percent)
+        );
+        assert_ne!(store.quota_json(&account_id), Some(old_quota));
+        assert_eq!(snapshot.quota().is_exhausted(), !recovered, "{suffix}");
+        assert_eq!(current.quota().is_exhausted(), !recovered, "{suffix}");
         assert!(snapshot.observed_at() > old_snapshot.observed_at());
     }
 }
