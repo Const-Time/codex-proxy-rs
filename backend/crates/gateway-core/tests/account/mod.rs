@@ -697,8 +697,8 @@ fn account_feedback_should_decay_failure_rate_after_success() {
 #[test]
 fn smart_selector_should_use_provider_quota_rank_after_load_is_equal() {
     let candidates = vec![
-        candidate("acct_low_quota", 0, Some(20)),
-        candidate("acct_high_quota", 0, Some(80)),
+        candidate("acct_low_quota", 0, Some(2_000)),
+        candidate("acct_high_quota", 0, Some(8_000)),
     ];
     let selected = AccountSelector
         .select(&candidates, &context(RotationStrategy::Smart))
@@ -743,10 +743,10 @@ fn quota_reset_selector_should_use_capacity_utilization_as_load_tiebreaker() {
 }
 
 #[test]
-fn smart_selector_should_prefer_known_quota_over_unknown_after_load_is_equal() {
+fn smart_selector_should_prefer_sufficient_known_quota_over_unknown_after_load_is_equal() {
     let candidates = vec![
         candidate("acct_unknown", 0, None),
-        candidate("acct_known", 0, Some(1)),
+        candidate("acct_known", 0, Some(8_000)),
     ];
     let selected = AccountSelector
         .select(&candidates, &context(RotationStrategy::Smart))

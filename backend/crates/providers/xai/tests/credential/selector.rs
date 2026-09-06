@@ -949,15 +949,16 @@ async fn smart_strategy_uses_common_account_health_feedback() {
 
 #[tokio::test]
 async fn smart_strategy_never_reuses_quota_projection_after_credential_rotation() {
-    let fixture = SelectorFixture::new(&["aaa-stale-high", "zzz-current-low"]).await;
+    let fixture = SelectorFixture::new(&["aaa-stale-high", "zzz-current-known"]).await;
     let stale = account_id("aaa-stale-high");
     fixture
         .seed_quota(&stale, 5.0, Duration::from_secs(600))
         .await;
     fixture
         .seed_quota(
-            &account_id("zzz-current-low"),
-            95.0,
+            // 剩余 75% 低于旧观测的 95%，但高于观测失效后的未知额度中性值。
+            &account_id("zzz-current-known"),
+            25.0,
             Duration::from_secs(600),
         )
         .await;
@@ -999,7 +1000,7 @@ async fn smart_strategy_never_reuses_quota_projection_after_credential_rotation(
         .await
         .expect("current quota-ranked account");
 
-    assert_eq!(selected.account_id(), &account_id("zzz-current-low"));
+    assert_eq!(selected.account_id(), &account_id("zzz-current-known"));
 }
 
 #[tokio::test]

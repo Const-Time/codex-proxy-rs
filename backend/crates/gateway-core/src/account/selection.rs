@@ -87,6 +87,7 @@ pub struct AccountRuntimeSignals {
     pub in_flight: u32,
     pub last_started_at: Option<SystemTime>,
     pub quota_reset_at: Option<SystemTime>,
+    /// Provider 归一化的剩余额度基点：0 耗尽，10_000 全部可用。
     pub quota_remaining_rank: Option<u64>,
     pub rate_limited_until: Option<SystemTime>,
     pub failure_rate_basis_points: Option<u16>,
@@ -323,6 +324,7 @@ pub struct AccountQuotaSignals {
 }
 
 impl AccountQuotaSignals {
+    /// `remaining_rank` 使用剩余额度基点，范围为 0..=10_000。
     #[must_use]
     pub const fn new(reset_at: Option<SystemTime>, remaining_rank: Option<u64>) -> Self {
         Self {
@@ -640,6 +642,10 @@ const SMART_LOAD_WEIGHT: f64 = 1.0;
 const SMART_QUOTA_WEIGHT: f64 = 0.8;
 const SMART_FAILURE_WEIGHT: f64 = 1.0;
 const SMART_LATENCY_WEIGHT: f64 = 0.5;
+// 容忍 5 个百分点的单项负载/失败率差异，避免微小信号波动独占新会话。
+const SMART_SCORE_TOLERANCE: f64 = 0.05;
+// 首输出 10 秒时延迟得分减半；固定尺度不随其他候选账号变化。
+const SMART_LATENCY_HALF_SCORE_MS: f64 = 10_000.0;
 
 fn capacity_utilization(candidate: &AccountCandidate, default_concurrency: NonZeroU32) -> f64 {
     f64::from(candidate.signals.in_flight)
@@ -651,94 +657,32 @@ fn capacity_utilization(candidate: &AccountCandidate, default_concurrency: NonZe
         )
 }
 
-struct SmartNormalization {
-    max_capacity_utilization: f64,
-    min_quota: Option<u64>,
-    max_quota: Option<u64>,
-    min_latency_ms: Option<u64>,
-    max_latency_ms: Option<u64>,
-}
-
-impl SmartNormalization {
-    fn from_candidates(candidates: &[&AccountCandidate], default_concurrency: NonZeroU32) -> Self {
-        let max_capacity_utilization = candidates
-            .iter()
-            .map(|candidate| capacity_utilization(candidate, default_concurrency))
-            .reduce(f64::max)
-            .unwrap_or_default();
-        let min_quota = candidates
-            .iter()
-            .filter_map(|candidate| candidate.signals.quota_remaining_rank)
-            .min();
-        let max_quota = candidates
-            .iter()
-            .filter_map(|candidate| candidate.signals.quota_remaining_rank)
-            .max();
-        let min_latency_ms = candidates
-            .iter()
-            .filter_map(|candidate| candidate.signals.first_output_latency_ms)
-            .filter(|latency| *latency > 0)
-            .min();
-        let max_latency_ms = candidates
-            .iter()
-            .filter_map(|candidate| candidate.signals.first_output_latency_ms)
-            .filter(|latency| *latency > 0)
-            .max();
-        Self {
-            max_capacity_utilization,
-            min_quota,
-            max_quota,
-            min_latency_ms,
-            max_latency_ms,
-        }
-    }
-}
-
 fn select_smart_candidate<'a>(
     candidates: &[&'a AccountCandidate],
     default_concurrency: NonZeroU32,
     cursor: u64,
 ) -> Option<&'a AccountCandidate> {
-    let normalization = SmartNormalization::from_candidates(candidates, default_concurrency);
     let mut ranked = candidates
         .iter()
-        .map(|candidate| {
-            (
-                *candidate,
-                smart_score(candidate, default_concurrency, &normalization),
-            )
-        })
+        .map(|candidate| (*candidate, smart_score(candidate, default_concurrency)))
         .collect::<Vec<_>>();
-    ranked.sort_by(|(left, left_score), (right, right_score)| {
-        right_score
-            .total_cmp(left_score)
-            .then_with(|| left.account.id().cmp(right.account.id()))
-    });
-    let best_score = ranked.first()?.1.to_bits();
-    let tied = ranked
+    let best_score = ranked
         .iter()
-        .take_while(|(_, score)| score.to_bits() == best_score)
-        .count();
-    let index = cursor as usize % tied;
+        .map(|(_, score)| *score)
+        .max_by(f64::total_cmp)?;
+    ranked.retain(|(_, score)| best_score - score <= SMART_SCORE_TOLERANCE);
+    // 轮换顺序保持稳定，避免分数轻微交错与 cursor 同步后仍反复命中同一账号。
+    ranked.sort_unstable_by(|(left, _), (right, _)| left.account.id().cmp(right.account.id()));
+    let index = (cursor % ranked.len() as u64) as usize;
     Some(ranked[index].0)
 }
 
-fn smart_score(
-    candidate: &AccountCandidate,
-    default_concurrency: NonZeroU32,
-    normalization: &SmartNormalization,
-) -> f64 {
-    let load = lower_ratio_is_better(
-        capacity_utilization(candidate, default_concurrency),
-        normalization.max_capacity_utilization,
-    );
-    let quota = candidate.signals.quota_remaining_rank.map_or(0.5, |quota| {
-        higher_is_better(
-            quota,
-            normalization.min_quota.unwrap_or(quota),
-            normalization.max_quota.unwrap_or(quota),
-        )
-    });
+fn smart_score(candidate: &AccountCandidate, default_concurrency: NonZeroU32) -> f64 {
+    let load = 1.0 - capacity_utilization(candidate, default_concurrency).clamp(0.0, 1.0);
+    let quota = candidate
+        .signals
+        .quota_remaining_rank
+        .map_or(0.5, |quota| quota.min(10_000) as f64 / 10_000.0);
     let failure = 1.0
         - f64::from(
             candidate
@@ -752,36 +696,11 @@ fn smart_score(
         .first_output_latency_ms
         .filter(|latency| *latency > 0)
         .map_or(1.0, |latency| {
-            lower_is_better(
-                latency,
-                normalization.min_latency_ms.unwrap_or(latency),
-                normalization.max_latency_ms.unwrap_or(latency),
-            )
+            SMART_LATENCY_HALF_SCORE_MS / (SMART_LATENCY_HALF_SCORE_MS + latency as f64)
         });
 
     SMART_LOAD_WEIGHT * load
         + SMART_QUOTA_WEIGHT * quota
         + SMART_FAILURE_WEIGHT * failure
         + SMART_LATENCY_WEIGHT * latency
-}
-
-fn lower_ratio_is_better(value: f64, maximum: f64) -> f64 {
-    if maximum <= 0.0 {
-        return 1.0;
-    }
-    1.0 - (value / maximum).clamp(0.0, 1.0)
-}
-
-fn lower_is_better(value: u64, minimum: u64, maximum: u64) -> f64 {
-    if maximum <= minimum {
-        return 1.0;
-    }
-    1.0 - (value.saturating_sub(minimum) as f64 / (maximum - minimum) as f64).clamp(0.0, 1.0)
-}
-
-fn higher_is_better(value: u64, minimum: u64, maximum: u64) -> f64 {
-    if maximum <= minimum {
-        return 1.0;
-    }
-    (value.saturating_sub(minimum) as f64 / (maximum - minimum) as f64).clamp(0.0, 1.0)
 }
