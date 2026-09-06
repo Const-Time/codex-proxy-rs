@@ -63,7 +63,7 @@ const variantDefinitions: Record<
     minimumBarWidth: '6px',
     compactValues: false,
     labelTooltip: true,
-    showResetTime: true,
+    showResetTime: false,
   },
   compact: {
     rootClass: 'flex min-w-0 flex-col',
