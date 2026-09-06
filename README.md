@@ -29,14 +29,20 @@
 
 ## 快速开始
 
-以下命令适用于 Linux，需要 Git、Docker Engine 和 Docker Compose Plugin。已有部署请先看
+使用 Docker Compose 部署发布镜像 `ghcr.io/zyycn/codex-proxy-rs:latest`，同时启动 PostgreSQL 和 Redis。
+以下命令适用于 Linux amd64/arm64，需要 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL。已有部署请先看
 [升级说明](deploy/README.md#镜像升级与源码构建)，不要覆盖原配置。
 
-### 1. 下载并配置
+### 1. 下载部署文件并配置
 
 ```bash
-git clone https://github.com/zyycn/codex-proxy-rs.git
+mkdir -p codex-proxy-rs/deploy
 cd codex-proxy-rs
+
+curl -fsSL https://raw.githubusercontent.com/zyycn/codex-proxy-rs/main/deploy/compose.yaml \
+  -o deploy/compose.yaml
+curl -fsSL https://raw.githubusercontent.com/zyycn/codex-proxy-rs/main/deploy/config.example.yaml \
+  -o deploy/config.example.yaml
 
 mkdir -p .runtime/data .runtime/logs
 install -d -m 0750 .runtime/postgres .runtime/redis
@@ -69,7 +75,7 @@ openssl rand -hex 24
 ```bash
 docker compose -f deploy/compose.yaml config --quiet
 docker compose -f deploy/compose.yaml pull
-docker compose -f deploy/compose.yaml up -d --no-build
+docker compose -f deploy/compose.yaml up -d --no-build --wait
 curl -i http://127.0.0.1:8080/healthz
 ```
 

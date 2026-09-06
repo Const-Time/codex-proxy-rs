@@ -1,7 +1,8 @@
 # 部署与运维
 
 首次安装可按 [快速开始](../README.md#快速开始) 操作。
-本文补充客户端配置、权限、备份和升级；命令从仓库根目录执行。
+本文补充客户端配置、权限、备份和升级；部署命令从安装目录 `codex-proxy-rs/` 执行，
+其中 `deploy/` 存放 Compose 文件和配置，`.runtime/` 存放持久化数据。
 
 需要维护的配置文件：
 
@@ -13,7 +14,7 @@
 
 ## 准备
 
-从仓库根目录执行：
+按快速开始下载部署文件后，从安装目录执行：
 
 ```bash
 mkdir -p .runtime/data .runtime/logs
@@ -60,7 +61,7 @@ UID/GID 和 mode，因此配置由当前用户持有，并只向容器组 `10001
 ```bash
 docker compose -f deploy/compose.yaml config --quiet
 docker compose -f deploy/compose.yaml pull
-docker compose -f deploy/compose.yaml up -d --no-build
+docker compose -f deploy/compose.yaml up -d --no-build --wait
 docker compose -f deploy/compose.yaml ps
 ```
 
@@ -207,7 +208,7 @@ Compose 的 `stop_grace_period` 为 75 秒，覆盖默认 30 秒 HTTP drain、30
 
 ## 本地开发
 
-本地 PostgreSQL 和 Redis 可继续由 Compose 启动：
+本地开发需要克隆源码仓库，以下命令从仓库根目录执行。PostgreSQL 和 Redis 可继续由 Compose 启动：
 
 ```bash
 docker compose -f deploy/compose.yaml up -d postgres redis
@@ -264,16 +265,18 @@ OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 Postgr
 > 以下命令只适用于同一大版本内的升级，不支持跨大版本在线升级。跨大版本请使用全新的
 > `.runtime/` 数据目录重新部署，并重新导入或重新授权 Provider 账号与客户端 Key。
 
-```bash
-docker compose -f deploy/compose.yaml build codex-proxy-rs
-docker compose -f deploy/compose.yaml up -d
-```
-
-拉取发布镜像：
+Docker 安装从安装目录拉取发布镜像并重建应用容器：
 
 ```bash
 docker compose -f deploy/compose.yaml pull codex-proxy-rs
-docker compose -f deploy/compose.yaml up -d --no-build
+docker compose -f deploy/compose.yaml up -d --no-build --wait codex-proxy-rs
+```
+
+源码构建需要克隆源码仓库并准备配置与数据目录，以下命令从仓库根目录执行：
+
+```bash
+docker compose -f deploy/compose.yaml build codex-proxy-rs
+docker compose -f deploy/compose.yaml up -d --no-build --wait
 ```
 
 仓库维护者发布新版本时必须从干净且已同步上游的分支运行：
