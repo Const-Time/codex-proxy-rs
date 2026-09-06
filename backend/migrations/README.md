@@ -1,8 +1,10 @@
 # 数据库迁移
 
-sqlx 在服务启动时（`serve` 监听之前）按编号顺序执行本目录的迁移，并把每个
-文件的 checksum 记入 `_sqlx_migrations`。此后每次启动都会重新校验：**已应用
-迁移的文件字节与记录不一致时，服务直接拒绝启动**。
+sqlx 在服务启动、监听请求之前按编号执行迁移，并把文件 checksum 记入 `_sqlx_migrations`。
+已应用迁移的字节与记录不一致时，服务会拒绝启动。
+
+`0001_initial.sql` 是初始基线，后续编号继续增加字段和索引；
+当前完整清单以本目录 SQL 文件和 `.frozen-sha256` 为准，不要只执行 `0001`。
 
 ## 冻结规则
 
@@ -18,6 +20,16 @@ sqlx 在服务启动时（`serve` 监听之前）按编号顺序执行本目录�
 - 若同一大版本内确需修正已冻结迁移里的错误，用新迁移做补偿性变更（`alter` / 回填），
   不要动原文件。
 
+从迁移目录检查已登记文件：
+
+```bash
+cd backend/migrations
+sha256sum --check --strict .frozen-sha256
+```
+
+CI 还会检查是否遗漏新 SQL 文件，并在 PR 中检查清单只增不改。
+遇到 checksum 不一致，先核对运行版本和文件来源；不要修改数据库中的 checksum 来绕过校验。
+
 ## 本地测试库
 
 `gateway-store` 的 PG/Redis 集成测试需要以下环境变量，未设置时在本地
@@ -28,5 +40,6 @@ export CPR_TEST_DATABASE_URL='postgres://<user>:<password>@127.0.0.1:5432/<db>'
 export CPR_TEST_REDIS_URL='redis://:<password>@127.0.0.1:6379'
 ```
 
-测试自建随机 schema / key 前缀做隔离，可安全指向开发库；凭据按本地部署
-实际值填写（`docker inspect` 对应容器可查）。
+测试自建随机 schema / key 前缀做隔离，但仍应使用专用开发或测试实例，不要连接生产库。
+凭据从自己的部署配置或 CI Secret 中读取，不要粘贴未脱敏的 `docker inspect` 输出。
+环境变量未设置导致的跳过不算数据库测试通过。

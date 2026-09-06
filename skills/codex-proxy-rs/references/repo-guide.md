@@ -43,11 +43,13 @@
 
 - Responses：`POST /v1/responses`、WebSocket `GET /v1/responses`；
 - Images：`POST /v1/images/generations`、`POST /v1/images/edits`；
+- Codex 独立搜索：`POST /v1/alpha/search`；
 - 模型：`GET /v1/models`、`GET /v1/models/{model_id}`。
 
 Responses adapter 解析参与路由的最少语义，并保留原始请求；review 等子代理仍走 `/v1/responses`，
 类型由 `x-openai-subagent` 携带。Images adapter 不解析模型或重建 JSON，直接创建
-`GenerateImage` operation。两者都进入同一 Core execution lifecycle。
+`GenerateImage` operation。Search 同样保留原始正文，不参与模型映射。
+这些请求都进入同一 Core execution lifecycle。
 
 定位请求问题时按以下顺序追踪：
 
@@ -69,8 +71,8 @@ gateway-api adapter
 - account retry 与跨 Provider 候选推进由 Core 管理；
 - response ID 和原始 wire 不因观测模型而重写。
 
-OpenAI 保持 Responses/SSE/WS/Images 业务字节透明；xAI 在自己的 Provider 内完成 Grok/Responses 转换。
-Images 固定调用 OpenAI Provider 自有端点，候选不带 `upstream_model`。
+OpenAI 保持 Responses/SSE/WS/Images/Search 业务字节透明；xAI 在自己的 Provider 内完成 Grok/Responses 转换。
+Images 和 Search 固定调用 OpenAI Provider 自有端点，候选不带 `upstream_model`。
 
 ## 路由与 continuation
 
@@ -85,14 +87,14 @@ OpenAI continuation 按 native/replay-owner/replay-any 推进，xAI 使用客户
 
 ## 账号控制面
 
-账号路由和 DTO 在 `gateway-api/src/admin/accounts.rs`，业务编排在
+账号路由和 DTO 在 `gateway-api/src/admin/accounts/` 的 handlers、credentials、wire 与 presenter 中，业务编排在
 `gateway-admin/src/use_case/accounts.rs`，Provider 解析/验证后由 Store 事务提交。
 
 ### 导入与授权
 
 - 公共导入合同始终是 `{ provider, data }`，其中 `data` 为 Provider-owned JSON object。
 - OpenAI 支持 OAuth JSON、`accounts` 数组、AT-only、RT-only 和 AT+RT+可选 ID Token；
-  最多 200 项。RT-only 先交换 AT，AT-only 不会凭空获得刷新能力。
+  最多 200 项。token 字段接受 camelCase 和官方 snake_case；RT-only 先交换 AT，AT-only 不具备刷新能力。
 - OpenAI OAuth 身份来自 `parse_chatgpt_jwt_claims`，不信任导入 object 顶层的 user/account ID。
 - 前端 AT/RT 标签只把“每行一个 token”转换成 `accounts` JSON，没有第二条导入 API。
 - xAI 接受 OAuth 账号 object/数组，逐项验证；API Key 不是 credential。
@@ -115,7 +117,7 @@ OpenAI continuation 按 native/replay-owner/replay-any 推进，xAI 使用客户
 
 ## 存储与迁移
 
-PostgreSQL 业务 schema 由 `0001_initial.sql` 建立。`.frozen-sha256` 覆盖全部迁移，
+PostgreSQL 业务 schema 由 `0001_initial.sql` 和后续编号迁移共同组成。`.frozen-sha256` 覆盖全部迁移，
 已应用文件不可回改。
 
 主要状态边界：
@@ -148,7 +150,9 @@ continuation 等正确性依赖的协调写入不经该 best-effort 队列。
 - 页面状态：对应 `views/*/composables/`；
 - 页面展示转换：对应组件或相邻 presenter/util；
 - 通用交互：`components/base/`；
-- 主题：`styles/tokens.css` 与既有 `cp-*` token。
+- 主题派生：`frontend/src/theme/`；样式桥接在 `styles/index.css`，`styles/tokens.css` 只保存静态基元。
+- Codex 配置：`views/api-keys/utils/codexConfig.ts`，界面与 CCSwitch 共用；
+  保留 API Key auth.json，只用 Provider 的 `supports_websockets` 控制客户端 WebSocket。
 
 不要把页面状态塞进 API module，也不要为单一页面创造第二套通用层。修改共享组件前检查所有调用方；
 异步上游动作必须区分 loading、明确失败和结果不确定。
@@ -157,8 +161,8 @@ continuation 等正确性依赖的协调写入不经该 best-effort 队列。
 
 ```bash
 cargo +1.97.0 fmt --all --manifest-path backend/Cargo.toml -- --check
-cargo +1.97.0 clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings
-cargo +1.97.0 test --manifest-path backend/Cargo.toml --test main --locked
+RUST_MIN_STACK=16777216 cargo +1.97.0 clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings
+RUST_MIN_STACK=16777216 cargo +1.97.0 test --manifest-path backend/Cargo.toml --test main --locked
 pnpm --dir frontend format:check
 pnpm --dir frontend build
 docker compose -f deploy/compose.yaml config --quiet

@@ -1,7 +1,8 @@
 # Codex Proxy RS 接口
 
-本文列出 v3 当前公开 HTTP 接口。路由事实以
-`backend/crates/gateway-api/src` 中的 router 为准。
+本文列出 v3 源码中的公开 HTTP 接口，路由以
+`backend/crates/gateway-api/src` 中的 router 为准。配置 Codex 请先看 [客户端配置](../deploy/README.md#客户端配置)；
+运行实例是否包含这些功能，应结合其版本和 revision 确认。
 
 ## 1. 鉴权与公共约定
 
@@ -13,6 +14,10 @@
 Authorization: Bearer sk_...
 ```
 
+Codex 原生生图配置还会携带 `X-OpenAI-Actor-Authorization: proxy-managed`。
+它仅用于客户端识别服务端托管认证，不能代替 Client Key。网关和 OpenAI Provider 都会过滤该请求头，
+上游账号身份只由服务端选中的账号提供；不要把真实账号 token 放进该标记。
+
 Client Key 通过账号分组限定路由范围：未绑定分组时可使用全部账号，绑定一个或多个分组时只能使用
 已启用分组成员的并集。分组可以混合 `openai` 与 `xai` 账号；同一请求只会在模型能力明确匹配且满足
 重放安全边界时跨 Provider fallback。
@@ -22,7 +27,7 @@ Client Key 通过账号分组限定路由范围：未绑定分组时可使用全
 低于对应门槛时，所有 `/v1/*` HTTP 请求和新 WebSocket 握手在访问上游前返回 `426 Upgrade Required`。
 未知客户端保持兼容，不应用版本门禁。
 
-低版本响应使用 OpenAI 风格错误合同：
+低版本响应使用 OpenAI 风格错误格式：
 
 ```json
 {
@@ -96,7 +101,7 @@ body 不进入这个通用信封。稳定业务码如下：
 
 ### 管理写入一致性
 
-mutation 请求不要求客户端提供全局配置版本。会改变路由快照或安全配置的写入由后端在事务内推进
+管理写入不要求客户端提供全局配置版本。会改变路由快照或安全配置的写入由后端在事务内推进
 内部 `config_revision`，并用于快照发布与审计。账号更新和分组查询/写入的部分响应会返回
 `configRevision` 作为已提交事实，但它不是客户端 mutation 的前置条件。
 
@@ -128,6 +133,10 @@ Responses WebSocket 仅接受文本 `response.create`，同一连接串行执行
 留在有界接收队列中，待当前响应完成终结和写出后再逐条校验、准入与执行，不因请求提前到达而断开。
 这对齐 Codex 客户端 `stream_request` 持锁至本轮结束的串行行为，不表示支持额外控制消息类型。
 接收队列容量为 32 个事件，超载仍关闭连接；Ping/Pong、客户端关闭和服务关闭不等待队列中的请求执行。
+
+客户端使用 HTTP/SSE 时，OpenAI Provider 仍可能选择上游 WebSocket。
+客户端配置的 `supports_websockets` 只控制第一段连接，不是服务端传输策略开关。
+上游在响应终态前发送 Close 1000 仍属于失败，不能按“正常关闭”计为成功。
 
 `GET /v1/models` 默认返回 OpenAI 兼容列表 `{"object": "list", "data": [...]}`；请求携带非空
 `client_version` query 参数（Codex 客户端）时改为返回 Codex 专用目录合同 `{"models": [...]}`。
@@ -219,8 +228,10 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 当前 xAI 导入上限为 16 MiB。内部 schema 由目标 Provider 独占解释：
 
 - OpenAI 接受单账号 OAuth 文档、`accounts` 数组（最多 200 项）和 CPR 账号 bundle；
-- OpenAI OAuth token 字段只识别 `accessToken`、`refreshToken`、`idToken`，可以嵌套在账号 object 内；
-  每项至少包含 AT 或 RT。RT-only 会在导入时换取 AT，AT-only 不具备自动续期能力；
+- OpenAI OAuth token 字段接受 `accessToken`、`refreshToken`、`idToken`，以及官方
+  `auth.json` 中的 `access_token`、`refresh_token`、`id_token`，可以嵌套在 `tokens` 等账号 object 内；
+  每项至少包含 AT 或 RT。仅含 `OPENAI_API_KEY` 的客户端代理配置不是 OAuth 账号导入材料；
+  RT-only 会在导入时换取 AT，AT-only 不具备自动续期能力；
 - xAI 从单账号 object 或 `accounts` 数组中提取 OAuth token；包装中的代理、并发、优先级等字段不参与认证；
 - xAI 批量导入逐条独立校验：失败条目跳过并记录日志，不中断其余条目，仅当没有任何条目成功时整个导入才报错；
 - xAI API Key 不是受支持的账号 credential；
@@ -277,8 +288,9 @@ OAuth start 使用：
 
 ### OpenAI 身份、额度与状态
 
-- OAuth 文件导入的 canonical 凭据字段为 `accessToken`、`refreshToken`、`idToken`，不接受含义模糊的
-  `token`。仅有 refresh token 时先换取 access token。
+- OAuth 文件导入接受 camelCase 与 snake_case 的三个 token 字段，内部统一保存为
+  `accessToken`、`refreshToken`、`idToken`，不接受含义模糊的 `token`。
+  仅有 refresh token 时先换取 access token。
 - 身份补全复用官方 `token_data.rs::parse_chatgpt_jwt_claims`：优先解析 `idToken`，缺失字段再由
   `accessToken` 补齐；`email` 优先 JWT 顶层值、其次 `https://api.openai.com/profile.email`，用户 ID
   优先 `chatgpt_user_id`、其次 `user_id`。该路径不调用 `whoami`，也不信任导入文档顶层的
@@ -380,8 +392,8 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 | `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除未被 Client Key 引用的组 |
 
 列表数据为 `{ items, page, configRevision }`，其中 item 返回 `memberCount`、按 Provider 聚合的
-`providerCounts` 和 `clientKeyCount`。成员响应为 `{ id, items, total, configRevision }`；成员的
-`providerKind` 描述账号自身 Provider，并不是分组属性。
+`providerCounts` 和 `clientKeyCount`。查询分组成员使用账号列表的 `groupId` 筛选，
+不提供独立的分组成员路由；账号的 Provider 不代表整个分组的 Provider。
 
 ## 7. Client Key
 
@@ -457,8 +469,8 @@ Windows 离线包接口固定解析 Microsoft Store Product ID `9PLM9XGG6VKS` �
 ```
 
 `source` 为 `microsoft_store` 或 `official_openai`。Store 的四段 package version 只用于下载展示，不参与
-Desktop 三段 SemVer 门禁，也不会自动回写最低版本设置。完整安全与回退设计见
-[客户端最低版本与下载方案](client-min-version-plan.md)。
+Desktop 三段 SemVer 门禁，也不会自动回写最低版本设置。门禁规则见
+[鉴权与公共约定](#1-鉴权与公共约定)，解析器职责见 [架构文档](architecture.md#11-生命周期安全与恢复)。
 
 ## 9. 备份
 
@@ -555,6 +567,10 @@ request/response/upstream ID、outcome 与搜索文本。诊断 `dimension` 可�
 汇总与洞察中的请求数与 outcome 分布覆盖筛选范围内全部请求；token、缓存、延迟与成本聚合仅统计
 已完整交付客户端的成功响应。
 
+错误记录中的“已自动恢复”表示系统关联到了后续成功请求，不会把原来的失败记录改为成功。
+`upstreamSendState = ambiguous` 表示无法确认该次上游执行结果，不代表后续恢复请求失败；
+恢复关联也不等于逐字节验证过两次请求正文。
+
 Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`metricValue`。
 `usageWindow` 复用账号额度窗口合同，缺失额度事实时为 `null`；窗口标签、百分比、触顶状态、重置时间
 和本地用量由 Provider/Admin 投影。前端不得从套餐缺失推断免费套餐，也不得从显示时舍入的百分比推断
@@ -578,5 +594,5 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 | `POST` | `/api/admin/system/restart` | 无 | 请求进程重启 |
 
 在线更新仅在当前部署模式、Release 资产和进程重启能力都满足要求时可用，且只在同一 major 版本内
-提供：跨大版本目标会以 `40901` 冲突拒绝，需按发布说明手动迁移。仓库发版流程见
-[部署文档](../deploy/README.md) 与根目录 [README](../README.md)。
+提供：跨大版本目标会以 `40901` 冲突拒绝，需按发布说明重新部署。
+实例升级和仓库发版见 [部署文档](../deploy/README.md#镜像升级与源码构建)。

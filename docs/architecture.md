@@ -1,6 +1,6 @@
 # Codex Proxy RS 架构
 
-本文回答系统由哪些边界组成、请求如何流动、状态由谁拥有，以及修改时必须保持哪些不变量。
+本文说明模块职责、请求流程、状态存储和必须保持的约束。
 具体 HTTP 字段见 [接口文档](api.md)，部署参数见 [部署文档](../deploy/README.md)；上游 URL、超时、
 重试间隔和 UI 布局属于源码或配置，不在架构文档重复维护。
 
@@ -177,6 +177,21 @@ Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 ca
 - 请求画像以配置为启动基线。OpenAI Desktop 与 xAI CLI 的官方版本检查只更新各自负责的运行时画像，
   不回写 `config.yaml`。
 
+### Codex 原生生图与认证
+
+管理端导出的 Codex 配置使用代理 Bearer 密钥，并声明服务端托管账号认证。
+客户端据此开放原生生图工具，图片生成和编辑仍进入现有 Images 路由，不新增独立的登录或图片代理服务。
+这只解决客户端能力识别；模型能力、客户端限制和上游账号的实际生图权限仍分别检查。
+
+`X-OpenAI-Actor-Authorization` 是客户端能力标记，不是账号凭据。API 解码和 OpenAI Provider
+都过滤该 header，网关继续校验 Client Key，上游认证由服务端账号产生。
+仅含代理密钥的本地 `auth.json` 可以与新配置共存。配置示例维护在
+[部署文档](../deploy/README.md#客户端配置)。
+
+客户端到代理与代理到上游的传输选择相互独立。客户端的 `supports_websockets = false`
+不禁止 Provider 使用上游 WebSocket。响应终态前的 Close 1000 仍视为失败，
+后续恢复请求成功也不改写原失败请求的结果。
+
 ### 错误与诊断三层边界
 
 错误信息按用途分成三层，不能用同一个 `message` 同时承担协议、界面和诊断职责：
@@ -257,7 +272,8 @@ PostgreSQL schema 由迁移目录按编号管理。已应用迁移按字节冻�
 credential 与 quota 是两组独立事实：credential refresh 不等于 quota refresh，额度接口的 401/403
 也不能单独证明 refresh token 永久失效。
 
-- OpenAI 支持 OAuth、AT/RT 与 OAuth JSON；RT-only 导入先换取 AT，AT-only 导入没有
+- OpenAI 支持 OAuth、AT/RT 与 OAuth JSON，导入识别 camelCase 和官方 `auth.json` 的 snake_case token 字段；
+  RT-only 导入先换取 AT，AT-only 导入没有
   自动续期能力。OAuth 身份只从官方 JWT claims 投影，不信任导入文档顶层身份字段。
 - xAI 使用 OAuth session；API Key 不是受支持的账号 credential。
 - 新账号导入和首次 OAuth 在 credential 提交后尽力读取一次额度；失败只留下观测，不回滚账号事务。
@@ -303,13 +319,17 @@ HTTP Client 构造失败也不会阻断网关启动。外部解析在已认证�
 
 - Provider credential 以 Provider schema 的明文 JSON 保存在 PostgreSQL；数据库和备份必须按敏感数据保护。
 - OAuth 恢复日志包含原始 AT/RT，`.runtime/logs` 同样属于敏感数据。
+- `host.logging.request_dump` 默认关闭；开启后独立请求转储包含原始请求头和正文，
+  可能包含密钥及用户内容，只能在明确的排障范围内使用，不能作为普通日志公开。
 - 真实 secret 不进入普通日志、Debug、fixture 或 audit details；明文只能通过账号导出、Key reveal、
   备份设置等明确的敏感 Admin 合同返回。
 - OAuth pending flow 使用有期限、带 owner 的一次性 claim；事务成功后才消费，失败释放 claim。
 - 在线更新校验 Release host、大小、SHA-256 和归档路径，并只允许同一大版本内更新。
 
-PostgreSQL 备份恢复属于人工维护操作：恢复时停用备份 Worker，清理快照中的非终态任务，重算计划游标并
-重新验证对象存储；不会自动删除恢复前已经存在的远端对象。
+PostgreSQL 备份恢复属于人工维护操作。当前没有部署级维护模式开关，需要先停止应用，
+离线处理快照中的非终态任务、计划游标和到期清理条件，再重新验证对象存储并恢复计划。
+关闭计划开关只阻止新计划任务，不会停止 Worker 的任务恢复和删除流程。
+未经核对就启动旧快照，可能触发远端对象删除；操作步骤见 [部署文档](../deploy/README.md#人工恢复数据库)。
 
 ## 12. 修改与验收
 
@@ -320,12 +340,16 @@ PostgreSQL 备份恢复属于人工维护操作：恢复时停用备份 Worker�
 
 ```bash
 cargo +1.97.0 fmt --all --manifest-path backend/Cargo.toml -- --check
-cargo +1.97.0 clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings
-cargo +1.97.0 test --manifest-path backend/Cargo.toml --test main --locked
+RUST_MIN_STACK=16777216 cargo +1.97.0 clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings
+RUST_MIN_STACK=16777216 cargo +1.97.0 test --manifest-path backend/Cargo.toml --test main --locked
 pnpm --dir frontend format:check
 pnpm --dir frontend build
 docker compose -f deploy/compose.yaml config --quiet
 ```
+
+线程栈设置与当前 CI 一致。PostgreSQL/Redis 集成测试需按
+[迁移文档](../backend/migrations/README.md#本地测试库) 配置专用测试库；未设置环境变量时，本地相关测试会跳过。
+前端以 lint、类型检查和构建验证，`build` 已包含类型检查，不维护独立前端测试代码。
 
 行为、配置或边界变化必须同步其唯一文档 owner：用户入口写入根 README，HTTP 合同写入 `docs/api.md`，
 部署操作写入 `deploy/README.md`，架构不变量保留在本文。

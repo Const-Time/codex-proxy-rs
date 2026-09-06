@@ -5,15 +5,18 @@
 
 # 管理端主题系统
 
-**基于 Seed、Map、Alias 与 Component Token 的运行时主题架构**
+浅色、深色、预置配色与自定义主题的配置和实现说明。
 
 [设计原则](#设计原则) · [Token 模型](#token-模型) · [运行时架构](#运行时架构) · [主题编辑器](#主题编辑器) · [扩展指南](#扩展指南)
 
 </div>
 
-主题系统为 Codex Proxy RS 管理端提供浅色、深色、预置配色与自定义配色能力。颜色 Map 复用 Ant Design 的
-Token 分层与十阶色板，再按项目的明暗角色规则派生；中性 Surface 由背景和文字 Seed 统一派生。不引入 `antd`、React、`ConfigProvider`
-或 CSS-in-JS，Vue 组件继续通过 CSS Variables 与 Tailwind CSS 4 utilities 消费主题。
+在管理端「主题」中调整颜色、字号、圆角和组件样式，保存后应用到当前浏览器。
+设置保存在浏览器本地，不会同步到服务器或其他设备。只想换配色时，选择预置主题即可。
+
+下文说明实现和扩展方式。颜色使用 Ant Design 十阶色板与项目的明暗角色规则，
+中性表面从背景和文字 Seed 派生；Vue 组件通过 CSS Variables 与 Tailwind CSS 4 使用这些值。
+项目不依赖 Ant Design 组件库或 CSS-in-JS。
 
 > [!IMPORTANT]
 > 主题的目标是调整颜色、密度、圆角与层级，不改变现有页面结构和产品语义。默认主题保留既有表面层级，并满足正常文字的可读性约束；
@@ -195,8 +198,13 @@ Token 直接覆盖时不会自动重算同组件的其他状态；需要保持�
 
 主按钮的颜色在 Component 派生入口统一生成：文字保留 `colorTextLightSolid`，默认背景从 Primary Seed 校正到
 4.5:1，Hover/Active 在该背景上分别混入 8% / 16% 黑色，使白字对比度逐级增强；明暗模式共用此规则。
-这组组件状态与全局 `colorPrimaryHover/Active` 分工明确，调整按钮不会反向改写主色 Seed。输入框 Hover 保留柔和
-外圈，Focus 使用已有 `control-outline`，错误外圈使用 Error Border，普通状态继续保持无边设计。
+这组组件状态与全局 `colorPrimaryHover/Active` 分工明确，调整按钮不会反向改写主色 Seed。
+输入框 Hover 与 Focus 使用 Primary Container Hover 的同色、同宽外圈；
+错误外圈使用带透明度的 Error 色，具体值由 Input Component Token 提供。
+
+结构化浮层头部统一使用 `--cp-popover-header-bg`：浅色从 Secondary Fill 派生，
+深色从 Tertiary Fill 派生。健康时间线朝向头部的箭头也使用该值；
+不要把浮层头部重新绑定到表格斑马纹或普通悬停背景。该 Token 可在主题编辑器中单独调整。
 
 Theme Editor 只开放真正由对应组件消费的 Component Token。全局 Alias 不放进组件目录，避免一次覆盖同时改变
 多个无关组件。
@@ -350,6 +358,7 @@ utility / arbitrary variant；Vue Transition、跨浏览器 Range、动态富文
 - 静态填充、Hover、Active 与 Selected 必须使用不同角色，不能复用一个变量制造所有层级。
 - Input 的 Hover 与 Active 只改变内部填充；外圈反馈保持同色同宽，错误状态使用独立 Error Token。
 - 表格斑马纹使用 `table-row-stripe-bg`，不借用 `row-hover-bg`。
+- 结构化浮层头部使用 `popover-header-bg`，明暗模式分别检查它与表格背景的区分。
 - Card 和选项默认不增加装饰性边框；键盘焦点必须保留可见反馈。
 - 阴影保持中性，`shadowStrength` 只调节层级强弱，不给阴影染品牌色。
 

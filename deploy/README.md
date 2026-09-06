@@ -1,11 +1,15 @@
-# 部署
+# 部署与运维
 
-本目录只有两个配置入口：
+首次安装可按 [快速开始](../README.md#快速开始) 操作。
+本文补充客户端配置、权限、备份和升级；命令从仓库根目录执行。
+
+需要维护的配置文件：
 
 - `config.yaml`：应用行为与真实凭据，由 `config.example.yaml` 复制得到并被 Git 忽略。
 - `compose.yaml`：镜像、容器网络、端口、目录映射、健康检查和资源限制。
 
-项目不使用 `.env` 配置文件。Compose 中的少量环境变量只描述容器内部拓扑与发布链路装配，不是用户配置入口。
+项目不使用 `.env` 配置文件。Compose 环境变量用于容器地址、镜像选择和构建发布；
+应用设置与凭据保存在 `config.yaml` 中。已有部署不要重新复制模板覆盖配置。
 
 ## 准备
 
@@ -22,6 +26,7 @@ chmod 0640 deploy/config.yaml
 为 PostgreSQL 与 Redis 分别生成一个密码：
 
 ```bash
+openssl rand -hex 24
 openssl rand -hex 24
 ```
 
@@ -47,8 +52,8 @@ UID/GID 和 mode，因此配置由当前用户持有，并只向容器组 `10001
 
 模板中的 `openai` / `xai` 只保留请求画像启动基线。OpenAI 的上游地址、WebSocket 池、额度刷新
 与 OAuth 设置，以及 xAI 的 OAuth、额度和模型目录策略，均由各自 Provider 使用代码内默认值管理；
-模板不重复列出这些默认项。运行后，OpenAI Desktop 与 xAI CLI 的官方发布检查只更新进程内
-版本字段，不回写 `config.yaml`；检查失败时继续使用上一份有效画像。
+模板不重复列出这些默认项。运行后，Provider 检查官方版本并更新运行时请求画像，
+不回写 `config.yaml`；检查失败时继续使用上一份有效画像。版本检查不等于重新核验 TLS。
 
 ## 启动
 
@@ -65,10 +70,119 @@ docker compose -f deploy/compose.yaml ps
 curl -i http://127.0.0.1:8080/healthz
 ```
 
-`204 No Content` 表示应用、PostgreSQL 和 Redis 均可用。
+`204 No Content` 表示应用、PostgreSQL、Redis 和后台任务的健康检查通过，不代表每个上游账号都可用。
 
 不要把未脱敏的 `docker compose config` 或 `docker inspect` 输出上传到工单；它们会包含
 PostgreSQL/Redis 启动密码。日常校验使用 `config --quiet`。
+
+## 公网访问
+
+Compose 默认只绑定 `127.0.0.1`。从其他设备访问时，在应用前配置 HTTPS 反向代理，
+不要把 PostgreSQL 或 Redis 暴露到公网。
+
+反向代理需要保留 `Authorization`，支持 `/v1/responses` 的 WebSocket Upgrade，
+并关闭 SSE 响应缓冲。读取超时应覆盖长时间生成任务。
+客户端使用 `https://你的域名/v1`，不要使用前端开发服务的 `5173/dev/v1`。
+当前应用只支持单副本，不能通过复制容器扩容。
+
+## 客户端配置
+
+在管理端创建客户端密钥，打开「使用密钥」，按操作系统复制 `config.toml` 和 `auth.json`，
+或通过 CCSwitch 导入。已有文件先备份，合并后完全退出并重启 Codex。
+
+Linux/macOS 默认目录为 `~/.codex/`，Windows 为 `%USERPROFILE%\.codex\`；
+设置过 `CODEX_HOME` 时以该目录为准。Provider 设置应写入用户配置，不要只写到项目目录。
+配置层级见 [官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+### config.toml
+
+以下示例与当前管理端模板的配置项一致。替换地址和密钥，模型可改成该密钥有权限使用的模型：
+
+```toml
+model_provider = "OpenAI"
+model = "gpt-5.6-terra"
+review_model = "gpt-5.6-terra"
+model_reasoning_effort = "max"
+service_tier = "default"
+
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+supports_websockets = false
+requires_openai_auth = false
+# 填写代理密钥，真实账号由服务端管理。
+experimental_bearer_token = "<client-api-key>"
+
+[model_providers.OpenAI.http_headers]
+# 供客户端识别服务端托管认证，本身不是密钥。
+X-OpenAI-Actor-Authorization = "proxy-managed"
+
+[features]
+image_generation = true
+goals = true
+```
+
+`OpenAI` 是自定义 Provider ID，大小写要与 `model_provider` 一致。合并配置时修改已有表，
+不要重复添加 `[features]` 或 Provider 表。更换模型时也要检查其支持的推理强度。
+密钥以明文保存，文件仅供本人读取，不要提交到 Git。
+
+### auth.json
+
+```json
+{
+  "OPENAI_API_KEY": "<client-api-key>"
+}
+```
+
+这份文件可以保留，用于兼容已有客户端和 CCSwitch。新配置从 `experimental_bearer_token`
+读取代理密钥，不会因为仅含 API Key 的 `auth.json` 存在而关闭生图。
+真实 OpenAI OAuth 账号文件用于管理端账号导入，不要当作代理配置分发给客户端。
+
+### 生图和 WebSocket
+
+新模板已启用原生生图。Codex 可在任务需要图片时调用 `image_gen.imagegen`，
+再通过代理的 Images 接口生成或编辑图片；也可以在需求中明确要求生成并使用图片。
+需要支持该能力的客户端、支持图片输入的对话模型，以及有生图权限和额度的 OpenAI 账号。
+代理不会增加上游权限，xAI 账号不能承接这些 Images 请求。
+
+本项目已用 Codex CLI 0.153.4 验证过原生生图，这不是最低支持版本声明。
+生图不要求开启 WebSocket。要启用客户端 WebSocket，把当前 Provider 的
+`supports_websockets` 改为 `true`，并检查反向代理是否允许 Upgrade。
+
+客户端到代理、代理到上游是两段独立连接。客户端关闭 WebSocket 后，
+服务端仍可能用 WebSocket 访问上游；客户端开关不控制服务端连接池和 HTTP 回退策略。
+
+### 旧版配置
+
+仅含代理密钥的 `auth.json` 配合 `requires_openai_auth = true` 仍可用于已有请求，
+但 API Key 登录本身不会启用原生生图。需要生图时换用上述 Provider 配置。
+
+以已核验的 Codex 0.153.4 为准，管理端已移除以下旧字段：
+
+| 字段 | 处理 |
+| --- | --- |
+| 顶层 `disable_response_storage` | 无有效配置定义，删除 |
+| 顶层 `network_access = "enabled"` | 无有效配置定义，删除；不是客户端 API 的联网开关 |
+| `features.responses_websockets_v2` | 已标记移除，使用 Provider 的 `supports_websockets` |
+
+`image_generation` 和 `goals` 仍有效。不要为了接入代理，顺带扩大命令沙箱的联网或文件权限。
+
+### 登录与生图排查
+
+- 仍提示登录：确认实际读取的用户配置目录、选中的 Provider 和客户端版本，再完全退出重启。
+  新 Provider 使用 `requires_openai_auth = false`，不依赖本地 ChatGPT 登录。
+- 没有生图工具：检查配置是否被覆盖、Actor 标记是否保留、模型是否支持图片输入。
+  官方客户端还会检查缓存登录状态；已核验版本在本地账号为 Free 时会隐藏生图。
+  先备份并区分本地真实账号文件与代理密钥文件，不要直接删除全部登录状态。
+- 已调用生图但失败：查看服务端账号的凭据、权限、额度和请求错误，不能只凭文本对话成功判断。
+- `401`：检查代理密钥是否正确、是否启用；Actor 标记不能代替密钥。
+- `426`：客户端低于管理员设置的最低版本，或版本无法识别，需要更新客户端。
+- 地址包含 `5173/dev/v1`：这是开发代理地址，依赖 Vite 服务。日常使用改成后端或 HTTPS 地址；
+  验证 WebSocket 时直接连接后端，当前 Vite 代理未显式开启 WebSocket 转发。
+
+其他客户端使用 Responses API、`/v1` Base URL 和代理密钥即可，不需要 Actor 标记。
+路由与请求格式见 [API 参考](../docs/api.md#3-openai-数据面与模型目录)。
 
 ## 优雅关停
 
@@ -115,7 +229,8 @@ Provider schema 以明文 JSON 保存于 PostgreSQL。Redis 只保存可重建�
 OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 PostgreSQL/Redis，也不属于本地备份内容；
 管理端只在当前浏览器会话中保留最近一次查询结果。
 
-备份必须包含 `.runtime/postgres`。要保留 OAuth 的 AT/RT 恢复能力，必须保持
+数据库可用管理端的 S3/R2 逻辑备份，或停库后备份 `.runtime/postgres`。
+不要在 PostgreSQL 写入期间直接复制数据目录作为一致性备份。要保留 OAuth 的 AT/RT 恢复记录，需保持
 `host.logging.file.enabled: true` 并备份 `.runtime/logs`；恢复记录位于独立文件集，仍按普通日志的
 `retention_days` 和 `max_files` 分别约束。若希望保留短期 Redis 状态和会话锚点，也同时备份 `.runtime/redis` 与
 `.runtime/data`。
@@ -130,7 +245,8 @@ OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 Postgr
 
 已有 PostgreSQL 数据目录后，直接修改 `database.password` 不会修改数据库用户密码，只会导致
 应用无法连接。轮换时必须先在 PostgreSQL 中修改用户密码，再同步更新 `config.yaml`。Redis
-密码变更后需要使用新密码重建或重新配置 Redis 数据目录。
+密码变更后需要用新配置重新创建 Redis 和应用容器，不需要删除 Redis 数据目录。
+安排维护窗口，避免应用和 Redis 在过渡期间使用不同密码。
 
 ## 镜像升级与源码构建
 
@@ -153,10 +269,11 @@ docker compose -f deploy/compose.yaml up -d --no-build
 仓库维护者发布新版本时必须从干净且已同步上游的分支运行：
 
 ```bash
-release/publish <version>
+release/publish X.Y.Z
 ```
 
-该脚本负责更新 `release/version.yaml`、创建版本提交和带注释 tag，并原子推送分支与 tag。
+将 `X.Y.Z` 替换为待发布版本。脚本需要 Git、Ruby 和已登录的 GitHub CLI，
+负责更新 `release/version.yaml`、创建版本提交和带注释 tag，并原子推送分支与 tag。
 它不会登录任何服务器，也不会拉取镜像或调用管理端在线更新。
 
 源码提交、仓库发版和运行实例升级是三种独立状态：本地 commit 不等于 Release，Release/tag 和镜像
@@ -199,7 +316,7 @@ Release 必须提供当前 OS/架构的 `codex-proxy-rs_<version>_<os>_<arch>.ta
 
 ## 备份与恢复
 
-### 运行时事实
+### 备份内容与限制
 
 - 运行时镜像的 `pg_dump`/`pg_restore` 在构建期从与 compose 服务端同一固定
   `postgres:18-bookworm` 镜像（`Dockerfile` 的 `POSTGRES_IMAGE`）COPY 到
@@ -226,15 +343,19 @@ Release 必须提供当前 OS/架构的 `codex-proxy-rs_<version>_<os>_<arch>.ta
 工具离线恢复：
 
 ```bash
-pg_restore --no-owner --no-privileges --dbname=<target> <archive>.dump
+pg_restore --no-owner --no-privileges --password \
+  --dbname='postgresql://restore_user@127.0.0.1:5432/restore_db' backup.dump
 ```
 
-恢复期间与恢复后的边界见 [架构文档](../docs/architecture.md#11-生命周期安全与恢复)。操作顺序为：
+示例中的账号、空目标库和归档路径需按实际情况替换，密码由命令交互输入。
 
-1. 恢复期间以维护模式启动，不运行备份 Worker（避免把快照中的中间状态当作当前任务继续处理）。
-2. 恢复完成后清理备份控制记录的非终态（`queued/dumping/uploading/deleting`），并重新计算
-   `next_run_at`，避免按旧游标立即触发计划。
-3. 重新执行当前 S3 配置的连接探针，再允许计划任务运行。
-4. 不自动删除恢复前已经存在的远端对象。
+恢复期间与恢复后的边界见 [架构文档](../docs/architecture.md#11-生命周期安全与恢复)。
+当前没有在线恢复 API，也没有供部署者直接启用的“维护模式”开关：
 
-首版不提供在线恢复 API；恢复属于人工运维操作。
+1. 先备份现有数据库，并停止应用；在独立的空数据库中恢复归档，检查数据和迁移版本。
+2. 应用保持停止，离线核对备份设置与记录。禁用快照中的旧计划，处理非终态记录
+   （`queued/dumping/uploading/deleting`）、旧调度游标和到期清理条件，再决定哪些记录保留。
+3. 确认不会误执行旧任务或删除恢复前的远端对象后，再启动应用；重新测试 S3 连接并设置计划。
+
+只关闭计划备份不会停止 Worker 的任务恢复和到期删除。无法确认这些记录的影响时，
+不要把恢复后的数据库直接接入运行中的应用。具体处理应根据目标库数据制定，不提供清空生产记录的通用命令。

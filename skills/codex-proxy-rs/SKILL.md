@@ -23,6 +23,8 @@ description: Codex Proxy RS 仓库开发与审计指南。Use for its Rust gatew
 | HTTP 路由、DTO、敏感导入/导出 | `docs/api.md` |
 | 系统边界、数据流、状态 owner、不变量 | `docs/architecture.md` |
 | Compose、密码、备份、更新与恢复 | `deploy/README.md` |
+| Codex 配置、auth.json 与原生生图 | `deploy/README.md#客户端配置` |
+| 主题配置与 Token | `docs/theme.md` |
 | 迁移冻结与测试库 | `backend/migrations/README.md` |
 | 具体目录和常见改动入口 | `references/repo-guide.md` |
 
@@ -39,20 +41,22 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
 - 已应用迁移按字节冻结；schema 变化新增编号迁移，并同步 `.frozen-sha256`。
 - 真实 secret 不进入普通日志、Debug、fixture、audit details 或文档示例；明文 Admin 响应只能出现在
   账号导出、Key reveal、备份设置等明确敏感合同中。
-- 测试放在各 package 的 `tests/`，统一挂载到单一 `main` 集成测试目标；生产 `src` 不写 test-only 代码。
+- 后端测试放在各 package 的 `tests/`，统一挂载到单一 `main` 集成测试目标；生产 `src` 不写 test-only 代码。
 - 不添加兼容 shim、第二套状态机、重复配置或跨层旁路。
 
 ## 当前关键合同
 
-- 数据面公开 Responses JSON/SSE/WS（含 Codex 子代理语义）、Images generation/edit 和模型目录；不提供 Chat Completions。
-- OpenAI Responses/Images 保持业务 wire 透明；xAI 在 Provider 内完成 Grok/Responses 转换。
+- 数据面公开 Responses JSON/SSE/WS（含 Codex 子代理语义）、Images generation/edit、standalone Search 和模型目录；不提供 Chat Completions。
+- OpenAI Responses/Images/Search 保持业务 wire 透明；xAI 在 Provider 内完成 Grok/Responses 转换。
 - Images 固定走 OpenAI Provider 自有端点，不要求模型，也不参与文本模型映射。
+- Codex 生图模板保留代理密钥 `auth.json`，使用服务端托管认证标记；该标记不能代替 Bearer 鉴权，
+  并在 API 与 Provider 层被过滤。客户端 WebSocket 开关与上游传输策略相互独立。
 - OpenAI 账号支持 OAuth、AT/RT 和 OAuth JSON；xAI 只接受 OAuth session/账号 JSON，
   不接受 API Key。
 - 主动额度重置卡只由 OpenAI 上游持有。查询由用户显式触发，消费使用 UUIDv4 幂等键；不得写本地卡库存
   或直接改 quota reset 时间。
 - credential 与 quota 是独立事实；刷新 token 不等于刷新额度，quota 401/403 也不等于 RT 永久失效。
-- 当前业务 schema 由 `0001_initial.sql` 建立。
+- `0001_initial.sql` 建立基线，后续编号迁移继续演进；完整清单以 `.frozen-sha256` 为准。
 - 运行拓扑是单副本；worker lease 不是完整多副本 leader election，自更新也只替换当前进程。
 
 ## 前端约束
@@ -61,6 +65,7 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
 - `frontend/src/api` 只保留 wire DTO 与请求函数；页面查询、缓存和交互状态留在对应 view/composable。
 - 修改页面前先检查共享组件和相邻调用方；复用既有视觉语言，保持紧凑、低噪声和键盘可访问。
 - 上游查询不得由列表渲染或隐藏轮询意外触发。不可逆动作需要明确确认、loading 和不确定结果恢复路径。
+- 当前不维护前端测试代码或独立测试命令，使用 lint、类型检查、构建和必要的界面核验。
 
 ## 验证
 
@@ -68,8 +73,8 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
 
 ```bash
 cargo +1.97.0 fmt --all --manifest-path backend/Cargo.toml -- --check
-cargo +1.97.0 clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings
-cargo +1.97.0 test --manifest-path backend/Cargo.toml --test main --locked
+RUST_MIN_STACK=16777216 cargo +1.97.0 clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings
+RUST_MIN_STACK=16777216 cargo +1.97.0 test --manifest-path backend/Cargo.toml --test main --locked
 pnpm --dir frontend format:check
 pnpm --dir frontend build
 docker compose -f deploy/compose.yaml config --quiet
