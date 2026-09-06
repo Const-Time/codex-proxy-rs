@@ -186,6 +186,7 @@ export interface ThemeComponentMap {
   brandMarkBg: string
   cardBg: string
   modalBg: string
+  popoverHeaderBg: string
   tableHeaderBg: string
   tableRowBg: string
   tableRowStripeBg: string

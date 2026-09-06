@@ -149,6 +149,7 @@ export const EDITABLE_COLOR_TOKEN_NAMES = new Set<ThemeTokenName>([
   '--cp-button-primary-active-bg',
   '--cp-card-bg',
   '--cp-modal-bg',
+  '--cp-popover-header-bg',
   '--cp-table-header-bg',
   '--cp-table-row-bg',
   '--cp-table-row-stripe-bg',

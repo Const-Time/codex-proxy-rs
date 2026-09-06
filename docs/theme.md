@@ -186,6 +186,7 @@ Token 直接覆盖时不会自动重算同组件的其他状态；需要保持�
 | Button | `--cp-button-primary-color / bg / hover-bg / active-bg` |
 | Input | `--cp-input-bg / hover-bg / active-bg / error-active-bg` 与对应 Shadow |
 | Menu | `--cp-menu-item-selected-bg` |
+| Popover | `--cp-popover-header-bg` |
 | Table | `--cp-table-row-bg / stripe-bg / hover-bg / selected-bg / height` |
 | Card | `--cp-card-bg / border-radius / shadow` |
 | Layout | `--cp-layout-sider-bg / shadow` |

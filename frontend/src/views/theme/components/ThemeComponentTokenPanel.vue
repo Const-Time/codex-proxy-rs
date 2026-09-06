@@ -80,6 +80,7 @@ const tokenCatalog: Record<ThemeEditorComponent, readonly EditableToken[]> = {
   surface: [
     { name: '--cp-card-bg', label: '卡片背景', kind: 'color', description: 'colorBgContainer' },
     { name: '--cp-modal-bg', label: '弹窗背景', kind: 'color', description: 'contentBg' },
+    { name: '--cp-popover-header-bg', label: '浮层标题背景', kind: 'color', description: 'headerBg' },
     {
       name: '--cp-card-border-radius',
       label: '卡片圆角',

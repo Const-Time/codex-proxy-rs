@@ -163,6 +163,7 @@
   --color-cp-control-outline: var(--cp-control-outline);
   --color-cp-menu-item-selected-bg: var(--cp-menu-item-selected-bg);
   --color-cp-modal-bg: var(--cp-modal-bg);
+  --color-cp-popover-header-bg: var(--cp-popover-header-bg);
   --color-cp-progress-remaining: var(--cp-progress-remaining-color);
 
   /* 圆角 */
