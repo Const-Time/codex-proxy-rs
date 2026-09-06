@@ -2,8 +2,8 @@ use std::{
     fmt,
     pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::{Duration, SystemTime},
@@ -25,6 +25,7 @@ use gateway_core::{
     error::GatewayError,
     event::{GatewayEvent, ProtocolWireEvent, ProviderEvent, ProviderResponseHeader, ResponseMeta},
     lifecycle::CancellationToken,
+    operation::Operation,
     routing::PublicModelId,
 };
 use serde_json::{Value, json};
@@ -32,7 +33,7 @@ use tokio::sync::mpsc::{
     UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel,
 };
 use tokio_tungstenite::{
-    connect_async,
+    MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{
         Message as ClientMessage, client::IntoClientRequest, protocol::frame::coding::CloseCode,
     },
@@ -44,27 +45,33 @@ use crate::openai::{api_router, authenticated_client};
 #[derive(Default)]
 struct CrossingLimitTrace {
     release_terminal: tokio::sync::Notify,
-    started_emitted: AtomicBool,
-    terminal_emitted: AtomicBool,
+    starts: AtomicUsize,
+    inputs: Mutex<Vec<Value>>,
+    cancelled: AtomicBool,
+    cancellation_observed: tokio::sync::Notify,
     finalized: AtomicBool,
 }
 
 struct CrossingLimitSession {
     trace: Arc<CrossingLimitTrace>,
+    started_emitted: bool,
+    terminal_emitted: bool,
+    finalized: bool,
 }
 
 impl ExecutionSession for CrossingLimitSession {
     fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>> {
         Box::pin(async move {
-            if !self.trace.started_emitted.swap(true, Ordering::AcqRel) {
+            if !self.started_emitted {
+                self.started_emitted = true;
                 return Ok(Some(crossing_limit_started_batch()));
             }
-            if !self.trace.terminal_emitted.load(Ordering::Acquire) {
+            if !self.terminal_emitted {
                 self.trace.release_terminal.notified().await;
-                if !self.trace.terminal_emitted.swap(true, Ordering::AcqRel) {
-                    return Ok(Some(crossing_limit_terminal_batch()));
-                }
+                self.terminal_emitted = true;
+                return Ok(Some(crossing_limit_terminal_batch()));
             }
+            self.finalized = true;
             self.trace.finalized.store(true, Ordering::Release);
             Ok(None)
         })
@@ -87,10 +94,13 @@ impl ExecutionSession for CrossingLimitSession {
     }
 
     fn is_finalized(&self) -> bool {
-        self.trace.finalized.load(Ordering::Acquire)
+        self.finalized
     }
 
-    fn cancel(&self) {}
+    fn cancel(&self) {
+        self.trace.cancelled.store(true, Ordering::Release);
+        self.trace.cancellation_observed.notify_one();
+    }
 
     fn detach_finalize(self: Box<Self>) -> BoxFuture<'static, ()> {
         Box::pin(async move {
@@ -127,6 +137,14 @@ impl ExecutionService for CrossingLimitExecution {
         request: StartExecution,
     ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
         Box::pin(async move {
+            self.trace.starts.fetch_add(1, Ordering::AcqRel);
+            if let Operation::Generate(generate) = &request.operation {
+                self.trace
+                    .inputs
+                    .lock()
+                    .expect("input trace lock")
+                    .push(generate.protocol_payload().body()["input"].clone());
+            }
             Ok(StartedExecution {
                 request_id: gateway_core::engine::ModelRequestId::new("req_ws_crossing_limit")
                     .expect("request id"),
@@ -134,6 +152,9 @@ impl ExecutionService for CrossingLimitExecution {
                 stream: request.metadata.stream,
                 session: Box::new(CrossingLimitSession {
                     trace: Arc::clone(&self.trace),
+                    started_emitted: false,
+                    terminal_emitted: false,
+                    finalized: false,
                 }),
             })
         })
@@ -192,7 +213,7 @@ fn crossing_limit_terminal_batch() -> CoordinatedEvent {
 }
 
 use gateway_api::openai::responses::websocket::connection::{
-    ConnectionConfig, ConnectionEvent, ConnectionWriteError, FramePhase,
+    ConnectionConfig, ConnectionEvent, ConnectionWriteError, FramePhase, PumpExitReason,
     ResponsesWebSocketConnection, WriteContext, spawn_connection,
 };
 
@@ -255,12 +276,14 @@ struct PumpHarness {
     incoming: UnboundedSender<Result<Message, TestSocketError>>,
     written: UnboundedReceiver<Message>,
     dropped: Arc<AtomicBool>,
+    cancellation: CancellationToken,
 }
 
 fn test_connection(stall_writes: bool) -> PumpHarness {
     let (incoming_tx, incoming_rx) = unbounded_channel();
     let (written_tx, written_rx) = unbounded_channel();
     let dropped = Arc::new(AtomicBool::new(false));
+    let cancellation = CancellationToken::new();
     let socket = TestSocket {
         incoming: incoming_rx,
         written: written_tx,
@@ -270,7 +293,7 @@ fn test_connection(stall_writes: bool) -> PumpHarness {
     let connection = spawn_connection(
         socket,
         Arc::from("ws_test"),
-        CancellationToken::new(),
+        cancellation.clone(),
         ConnectionConfig::PRODUCTION,
     );
     PumpHarness {
@@ -278,6 +301,7 @@ fn test_connection(stall_writes: bool) -> PumpHarness {
         incoming: incoming_tx,
         written: written_rx,
         dropped,
+        cancellation,
     }
 }
 
@@ -314,6 +338,110 @@ async fn pump_consumes_pong_without_forwarding_a_business_event() {
 
     let result = tokio::time::timeout(Duration::from_secs(1), connection.next_event()).await;
     assert!(result.is_err(), "Pong unexpectedly reached the coordinator");
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_for_exit_should_preserve_queued_business_frames() {
+    let PumpHarness {
+        mut connection,
+        incoming,
+        ..
+    } = test_connection(false);
+    for payload in ["first", "second"] {
+        incoming
+            .send(Ok(Message::Text(payload.into())))
+            .expect("queue text");
+    }
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), connection.wait_for_exit())
+            .await
+            .is_err()
+    );
+    for expected in ["first", "second"] {
+        assert!(
+            matches!(connection.next_event().await, Some(ConnectionEvent::Text(payload)) if payload == expected)
+        );
+    }
+}
+
+#[tokio::test]
+async fn client_close_should_take_priority_over_queued_business_frames() {
+    let PumpHarness {
+        mut connection,
+        incoming,
+        ..
+    } = test_connection(false);
+    incoming
+        .send(Ok(Message::Text("queued".into())))
+        .expect("queue text");
+    incoming
+        .send(Ok(Message::Close(None)))
+        .expect("close socket");
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), connection.wait_for_exit())
+            .await
+            .expect("observe close"),
+        PumpExitReason::ClientClose
+    );
+    assert!(matches!(
+        connection.next_event().await,
+        Some(ConnectionEvent::Exited(PumpExitReason::ClientClose))
+    ));
+}
+
+#[tokio::test]
+async fn full_business_queue_should_not_block_lifecycle_shutdown() {
+    let PumpHarness {
+        mut connection,
+        incoming,
+        mut written,
+        cancellation,
+        ..
+    } = test_connection(false);
+    for _ in 0..32 {
+        incoming
+            .send(Ok(Message::Text("queued".into())))
+            .expect("queue text");
+    }
+    incoming
+        .send(Ok(Message::Ping(vec![1].into())))
+        .expect("send Ping after queue fills");
+    assert!(matches!(written.recv().await, Some(Message::Pong(_))));
+    cancellation.cancel();
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), connection.wait_for_exit())
+            .await
+            .expect("observe shutdown"),
+        PumpExitReason::LifecycleShutdown
+    );
+}
+
+#[tokio::test]
+async fn inbound_overload_should_close_without_executing_queued_frames() {
+    let PumpHarness {
+        mut connection,
+        incoming,
+        ..
+    } = test_connection(false);
+    for _ in 0..33 {
+        incoming
+            .send(Ok(Message::Text("queued".into())))
+            .expect("queue text");
+    }
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), connection.wait_for_exit())
+            .await
+            .expect("observe overload"),
+        PumpExitReason::InboundOverload
+    );
+    assert!(matches!(
+        connection.next_event().await,
+        Some(ConnectionEvent::Exited(PumpExitReason::InboundOverload))
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -371,6 +499,7 @@ async fn stalled_write_times_out_at_three_hundred_seconds_and_aborts_the_pump() 
         incoming: _incoming,
         written: _written,
         dropped,
+        ..
     } = test_connection(true);
     let request_id = Arc::<str>::from("req_test");
 
@@ -413,6 +542,7 @@ async fn dropping_the_connection_aborts_and_drops_the_socket_owner() {
         incoming: _incoming,
         written: _written,
         dropped,
+        ..
     } = test_connection(false);
 
     drop(connection);
@@ -540,6 +670,27 @@ async fn active_response_crossing_the_limit_writes_terminal_before_the_limit_err
         }
     }
 
+    for _ in 0..32 {
+        socket
+            .send(ClientMessage::Text(
+                json!({"type": "response.create", "model": "model-a", "input": "queued after limit"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("fill request queue before expiry");
+    }
+    socket
+        .send(ClientMessage::Ping(vec![1].into()))
+        .await
+        .expect("send Ping after queued request");
+    let pong = tokio::time::timeout(Duration::from_secs(1), socket.next())
+        .await
+        .expect("Pong timeout")
+        .expect("connection remains open")
+        .expect("valid frame");
+    assert!(matches!(pong, ClientMessage::Pong(_)));
+
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(60 * 60)).await;
     tokio::task::yield_now().await;
@@ -568,15 +719,21 @@ async fn active_response_crossing_the_limit_writes_terminal_before_the_limit_err
 
     assert_eq!(event_types, ["response.completed", "error"]);
     assert!(trace.finalized.load(Ordering::Acquire));
+    assert_eq!(trace.starts.load(Ordering::Acquire), 1);
     server.abort();
 }
 
-#[tokio::test]
-async fn second_text_frame_during_an_active_response_keeps_the_single_response_contract() {
+type TestClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn start_active_response() -> (
+    Arc<CrossingLimitTrace>,
+    TestClientSocket,
+    tokio::task::JoinHandle<()>,
+) {
     let trace = Arc::new(CrossingLimitTrace::default());
     let execution = Arc::new(CrossingLimitExecution {
         client: authenticated_client("sk_ws_crossing_limit"),
-        trace,
+        trace: Arc::clone(&trace),
     });
     let app = api_router(execution).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -608,7 +765,7 @@ async fn second_text_frame_during_an_active_response_keeps_the_single_response_c
         .into(),
     );
     socket
-        .send(response_create.clone())
+        .send(response_create)
         .await
         .expect("send first response.create");
     loop {
@@ -626,19 +783,169 @@ async fn second_text_frame_during_an_active_response_keeps_the_single_response_c
         }
     }
 
+    (trace, socket, server)
+}
+
+#[tokio::test]
+async fn requests_received_during_an_active_response_should_execute_in_order() {
+    let (trace, mut socket, server) = start_active_response().await;
+    for input in ["second", "third"] {
+        socket
+            .send(ClientMessage::Text(
+                json!({"type": "response.create", "model": "model-a", "input": input})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send queued response.create");
+    }
     socket
-        .send(response_create)
+        .send(ClientMessage::Ping(vec![1, 2, 3].into()))
         .await
-        .expect("send overlapping response.create");
+        .expect("send Ping after queued requests");
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("Pong timeout while response is active")
+        .expect("WebSocket remains open")
+        .expect("valid WebSocket frame");
+    assert!(matches!(message, ClientMessage::Pong(_)));
+    assert_eq!(trace.starts.load(Ordering::Acquire), 1);
+
+    for completed_count in 1..=3 {
+        trace.release_terminal.notify_one();
+        let expected_types = if completed_count < 3 {
+            vec![
+                "response.completed",
+                "response.metadata",
+                "response.created",
+            ]
+        } else {
+            vec!["response.completed"]
+        };
+        let mut event_types = Vec::new();
+        for _ in &expected_types {
+            let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("serial response timeout")
+                .expect("WebSocket remains open")
+                .expect("valid WebSocket frame");
+            let ClientMessage::Text(text) = message else {
+                panic!("unexpected frame during serial execution: {message:?}");
+            };
+            let event: Value = serde_json::from_str(&text).expect("response event JSON");
+            event_types.push(event["type"].as_str().expect("event type").to_owned());
+        }
+        assert_eq!(event_types, expected_types);
+        assert_eq!(
+            trace.starts.load(Ordering::Acquire),
+            (completed_count + 1).min(3)
+        );
+    }
+    assert_eq!(
+        *trace.inputs.lock().expect("input trace lock"),
+        vec![json!("hello"), json!("second"), json!("third")]
+    );
+    assert!(!trace.cancelled.load(Ordering::Acquire));
+    socket.close(None).await.expect("close WebSocket");
+    server.abort();
+}
+
+#[tokio::test]
+async fn queued_unknown_message_should_be_rejected_before_the_next_valid_request() {
+    let (trace, mut socket, server) = start_active_response().await;
+    for payload in [
+        json!({"type": "response.future"}),
+        json!({"type": "response.create", "model": "model-a", "input": "next"}),
+    ] {
+        socket
+            .send(ClientMessage::Text(payload.to_string().into()))
+            .await
+            .expect("queue frame");
+    }
+    trace.release_terminal.notify_one();
+
+    let mut event_types = Vec::new();
+    for _ in 0..4 {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("response timeout")
+            .expect("connection remains open")
+            .expect("valid frame");
+        let ClientMessage::Text(text) = message else {
+            panic!("unexpected frame: {message:?}");
+        };
+        let event: Value = serde_json::from_str(&text).expect("event JSON");
+        event_types.push(event["type"].as_str().expect("event type").to_owned());
+    }
+    assert_eq!(
+        event_types,
+        [
+            "response.completed",
+            "error",
+            "response.metadata",
+            "response.created"
+        ]
+    );
+    assert_eq!(trace.starts.load(Ordering::Acquire), 2);
+    assert_eq!(
+        *trace.inputs.lock().expect("input trace lock"),
+        vec![json!("hello"), json!("next")]
+    );
+    socket.close(None).await.expect("close WebSocket");
+    server.abort();
+}
+
+#[tokio::test]
+async fn queued_binary_frame_should_be_rejected_after_the_active_response_finishes() {
+    let (trace, mut socket, server) = start_active_response().await;
+    socket
+        .send(ClientMessage::Binary(b"{}".to_vec().into()))
+        .await
+        .expect("queue binary frame");
+    trace.release_terminal.notify_one();
+
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("terminal timeout")
+        .expect("connection remains open")
+        .expect("valid frame");
+    let ClientMessage::Text(text) = message else {
+        panic!("active response did not finish before binary rejection: {message:?}");
+    };
+    let event: Value = serde_json::from_str(&text).expect("event JSON");
+    assert_eq!(event["type"], "response.completed");
     let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
         .await
         .expect("policy close timeout")
-        .expect("WebSocket returns a policy close")
-        .expect("valid WebSocket frame");
-    let ClientMessage::Close(Some(frame)) = message else {
-        panic!("overlapping response.create must close the connection");
-    };
+        .expect("connection closes")
+        .expect("valid frame");
+    assert!(
+        matches!(message, ClientMessage::Close(Some(frame)) if frame.code == CloseCode::Policy)
+    );
+    assert_eq!(trace.starts.load(Ordering::Acquire), 1);
+    server.abort();
+}
 
-    assert_eq!(frame.code, CloseCode::Policy);
+#[tokio::test]
+async fn client_close_should_cancel_active_execution_without_starting_queued_requests() {
+    let (trace, mut socket, server) = start_active_response().await;
+    socket
+        .send(ClientMessage::Text(
+            json!({"type": "response.create", "model": "model-a", "input": "queued"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("queue request");
+    socket.close(None).await.expect("close WebSocket");
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        trace.cancellation_observed.notified(),
+    )
+    .await
+    .expect("cancel active execution promptly");
+    assert_eq!(trace.starts.load(Ordering::Acquire), 1);
+    assert!(trace.cancelled.load(Ordering::Acquire));
     server.abort();
 }

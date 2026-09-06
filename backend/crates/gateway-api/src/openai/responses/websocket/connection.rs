@@ -195,6 +195,7 @@ pub struct ResponsesWebSocketConnection {
     expired: Arc<AtomicBool>,
     commands: Option<mpsc::Sender<ConnectionCommand>>,
     incoming: mpsc::Receiver<ConnectionEvent>,
+    exited: oneshot::Receiver<PumpExitReason>,
     pump_task: Option<JoinHandle<()>>,
     stats: Arc<ConnectionStats>,
     config: ConnectionConfig,
@@ -231,13 +232,34 @@ impl ResponsesWebSocketConnection {
 
     /// 等待下一个需要业务层处理的客户端事件。
     pub async fn next_event(&mut self) -> Option<ConnectionEvent> {
-        let event = self.incoming.recv().await;
+        if let Some(reason) = self.exit_reason {
+            return Some(ConnectionEvent::Exited(reason));
+        }
+        let event = tokio::select! {
+            biased;
+            reason = &mut self.exited => {
+                Some(ConnectionEvent::Exited(reason.unwrap_or(PumpExitReason::PumpStopped)))
+            }
+            event = self.incoming.recv() => event,
+        };
         if let Some(ConnectionEvent::Exited(reason)) = event.as_ref() {
             self.exit_reason.get_or_insert(*reason);
         } else if event.is_none() {
             self.exit_reason.get_or_insert(PumpExitReason::PumpStopped);
         }
         event
+    }
+
+    /// 等待连接退出，不消费留给后续串行请求的业务帧。
+    pub async fn wait_for_exit(&mut self) -> PumpExitReason {
+        if let Some(reason) = self.exit_reason {
+            return reason;
+        }
+        let reason = (&mut self.exited)
+            .await
+            .unwrap_or(PumpExitReason::PumpStopped);
+        self.exit_reason = Some(reason);
+        reason
     }
 
     /// 串行写入文本帧，并等待 pump 确认 transport 写入结果。
@@ -425,10 +447,12 @@ where
     let stats = Arc::new(ConnectionStats::default());
     let (command_tx, command_rx) = mpsc::channel(OUTBOUND_COMMAND_BUFFER);
     let (incoming_tx, incoming_rx) = mpsc::channel(INBOUND_EVENT_BUFFER);
+    let (exit_tx, exit_rx) = oneshot::channel();
     let pump_task = tokio::spawn(run_pump(
         socket,
         command_rx,
         incoming_tx,
+        exit_tx,
         Arc::clone(&connection_id),
         cancellation,
         opened_at,
@@ -442,6 +466,7 @@ where
         expired,
         commands: Some(command_tx),
         incoming: incoming_rx,
+        exited: exit_rx,
         pump_task: Some(pump_task),
         stats,
         config,
@@ -454,6 +479,7 @@ async fn run_pump<S, E>(
     mut socket: S,
     mut commands: mpsc::Receiver<ConnectionCommand>,
     incoming: mpsc::Sender<ConnectionEvent>,
+    exited: oneshot::Sender<PumpExitReason>,
     connection_id: Arc<str>,
     cancellation: CancellationToken,
     opened_at: Instant,
@@ -474,8 +500,13 @@ async fn run_pump<S, E>(
             () = &mut deadline, if !deadline_elapsed => {
                 deadline_elapsed = true;
                 expired.store(true, Ordering::Release);
-                if let Err(reason) = emit_incoming(&incoming, ConnectionEvent::Expired) {
-                    break reason;
+                // 满队列本身已能唤醒空闲协调层；到期标志仍阻止启动下一轮。
+                // 不能因无法追加 Expired 通知而中断正在收尾的响应。
+                match incoming.try_send(ConnectionEvent::Expired) {
+                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        break PumpExitReason::CoordinatorDropped;
+                    }
                 }
             }
             command = commands.recv() => {
@@ -550,7 +581,8 @@ async fn run_pump<S, E>(
             },
         }
     };
-    let _ = incoming.try_send(ConnectionEvent::Exited(reason));
+    // 退出不能排在待执行请求之后，也不能因业务队列已满而丢失。
+    let _ = exited.send(reason);
     tracing::debug!(
         websocket_connection_id = %connection_id,
         pump_exit_reason = reason.as_str(),

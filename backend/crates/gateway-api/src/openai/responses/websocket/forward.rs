@@ -13,11 +13,9 @@ use crate::openai::error::{gateway_error_contract, gateway_error_from_engine};
 
 use super::{
     super::{DecodedResponsesRequest, OpenAiResponsesEncoder, PendingExecution, ProtocolErrorBody},
-    connection::{ConnectionEvent, FramePhase, ResponsesWebSocketConnection, WriteContext},
+    connection::{FramePhase, ResponsesWebSocketConnection, WriteContext},
     protocol::{error_event, response_metadata_event},
 };
-
-const ACTIVE_RESPONSE_VIOLATION: &str = "Only one response.create may be active per connection";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ForwardOutcome {
@@ -66,29 +64,20 @@ pub(super) async fn forward_execution(
         );
         return send_gateway_error(connection, &error, &request_id).await;
     }
-    let first = loop {
-        match next_active_input(connection, &mut execution).await {
-            ActiveInput::Event(Ok(Some(event))) => break event,
-            ActiveInput::Event(Ok(None)) => {
-                let error = GatewayError::new(
-                    GatewayErrorKind::Internal,
-                    "gateway response ended before its first event",
-                );
-                return send_gateway_error(connection, &error, &request_id).await;
-            }
-            ActiveInput::Event(Err(error)) => {
-                return send_initial_engine_error(connection, &mut execution, &error, &request_id)
-                    .await;
-            }
-            ActiveInput::Control => continue,
-            ActiveInput::Disconnect => return ForwardOutcome::Disconnect,
-            ActiveInput::ProtocolViolation => {
-                connection
-                    .close_policy(ACTIVE_RESPONSE_VIOLATION, Some(&request_id))
-                    .await;
-                return ForwardOutcome::Disconnect;
-            }
+    let first = match next_active_input(connection, &mut execution).await {
+        ActiveInput::Event(Ok(Some(event))) => event,
+        ActiveInput::Event(Ok(None)) => {
+            let error = GatewayError::new(
+                GatewayErrorKind::Internal,
+                "gateway response ended before its first event",
+            );
+            return send_gateway_error(connection, &error, &request_id).await;
         }
+        ActiveInput::Event(Err(error)) => {
+            return send_initial_engine_error(connection, &mut execution, &error, &request_id)
+                .await;
+        }
+        ActiveInput::Disconnect => return ForwardOutcome::Disconnect,
     };
     let requirement = first.commit_requirement();
     let mut first = first.into_provider_events();
@@ -259,14 +248,7 @@ pub(super) async fn forward_execution(
                 let error = gateway_error_from_engine(&error);
                 return send_gateway_error(connection, &error, &request_id).await;
             }
-            ActiveInput::Control => {}
             ActiveInput::Disconnect => return ForwardOutcome::Disconnect,
-            ActiveInput::ProtocolViolation => {
-                connection
-                    .close_policy(ACTIVE_RESPONSE_VIOLATION, Some(&request_id))
-                    .await;
-                return ForwardOutcome::Disconnect;
-            }
         }
     }
 }
@@ -310,50 +292,39 @@ async fn confirm_completed_execution(
     execution: &mut PendingExecution,
     request_id: &Arc<str>,
 ) -> Result<(), ForwardOutcome> {
-    loop {
-        match next_active_input(connection, execution).await {
-            ActiveInput::Event(Ok(None))
-                if execution
-                    .session_mut()
-                    .is_some_and(|session| session.is_finalized()) =>
-            {
-                return Ok(());
-            }
-            ActiveInput::Event(Ok(None)) => {
-                let error = GatewayError::new(
-                    GatewayErrorKind::Internal,
-                    "gateway response was not finalized after its terminal event",
-                );
-                return Err(send_gateway_error(connection, &error, request_id).await);
-            }
-            ActiveInput::Event(Ok(Some(_))) => {
-                let error = GatewayError::new(
-                    GatewayErrorKind::Internal,
-                    "gateway response continued after its terminal event",
-                );
-                return Err(send_gateway_error(connection, &error, request_id).await);
-            }
-            ActiveInput::Event(Err(error)) => {
-                let error = gateway_error_from_engine(&error);
-                return Err(send_gateway_error(connection, &error, request_id).await);
-            }
-            ActiveInput::Control => {}
-            ActiveInput::Disconnect => return Err(ForwardOutcome::Disconnect),
-            ActiveInput::ProtocolViolation => {
-                connection
-                    .close_policy(ACTIVE_RESPONSE_VIOLATION, Some(request_id))
-                    .await;
-                return Err(ForwardOutcome::Disconnect);
-            }
+    match next_active_input(connection, execution).await {
+        ActiveInput::Event(Ok(None))
+            if execution
+                .session_mut()
+                .is_some_and(|session| session.is_finalized()) =>
+        {
+            Ok(())
         }
+        ActiveInput::Event(Ok(None)) => {
+            let error = GatewayError::new(
+                GatewayErrorKind::Internal,
+                "gateway response was not finalized after its terminal event",
+            );
+            Err(send_gateway_error(connection, &error, request_id).await)
+        }
+        ActiveInput::Event(Ok(Some(_))) => {
+            let error = GatewayError::new(
+                GatewayErrorKind::Internal,
+                "gateway response continued after its terminal event",
+            );
+            Err(send_gateway_error(connection, &error, request_id).await)
+        }
+        ActiveInput::Event(Err(error)) => {
+            let error = gateway_error_from_engine(&error);
+            Err(send_gateway_error(connection, &error, request_id).await)
+        }
+        ActiveInput::Disconnect => Err(ForwardOutcome::Disconnect),
     }
 }
 
 enum ActiveInput {
     Event(Result<Option<CoordinatedEvent>, EngineError>),
-    Control,
     Disconnect,
-    ProtocolViolation,
 }
 
 async fn next_active_input(
@@ -363,15 +334,12 @@ async fn next_active_input(
     let Some(session) = execution.session_mut() else {
         return ActiveInput::Disconnect;
     };
+    // 与 Codex stream_request 的连接锁一致：本轮结束前不消费下一条请求。
+    // pump 继续接收有界业务帧和处理 Ping/Pong；退出通过独立通知取消本轮。
     tokio::select! {
+        biased;
+        _ = connection.wait_for_exit() => ActiveInput::Disconnect,
         event = session.next_event() => ActiveInput::Event(event),
-        message = connection.next_event() => match message {
-            Some(ConnectionEvent::Expired) => ActiveInput::Control,
-            Some(ConnectionEvent::Text(_) | ConnectionEvent::Binary) => {
-                ActiveInput::ProtocolViolation
-            }
-            Some(ConnectionEvent::Exited(_)) | None => ActiveInput::Disconnect,
-        },
     }
 }
 
