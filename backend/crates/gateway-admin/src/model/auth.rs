@@ -4,6 +4,12 @@ use chrono::{DateTime, Utc};
 
 use super::{MutationActor, MutationContext, Revision};
 
+/// 会话审计使用的稳定管理员标识。
+#[must_use]
+pub fn admin_session_actor_ref(admin_user_id: &str) -> String {
+    format!("admin:{admin_user_id}")
+}
+
 /// 已认证的管理主体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminPrincipal {

@@ -1182,11 +1182,10 @@ async fn execute_returns_cold_stream_and_records_selected_account() {
     assert_eq!(
         metadata,
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "clientCache": "miss",
             "dnsSource": "system",
-            "dnsMs": 7,
-            "upstreamHeadersMs": 42
+            "dnsMs": 7
         })
     );
     assert!(

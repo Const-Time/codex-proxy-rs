@@ -562,7 +562,6 @@ pub(crate) fn ops_error_view(error: domain::OpsError) -> OpsErrorView {
         failure_class: error.failure_kind,
         upstream_send_state: error.upstream_send_state,
         provider_error_code: error.provider_error_code,
-        occurrence_count: error.occurrence_count,
         response_id: error.client_response_id,
         upstream_request_id: error.upstream_request_id,
         latency_ms: error.latency_ms,

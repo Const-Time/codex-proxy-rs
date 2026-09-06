@@ -79,7 +79,6 @@ const eventFields = computed(() => visibleFields([
   { label: '事件类型', value: props.record?.kind, mono: true },
   { label: '操作', value: props.record?.operation, mono: true },
   { label: '尝试序号', value: props.record?.attemptIndex },
-  { label: '聚合次数', value: props.record?.occurrenceCount },
   { label: '响应 ID', value: props.record?.responseId, mono: true },
   { label: '上游请求 ID', value: props.record?.upstreamRequestId, mono: true },
 ]))

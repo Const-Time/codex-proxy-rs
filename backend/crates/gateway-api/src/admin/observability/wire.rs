@@ -783,7 +783,6 @@ pub struct OpsErrorView {
     pub failure_class: String,
     pub upstream_send_state: Option<String>,
     pub provider_error_code: Option<String>,
-    pub occurrence_count: u32,
     pub response_id: Option<String>,
     pub upstream_request_id: Option<String>,
     pub latency_ms: Option<u64>,

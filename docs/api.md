@@ -503,6 +503,8 @@ endpoint, region, bucket, accessKeyId, secretAccessKey, prefix, forcePathStyle
 
 `secretAccessKey` 为空字符串会校验失败；由于 GET 会回传已保存的明文 Secret，保存时始终整体提交当前值。已有备份记录时，endpoint/region/bucket/forcePathStyle 不允许变化（存储身份锁定，`409`）；只允许轮换凭据与修改 prefix。
 
+保存相同配置保留验证状态、定时计划及配置版本。存储配置实际变化时，会同时使验证失效、暂停定时计划并清空下次运行时间；连接测试通过后需重新启用计划。
+
 更新调度请求字段：
 
 ```text

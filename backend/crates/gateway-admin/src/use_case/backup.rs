@@ -326,7 +326,9 @@ impl DefaultBackupService {
             crate::model::MutationActor::System => AuditActorKind::System,
         };
         let actor_ref = match &context.actor {
-            crate::model::MutationActor::AdminSession { admin_user_id } => admin_user_id.clone(),
+            crate::model::MutationActor::AdminSession { admin_user_id } => {
+                crate::model::auth::admin_session_actor_ref(admin_user_id)
+            }
             crate::model::MutationActor::AdminApiKey => "admin_api_key".to_owned(),
             crate::model::MutationActor::System => "system".to_owned(),
         };

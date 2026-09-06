@@ -425,20 +425,20 @@ pub(crate) async fn attempt_metrics(
                   )::bigint as unavailable_count
            from selected_requests sr
          ), ops_aggregate as (
-           select coalesce(sum(coalesce(oe.occurrence_count, 1)), 0)::bigint
+           select count(*)::bigint
                     as ops_failure_count,
-                  coalesce(sum(coalesce(oe.occurrence_count, 1)) filter (
+                  count(*) filter (
                     where oe.failure_kind in ('rate_limited', 'quota_exhausted')
                        or oe.status_code = 429
-                  ), 0)::bigint as ops_rate_limited_count,
-                  coalesce(sum(coalesce(oe.occurrence_count, 1)) filter (
+                  )::bigint as ops_rate_limited_count,
+                  count(*) filter (
                     where oe.failure_kind in
                             ('authentication', 'authorization', 'invalid_credential')
                        or oe.status_code in (401, 403)
-                  ), 0)::bigint as ops_auth_failure_count,
-                  coalesce(sum(coalesce(oe.occurrence_count, 1)) filter (
+                  )::bigint as ops_auth_failure_count,
+                  count(*) filter (
                     where oe.status_code between 500 and 599
-                  ), 0)::bigint as ops_provider_5xx_count
+                  )::bigint as ops_provider_5xx_count
            from ops_events oe
            join selected_requests sr on sr.id = oe.model_request_id
          )

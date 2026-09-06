@@ -69,7 +69,7 @@ impl DefaultAuthService {
             id: format!("audit_{}", Uuid::now_v7().simple()),
             actor_kind: AuditActorKind::AdminSession,
             actor_admin_user_id: Some(self.default_admin_user_id.clone()),
-            actor_ref: format!("admin:{}", self.default_admin_user_id),
+            actor_ref: crate::model::auth::admin_session_actor_ref(&self.default_admin_user_id),
             request_id: None,
             action: action.to_owned(),
             entity_kind: "admin_session".to_owned(),
@@ -183,7 +183,7 @@ impl AuthService for DefaultAuthService {
         if let Some(session) = session {
             let mut event = self.auth_audit("admin.logout", Utc::now());
             event.actor_admin_user_id = Some(session.admin_user_id.clone());
-            event.actor_ref = format!("admin:{}", session.admin_user_id);
+            event.actor_ref = crate::model::auth::admin_session_actor_ref(&session.admin_user_id);
             event.entity_ref = session.admin_user_id;
             self.store
                 .append_audit_event(event)

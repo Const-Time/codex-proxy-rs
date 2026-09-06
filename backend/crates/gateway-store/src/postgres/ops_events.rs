@@ -45,7 +45,6 @@ pub struct OpsEvent {
     pub upstream_request_id: Option<String>,
     pub latency_ms: Option<u64>,
     pub message: String,
-    pub occurrence_count: u32,
     pub created_at: DateTime<Utc>,
 }
 
@@ -63,10 +62,8 @@ impl OpsEvent {
                 "request-scoped events require a model request and a positive attempt index",
             ));
         }
-        if self.attempt_index == Some(0) || self.occurrence_count == 0 {
-            return Err(invalid(
-                "attempt_index and occurrence_count must be positive",
-            ));
+        if self.attempt_index == Some(0) {
+            return Err(invalid("attempt_index must be positive"));
         }
         if self
             .status_code
@@ -123,13 +120,13 @@ impl OpsEventRepository for PgOpsEventRepository {
                provider_account_authentication_kind_snapshot,
                failure_kind, upstream_send_state, status_code, provider_error_code, retry_after_ms,
                upstream_request_id, latency_ms, message, raw_upstream_error,
-               occurrence_count, created_at
+               created_at
              ) values (
                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                (select name from provider_accounts where id = $8),
                (select email from provider_accounts where id = $8),
                (select authentication_kind from provider_accounts where id = $8),
-               $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+               $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
              )",
         )
         .bind(event.id)
@@ -169,10 +166,6 @@ impl OpsEventRepository for PgOpsEventRepository {
         )
         .bind(event.message)
         .bind(event.raw_upstream_error)
-        .bind(
-            i32::try_from(event.occurrence_count)
-                .map_err(|_| invalid("occurrence_count is too large"))?,
-        )
         .bind(event.created_at)
         .execute(&self.pool)
         .await

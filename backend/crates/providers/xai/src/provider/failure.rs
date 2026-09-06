@@ -90,14 +90,10 @@ pub(super) fn xai_transport_metadata(
         );
         metadata.insert("dnsMs".to_owned(), Value::from(dns.duration_ms()));
     }
-    if let Some(headers_ms) = metrics.headers_ms() {
-        metadata.insert("upstreamHeadersMs".to_owned(), Value::from(headers_ms));
-    }
     if metadata.is_empty() {
         return None;
     }
-    // 观测对象版本信封：读取端按 schemaVersion 解码，缺失视为 v0。
-    metadata.insert("schemaVersion".to_owned(), Value::from(1));
+    metadata.insert("schemaVersion".to_owned(), Value::from(2));
     ProviderResponseMetadata::new(serde_json::to_string(&Value::Object(metadata)).ok()?)
 }
 

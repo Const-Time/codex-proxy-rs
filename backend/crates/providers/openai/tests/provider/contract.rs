@@ -1573,7 +1573,7 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
         assert!(String::from_utf8_lossy(&request).starts_with("POST /codex/responses"));
         http.write_all(
             format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CAPTURE_COMPLETED_SSE}",
+                "HTTP/1.1 200 OK\r\nopenai-model: gpt-reported-by-upstream\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CAPTURE_COMPLETED_SSE}",
                 CAPTURE_COMPLETED_SSE.len()
             )
             .as_bytes(),
@@ -1602,13 +1602,48 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
         .expect("prepare first provider stream");
     let mut first_transport = None;
     let mut first_decision = None;
+    let mut first_timings = None;
+    let mut first_http_version = None;
     while let Some(event) = first.next().await {
         let event = event.expect("fast-path miss must not surface as a provider error");
         if let Some(observation) = event.response_observation() {
             first_transport = Some(observation.transport().as_str().to_owned());
+            first_timings = Some(observation.timings());
+            first_http_version = observation.http_version();
             if let Some(provider_metadata) = observation.provider_metadata() {
                 let metadata: Value = serde_json::from_str(provider_metadata.as_json())
                     .expect("OpenAI provider metadata JSON");
+                assert_eq!(metadata["schemaVersion"], 2);
+                for field in [
+                    "attemptAccountId",
+                    "attemptIndex",
+                    "compact",
+                    "httpVersion",
+                    "effectiveModel",
+                    "serviceTier",
+                    "transportDecisionWaitMs",
+                    "wsConnectMs",
+                    "upstreamHeadersMs",
+                    "firstEventMs",
+                    "firstReasoningMs",
+                    "firstTextMs",
+                    "firstTokenMs",
+                    "openaiProcessingMs",
+                    "websocketPool",
+                    "cfRay",
+                ] {
+                    assert!(
+                        metadata.get(field).is_none(),
+                        "duplicate metadata field {field}"
+                    );
+                }
+                assert_eq!(metadata["upstreamStatus"], 200);
+                assert_eq!(
+                    metadata["upstreamReportedModel"],
+                    "gpt-reported-by-upstream"
+                );
+                assert!(metadata["requestSummary"].is_object());
+                assert!(metadata["upstreamTraceHeaders"].is_array());
                 first_decision = metadata
                     .get("transportDecision")
                     .and_then(Value::as_str)
@@ -1618,6 +1653,13 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
     }
     assert_eq!(first_transport.as_deref(), Some("http_sse"));
     assert_eq!(first_decision.as_deref(), Some("http2_ws_budget_exhausted"));
+    assert!(first_http_version.is_some());
+    assert!(
+        first_timings
+            .expect("typed response timings")
+            .first_event_ms
+            .is_some()
+    );
 
     preconnect_ready_rx
         .await

@@ -4,7 +4,7 @@ use chrono::Utc;
 use secrecy::SecretString;
 
 use gateway_admin::model::backup::{
-    BackupRecordSeed, BackupStatus, BackupTriggerKind, UpdateBackupScheduleCommand,
+    BackupRecordSeed, BackupSettings, BackupStatus, BackupTriggerKind, UpdateBackupScheduleCommand,
     UpdateBackupStorageCommand,
 };
 use gateway_admin::model::{MutationActor, MutationContext};
@@ -46,6 +46,114 @@ fn storage_command(endpoint: &str) -> UpdateBackupStorageCommand {
         prefix: "codex".to_owned(),
         force_path_style: false,
     }
+}
+
+async fn enable_verified_schedule(repository: &PgBackupRepository) -> BackupSettings {
+    let (settings, _) = repository
+        .update_storage_settings(storage_command("https://one.example.com"), &context())
+        .await
+        .expect("configure storage");
+    repository
+        .record_verification(settings.storage_revision, Utc::now())
+        .await
+        .expect("verify storage");
+    repository
+        .update_schedule_settings(
+            UpdateBackupScheduleCommand {
+                schedule_enabled: true,
+                cron_expression: "0 2 * * *".to_owned(),
+                schedule_timezone: "Asia/Shanghai".to_owned(),
+                retention_days: 7,
+                retention_count: 5,
+            },
+            Some(Utc::now() + chrono::Duration::hours(1)),
+            &context(),
+        )
+        .await
+        .expect("enable schedule")
+}
+
+#[tokio::test]
+async fn storage_rotation_pauses_schedule_and_rejects_stale_verification() {
+    let Some(db) = TestDatabase::create("backup_rotation").await else {
+        return;
+    };
+    let repository = PgBackupRepository::new(db.pool.clone());
+    let before = enable_verified_schedule(&repository).await;
+    let mut command = storage_command("https://one.example.com");
+    command.secret_access_key = Some(SecretString::from("rotated-secret"));
+    let (after, _) = repository
+        .update_storage_settings(command, &context())
+        .await
+        .expect("rotate credentials while schedule is enabled");
+    assert_eq!(after.storage_revision, before.storage_revision + 1);
+    assert!(!after.schedule_enabled);
+    assert!(after.next_run_at.is_none());
+    assert!(after.last_verified_at.is_none());
+    assert_eq!(after.cron_expression, before.cron_expression);
+    assert!(
+        !repository
+            .record_verification(before.storage_revision, Utc::now())
+            .await
+            .expect("stale verification is ignored")
+    );
+    let changed: Vec<String> = sqlx::query_scalar(
+        "select changed_fields from admin_audit_events
+         where action = 'backup.s3_config_updated' and 'schedule_enabled' = any(changed_fields)",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("schedule pause is audited with storage change");
+    for field in [
+        "secret_access_key",
+        "schedule_enabled",
+        "next_run_at",
+        "last_verified_at",
+    ] {
+        assert!(
+            changed.iter().any(|value| value == field),
+            "missing audited field {field}"
+        );
+    }
+    db.close().await;
+}
+
+#[tokio::test]
+async fn unchanged_storage_preserves_verification_schedule_and_revision() {
+    let Some(db) = TestDatabase::create("backup_noop_save").await else {
+        return;
+    };
+    let repository = PgBackupRepository::new(db.pool.clone());
+    let before = enable_verified_schedule(&repository).await;
+    let revision: i64 = sqlx::query_scalar("select config_revision from runtime_settings")
+        .fetch_one(&db.pool)
+        .await
+        .expect("current config revision");
+    let audit_count: i64 = sqlx::query_scalar("select count(*) from admin_audit_events")
+        .fetch_one(&db.pool)
+        .await
+        .expect("current audit count");
+    for include_secret in [true, false] {
+        let mut command = storage_command("https://one.example.com");
+        if !include_secret {
+            command.secret_access_key = None;
+        }
+        let (after, config_revision) = repository
+            .update_storage_settings(command, &context())
+            .await
+            .expect("save unchanged storage");
+        assert_eq!(after.storage_revision, before.storage_revision);
+        assert_eq!(after.last_verified_at, before.last_verified_at);
+        assert_eq!(after.next_run_at, before.next_run_at);
+        assert!(after.schedule_enabled);
+        assert_eq!(config_revision.get(), u64::try_from(revision).unwrap());
+    }
+    let current_count: i64 = sqlx::query_scalar("select count(*) from admin_audit_events")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read audit count after no-op");
+    assert_eq!(current_count, audit_count);
+    db.close().await;
 }
 
 #[tokio::test]

@@ -1467,14 +1467,14 @@ async fn seed_observability_facts(
            provider_account_ref, upstream_model_id, failure_kind, status_code,
            provider_account_name_snapshot, provider_account_email_snapshot,
            provider_account_authentication_kind_snapshot,
-           provider_error_code, retry_after_ms, latency_ms, message, occurrence_count, created_at
+           provider_error_code, retry_after_ms, latency_ms, message, created_at
          ) values (
            'ops_observe_retry', 'req_observe_failed', 1, 'warning', 'routing', 'responses',
            'openai', 'acct_observe', 'acct_observe',
            'upstream-model', 'rate_limited', 429,
            'primary', 'account@example.invalid', 'oauth',
            'rate_limit', 1000, 300,
-           'first account was limited', 1, $1 - interval '9 minutes 30 seconds'
+           'first account was limited', $1 - interval '9 minutes 30 seconds'
          )",
     )
     .bind(now)

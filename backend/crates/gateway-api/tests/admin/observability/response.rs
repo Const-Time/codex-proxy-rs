@@ -568,7 +568,6 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
             raw_upstream_error: Some(
                 r#"{"error":{"code":"upstream","message":"raw upstream marker"}}"#.to_owned(),
             ),
-            occurrence_count: 1,
             client_ip: Some("203.0.113.8".to_owned()),
             user_agent: Some("codex-cli/0.144.0".to_owned()),
             reasoning_effort: Some("medium".to_owned()),

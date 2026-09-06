@@ -634,8 +634,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let mut observation_state = OpenAiResponseObservationState::from_backend_response(
             &response,
             &request,
-            active_account.id().as_str(),
-            context.attempt_index().get(),
         );
         if let Some(observation) = observation_state.observation() {
             yield ProviderEvent::observation(observation);

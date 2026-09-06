@@ -23,7 +23,6 @@ fn request_scoped_ops_event_requires_attempt_index() {
         upstream_request_id: None,
         latency_ms: None,
         message: "safe".to_owned(),
-        occurrence_count: 1,
         created_at: Utc::now(),
     };
     assert!(event.validate().is_err());

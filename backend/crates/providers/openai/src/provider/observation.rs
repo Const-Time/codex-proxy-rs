@@ -13,14 +13,10 @@ pub(super) struct OpenAiResponseObservationState {
     metrics: CodexTransportMetrics,
     websocket_pool_decision: Option<crate::transport::WebSocketPoolDecision>,
     request_summary: Value,
-    requested_model: String,
     stream: bool,
-    compact: bool,
     requested_service_tier: Option<String>,
     upstream_service_tier: Option<String>,
     rate_limit_headers: Vec<(String, String)>,
-    account_id: String,
-    attempt_index: u32,
     timings: ProviderResponseTimings,
     terminal: Option<OpenAiResponseTerminal>,
 }
@@ -55,10 +51,7 @@ impl OpenAiResponseObservationState {
     pub(super) fn from_backend_response(
         response: &CodexBackendStreamingResponse,
         request: &CodexResponsesRequest,
-        account_id: &str,
-        attempt_index: u32,
     ) -> Self {
-        let semantics = request.semantics();
         Self {
             transport: response.transport,
             diagnostics: response.diagnostics.clone(),
@@ -66,14 +59,10 @@ impl OpenAiResponseObservationState {
             metrics: response.transport_metrics.clone(),
             websocket_pool_decision: response.websocket_pool_decision,
             request_summary: openai_response_request_summary(request, response.transport),
-            requested_model: request.model().to_owned(),
             stream: request.stream(),
-            compact: semantics.compact,
             requested_service_tier: normalize_service_tier(request.service_tier()),
             upstream_service_tier: None,
             rate_limit_headers: selected_observation_headers(&response.rate_limit_headers),
-            account_id: account_id.to_owned(),
-            attempt_index,
             timings: openai_response_timings(
                 &response.transport_metrics,
                 &response.response_metadata,
@@ -199,18 +188,16 @@ impl OpenAiResponseObservationState {
 
     pub(super) fn provider_metadata(&self) -> Option<ProviderResponseMetadata> {
         let mut metadata = Map::new();
-        // 观测对象版本信封：读取端按 schemaVersion 解码，缺失视为 v0。
-        metadata.insert("schemaVersion".to_owned(), json!(1));
-        let effective_model = self
+        metadata.insert("schemaVersion".to_owned(), json!(2));
+        if let Some(model) = self
             .response_metadata
             .effective_model
             .as_deref()
             .filter(|model| !model.is_empty())
-            .unwrap_or(&self.requested_model);
-        if !effective_model.is_empty() {
+        {
             metadata.insert(
-                "effectiveModel".to_owned(),
-                Value::String(effective_model.to_owned()),
+                "upstreamReportedModel".to_owned(),
+                Value::String(model.to_owned()),
             );
         }
         metadata.insert(
@@ -225,12 +212,6 @@ impl OpenAiResponseObservationState {
             Value::Bool(self.response_metadata.reasoning_included),
         );
         metadata.insert("stream".to_owned(), Value::Bool(self.stream));
-        metadata.insert("compact".to_owned(), Value::Bool(self.compact));
-        metadata.insert("attemptIndex".to_owned(), json!(self.attempt_index));
-        metadata.insert(
-            "attemptAccountId".to_owned(),
-            Value::String(self.account_id.clone()),
-        );
         metadata.insert(
             "rateLimitHeaders".to_owned(),
             json!(self.rate_limit_headers),
@@ -242,12 +223,6 @@ impl OpenAiResponseObservationState {
             )),
         );
         metadata.insert("requestSummary".to_owned(), self.request_summary.clone());
-        if let Some(service_tier) = self.effective_service_tier() {
-            metadata.insert(
-                "serviceTier".to_owned(),
-                Value::String(service_tier.to_owned()),
-            );
-        }
         if let Some(service_tier) = &self.requested_service_tier {
             metadata.insert(
                 "requestedServiceTier".to_owned(),
@@ -269,48 +244,6 @@ impl OpenAiResponseObservationState {
                 Value::String(decision.as_str().to_owned()),
             );
         }
-        if let Some(decision) = self.websocket_pool_decision {
-            metadata.insert(
-                "websocketPool".to_owned(),
-                json!({ "kind": decision.kind() }),
-            );
-        }
-        if let Some(version) = self.metrics.http_version.as_deref() {
-            metadata.insert("httpVersion".to_owned(), Value::String(version.to_owned()));
-        }
-        if let Some((_, cf_ray)) = self
-            .diagnostics
-            .trace_headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("cf-ray"))
-            && let Some((_, cf_ray)) = selected_observation_header("cf-ray", cf_ray)
-        {
-            metadata.insert("cfRay".to_owned(), Value::String(cf_ray));
-        }
-        insert_optional_metadata_millis(
-            &mut metadata,
-            "transportDecisionWaitMs",
-            self.timings.transport_decision_wait_ms,
-        );
-        insert_optional_metadata_millis(&mut metadata, "wsConnectMs", self.timings.connect_ms);
-        insert_optional_metadata_millis(
-            &mut metadata,
-            "upstreamHeadersMs",
-            self.timings.headers_ms,
-        );
-        insert_optional_metadata_millis(&mut metadata, "firstEventMs", self.timings.first_event_ms);
-        insert_optional_metadata_millis(
-            &mut metadata,
-            "firstReasoningMs",
-            self.timings.first_reasoning_ms,
-        );
-        insert_optional_metadata_millis(&mut metadata, "firstTextMs", self.timings.first_text_ms);
-        insert_optional_metadata_millis(&mut metadata, "firstTokenMs", self.timings.first_token_ms);
-        insert_optional_metadata_millis(
-            &mut metadata,
-            "openaiProcessingMs",
-            self.timings.provider_processing_ms,
-        );
         if let Some(terminal) = self.terminal {
             let incomplete = terminal == OpenAiResponseTerminal::Incomplete;
             metadata.insert("completed".to_owned(), Value::Bool(!incomplete));
@@ -495,16 +428,6 @@ pub(super) fn insert_first_timing(target: &mut Option<u64>, started_at: Instant)
         .max(1);
     *target = Some(elapsed);
     true
-}
-
-pub(super) fn insert_optional_metadata_millis(
-    metadata: &mut Map<String, Value>,
-    name: &str,
-    value: Option<u64>,
-) {
-    if let Some(value) = value {
-        metadata.insert(name.to_owned(), json!(value));
-    }
 }
 
 pub(super) async fn take_rate_limit_updates(

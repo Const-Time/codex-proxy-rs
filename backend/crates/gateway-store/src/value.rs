@@ -70,7 +70,7 @@ pub(crate) fn mutation_audit(
         MutationActor::AdminSession { admin_user_id } => (
             postgres::AdminAuditActorKind::AdminSession,
             Some(admin_user_id.clone()),
-            admin_user_id.clone(),
+            gateway_admin::model::auth::admin_session_actor_ref(admin_user_id),
         ),
         MutationActor::AdminApiKey => (
             postgres::AdminAuditActorKind::AdminApiKey,

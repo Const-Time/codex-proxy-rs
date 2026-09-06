@@ -787,7 +787,6 @@ pub struct OpsError {
     pub latency_ms: Option<u64>,
     pub message: String,
     pub raw_upstream_error: Option<String>,
-    pub occurrence_count: u32,
     pub client_ip: Option<String>,
     pub user_agent: Option<String>,
     pub reasoning_effort: Option<String>,

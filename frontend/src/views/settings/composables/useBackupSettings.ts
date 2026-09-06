@@ -92,9 +92,9 @@ export function useBackupSettings() {
     savingStorage.value = true
     try {
       const data = await updateBackupStorage(storagePayload())
+      const schedulePaused = schedule.scheduleEnabled && !data.scheduleEnabled
       applySettings(data)
-      verified.value = false
-      toast.success('存储配置已保存')
+      toast.success(schedulePaused ? '存储配置已保存，定时备份已暂停，请测试连接后重新启用' : '存储配置已保存')
       return true
     }
     catch (cause) {

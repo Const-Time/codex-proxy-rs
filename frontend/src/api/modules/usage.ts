@@ -275,7 +275,6 @@ export interface OpsError {
   failureClass: string
   upstreamSendState: string | null
   providerErrorCode: string | null
-  occurrenceCount: number
   responseId: string | null
   upstreamRequestId: string | null
   latencyMs: number | null

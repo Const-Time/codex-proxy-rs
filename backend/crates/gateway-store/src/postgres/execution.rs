@@ -1089,7 +1089,6 @@ impl ExecutionStore for PgExecutionStore {
                     || "intermediate upstream failure".to_owned(),
                     |diagnostic| diagnostic.as_str().to_owned(),
                 ),
-                occurrence_count: 1,
                 created_at: Utc::now(),
             },
         )
@@ -1134,7 +1133,6 @@ impl ExecutionStore for PgExecutionStore {
                     || "account connection test failed".to_owned(),
                     |diagnostic| diagnostic.as_str().to_owned(),
                 ),
-                occurrence_count: 1,
                 created_at: Utc::now(),
             },
         )

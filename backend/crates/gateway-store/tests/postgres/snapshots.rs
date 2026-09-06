@@ -260,7 +260,6 @@ async fn attempts_should_keep_their_own_account_snapshots() {
             upstream_request_id: None,
             latency_ms: Some(120),
             message: "first account was limited".to_owned(),
-            occurrence_count: 1,
             created_at: started_at + chrono::Duration::seconds(1),
         })
         .await
@@ -391,7 +390,6 @@ async fn ops_errors_should_keep_request_and_event_snapshots_after_account_deleti
             upstream_request_id: None,
             latency_ms: Some(80),
             message: "probe failed".to_owned(),
-            occurrence_count: 1,
             created_at: started_at + chrono::Duration::seconds(3),
         })
         .await

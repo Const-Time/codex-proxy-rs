@@ -59,12 +59,25 @@ impl BackupRepository for PgBackupRepository {
             .map_err(|_| store_unavailable("begin backup storage update"))?;
         let result = async {
             let current = lock_settings_in_transaction(&mut transaction).await?;
+            let mut changed = storage_changed_fields(&current, &command);
+            if changed.is_empty() {
+                let revision: i64 =
+                    sqlx::query_scalar("select config_revision from runtime_settings where id = 1")
+                        .fetch_one(&mut *transaction)
+                        .await
+                        .map_err(|_| store_unavailable("load unchanged backup revision"))?;
+                let revision = AdminRevision::new(
+                    u64::try_from(revision).map_err(|_| store_invalid("config revision"))?,
+                )
+                .map_err(|_| store_invalid("config revision"))?;
+                return Ok((current, revision));
+            }
             ensure_storage_identity_stable(&current, &command, &mut transaction).await?;
 
             let secret = command
                 .secret_access_key
                 .as_ref()
-                .map(|secret| secret.expose_secret().to_owned());
+                .map(|secret| secret.expose_secret());
             sqlx::query(
                 "update backup_settings
                     set endpoint = $1,
@@ -76,6 +89,8 @@ impl BackupRepository for PgBackupRepository {
                         force_path_style = $7,
                         storage_revision = storage_revision + 1,
                         last_verified_at = null,
+                        schedule_enabled = false,
+                        next_run_at = null,
                         updated_at = now()
                   where id = 1",
             )
@@ -83,7 +98,7 @@ impl BackupRepository for PgBackupRepository {
             .bind(&command.region)
             .bind(&command.bucket)
             .bind(&command.access_key_id)
-            .bind(secret.as_deref())
+            .bind(secret)
             .bind(&command.prefix)
             .bind(command.force_path_style)
             .execute(&mut *transaction)
@@ -94,7 +109,13 @@ impl BackupRepository for PgBackupRepository {
                 .await
                 .map_err(map_admin_error)?;
             let revision = admin_revision(store_revision)?;
-            let changed = storage_changed_fields(&current, &command);
+            if current.last_verified_at.is_some() {
+                changed.push("last_verified_at".to_owned());
+            }
+            if current.schedule_enabled {
+                changed.push("schedule_enabled".to_owned());
+                changed.push("next_run_at".to_owned());
+            }
             let audit = crate::mutation_audit(
                 context,
                 "backup.s3_config_updated",
@@ -719,7 +740,13 @@ fn storage_changed_fields(
     if current.access_key_id.as_deref() != Some(command.access_key_id.as_str()) {
         fields.push("access_key_id".to_owned());
     }
-    if command.secret_access_key.is_some() {
+    if command.secret_access_key.as_ref().is_some_and(|secret| {
+        current
+            .secret_access_key
+            .as_ref()
+            .map(|value| value.expose_secret())
+            != Some(secret.expose_secret())
+    }) {
         fields.push("secret_access_key".to_owned());
     }
     if current.prefix.as_deref() != Some(command.prefix.as_str()) {
