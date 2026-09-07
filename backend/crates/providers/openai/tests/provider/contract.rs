@@ -2943,6 +2943,108 @@ async fn cross_account_scope_sanitizes_only_known_turn_metadata_fields() {
 }
 
 #[tokio::test]
+async fn websocket_account_scoping_preserves_ascii_turn_metadata_and_unicode_input() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_scope_same").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let base_url = format!("http://{}", listener.local_addr().expect("address"));
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept websocket");
+        let mut socket = accept_codex_test_websocket(socket).await;
+        let message = socket.next().await.expect("request").expect("valid frame");
+        let body: Value = serde_json::from_str(message.to_text().expect("text")).expect("JSON");
+        socket.send(Message::Text(json!({
+            "type": "response.completed",
+            "response": {"id": "resp_ascii_metadata", "model": "gpt-5.4", "status": "completed", "output": []}
+        }).to_string().into())).await.expect("complete response");
+        body
+    });
+    // Official Codex keeps embedded turn metadata ASCII even for Unicode workspaces.
+    let raw = r#"{"installation_id":"client-installation","workspaces":{"C:\\Users\\\u9879\u76ee\\\ud83d\ude80":{"label":"caf\u00e9","literal":"\\u4e2d","quoted":"\"line\n"}}}"#;
+    let input = json!([{"role": "user", "content": "中文正文 🚀"}]);
+    let payload = ProtocolPayload::json_object(
+        "openai",
+        Map::from_iter([
+            ("model".to_owned(), json!("gpt-5.4")),
+            ("input".to_owned(), input.clone()),
+            (
+                "client_metadata".to_owned(),
+                json!({"x-codex-turn-metadata": raw}),
+            ),
+        ]),
+    )
+    .expect("payload")
+    .with_context(Map::from_iter([("turn_metadata".to_owned(), json!(raw))]));
+    let mut stream = provider_with_base_url(&store, base_url)
+        .execute(
+            planned_request(
+                "openai",
+                Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+            ),
+            context_with_state_owner("req_ascii_metadata", "acct_scope_same"),
+        )
+        .await
+        .expect("provider stream");
+    while let Some(event) = stream.next().await {
+        event.expect("successful websocket response");
+    }
+    let body = server.await.expect("server");
+    let encoded = body
+        .pointer("/client_metadata/x-codex-turn-metadata")
+        .and_then(Value::as_str)
+        .expect("turn metadata");
+    assert!(encoded.is_ascii(), "embedded header JSON must remain ASCII");
+    let mut expected: Value = serde_json::from_str(raw).expect("original metadata");
+    expected["installation_id"] = body["client_metadata"]["installation_id"].clone();
+    assert_eq!(
+        serde_json::from_str::<Value>(encoded).expect("metadata JSON"),
+        expected
+    );
+    assert_eq!(body["input"], input);
+}
+
+#[tokio::test]
+async fn http_account_scoping_keeps_unicode_metadata_ascii_in_headers_and_body() {
+    for owner in ["acct_scope_same", "acct_scope_old"] {
+        let raw = r#"{"installation_id":"client-installation","workspaces":{"/tmp/\u4e2d\u6587/\ud83d\ude80":{"label":"caf\u00e9"}}}"#;
+        let request = capture_scoped_http_request(
+            "req_ascii_http",
+            "acct_scope_same",
+            owner,
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("中文正文 🚀")),
+                ("turnMetadata".to_owned(), json!(raw)),
+                (
+                    "client_metadata".to_owned(),
+                    json!({"x-codex-turn-metadata": raw}),
+                ),
+            ]),
+            Map::from_iter([("turn_metadata".to_owned(), json!(raw))]),
+        )
+        .await;
+        let body = captured_request_body(&request);
+        let headers = captured_header_values(&request, "x-codex-turn-metadata");
+        assert_eq!(headers.len(), 1);
+        let mut expected: Value = serde_json::from_str(raw).expect("original metadata");
+        expected["installation_id"] = body["client_metadata"]["installation_id"].clone();
+        for encoded in [
+            std::str::from_utf8(&headers[0]).expect("UTF-8 header"),
+            body["turnMetadata"].as_str().expect("body turn metadata"),
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("client metadata"),
+        ] {
+            assert!(encoded.is_ascii(), "scoped header JSON must remain ASCII");
+            assert_eq!(
+                serde_json::from_str::<Value>(encoded).expect("metadata JSON"),
+                expected
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn cross_account_continuation_should_require_client_replay_without_an_upstream_probe() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_scope_new").await;

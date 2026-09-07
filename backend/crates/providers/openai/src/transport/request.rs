@@ -1,9 +1,12 @@
 //! 核心 Generate operation 到 Codex Responses wire request 的严格编码。
 
+use std::io;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gateway_core::operation::GenerateRequest;
 use gateway_protocol::openai::WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::Serialize as _;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -447,7 +450,8 @@ pub(crate) fn scope_turn_metadata(
             changed |= metadata.remove(*key).is_some();
         }
     }
-    if !cross_account
+    if raw.is_ascii()
+        && !cross_account
         && !changed
         && !INSTALLATION_ID_KEYS
             .iter()
@@ -460,7 +464,40 @@ pub(crate) fn scope_turn_metadata(
             metadata.insert((*key).to_owned(), Value::String(installation_id.to_owned()));
         }
     }
-    serde_json::to_string(&metadata).ok()
+    // Codex 的 turn metadata 同时承载于 HTTP header 与 WS client_metadata。
+    // 改写安装 ID 后仍须保持官方 to_ascii_json_string 的编码合同；普通
+    // to_string 会把中文工作区路径还原成 UTF-8，触发上游 WS metadata 后 Close 1000。
+    let mut bytes = Vec::new();
+    metadata
+        .serialize(&mut serde_json::Serializer::with_formatter(
+            &mut bytes,
+            AsciiTurnMetadataFormatter,
+        ))
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+struct AsciiTurnMetadataFormatter;
+
+impl serde_json::ser::Formatter for AsciiTurnMetadataFormatter {
+    fn write_string_fragment<W: ?Sized + io::Write>(
+        &mut self,
+        writer: &mut W,
+        fragment: &str,
+    ) -> io::Result<()> {
+        let mut start = 0;
+        for (index, ch) in fragment.char_indices() {
+            if ch.is_ascii() {
+                continue;
+            }
+            writer.write_all(&fragment.as_bytes()[start..index])?;
+            for unit in ch.encode_utf16(&mut [0; 2]) {
+                write!(writer, "\\u{unit:04x}")?;
+            }
+            start = index + ch.len_utf8();
+        }
+        writer.write_all(&fragment.as_bytes()[start..])
+    }
 }
 
 fn replace_existing_body_string(
