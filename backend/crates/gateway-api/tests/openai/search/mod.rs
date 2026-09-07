@@ -22,7 +22,7 @@ use gateway_core::upstream::UpstreamSendState;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::provider_endpoint::BufferedJsonSession;
+use super::endpoint::BufferedJsonSession;
 use super::{api_router, authenticated_client};
 
 const SEARCH_RESPONSE: &[u8] = br#"{ "encrypted_output":"ciphertext", "output":"search result", "results":[{"type":"text_result","ref_id":"turn0search0","future":9007199254740993}] }"#;

@@ -1,8 +1,8 @@
 mod auth;
+mod endpoint;
 mod error;
 mod images;
 mod models;
-mod provider_endpoint;
 mod responses;
 mod router;
 mod search;

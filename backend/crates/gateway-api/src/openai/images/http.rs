@@ -15,8 +15,8 @@ use serde_json::Value;
 use crate::ApiState;
 use crate::openai::{
     auth::{authenticate_client, client_access_error_response},
+    endpoint::collect_raw_json_response,
     error::gateway_error_response,
-    provider_endpoint::collect_raw_json_response,
     responses::{OpenAiRequestHeaders, request_client_context},
 };
 
