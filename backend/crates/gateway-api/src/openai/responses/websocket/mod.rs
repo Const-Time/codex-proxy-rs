@@ -247,7 +247,7 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
             }
         };
         started.session.trace().record("client.connection", serde_json::json!({
-            "transport": "websocket", "connectionId": connection.id(), "correlationId": correlation_id,
+            "transport": "websocket", "connectionId": connection.id(), "correlationId": correlation_id.as_ref(),
             "requestIndex": request_count,
         }));
         started

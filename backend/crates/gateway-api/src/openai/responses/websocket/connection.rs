@@ -23,6 +23,7 @@ const OUTBOUND_COMMAND_BUFFER: usize = 32;
 const INBOUND_EVENT_BUFFER: usize = 32;
 const DOWNSTREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CONNECTION_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+const DOWNSTREAM_PING_INTERVAL: Duration = Duration::from_secs(25);
 
 /// WebSocket pump 的写入与生命周期预算。
 #[derive(Clone, Copy)]
@@ -171,9 +172,27 @@ struct ConnectionStats {
     command_backpressure_count: AtomicU64,
     ping_received_count: AtomicU64,
     pong_written_count: AtomicU64,
+    ping_written_count: AtomicU64,
+    pong_received_count: AtomicU64,
+    last_read_ms: AtomicU64,
+    last_write_ms: AtomicU64,
 }
 
 impl ConnectionStats {
+    fn record_read(&self, opened_at: Instant) {
+        self.last_read_ms.store(
+            u64::try_from(opened_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn record_write(&self, opened_at: Instant) {
+        self.last_write_ms.store(
+            u64::try_from(opened_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
     fn observe_command_queue(&self, sender: &mpsc::Sender<ConnectionCommand>) {
         let queued = OUTBOUND_COMMAND_BUFFER
             .saturating_sub(sender.capacity())
@@ -400,10 +419,15 @@ impl ResponsesWebSocketConnection {
     }
 
     pub(super) fn log_summary(&self, request_count: u64) {
+        let connection_age_ms = self.age().as_millis();
+        let read_idle_ms = connection_age_ms
+            .saturating_sub(u128::from(self.stats.last_read_ms.load(Ordering::Relaxed)));
+        let write_idle_ms = connection_age_ms
+            .saturating_sub(u128::from(self.stats.last_write_ms.load(Ordering::Relaxed)));
         tracing::info!(
             websocket_connection_id = %self.connection_id,
             request_count,
-            connection_age_ms = self.age().as_millis(),
+            connection_age_ms,
             pump_exit_reason = self
                 .exit_reason
                 .map_or("unknown", PumpExitReason::as_str),
@@ -417,6 +441,10 @@ impl ResponsesWebSocketConnection {
                 .load(Ordering::Relaxed),
             ping_received_count = self.stats.ping_received_count.load(Ordering::Relaxed),
             pong_written_count = self.stats.pong_written_count.load(Ordering::Relaxed),
+            ping_written_count = self.stats.ping_written_count.load(Ordering::Relaxed),
+            pong_received_count = self.stats.pong_received_count.load(Ordering::Relaxed),
+            read_idle_ms,
+            write_idle_ms,
             "Responses WebSocket disconnected"
         );
     }
@@ -493,6 +521,12 @@ async fn run_pump<S, E>(
     let deadline = tokio::time::sleep_until(opened_at + config.max_age);
     tokio::pin!(deadline);
     let mut deadline_elapsed = false;
+    let mut heartbeat = tokio::time::interval_at(
+        opened_at + DOWNSTREAM_PING_INTERVAL,
+        DOWNSTREAM_PING_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ping_sequence = 0_u64;
     let reason = loop {
         tokio::select! {
             biased;
@@ -531,6 +565,9 @@ async fn run_pump<S, E>(
                     ConnectionWriteError::Transport { message }
                 });
                 let failed = result.is_err();
+                if !failed {
+                    stats.record_write(opened_at);
+                }
                 let _ = acknowledged.send(result);
                 if failed {
                     break PumpExitReason::WriteError;
@@ -539,45 +576,79 @@ async fn run_pump<S, E>(
                     break PumpExitReason::ServerClose;
                 }
             }
-            message = socket.next() => match message {
-                Some(Ok(Message::Text(payload))) => {
-                    if let Err(reason) = emit_incoming(&incoming, ConnectionEvent::Text(payload.to_string())) {
-                        break reason;
+            // 官方 Codex WsStream 在独立 pump 中回复 Pong，且不将控制帧交给业务流。
+            // 这里只为下游链路保活，不设置 Pong deadline，也不延长业务请求预算。
+            _ = heartbeat.tick() => {
+                ping_sequence = ping_sequence.wrapping_add(1);
+                let ping = Message::Ping(ping_sequence.to_be_bytes().to_vec().into());
+                let result = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break PumpExitReason::LifecycleShutdown,
+                    result = timeout(config.write_timeout, socket.send(ping)) => result,
+                };
+                match result {
+                    Ok(Ok(())) => {
+                        stats.ping_written_count.fetch_add(1, Ordering::Relaxed);
+                        stats.record_write(opened_at);
                     }
-                }
-                Some(Ok(Message::Binary(_))) => {
-                    if let Err(reason) = emit_incoming(&incoming, ConnectionEvent::Binary) {
-                        break reason;
+                    Ok(Err(error)) => {
+                        tracing::info!(
+                            websocket_connection_id = %connection_id,
+                            error = %error,
+                            "Responses WebSocket Ping write failed"
+                        );
+                        break PumpExitReason::WriteError;
                     }
+                    Err(_) => break PumpExitReason::WriteTimeout,
                 }
-                Some(Ok(Message::Ping(payload))) => {
-                    stats.ping_received_count.fetch_add(1, Ordering::Relaxed);
-                    match timeout(config.write_timeout, socket.send(Message::Pong(payload))).await {
-                        Ok(Ok(())) => {
-                            stats.pong_written_count.fetch_add(1, Ordering::Relaxed);
+            }
+            message = socket.next() => {
+                if matches!(&message, Some(Ok(_))) {
+                    stats.record_read(opened_at);
+                }
+                match message {
+                    Some(Ok(Message::Text(payload))) => {
+                        if let Err(reason) = emit_incoming(&incoming, ConnectionEvent::Text(payload.to_string())) {
+                            break reason;
                         }
-                        Ok(Err(error)) => {
-                            tracing::info!(
-                                websocket_connection_id = %connection_id,
-                                error = %error,
-                                "Responses WebSocket Pong write failed"
-                            );
-                            break PumpExitReason::WriteError;
-                        }
-                        Err(_) => break PumpExitReason::WriteTimeout,
                     }
+                    Some(Ok(Message::Binary(_))) => {
+                        if let Err(reason) = emit_incoming(&incoming, ConnectionEvent::Binary) {
+                            break reason;
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        stats.ping_received_count.fetch_add(1, Ordering::Relaxed);
+                        match timeout(config.write_timeout, socket.send(Message::Pong(payload))).await {
+                            Ok(Ok(())) => {
+                                stats.pong_written_count.fetch_add(1, Ordering::Relaxed);
+                                stats.record_write(opened_at);
+                            }
+                            Ok(Err(error)) => {
+                                tracing::info!(
+                                    websocket_connection_id = %connection_id,
+                                    error = %error,
+                                    "Responses WebSocket Pong write failed"
+                                );
+                                break PumpExitReason::WriteError;
+                            }
+                            Err(_) => break PumpExitReason::WriteTimeout,
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        stats.pong_received_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Some(Ok(Message::Close(_))) => break PumpExitReason::ClientClose,
+                    Some(Err(error)) => {
+                        tracing::info!(
+                            websocket_connection_id = %connection_id,
+                            error = %error,
+                            "Responses WebSocket receive failed"
+                        );
+                        break PumpExitReason::ReadError;
+                    }
+                    None => break PumpExitReason::PeerEof,
                 }
-                Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_))) => break PumpExitReason::ClientClose,
-                Some(Err(error)) => {
-                    tracing::info!(
-                        websocket_connection_id = %connection_id,
-                        error = %error,
-                        "Responses WebSocket receive failed"
-                    );
-                    break PumpExitReason::ReadError;
-                }
-                None => break PumpExitReason::PeerEof,
             },
         }
     };

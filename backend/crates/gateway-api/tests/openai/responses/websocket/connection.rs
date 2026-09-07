@@ -42,6 +42,8 @@ use tokio_tungstenite::{
 use super::{AtomicFailureExecution, AtomicFailureTrace};
 use crate::openai::{api_router, authenticated_client};
 
+mod heartbeat;
+
 #[derive(Default)]
 struct CrossingLimitTrace {
     release_terminal: tokio::sync::Notify,
@@ -444,21 +446,6 @@ async fn inbound_overload_should_close_without_executing_queued_frames() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
-async fn pump_does_not_emit_an_active_ping() {
-    let PumpHarness {
-        connection,
-        incoming: _incoming,
-        mut written,
-        ..
-    } = test_connection(false);
-    tokio::time::advance(Duration::from_secs(5 * 60)).await;
-    tokio::task::yield_now().await;
-
-    assert!(matches!(written.try_recv(), Err(TryRecvError::Empty)));
-    drop(connection);
-}
-
 #[tokio::test]
 async fn outbound_commands_are_written_in_acknowledged_order() {
     let PumpHarness {
@@ -582,13 +569,17 @@ async fn idle_connection_reaches_the_official_limit_without_starting_an_executio
 
     tokio::time::advance(Duration::from_secs(60 * 60)).await;
     tokio::task::yield_now().await;
-    let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
-        .await
-        .expect("connection limit response timeout")
-        .expect("connection remains available for the limit error")
-        .expect("valid WebSocket frame");
-    let ClientMessage::Text(text) = message else {
-        panic!("connection limit must be a text error event");
+    let text = loop {
+        let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .expect("connection limit response timeout")
+            .expect("connection remains available for the limit error")
+            .expect("valid WebSocket frame");
+        match message {
+            ClientMessage::Text(text) => break text,
+            ClientMessage::Ping(_) => {}
+            other => panic!("unexpected frame before connection limit: {other:?}"),
+        }
     };
     let value = serde_json::from_str::<Value>(&text).expect("connection limit JSON");
 
@@ -606,7 +597,8 @@ async fn idle_connection_reaches_the_official_limit_without_starting_an_executio
     );
     assert_eq!(trace.starts.load(Ordering::Acquire), 0);
 
-    socket.close(None).await.expect("close WebSocket");
+    // 服务端已因生命周期到期关闭；不再向关闭中的连接写入。
+    drop(socket);
     server.abort();
 }
 
