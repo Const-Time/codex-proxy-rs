@@ -151,6 +151,9 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         .map(|pool_return| std::mem::take(&mut pool_return.continuation))
         .unwrap_or_default();
     let mut last_event_type = None;
+    // 官方 run_websocket_response_stream 按响应消费 metadata 事件；它们不属于握手头。
+    // 复用连接时恢复握手快照，避免上一轮模型信息及普通响应头随每次请求累积。
+    let opening_response_metadata = metadata.response_metadata.clone();
     loop {
         let message = tokio::select! {
             biased;
@@ -323,6 +326,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             );
             match terminal {
                 WebSocketTerminalKind::Completed => {
+                    metadata.response_metadata = opening_response_metadata;
                     finish_stream_websocket(websocket, metadata, continuation, pool_return.take())
                         .await;
                 }
