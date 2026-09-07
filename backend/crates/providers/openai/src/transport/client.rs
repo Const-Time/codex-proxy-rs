@@ -851,7 +851,9 @@ pub(super) fn websocket_success_decision(
 ) -> CodexTransportDecision {
     match requirement {
         TransportRequirement::ExactWebSocketContinuation => CodexTransportDecision::ExactWebSocket,
-        TransportRequirement::ExplicitWebSocketWarmup => CodexTransportDecision::RequiredWebSocket,
+        TransportRequirement::ExplicitWebSocketWarmup | TransportRequirement::WebSocketNewChain => {
+            CodexTransportDecision::RequiredWebSocket
+        }
         _ if prepared.reused() => CodexTransportDecision::ReusedWebSocket,
         _ => CodexTransportDecision::ConnectedWebSocket,
     }

@@ -274,6 +274,34 @@ fn transport_should_prefer_websocket_when_requested_without_history() {
 }
 
 #[test]
+fn downstream_websocket_new_chain_should_require_pooled_websocket_without_storage() {
+    for store in [None, Some(false)] {
+        let mut body = serde_json::Map::new();
+        if let Some(store) = store {
+            body.insert("store".to_owned(), json!(store));
+        }
+        let mut request = CodexResponsesRequest::from_body(body);
+        request.downstream_websocket_connection_id = Some("ws_downstream".to_owned());
+
+        let requirement = transport_requirement(&request);
+        assert!(requirement.requires_websocket());
+        assert!(!requirement.allows_pre_send_http_fallback());
+        assert!(requirement.allows_connection_restart());
+    }
+}
+
+#[test]
+fn downstream_websocket_new_chain_should_allow_http_when_response_is_stored() {
+    let mut request = CodexResponsesRequest::from_body(serde_json::Map::from_iter([(
+        "store".to_owned(),
+        json!(true),
+    )]));
+    request.downstream_websocket_connection_id = Some("ws_downstream".to_owned());
+
+    assert!(transport_requirement(&request).allows_pre_send_http_fallback());
+}
+
+#[test]
 fn unspecified_transport_without_history_should_still_be_a_new_chain() {
     let request = codex_request("gpt-test", "be brief", Vec::new());
 

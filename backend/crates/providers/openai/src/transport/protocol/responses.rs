@@ -121,6 +121,8 @@ pub enum TransportRequirement {
     HttpRequired,
     /// `generate=false + store=false` 预热必须保留在同一条 WebSocket。
     ExplicitWebSocketWarmup,
+    /// 客户端 WebSocket 的非持久化新链，必须在池化连接上建立后续续接状态。
+    WebSocketNewChain,
     /// 只能使用持有指定 connection-local response 的精确 WebSocket。
     ExactWebSocketContinuation,
     /// previous response 已持久化，允许 WebSocket 或 HTTP/2。
@@ -136,7 +138,9 @@ impl TransportRequirement {
     pub fn requires_websocket(self) -> bool {
         matches!(
             self,
-            Self::ExplicitWebSocketWarmup | Self::ExactWebSocketContinuation
+            Self::ExplicitWebSocketWarmup
+                | Self::WebSocketNewChain
+                | Self::ExactWebSocketContinuation
         )
     }
 
@@ -150,7 +154,7 @@ impl TransportRequirement {
 
     /// 无续接依赖的新请求可以在明确的连接级拒绝后重新建连。
     pub fn allows_connection_restart(self) -> bool {
-        matches!(self, Self::NewChain)
+        matches!(self, Self::NewChain | Self::WebSocketNewChain)
     }
 
     /// 用于审计与遥测的稳定名称。
@@ -158,6 +162,7 @@ impl TransportRequirement {
         match self {
             Self::HttpRequired => "http_required",
             Self::ExplicitWebSocketWarmup => "explicit_websocket_warmup",
+            Self::WebSocketNewChain => "websocket_new_chain",
             Self::ExactWebSocketContinuation => "exact_websocket_continuation",
             Self::PersistedContinuation => "persisted_continuation",
             Self::ExternalUnknown => "external_unknown",
@@ -184,6 +189,11 @@ pub fn transport_requirement(request: &CodexResponsesRequest) -> TransportRequir
                 TransportRequirement::ExternalUnknown
             }
         },
+        // 客户端会在下一轮提交 response ID；HTTP store=false 的成功响应无法
+        // 在池化 WebSocket 上续接，所以首轮也不能按普通快路径降级到 HTTP。
+        None if request.downstream_websocket_connection_id.is_some() && !request.store() => {
+            TransportRequirement::WebSocketNewChain
+        }
         None => TransportRequirement::NewChain,
     }
 }

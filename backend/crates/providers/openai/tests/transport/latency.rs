@@ -116,6 +116,79 @@ async fn cold_websocket_should_fall_back_without_recording_a_successful_connect(
 }
 
 #[tokio::test(start_paused = true)]
+async fn downstream_websocket_new_chain_should_preserve_continuation_after_slow_opening() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            accepted = listener.accept() => {
+                let (mut http, _) = accepted.unwrap();
+                let request = read_http_request(&mut http).await;
+                assert!(request.starts_with("POST /codex/responses HTTP/1.1"));
+                write_completed_sse_response(&mut http).await;
+                return;
+            }
+        }
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        let _first = websocket.next().await.unwrap().unwrap();
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_slow_seed", 2, 1).into(),
+            ))
+            .await
+            .unwrap();
+
+        let second = websocket.next().await.unwrap().unwrap();
+        let second: Value = serde_json::from_str(second.to_text().unwrap()).unwrap();
+        assert_eq!(second["previous_response_id"], "resp_slow_seed");
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_slow_continuation", 2, 1).into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let pool = Arc::new(CodexWebSocketPool::default());
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::clone(&pool));
+    let mut request = new_chain_request("conversation-downstream-slow");
+    request.downstream_websocket_connection_id = Some("ws_downstream_slow".to_owned());
+
+    let first = backend
+        .create_response(
+            &request,
+            request_context("req_slow_seed", Some("chatgpt-account")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.transport, CodexBackendTransport::WebSocket);
+    assert!(first.connection_local_continuation);
+
+    request.set_previous_response_id(Some("resp_slow_seed".to_owned()));
+    request.previous_response_scope = Some(PreviousResponseScope::ConnectionLocal);
+    let second = backend
+        .create_response(
+            &request,
+            request_context("req_slow_continuation", Some("chatgpt-account")),
+        )
+        .await
+        .expect("the next turn must use the socket that generated the previous response");
+    assert_eq!(
+        second.transport_metrics.decision,
+        Some(CodexTransportDecision::ExactWebSocket)
+    );
+    assert!(second.body.contains("resp_slow_continuation"));
+    server.await.unwrap();
+    pool.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn external_continuation_should_wait_for_a_cold_websocket() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -272,6 +272,7 @@ impl CodexBackendClient {
                 Some(WEBSOCKET_FAST_PATH_BUDGET)
             }
             TransportRequirement::ExplicitWebSocketWarmup
+            | TransportRequirement::WebSocketNewChain
             | TransportRequirement::ExactWebSocketContinuation
             | TransportRequirement::ExternalUnknown => None,
             TransportRequirement::HttpRequired => None,

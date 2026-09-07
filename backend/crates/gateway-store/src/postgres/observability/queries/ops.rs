@@ -13,12 +13,12 @@ const REQUEST_ERROR_SELECT: &str = "select 'model_request'::text as source,
        mr.provider_account_authentication_kind_snapshot
          as provider_account_authentication_kind,
        mr.upstream_model_id, mr.upstream_transport,
-       coalesce(mr.error_kind, 'failed') as failure_kind,
+       mr.error_kind as failure_kind,
        mr.upstream_send_state,
        mr.client_status_code, mr.upstream_status_code,
        mr.provider_error_code, mr.client_response_id, mr.upstream_request_id,
        mr.latency_ms,
-       coalesce(mr.error_message, mr.error_kind, 'request failed') as message,
+       coalesce(mr.error_message, mr.error_kind) as message,
        mr.raw_upstream_error,
        host(mr.client_ip) as client_ip, mr.user_agent,
        mr.reasoning_effort, mr.reasoning_preset, mr.request_kind,
@@ -32,7 +32,7 @@ const REQUEST_ERROR_SELECT: &str = "select 'model_request'::text as source,
        mr.completed_at as occurred_at,
        'model_request:' || mr.id as stable_sort_id
 from model_requests mr
-where mr.outcome = 'failed'";
+where true";
 
 const OPS_EVENT_SELECT: &str = "select 'ops_event'::text as source,
        oe.id as event_id, oe.model_request_id as request_id, oe.attempt_index,
@@ -106,7 +106,7 @@ pub(crate) async fn count_ops_errors(
     filter: &OpsErrorFilter,
 ) -> StoreResult<u64> {
     let mut statement = QueryBuilder::<Postgres>::new(
-        "select coalesce(sum(source_count), 0)::bigint from (select count(*)::bigint as source_count from model_requests mr where mr.outcome = 'failed'",
+        "select coalesce(sum(source_count), 0)::bigint from (select count(*)::bigint as source_count from model_requests mr where true",
     );
     push_request_error_predicates(&mut statement, range, filter);
     statement.push(
@@ -127,6 +127,9 @@ fn push_request_error_predicates(
     range: ObservabilityRange,
     filter: &OpsErrorFilter,
 ) {
+    // 错误事实独立于请求结束状态；主动取消不属于需要排查的错误。
+    // 列表和总数共用此条件，避免流式响应中的错误因 outcome 被漏掉。
+    statement.push(" and mr.error_kind is not null and mr.error_kind <> 'cancelled'");
     push_range(statement, "mr.completed_at", range);
     for (column, value) in [
         ("mr.client_api_key_ref", &filter.client_api_key_ref),

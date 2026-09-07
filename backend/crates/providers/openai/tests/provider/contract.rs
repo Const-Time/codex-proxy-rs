@@ -2522,6 +2522,127 @@ async fn fallback_attempt_transport_forces_http_sse_for_a_websocket_request() {
 }
 
 #[tokio::test]
+async fn downstream_websocket_new_chain_should_override_session_and_attempt_http_fallback() {
+    const SESSION_ID: &str = "downstream-required-session";
+
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_http_sse_exhausted").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut opening, _) = listener.accept().await.unwrap();
+        let request = capture_http_request(&mut opening).await;
+        assert!(String::from_utf8_lossy(&request).starts_with("GET /codex/responses"));
+        opening
+            .write_all(
+                b"HTTP/1.1 426 Upgrade Required\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        for id in ["resp_required_session", "resp_required_attempt"] {
+            let request = websocket.next().await.unwrap().unwrap();
+            let payload: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+            assert_eq!(payload["store"], false);
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": id,
+                            "model": "gpt-5.4",
+                            "status": "completed",
+                            "store": false,
+                            "output": [],
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+    });
+    let provider = provider_with_base_url(&store, base_url);
+    let mut seed = provider
+        .execute(
+            planned_request(
+                "openai",
+                Operation::Generate(generate_with_session_context(SESSION_ID, None, None)),
+            ),
+            context("req_disable_optional_websocket", CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    let error = loop {
+        match seed.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("426 opening must enable session HTTP fallback"),
+        }
+    };
+    assert_eq!(
+        error.pre_delivery_retry(),
+        Some(PreDeliveryRetry::SameAccountTransportFallback)
+    );
+    drop(seed);
+
+    for attempt in [
+        context("req_required_session", CancellationToken::new()),
+        fallback_transport_context("req_required_attempt"),
+    ] {
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("hello")),
+                ("store".to_owned(), json!(false)),
+                ("session_id".to_owned(), json!(SESSION_ID)),
+            ]),
+        )
+        .unwrap()
+        .with_context(Map::from_iter([(
+            "downstream_websocket_connection_id".to_owned(),
+            json!("ws_required_session"),
+        )]));
+        let request = GenerateRequest::from_protocol_payload(payload).with_provider_session_state(
+            ProviderSessionState::new(
+                "openai",
+                Map::from_iter([
+                    ("account_id".to_owned(), json!("acct_http_sse_exhausted")),
+                    ("conversation_id".to_owned(), json!(SESSION_ID)),
+                    ("continuation_scope".to_owned(), json!("persisted")),
+                ]),
+            )
+            .unwrap(),
+        );
+        let mut stream = provider
+            .execute(
+                planned_request("openai", Operation::Generate(request)),
+                attempt,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream.metadata().transport().as_str(), "websocket");
+        let mut session = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("required WebSocket response");
+            if let Some(update) = event.session_update() {
+                session = Some(update.clone());
+            }
+        }
+        assert_eq!(
+            session.unwrap().payload().get("continuation_scope"),
+            Some(&json!("connection_local"))
+        );
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn websocket_turn_state_metadata_is_exposed_through_response_observation() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_websocket_turn_state").await;

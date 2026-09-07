@@ -259,6 +259,119 @@ async fn ops_search_should_treat_sql_wildcards_as_literals() {
 }
 
 #[tokio::test]
+async fn ops_should_include_incomplete_upstream_errors() {
+    let Some(database) = TestDatabase::create("ops_incomplete_error").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&database.pool, now).await.unwrap();
+    let raw_error = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Invalid `previous_response_id`."}}"#;
+    sqlx::query(
+        "update model_requests
+            set outcome = 'incomplete', error_kind = 'invalid_request',
+                client_transport = 'websocket', upstream_transport = 'websocket',
+                downstream_committed_at = completed_at,
+                client_status_code = null, upstream_status_code = 400,
+                provider_error_code = null, raw_upstream_error = $1
+          where id = 'req_observe_failed'",
+    )
+    .bind(raw_error)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let page = admin_observability_store(&database.pool)
+        .list_ops_errors(admin_observability::OpsErrorQuery {
+            range: admin_observability::TimeRange::new(
+                now - TimeDelta::hours(1),
+                now + TimeDelta::hours(1),
+            )
+            .unwrap(),
+            filter: admin_observability::OpsErrorFilter {
+                request_id: Some("req_observe_failed".to_owned()),
+                status_code: Some(400),
+                ..admin_observability::OpsErrorFilter::default()
+            },
+            current_page: 1,
+            page_size: PageSize::new(10).unwrap(),
+        })
+        .await
+        .expect("incomplete request must be available in admin error troubleshooting");
+    database.close().await;
+
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items.len(), 1);
+    let error = &page.items[0];
+    assert_eq!(error.source, "model_request");
+    assert_eq!(error.failure_kind, "invalid_request");
+    assert_eq!(error.upstream_status_code, Some(400));
+    assert_eq!(error.client_status_code, None);
+    assert_eq!(error.raw_upstream_error.as_deref(), Some(raw_error));
+}
+
+#[tokio::test]
+async fn ops_should_select_errors_independently_of_request_outcome() {
+    let Some(database) = TestDatabase::create("ops_error_outcomes").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&database.pool, now).await.unwrap();
+    let range =
+        ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1)).unwrap();
+    let repository = observability_repository(&database.pool);
+    let mut results = Vec::new();
+    for (outcome, error_kind, expected_count) in [
+        ("incomplete", Some("upstream_unavailable"), 1),
+        ("succeeded", Some("upstream_unavailable"), 1),
+        ("failed", Some("upstream_unavailable"), 1),
+        ("failed", None, 0),
+        ("incomplete", None, 0),
+        ("cancelled", Some("cancelled"), 0),
+        ("incomplete", Some("cancelled"), 0),
+        ("failed", Some("cancelled"), 0),
+        ("succeeded", None, 0),
+    ] {
+        sqlx::query(
+            "update model_requests set outcome = $1, error_kind = $2
+              where id = 'req_observe_success'",
+        )
+        .bind(outcome)
+        .bind(error_kind)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let page = repository
+            .list_ops_errors(OpsErrorQuery {
+                range,
+                filter: OpsErrorFilter {
+                    request_id: Some("req_observe_success".to_owned()),
+                    ..OpsErrorFilter::default()
+                },
+                current_page: 1,
+                page_size: ObservabilityPageSize::new(10).unwrap(),
+            })
+            .await
+            .unwrap();
+        results.push((outcome, error_kind, expected_count, page));
+    }
+    database.close().await;
+
+    for (outcome, error_kind, expected_count, page) in results {
+        assert_eq!(
+            page.total, expected_count,
+            "total for outcome={outcome}, error_kind={error_kind:?}"
+        );
+        assert_eq!(
+            page.items.len() as u64,
+            expected_count,
+            "items for outcome={outcome}, error_kind={error_kind:?}"
+        );
+        if let Some(error) = page.items.first() {
+            assert_eq!(Some(error.failure_kind.as_str()), error_kind);
+        }
+    }
+}
+
+#[tokio::test]
 async fn recovered_continuation_failure_should_be_visible_in_ops_but_hidden_from_business_metrics()
 {
     let Some(database) = TestDatabase::create("observability_recovered_continuation").await else {
