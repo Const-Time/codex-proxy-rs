@@ -1192,9 +1192,139 @@ async fn image_usage_should_preserve_unknown_fields_and_explicit_zero_counts() {
     }
 }
 
+#[tokio::test]
+async fn image_prices_should_use_modality_rates_and_precede_delivery() {
+    // First case is the real gpt-image-2 response verified on 2026-09-08.
+    let cases = [
+        (18, 0, 229, None, 69_600_000_u128),
+        (17, 1457, 1372, None, 529_010_000),
+        (100, 0, 10, Some(40), 6_500_000),
+        (0, 100, 10, Some(40), 8_600_000),
+        (20, 80, 10, Some(100), 4_850_000),
+        (0, 0, 0, Some(0), 0),
+    ];
+    for (text, image, output, cached, expected_ticks) in cases {
+        let mut usage = json!({
+            "input_tokens":text+image,
+            "input_tokens_details":{"text_tokens":text,"image_tokens":image},
+            "output_tokens":output,
+            "output_tokens_details":{"text_tokens":0,"image_tokens":output},
+            "total_tokens":text+image+output,
+        });
+        if let Some(cached) = cached {
+            usage["input_tokens_details"]["cached_tokens"] = json!(cached);
+        }
+        let response = serde_json::to_vec(&json!({"data":[{"b64_json":"AAEC"}],"usage":usage}))
+            .expect("response");
+        for (kind, model) in [
+            (ImageRequestKind::Generation, "gpt-image-2"),
+            (ImageRequestKind::Edit, "gpt-image-2-2026-04-21"),
+        ] {
+            let events = image_metering_events(kind, &response, model).await;
+            let costs = events
+                .iter()
+                .enumerate()
+                .flat_map(|(index, event)| {
+                    event
+                        .canonical_facts()
+                        .iter()
+                        .filter_map(move |fact| match fact {
+                            GatewayEvent::CalculatedCost(cost) => Some((index, *cost)),
+                            _ => None,
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(costs.len(), 1);
+            let (cost_index, cost) = costs[0];
+            assert_eq!(cost.total().amount().scaled(), expected_ticks);
+            assert_eq!(cost.into_estimate().source().as_str(), "calculated");
+            let wire_index = events
+                .iter()
+                .position(|event| event.wire_event().is_some())
+                .expect("wire event");
+            assert!(cost_index < wire_index);
+            assert_eq!(
+                events[wire_index]
+                    .wire_event()
+                    .and_then(|wire| wire.raw_json_body())
+                    .map(|body| body.as_ref()),
+                Some(response.as_slice())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_prices_should_remain_unknown_when_modality_or_model_is_uncertain() {
+    let valid = json!({
+        "input_tokens":100,
+        "input_tokens_details":{"text_tokens":20,"image_tokens":80},
+        "output_tokens":10,
+        "output_tokens_details":{"text_tokens":0,"image_tokens":10},
+        "total_tokens":110,
+    });
+    let mut cases = vec![
+        ("gpt-image-future", valid.clone()),
+        ("gpt-image-2-future", valid.clone()),
+        ("gpt-image-2", json!(null)),
+        (
+            "gpt-image-2",
+            json!({"input_tokens":100,"output_tokens":10}),
+        ),
+    ];
+    for (pointer, value) in [
+        ("/input_tokens", json!(101)),
+        ("/input_tokens_details/text_tokens", json!(null)),
+        ("/input_tokens_details/image_tokens", json!("80")),
+        ("/output_tokens_details/text_tokens", json!(1)),
+        ("/output_tokens_details/image_tokens", json!(9)),
+        ("/output_tokens", json!(-1)),
+        ("/total_tokens", json!(111)),
+    ] {
+        let mut usage = valid.clone();
+        *usage.pointer_mut(pointer).expect("existing field") = value;
+        cases.push(("gpt-image-2", usage));
+    }
+    for cached in [json!(40), json!(101), json!(null), json!("40")] {
+        let mut usage = valid.clone();
+        usage["input_tokens_details"]["cached_tokens"] = cached;
+        cases.push(("gpt-image-2", usage));
+    }
+    cases.push(("gpt-image-2", json!({
+        "input_tokens":u64::MAX,"input_tokens_details":{"text_tokens":u64::MAX,"image_tokens":0},
+        "output_tokens":10,
+    })));
+    for (model, usage) in cases {
+        let response = serde_json::to_vec(&json!({"data":[{"b64_json":"AAEC"}],"usage":usage}))
+            .expect("response");
+        let events = image_metering_events(ImageRequestKind::Generation, &response, model).await;
+        assert!(
+            events
+                .iter()
+                .flat_map(|event| event.canonical_facts())
+                .all(|fact| !matches!(fact, GatewayEvent::CalculatedCost(_)))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .find_map(|event| event.wire_event().and_then(|wire| wire.raw_json_body()))
+                .map(|body| body.as_ref()),
+            Some(response.as_slice())
+        );
+    }
+}
+
 async fn image_usage_events(
     kind: ImageRequestKind,
     response: &[u8],
+) -> Vec<gateway_core::event::ProviderEvent> {
+    image_metering_events(kind, response, "gpt-image-2").await
+}
+
+async fn image_metering_events(
+    kind: ImageRequestKind,
+    response: &[u8],
+    model: &str,
 ) -> Vec<gateway_core::event::ProviderEvent> {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
@@ -1214,7 +1344,10 @@ async fn image_usage_events(
     let provider = provider_with_base_url(&store, server.uri());
     let payload = RawJsonPayload::new(
         "openai",
-        Bytes::from_static(br#"{"model":"gpt-image-2","prompt":"draw a tree"}"#),
+        Bytes::from(
+            serde_json::to_vec(&json!({"model":model,"prompt":"draw a tree"}))
+                .expect("request JSON"),
+        ),
     )
     .expect("image payload");
     let operation = Operation::GenerateImage(ImageRequest::from_raw_json(kind, payload));

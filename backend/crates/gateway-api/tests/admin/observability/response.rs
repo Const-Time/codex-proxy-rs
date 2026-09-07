@@ -919,6 +919,22 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             compact: true,
             started_at: Utc::now(),
         });
+    {
+        let mut records = fixture.usage_records.lock().expect("usage records");
+        for source in ["calculated", "provider_reported"] {
+            let mut image = records[0].clone();
+            image.id = format!("image_{source}");
+            image.endpoint = "/v1/images/generations".to_owned();
+            image.provider_kind = Some("openai".to_owned());
+            image.requested_model_id = Some("gpt-image-2".to_owned());
+            image.upstream_model_id = None;
+            image.billing = Some(UsageBilling::Total {
+                source: source.to_owned(),
+                total: usd("0.00696"),
+            });
+            records.push(image);
+        }
+    }
     let response = observability::router::<AdminTestState>()
         .with_state(fixture.state())
         .oneshot(
@@ -1016,4 +1032,12 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         })
     );
     assert!(value["data"]["items"][0].get("metadata").is_none());
+    assert_eq!(
+        value["data"]["items"][1]["billing"]["totalAmountDisplay"],
+        "≈ $0.007"
+    );
+    assert_eq!(
+        value["data"]["items"][2]["billing"]["totalAmountDisplay"],
+        "$0.007"
+    );
 }

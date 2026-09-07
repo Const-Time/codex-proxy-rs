@@ -1,6 +1,6 @@
 use gateway_core::metering::{
-    CalculatedCostAmounts, CalculatedCostBreakdown, CalculatedCostRates, CurrencyCode, Decimal,
-    Money,
+    CalculatedCost, CalculatedCostAmounts, CalculatedCostBreakdown, CalculatedCostRates,
+    CurrencyCode, Decimal, Money,
 };
 use gateway_protocol::openai::events::{TokenUsage, retry_after_seconds_from_body};
 use reqwest::StatusCode;
@@ -491,6 +491,76 @@ fn openai_billing_breakdown_with_context(
         Some(normalized_tier.unwrap_or_else(|| "default".to_owned())),
         multiplier_percent,
     ))
+}
+
+/// 独立 Images 端点按公开标准 API 单价估算；不是 ChatGPT 账号实际扣费。
+pub(crate) fn image_calculated_cost(request_body: &[u8], usage: &Value) -> Option<CalculatedCost> {
+    #[derive(serde::Deserialize)]
+    struct ImageModel {
+        model: String,
+    }
+    // 只读取模型，跳过编辑请求中可能很大的 base64 图片。
+    let request = serde_json::from_slice::<ImageModel>(request_body).ok()?;
+    if !matches!(
+        request.model.as_str(),
+        "gpt-image-2" | "gpt-image-2-2026-04-21"
+    ) {
+        return None;
+    }
+    let input = usage.get("input_tokens")?.as_u64()?;
+    let output = usage.get("output_tokens")?.as_u64()?;
+    let details = usage.get("input_tokens_details")?;
+    let text_input = details.get("text_tokens")?.as_u64()?;
+    let image_input = details.get("image_tokens")?.as_u64()?;
+    if text_input.checked_add(image_input)? != input {
+        return None;
+    }
+    if let Some(total) = usage.get("total_tokens")
+        && total.as_u64()? != input.checked_add(output)?
+    {
+        return None;
+    }
+    // 此模型仅输出图片；上游如报告其他输出模态，不能套用图片单价。
+    if let Some(details) = usage.get("output_tokens_details")
+        && (details.get("image_tokens")?.as_u64()? != output
+            || details.get("text_tokens")?.as_u64()? != 0)
+    {
+        return None;
+    }
+    let cached = match details.get("cached_tokens") {
+        None => 0,
+        Some(value) => value.as_u64()?,
+    };
+    if cached > input {
+        return None;
+    }
+    // 缓存只给总量时，混合输入无法判定应套用哪种缓存单价。
+    let (cached_text, cached_image) = match (text_input, image_input, cached) {
+        (_, _, 0) => (0, 0),
+        (_, 0, cached) => (cached, 0),
+        (0, _, cached) => (0, cached),
+        (_, _, cached) if cached == input => (text_input, image_input),
+        _ => return None,
+    };
+    // https://developers.openai.com/api/docs/pricing (2026-09-08)
+    // USD / 1M tokens: text 5 / cached 1.25; image 8 / cached 2 / output 30.
+    let text = token_amounts(
+        TokenRates::new(50_000, 0, 12_500),
+        0,
+        text_input,
+        0,
+        cached_text,
+        0,
+    )?;
+    let image = token_amounts(
+        TokenRates::new(80_000, 300_000, 20_000),
+        0,
+        image_input,
+        output,
+        cached_image,
+        0,
+    )?;
+    CalculatedCost::from_usd_ticks(text.total_ticks.checked_add(image.total_ticks)?).ok()
 }
 
 fn model_pricing(model: &str) -> Option<ModelPricing> {

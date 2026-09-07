@@ -213,13 +213,17 @@ fn capitalize_first(value: &str) -> String {
 
 pub(crate) fn billing_view(billing: Option<&domain::UsageBilling>) -> Option<BillingView> {
     match billing? {
-        domain::UsageBilling::Total { total, .. } => Some(BillingView {
+        domain::UsageBilling::Total { source, total } => Some(BillingView {
             input_amount_display: "—".to_owned(),
             output_amount_display: "—".to_owned(),
             cache_read_amount_display: "—".to_owned(),
             cache_write_amount_display: "—".to_owned(),
             standard_amount_display: "—".to_owned(),
-            total_amount_display: format_money(total),
+            total_amount_display: if source == "calculated" {
+                format!("≈ {}", format_money(total))
+            } else {
+                format_money(total)
+            },
             input_price_display: "—".to_owned(),
             output_price_display: "—".to_owned(),
             cache_read_price_display: "—".to_owned(),
