@@ -2,6 +2,23 @@
 
 use super::*;
 
+pub(super) fn endpoint_requested_model(
+    payload: &gateway_core::operation::RawJsonPayload,
+) -> Option<gateway_core::routing::PublicModelId> {
+    if payload.protocol() != PROVIDER_NAME {
+        return None;
+    }
+    // 只读取 model，避免把编辑请求中的整张图片复制到观测数据。
+    #[derive(Deserialize)]
+    struct RequestModel {
+        model: Option<Value>,
+    }
+    let model = serde_json::from_slice::<RequestModel>(payload.body())
+        .ok()?
+        .model?;
+    gateway_core::routing::PublicModelId::new(model.as_str()?.to_owned()).ok()
+}
+
 /// OpenAI Responses 的观测状态完全归 Provider 所有。
 ///
 /// 每次原始 SSE/WS 事件推进状态后重新生成不可变 observation，Core 只负责携带、

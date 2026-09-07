@@ -1,5 +1,7 @@
 //! OpenAI attempt 的选择、发送与响应流执行。
 
+use gateway_core::metering::Usage;
+
 use super::*;
 
 impl CodexProvider {
@@ -490,6 +492,11 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
         let response_meta =
             ResponseMeta::for_provider_endpoint(request.context.request_id().as_str());
         yield ProviderEvent::canonical(GatewayEvent::Started(response_meta.clone()));
+        if matches!(request.endpoint_path, CODEX_IMAGE_GENERATIONS_PATH | CODEX_IMAGE_EDITS_PATH)
+            && let Some(usage) = image_response_usage(&response.body)
+        {
+            yield ProviderEvent::canonical(GatewayEvent::Usage(usage));
+        }
         let wire = ProtocolWireEvent::raw_json(PROVIDER_NAME, response.body).map_err(|_| {
             provider_error(ProviderErrorKind::Protocol, UpstreamSendState::Sent)
         })?;
@@ -498,6 +505,33 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             response_meta.with_finish_reason(FinishReason::Stop),
         ));
     })
+}
+
+fn image_response_usage(body: &[u8]) -> Option<Usage> {
+    // 只保留 usage，跳过通常很大的 base64 图片；原始响应仍按字节透传。
+    #[derive(Deserialize)]
+    struct ImageUsageEnvelope {
+        usage: Option<Value>,
+    }
+
+    let raw = serde_json::from_slice::<ImageUsageEnvelope>(body)
+        .ok()?
+        .usage?;
+    let mut usage = Usage::new();
+    usage.input_tokens = raw.get("input_tokens").and_then(Value::as_u64);
+    usage.output_tokens = raw.get("output_tokens").and_then(Value::as_u64);
+    usage.cached_tokens = raw
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64);
+    usage.image_input_tokens = raw
+        .pointer("/input_tokens_details/image_tokens")
+        .and_then(Value::as_u64);
+    usage.image_output_tokens = raw
+        .pointer("/output_tokens_details/image_tokens")
+        .and_then(Value::as_u64);
+    // 总量是上游独立报告的事实；图片明细是总输入/输出的子集，不能再次相加。
+    usage.total_tokens = raw.get("total_tokens").and_then(Value::as_u64);
+    (usage != Usage::default()).then_some(usage)
 }
 
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {

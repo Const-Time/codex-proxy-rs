@@ -20,7 +20,9 @@ use crate::event::{EventSequenceValidator, ProviderEvent};
 use crate::identity::ProviderKind;
 use crate::operation::Operation;
 use crate::policy::ClientApiKeyId;
-use crate::routing::{ModelCapabilities, ModelPresentation, ProviderCandidate, UpstreamModelId};
+use crate::routing::{
+    ModelCapabilities, ModelPresentation, ProviderCandidate, PublicModelId, UpstreamModelId,
+};
 use crate::upstream::OpaqueUpstreamValue;
 use crate::upstream::{UpstreamSendState, UpstreamTransport};
 
@@ -416,6 +418,8 @@ pub struct ProviderRequest {
 /// Provider 对公共观测表可解释的请求语义；未知字段保持空值。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderRequestObservation {
+    /// 独立 Provider 端点声明的请求模型，仅用于观测，不参与文本模型目录路由。
+    pub requested_model: Option<PublicModelId>,
     /// 客户端原始请求中的推理强度。
     pub reasoning_effort: Option<String>,
     pub reasoning_preset: Option<String>,

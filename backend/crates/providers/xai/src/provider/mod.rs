@@ -152,6 +152,7 @@ impl Provider for GrokBuildProvider {
         }
         let semantics = codex_responses_request_semantics(payload.body(), payload.context());
         ProviderRequestObservation {
+            requested_model: None,
             reasoning_effort: semantics.reasoning_effort,
             reasoning_preset: semantics.reasoning_preset.map(str::to_owned),
             request_kind: semantics.request_kind,

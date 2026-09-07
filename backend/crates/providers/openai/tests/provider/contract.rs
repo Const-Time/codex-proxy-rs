@@ -26,6 +26,7 @@ use gateway_core::error::{
 };
 use gateway_core::event::{GatewayEvent, WebSocketPoolKind};
 use gateway_core::lifecycle::CancellationToken;
+use gateway_core::metering::Usage;
 use gateway_core::operation::{
     CapabilityRequirements, GenerateRequest, ImageRequest, ImageRequestKind, Operation,
     OperationKind, ProtocolPayload, ProviderSessionState, RawJsonPayload, StandaloneSearchRequest,
@@ -1051,6 +1052,13 @@ async fn image_endpoints_bypass_only_the_text_catalog_and_preserve_the_current_c
         let mut observed_http_json = false;
         while let Some(event) = stream.next().await {
             let event = event.expect("image provider event");
+            assert!(
+                event
+                    .canonical_facts()
+                    .iter()
+                    .all(|fact| !matches!(fact, GatewayEvent::Usage(_))),
+                "missing upstream usage must remain unknown"
+            );
             completed |= event
                 .canonical_facts()
                 .iter()
@@ -1073,6 +1081,156 @@ async fn image_endpoints_bypass_only_the_text_catalog_and_preserve_the_current_c
         assert_eq!(raw_response.as_deref(), Some(*expected_response));
     }
     server.verify().await;
+}
+
+#[tokio::test]
+async fn image_endpoints_should_report_usage_before_delivering_the_unchanged_body() {
+    let response = br#"{ "created":1778832973,"data":[{"b64_json":"AAEC"}],"quality":"medium","size":"1024x1536","usage":{"input_tokens":1474,"input_tokens_details":{"image_tokens":1457,"text_tokens":17,"cached_tokens":100},"output_tokens":1372,"output_tokens_details":{"image_tokens":1372,"text_tokens":0},"total_tokens":2846},"future":9007199254740993 }"#;
+    let expected = Usage {
+        input_tokens: Some(1474),
+        output_tokens: Some(1372),
+        cached_tokens: Some(100),
+        image_input_tokens: Some(1457),
+        image_output_tokens: Some(1372),
+        total_tokens: Some(2846),
+        ..Usage::default()
+    };
+    for kind in [ImageRequestKind::Generation, ImageRequestKind::Edit] {
+        let events = image_usage_events(kind, response).await;
+        let usage = events
+            .iter()
+            .flat_map(|event| event.canonical_facts())
+            .filter_map(|fact| match fact {
+                GatewayEvent::Usage(usage) => Some(usage.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usage.as_slice(), std::slice::from_ref(&expected));
+        let usage_index = events
+            .iter()
+            .position(|event| {
+                event
+                    .canonical_facts()
+                    .iter()
+                    .any(|fact| matches!(fact, GatewayEvent::Usage(_)))
+            })
+            .expect("usage event");
+        let wire_index = events
+            .iter()
+            .position(|event| {
+                event
+                    .wire_event()
+                    .and_then(|wire| wire.raw_json_body())
+                    .is_some()
+            })
+            .expect("raw image response");
+        assert!(
+            usage_index < wire_index,
+            "usage must be observed before image delivery"
+        );
+        assert_eq!(
+            events[wire_index]
+                .wire_event()
+                .and_then(|wire| wire.raw_json_body())
+                .map(|body| body.as_ref()),
+            Some(response.as_slice())
+        );
+    }
+}
+
+#[tokio::test]
+async fn image_usage_should_preserve_unknown_fields_and_explicit_zero_counts() {
+    let cases = [
+        (json!(null), None),
+        (json!({}), None),
+        (json!([]), None),
+        (
+            json!({"input_tokens": -1, "output_tokens": "42", "total_tokens": 1.5}),
+            None,
+        ),
+        (
+            json!({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_details": {"image_tokens": 0, "cached_tokens": 0}, "output_tokens_details": {"image_tokens": 0}}),
+            Some(Usage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                total_tokens: Some(0),
+                cached_tokens: Some(0),
+                image_input_tokens: Some(0),
+                image_output_tokens: Some(0),
+                ..Usage::default()
+            }),
+        ),
+        (
+            json!({"input_tokens": 17, "output_tokens": 1372, "input_tokens_details": {"image_tokens": "invalid"}, "output_tokens_details": {"image_tokens": 1372}}),
+            Some(Usage {
+                input_tokens: Some(17),
+                output_tokens: Some(1372),
+                image_output_tokens: Some(1372),
+                ..Usage::default()
+            }),
+        ),
+    ];
+    for (usage, expected) in cases {
+        let response = serde_json::to_vec(
+            &json!({"created":1778832973,"data":[{"b64_json":"AAEC"}],"usage":usage}),
+        )
+        .expect("image response JSON");
+        let events = image_usage_events(ImageRequestKind::Generation, &response).await;
+        let actual = events
+            .iter()
+            .flat_map(|event| event.canonical_facts())
+            .filter_map(|fact| match fact {
+                GatewayEvent::Usage(usage) => Some(usage.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected.into_iter().collect::<Vec<_>>());
+        let raw = events
+            .iter()
+            .find_map(|event| event.wire_event().and_then(|wire| wire.raw_json_body()));
+        assert_eq!(raw.map(|body| body.as_ref()), Some(response.as_slice()));
+    }
+}
+
+async fn image_usage_events(
+    kind: ImageRequestKind,
+    response: &[u8],
+) -> Vec<gateway_core::event::ProviderEvent> {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let endpoint = match kind {
+        ImageRequestKind::Generation => "/codex/images/generations",
+        ImageRequestKind::Edit => "/codex/images/edits",
+    };
+    Mock::given(method("POST"))
+        .and(path(endpoint))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(response.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = provider_with_base_url(&store, server.uri());
+    let payload = RawJsonPayload::new(
+        "openai",
+        Bytes::from_static(br#"{"model":"gpt-image-2","prompt":"draw a tree"}"#),
+    )
+    .expect("image payload");
+    let operation = Operation::GenerateImage(ImageRequest::from_raw_json(kind, payload));
+    let mut stream = provider
+        .execute(
+            planned_provider_endpoint_request("openai", operation),
+            context("req_image_usage", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare image stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("image provider event"));
+    }
+    server.verify().await;
+    events
 }
 
 #[tokio::test]
@@ -5629,6 +5787,52 @@ fn request_observation_reads_openai_metadata_without_changing_the_operation() {
     assert_eq!(observation.subagent_kind.as_deref(), Some("worker"));
     assert!(!observation.compact);
     assert!(matches!(operation, Operation::Generate(_)));
+}
+
+#[test]
+fn endpoint_observation_should_read_models_without_rewriting_or_requiring_a_catalog() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let provider = provider(&store);
+    let client_key = ClientApiKeyId::new("key_endpoint_model").expect("client key");
+    for model in [
+        json!("gpt-image-future"),
+        json!("gpt-5.6-sol"),
+        json!(null),
+        json!(42),
+        json!(""),
+    ] {
+        let body = serde_json::to_vec(&json!({"model":model,"future":9007199254740993_u64}))
+            .expect("body");
+        let payload =
+            RawJsonPayload::new("openai", Bytes::copy_from_slice(&body)).expect("payload");
+        let operations = [
+            Operation::GenerateImage(ImageRequest::from_raw_json(
+                ImageRequestKind::Generation,
+                payload.clone(),
+            )),
+            Operation::GenerateImage(ImageRequest::from_raw_json(
+                ImageRequestKind::Edit,
+                payload.clone(),
+            )),
+            Operation::Search(StandaloneSearchRequest::from_raw_json(payload)),
+        ];
+        for operation in operations {
+            let observation = provider.request_observation(&operation, &client_key);
+            assert_eq!(
+                observation
+                    .requested_model
+                    .as_ref()
+                    .map(PublicModelId::as_str),
+                model.as_str().filter(|model| !model.is_empty()),
+            );
+            let payload = match &operation {
+                Operation::GenerateImage(request) => request.payload(),
+                Operation::Search(request) => request.payload(),
+                _ => unreachable!(),
+            };
+            assert_eq!(payload.body().as_ref(), body.as_slice());
+        }
+    }
 }
 
 #[test]

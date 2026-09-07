@@ -26,7 +26,7 @@ use gateway_core::engine::execution::{
 use gateway_core::engine::probe::{AccountProbe, AccountProbeErrorSource, AccountProbeRequest};
 use gateway_core::engine::provider::{
     Provider, ProviderCallMetadata, ProviderCatalogGeneration, ProviderModelCapabilities,
-    ProviderRegistry, ProviderRequest, ProviderStream,
+    ProviderRegistry, ProviderRequest, ProviderRequestObservation, ProviderStream,
 };
 use gateway_core::engine::{
     AttemptContext, AttemptRecord, ExecutionStore, IntermediateFailure, ModelRequestFinalization,
@@ -260,7 +260,9 @@ impl Provider for LocalFailingProvider {
     }
 }
 
-struct ColdFailingProvider;
+struct ColdFailingProvider {
+    requested_model: Option<PublicModelId>,
+}
 
 #[async_trait]
 impl Provider for ColdFailingProvider {
@@ -270,6 +272,13 @@ impl Provider for ColdFailingProvider {
 
     fn catalog_generation(&self) -> ProviderCatalogGeneration {
         ProviderCatalogGeneration::default()
+    }
+
+    fn request_observation(&self, _: &Operation, _: &ClientApiKeyId) -> ProviderRequestObservation {
+        ProviderRequestObservation {
+            requested_model: self.requested_model.clone(),
+            ..Default::default()
+        }
     }
 
     async fn query_model_capabilities(
@@ -323,12 +332,19 @@ fn successful_authentication_should_record_client_key_usage() {
 
 #[test]
 fn provider_endpoint_should_persist_its_real_v1_endpoint() {
+    assert_provider_endpoint_observation(None);
+    assert_provider_endpoint_observation(Some("gpt-image-2"));
+}
+
+fn assert_provider_endpoint_observation(model: Option<&str>) {
     let store = Arc::new(TrackingExecutionStore::default());
     let service = DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(client_snapshot()),
         store.clone(),
-        ProviderRegistry::new([Arc::new(ColdFailingProvider) as Arc<dyn Provider>])
-            .expect("provider registry"),
+        ProviderRegistry::new([Arc::new(ColdFailingProvider {
+            requested_model: model.map(|model| PublicModelId::new(model).expect("model")),
+        }) as Arc<dyn Provider>])
+        .expect("provider registry"),
         Arc::new(UnusedAdmissions),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
@@ -369,7 +385,7 @@ fn provider_endpoint_should_persist_its_real_v1_endpoint() {
         vec!["/v1/images/generations".to_owned()],
         "execution error: {error:?}"
     );
-    assert_eq!(store.requested_models(), vec![None]);
+    assert_eq!(store.requested_models(), vec![model.map(str::to_owned)]);
     let upstream_models = store.upstream_models();
     assert!(!upstream_models.is_empty());
     assert!(upstream_models.iter().all(Option::is_none));

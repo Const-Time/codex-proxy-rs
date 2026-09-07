@@ -237,6 +237,15 @@ impl Provider for CodexProvider {
                 _ => None,
             };
             return ProviderRequestObservation {
+                requested_model: match operation {
+                    Operation::Search(request) => {
+                        observation::endpoint_requested_model(request.payload())
+                    }
+                    Operation::GenerateImage(request) => {
+                        observation::endpoint_requested_model(request.payload())
+                    }
+                    _ => None,
+                },
                 continuation: ContinuationRequestObservation {
                     affinity_hash: affinity.map(|affinity| affinity.persistence_hash().to_owned()),
                     ..Default::default()
@@ -259,6 +268,7 @@ impl Provider for CodexProvider {
             requested: previous_response_id.is_some(),
         };
         ProviderRequestObservation {
+            requested_model: None,
             reasoning_effort,
             reasoning_preset: semantics.reasoning_preset.map(str::to_owned),
             request_kind: semantics.request_kind,
