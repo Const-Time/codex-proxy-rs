@@ -1705,6 +1705,35 @@ async fn inference_request_uses_oauth_headers_and_no_api_key() {
 }
 
 #[tokio::test]
+async fn transport_diagnostic_survives_provider_mapping_without_enabling_replay() {
+    let transport = StubInferenceTransport::stream_error(
+        GrokInferenceTransportError::new(
+            GrokInferenceTransportErrorKind::Transport,
+            UpstreamSendState::Sent,
+        )
+        .with_diagnostic(
+            gateway_core::error::ProviderDiagnostic::new("xAI HTTP body read failed")
+                .with_classification("receive", "http_body_failed"),
+        ),
+    );
+    let provider = provider(StubSelector::success(), transport).await;
+    let mut stream = provider
+        .execute(
+            provider_request("xai"),
+            context(CancellationToken::new(), None),
+        )
+        .await
+        .expect("stream");
+    let error = next_provider_error(&mut stream).await;
+    let diagnostic = error.diagnostic().expect("preserved transport diagnosis");
+    assert_eq!(diagnostic.code(), Some("http_body_failed"));
+    assert_eq!(diagnostic.stage(), Some("receive"));
+    assert_eq!(diagnostic.as_str(), "xAI HTTP body read failed");
+    assert_eq!(error.send_state(), UpstreamSendState::Sent);
+    assert!(!error.replay_is_safe());
+}
+
+#[tokio::test]
 async fn unauthorized_transport_feedback_is_bound_to_selected_account() {
     let selector = StubSelector::success();
     let transport = StubInferenceTransport::error(GrokInferenceTransportError::new(

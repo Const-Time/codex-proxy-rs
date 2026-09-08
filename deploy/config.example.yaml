@@ -20,15 +20,17 @@ host:
   logging:
     level: 'info'
     stdout: true
+    # 将原始 AT/RT 写入独立 OAuth 恢复文件，沿用 file 的目录、大小与保留期。
+    oauth_recovery: false
     # 将完整请求与响应头、正文写入独立文件；包含凭据，仅排障时开启。
     request_dump: false
+    request_dump_retention_days: 1
     file:
       enabled: true
       # 相对路径以 deploy/config.yaml 所在目录为基准。
       directory: '../.runtime/logs'
-      retention_days: 14
+      retention_days: 7
       max_file_size_mb: 20
-      max_files: 20
   drain_timeout_seconds: 30
   worker_shutdown_timeout_seconds: 30
 

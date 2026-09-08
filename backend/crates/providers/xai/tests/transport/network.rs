@@ -253,6 +253,22 @@ async fn inference_transport_should_build_distinct_cold_account_clients_concurre
 }
 
 #[tokio::test]
+async fn inference_connect_failure_keeps_safe_diagnosis_without_endpoint_or_payload() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    drop(listener);
+    let error = inference_transport(&origin)
+        .execute(inference_request(&origin))
+        .await
+        .expect_err("closed listener");
+    let diagnostic = error.diagnostic().expect("transport cause");
+    assert_eq!(diagnostic.stage(), Some("connect"));
+    assert_eq!(diagnostic.code(), Some("connection_refused"));
+    assert!(!diagnostic.as_str().contains("127.0.0.1"));
+    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+}
+
+#[tokio::test]
 async fn inference_transport_should_classify_http_failures_without_retaining_bodies() {
     let cases = [
         (400, GrokInferenceTransportErrorKind::InvalidRequest),

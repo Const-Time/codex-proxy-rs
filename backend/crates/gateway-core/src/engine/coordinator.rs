@@ -1854,6 +1854,9 @@ fn duration_ms(duration: Duration) -> u64 {
 fn record_trace_error(trace: &TraceContext, error: &ProviderError) {
     trace.record("attempt.failed", json!({
         "kind": error.kind().as_str(), "sendState": format!("{:?}", error.send_state()),
+        "diagnostic": error.diagnostic().map(|diagnostic| json!({
+            "stage": diagnostic.stage(), "code": diagnostic.code(), "message": diagnostic.as_str(),
+        })),
         "upstreamStatus": error.upstream_status(),
         "upstreamCode": error.upstream_code().map(|code| code.as_str()),
         "rawError": error.raw_upstream_error().map(|raw| {

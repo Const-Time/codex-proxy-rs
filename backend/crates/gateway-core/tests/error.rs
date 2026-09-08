@@ -30,13 +30,24 @@ fn provider_error_debug_should_not_print_classified_upstream_values() {
 fn classified_provider_diagnostic_survives_clone_without_entering_debug() {
     let message = "OpenAI WebSocket closed before terminal response (close code 1000)";
     let error = ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::Ambiguous)
-        .with_diagnostic(ProviderDiagnostic::new(message));
+        .with_diagnostic(
+            ProviderDiagnostic::new(message)
+                .with_classification("receive", "closed_before_terminal"),
+        );
     let cloned = error.clone();
     let gateway = GatewayError::from_provider(&cloned);
 
     assert_eq!(
         gateway.diagnostic().map(ProviderDiagnostic::as_str),
         Some(message)
+    );
+    assert_eq!(
+        gateway.diagnostic().and_then(ProviderDiagnostic::stage),
+        Some("receive")
+    );
+    assert_eq!(
+        gateway.diagnostic().and_then(ProviderDiagnostic::code),
+        Some("closed_before_terminal")
     );
     assert!(!format!("{error:?}").contains(message));
     assert!(!format!("{gateway:?}").contains(message));

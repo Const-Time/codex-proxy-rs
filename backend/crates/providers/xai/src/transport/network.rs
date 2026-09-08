@@ -30,7 +30,7 @@ use crate::{
     HttpMethod, MAX_GROK_BILLING_BYTES, MAX_GROK_MODEL_CATALOG_BYTES, OAuthHttpRequest,
     OAuthHttpResponse, OAuthHttpTransport, TransportFailure, TransportFailureKind, TransportFuture,
 };
-use gateway_core::error::{ClientVisibleUpstreamError, OpaqueUpstreamValue};
+use gateway_core::error::{ClientVisibleUpstreamError, OpaqueUpstreamValue, ProviderDiagnostic};
 use gateway_core::event::UpstreamHttpVersion;
 use gateway_core::upstream::UpstreamSendState;
 
@@ -954,6 +954,27 @@ fn classify_oauth_reqwest_error(error: reqwest::Error) -> TransportFailure {
     TransportFailure::new(kind)
 }
 
+fn inference_http_diagnostic(error: &reqwest::Error) -> ProviderDiagnostic {
+    let (stage, code) = if error.is_builder() {
+        ("prepare", "http_request_build_failed")
+    } else if error.is_connect() && error.is_timeout() {
+        ("connect", "http_connect_timeout")
+    } else if error.is_connect() {
+        ("connect", "http_connect_failed")
+    } else if error.is_timeout() {
+        ("exchange", "http_timeout")
+    } else if error.is_decode() {
+        ("decode", "http_decode_failed")
+    } else if error.is_body() {
+        ("receive", "http_body_failed")
+    } else {
+        ("exchange", "http_transport_failed")
+    };
+    ProviderDiagnostic::new(format!("xAI HTTP failure: stage={stage}, cause={code}"))
+        .with_classification(stage, code)
+        .with_io_cause(error)
+}
+
 fn classify_inference_reqwest_error(error: reqwest::Error) -> GrokInferenceTransportError {
     let (kind, send_state) = if error.is_builder() {
         (
@@ -977,6 +998,7 @@ fn classify_inference_reqwest_error(error: reqwest::Error) -> GrokInferenceTrans
         )
     };
     GrokInferenceTransportError::new(kind, send_state)
+        .with_diagnostic(inference_http_diagnostic(&error))
 }
 
 fn classify_model_catalog_reqwest_error(error: reqwest::Error) -> GrokModelCatalogTransportError {
@@ -1010,6 +1032,7 @@ fn classify_inference_stream_error(error: &reqwest::Error) -> GrokInferenceTrans
         },
         UpstreamSendState::Sent,
     )
+    .with_diagnostic(inference_http_diagnostic(error))
 }
 
 async fn classify_inference_status(

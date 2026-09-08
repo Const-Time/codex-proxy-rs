@@ -118,16 +118,31 @@ pub struct LoggingConfig {
     pub level: String,
     pub stdout: bool,
     pub file: FileLoggingConfig,
+    /// 将 OAuth 原始 AT/RT 写入独立恢复日志；默认关闭，沿用 file 的目录与保留期。
+    #[serde(default)]
+    pub oauth_recovery: bool,
     /// 将完整请求原文写入独立诊断日志；默认关闭，因为内容包含凭据。
+    /// 请求报文的留存窗口由 request_dump_retention_days 独立控制。
     #[serde(default)]
     pub request_dump: bool,
+    /// 完整报文的最少保留天数；按 UTC 日期整组清理，默认 1 天。
+    #[serde(default = "default_request_dump_retention_days")]
+    pub request_dump_retention_days: usize,
+}
+
+fn default_file_retention_days() -> usize {
+    7
+}
+
+fn default_request_dump_retention_days() -> usize {
+    1
 }
 
 impl LoggingConfig {
     fn resolve_and_validate(&mut self, source_dir: &Path) -> Result<(), ConfigError> {
         EnvFilter::try_new(&self.level)
             .map_err(|_| ConfigError::InvalidField("host.logging.level"))?;
-        if !self.stdout && !self.file.enabled {
+        if !self.stdout && !self.file.enabled && !self.oauth_recovery && !self.request_dump {
             return Err(ConfigError::InvalidField("host.logging"));
         }
         if self.file.directory.as_os_str().is_empty() {
@@ -143,8 +158,10 @@ impl LoggingConfig {
                 "host.logging.file.max_file_size_mb",
             ));
         }
-        if self.file.max_files == 0 {
-            return Err(ConfigError::InvalidField("host.logging.file.max_files"));
+        if self.request_dump_retention_days == 0 {
+            return Err(ConfigError::InvalidField(
+                "host.logging.request_dump_retention_days",
+            ));
         }
         resolve_relative_path(source_dir, &mut self.file.directory);
         Ok(())
@@ -157,9 +174,10 @@ impl LoggingConfig {
 pub struct FileLoggingConfig {
     pub enabled: bool,
     pub directory: PathBuf,
+    /// 至少保留的完整天数，默认 7 天；文件数量不参与清理。
+    #[serde(default = "default_file_retention_days")]
     pub retention_days: usize,
     pub max_file_size_mb: u64,
-    pub max_files: usize,
 }
 
 #[derive(Debug, thiserror::Error)]

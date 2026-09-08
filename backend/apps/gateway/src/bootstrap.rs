@@ -87,6 +87,7 @@ pub async fn run() -> Result<(), BootstrapError> {
 
     let mut probes = store.health_probes();
     probes.extend(core.health_probes());
+    probes.push(host.logging_health_probe());
     let api = gateway_api::initialize(
         api,
         core.execution_service(),

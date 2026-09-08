@@ -318,9 +318,19 @@ HTTP Client 构造失败也不会阻断网关启动。外部解析在已认证�
 安全边界：
 
 - Provider credential 以 Provider schema 的明文 JSON 保存在 PostgreSQL；数据库和备份必须按敏感数据保护。
-- OAuth 恢复日志包含原始 AT/RT，`.runtime/logs` 同样属于敏感数据。
+- `host.logging.oauth_recovery` 默认关闭，开启后将 OAuth 原始 AT/RT 写入独立文件；
+  与普通文件日志开关分别控制，不输出到普通日志或 stdout。`.runtime/logs` 同样属于敏感数据。
 - `host.logging.request_dump` 默认关闭；开启后独立请求转储包含原始请求头和正文，
   可能包含密钥及用户内容，只能在明确的排障范围内使用，不能作为普通日志公开。
+  普通及 OAuth 文件按 `file.retention_days`（默认 7）保留；报文按独立的
+  `request_dump_retention_days`（默认 1）保留。保留当天及前 N 个完整 UTC 日期的所有分片，
+  仅整组清理更早日期；近期被写入的旧日期组延后清理。不存在文件数量淘汰。
+  `file.max_file_size_mb` 只控制轮转；已关闭分片压缩后才删除原文件，启动和轮转时清理过期日期。
+  文件队列满时背压，正常关闭时排空并同步。`file_logging` 健康探针持续报告本次进程的写入缺口，
+  不将压缩/清理失败伪装成保留完成。容量规划须覆盖完整时间窗口，不能靠提前删窗口内分片解决磁盘不足。
+- Provider 将安全诊断的阶段、原因码与消息独立于错误大类和发送状态传入 Core；
+  `attempt.failed` 保存这些字段，最终错误记录优先持久化诊断消息。重试包装不能覆盖底层诊断，
+  也不能因为错误更详细而改变已有重试安全边界。
 - 真实 secret 不进入普通日志、Debug、fixture 或 audit details；明文只能通过账号导出、Key reveal、
   备份设置等明确的敏感 Admin 合同返回。
 - OAuth pending flow 使用有期限、带 owner 的一次性 claim；事务成功后才消费，失败释放 claim。

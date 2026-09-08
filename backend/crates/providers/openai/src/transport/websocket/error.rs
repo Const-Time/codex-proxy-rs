@@ -223,6 +223,50 @@ impl fmt::Display for CodexWebSocketUpstreamError {
 }
 
 impl CodexWebSocketExchangeError {
+    /// 仅供诊断展示穿透发送状态与连接快照包装；重试分类仍使用 classified。
+    pub(crate) fn diagnostic_cause(&self) -> &Self {
+        match self {
+            Self::PostSendAmbiguous {
+                source: Some(source),
+                ..
+            }
+            | Self::ReusedConnectionDiedBeforeFirstEvent {
+                source: Some(source),
+                ..
+            }
+            | Self::ConnectionObserved { source, .. } => source.diagnostic_cause(),
+            _ => self,
+        }
+    }
+
+    /// 返回可持久化的传输错误分类，不包含底层错误中的地址、报文或凭据。
+    /// 与已有指标粗分类分开：缺少关闭握手本身不能证明收到 TCP RST。
+    pub(crate) fn transport_failure_reason(&self) -> Option<&'static str> {
+        match self.diagnostic_cause() {
+            Self::Transport(error) | Self::Connect(error) => Some(match error {
+                tungstenite::Error::Protocol(
+                    tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                ) => "reset_without_closing_handshake",
+                tungstenite::Error::Io(error) => match error.kind() {
+                    std::io::ErrorKind::ConnectionRefused => "connection_refused",
+                    std::io::ErrorKind::NetworkUnreachable => "network_unreachable",
+                    std::io::ErrorKind::HostUnreachable => "host_unreachable",
+                    std::io::ErrorKind::ConnectionReset => "tcp_reset",
+                    std::io::ErrorKind::ConnectionAborted => "connection_aborted",
+                    std::io::ErrorKind::BrokenPipe => "broken_pipe",
+                    std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
+                    std::io::ErrorKind::TimedOut => "transport_timeout",
+                    _ => "io_error",
+                },
+                tungstenite::Error::Tls(_) => "tls_error",
+                tungstenite::Error::Protocol(_) => "protocol_error",
+                tungstenite::Error::Capacity(_) => "capacity_error",
+                _ => "transport_error",
+            }),
+            _ => None,
+        }
+    }
+
     pub(crate) fn closed_before_terminal_on(
         connection_id: Uuid,
         code: Option<u16>,

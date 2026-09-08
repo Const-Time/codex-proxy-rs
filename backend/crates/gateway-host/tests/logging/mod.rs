@@ -1,16 +1,20 @@
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gateway_host::config::{FileLoggingConfig, HostConfig, ListenConfig, LoggingConfig};
 use gateway_host::system_update::SystemUpdateConfig;
 
+mod sink;
+mod writer;
+
 const LOG_DIRECTORY_ENV: &str = "CPR_LOGGING_TEST_DIRECTORY";
 const CHILD_PROCESS_ENV: &str = "CPR_LOGGING_TEST_CHILD";
 const REQUEST_DUMP_ENABLED_ENV: &str = "CPR_LOGGING_TEST_REQUEST_DUMP_ENABLED";
-const APPLICATION_LOG_FILE_PREFIX: &str = "codex-proxy-rs.";
-const OAUTH_RECOVERY_LOG_FILE_PREFIX: &str = "codex-proxy-rs-oath.";
+const APPLICATION_LOG_FILE_PREFIX: &str = "codex-proxy-rs-application.";
+const OAUTH_RECOVERY_LOG_FILE_PREFIX: &str = "codex-proxy-rs-oauth-recovery.";
 const REQUEST_DUMP_LOG_FILE_PREFIX: &str = "codex-proxy-rs-request-dump.";
 const APPLICATION_LOG_TARGET: &str = "logging_test_application";
 const APPLICATION_LOG_MARKER: &str = "application-file-filter-test";
@@ -37,9 +41,10 @@ fn logging_requires_at_least_one_sink() {
                 directory: PathBuf::from("logs"),
                 retention_days: 7,
                 max_file_size_mb: 100,
-                max_files: 30,
             },
+            oauth_recovery: false,
             request_dump: false,
+            request_dump_retention_days: 1,
         },
         system_update: SystemUpdateConfig::default(),
         drain_timeout_seconds: 30,
@@ -143,8 +148,115 @@ fn sensitive_file_logging_is_separate_and_overrides_global_log_level() {
     assert!(!application_log.contains(REQUEST_DUMP_SECRET));
 }
 
+#[test]
+fn oauth_recovery_switch_controls_only_its_dedicated_file() {
+    const OAUTH_ENABLED_ENV: &str = "CPR_LOGGING_TEST_OAUTH_ENABLED";
+    const APPLICATION_ENABLED_ENV: &str = "CPR_LOGGING_TEST_APPLICATION_ENABLED";
+    const TOKEN: &str = "synthetic-oauth-token-must-stay-in-recovery-file";
+    if env::var_os(CHILD_PROCESS_ENV).is_some() {
+        let mut config =
+            logging_config(PathBuf::from(env::var_os(LOG_DIRECTORY_ENV).unwrap()), true);
+        config.logging.oauth_recovery = env::var(OAUTH_ENABLED_ENV).unwrap() == "true";
+        config.logging.file.enabled = env::var(APPLICATION_ENABLED_ENV).unwrap() == "true";
+        config.logging.stdout = true;
+        with_logging(config, || {
+            tracing::info!(target: APPLICATION_LOG_TARGET, marker = APPLICATION_LOG_MARKER);
+            tracing::info!(target: OAUTH_RECOVERY_LOG_TARGET, access_token = TOKEN);
+            tracing::info!(target: REQUEST_DUMP_LOG_TARGET, marker = REQUEST_DUMP_LOG_MARKER);
+        });
+        return;
+    }
+    for application_enabled in [false, true] {
+        for oauth_enabled in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "logging::oauth_recovery_switch_controls_only_its_dedicated_file",
+                    "--nocapture",
+                ])
+                .env(CHILD_PROCESS_ENV, "1")
+                .env(LOG_DIRECTORY_ENV, directory.path())
+                .env(OAUTH_ENABLED_ENV, oauth_enabled.to_string())
+                .env(APPLICATION_ENABLED_ENV, application_enabled.to_string())
+                .env("RUST_LOG", "info,oauth_recovery=trace,request_dump=trace")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(TOKEN));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(TOKEN));
+            assert_eq!(
+                log_file_set_exists(directory.path(), OAUTH_RECOVERY_LOG_FILE_PREFIX),
+                oauth_enabled
+            );
+            assert_eq!(
+                log_file_set_exists(directory.path(), APPLICATION_LOG_FILE_PREFIX),
+                application_enabled
+            );
+            if oauth_enabled {
+                assert!(
+                    read_log_file_set(directory.path(), OAUTH_RECOVERY_LOG_FILE_PREFIX)
+                        .contains(TOKEN)
+                );
+            }
+            if application_enabled {
+                let body = read_log_file_set(directory.path(), APPLICATION_LOG_FILE_PREFIX);
+                assert!(body.contains(APPLICATION_LOG_MARKER));
+                assert!(!body.contains(TOKEN));
+            } else {
+                assert!(String::from_utf8_lossy(&output.stdout).contains(APPLICATION_LOG_MARKER));
+            }
+            let dump = read_log_file_set(directory.path(), REQUEST_DUMP_LOG_FILE_PREFIX);
+            assert!(dump.contains(REQUEST_DUMP_LOG_MARKER));
+            assert!(!dump.contains(TOKEN));
+        }
+    }
+}
+
 fn write_sensitive_logs(directory: PathBuf, request_dump: bool) {
-    let config = HostConfig {
+    with_file_logging(directory, request_dump, || {
+        tracing::info!(
+            target: APPLICATION_LOG_TARGET,
+            marker = APPLICATION_LOG_MARKER,
+            "application file test record"
+        );
+        tracing::info!(
+            target: OAUTH_RECOVERY_LOG_TARGET,
+            provider = OAUTH_RECOVERY_PROVIDER,
+            marker = OAUTH_RECOVERY_LOG_MARKER,
+            "OAuth recovery test record"
+        );
+        tracing::info!(
+            target: REQUEST_DUMP_LOG_TARGET,
+            marker = REQUEST_DUMP_LOG_MARKER,
+            authorization = REQUEST_DUMP_SECRET,
+            "request dump test record"
+        );
+    });
+}
+
+fn with_file_logging(directory: PathBuf, request_dump: bool, write: impl FnOnce()) {
+    with_logging(logging_config(directory, request_dump), write);
+}
+
+fn with_logging(config: HostConfig, write: impl FnOnce()) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("create logging runtime");
+    let bundle = runtime
+        .block_on(gateway_host::initialize(config))
+        .expect("initialize logging");
+    write();
+    drop(bundle);
+}
+
+fn logging_config(directory: PathBuf, request_dump: bool) -> HostConfig {
+    HostConfig {
         listen: ListenConfig {
             host: "127.0.0.1".to_owned(),
             port: 8080,
@@ -156,42 +268,17 @@ fn write_sensitive_logs(directory: PathBuf, request_dump: bool) {
             file: FileLoggingConfig {
                 enabled: true,
                 directory,
-                retention_days: 1,
+                retention_days: 7,
                 max_file_size_mb: 1,
-                max_files: 1,
             },
+            oauth_recovery: true,
             request_dump,
+            request_dump_retention_days: 1,
         },
         system_update: SystemUpdateConfig::default(),
         drain_timeout_seconds: 30,
         worker_shutdown_timeout_seconds: 30,
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("create logging runtime");
-    let bundle = runtime
-        .block_on(gateway_host::initialize(config))
-        .expect("initialize logging");
-
-    tracing::info!(
-        target: APPLICATION_LOG_TARGET,
-        marker = APPLICATION_LOG_MARKER,
-        "application file test record"
-    );
-    tracing::info!(
-        target: OAUTH_RECOVERY_LOG_TARGET,
-        provider = OAUTH_RECOVERY_PROVIDER,
-        marker = OAUTH_RECOVERY_LOG_MARKER,
-        "OAuth recovery test record"
-    );
-    tracing::info!(
-        target: REQUEST_DUMP_LOG_TARGET,
-        marker = REQUEST_DUMP_LOG_MARKER,
-        authorization = REQUEST_DUMP_SECRET,
-        "request dump test record"
-    );
-    drop(bundle);
+    }
 }
 
 fn read_log_file_set(directory: &Path, file_prefix: &str) -> String {
@@ -201,7 +288,10 @@ fn read_log_file_set(directory: &Path, file_prefix: &str) -> String {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(file_prefix))
+                .is_some_and(|name| {
+                    name.starts_with(file_prefix)
+                        && (name.ends_with(".log") || name.ends_with(".log.gz"))
+                })
         })
         .collect::<Vec<_>>();
     files.sort();
@@ -209,7 +299,17 @@ fn read_log_file_set(directory: &Path, file_prefix: &str) -> String {
     assert!(!files.is_empty(), "expected log file set {file_prefix}");
     files
         .into_iter()
-        .map(|path| fs::read_to_string(path).expect("read log file"))
+        .map(|path| {
+            if path.extension().is_some_and(|extension| extension == "gz") {
+                let mut body = String::new();
+                flate2::read::GzDecoder::new(fs::File::open(path).expect("open archive"))
+                    .read_to_string(&mut body)
+                    .expect("read complete archive");
+                body
+            } else {
+                fs::read_to_string(path).expect("read log file")
+            }
+        })
         .collect()
 }
 
@@ -218,10 +318,10 @@ fn log_file_set_exists(directory: &Path, file_prefix: &str) -> bool {
         .expect("read log directory")
         .filter_map(Result::ok)
         .any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(file_prefix))
+            entry.file_name().to_str().is_some_and(|name| {
+                name.starts_with(file_prefix)
+                    && (name.ends_with(".log") || name.ends_with(".log.gz"))
+            })
         })
 }
 

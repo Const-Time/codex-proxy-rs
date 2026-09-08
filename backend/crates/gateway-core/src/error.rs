@@ -172,17 +172,72 @@ impl fmt::Debug for ClientVisibleUpstreamError {
 /// Adapter 只能放入不含凭据、cookie、原始请求正文和 opaque response ID 的有界摘要；
 /// 原始上游错误返回由 [`RawUpstreamError`] 单独承载。
 #[derive(Clone, PartialEq, Eq)]
-pub struct ProviderDiagnostic(String);
+pub struct ProviderDiagnostic {
+    message: String,
+    stage: Option<&'static str>,
+    code: Option<&'static str>,
+}
 
 impl ProviderDiagnostic {
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            stage: None,
+            code: None,
+        }
+    }
+
+    /// 附着本地定义的阶段与原因码；独立于发送状态和重试策略。
+    #[must_use]
+    pub const fn with_classification(mut self, stage: &'static str, code: &'static str) -> Self {
+        self.stage = Some(stage);
+        self.code = Some(code);
+        self
+    }
+
+    /// 从错误链补充可证明的 I/O 原因；只保留本地原因码，不格式化原始错误。
+    #[must_use]
+    pub fn with_io_cause(mut self, error: &(dyn std::error::Error + 'static)) -> Self {
+        let mut source = Some(error);
+        while let Some(error) = source {
+            if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                let code = match error.kind() {
+                    std::io::ErrorKind::ConnectionRefused => Some("connection_refused"),
+                    std::io::ErrorKind::ConnectionReset => Some("tcp_reset"),
+                    std::io::ErrorKind::ConnectionAborted => Some("connection_aborted"),
+                    std::io::ErrorKind::BrokenPipe => Some("broken_pipe"),
+                    std::io::ErrorKind::UnexpectedEof => Some("unexpected_eof"),
+                    std::io::ErrorKind::TimedOut => Some("io_timeout"),
+                    std::io::ErrorKind::NetworkUnreachable => Some("network_unreachable"),
+                    std::io::ErrorKind::HostUnreachable => Some("host_unreachable"),
+                    _ => None,
+                };
+                if let Some(code) = code {
+                    self.message.push_str("; I/O cause: ");
+                    self.message.push_str(code);
+                    self.code = Some(code);
+                    break;
+                }
+            }
+            source = error.source();
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn stage(&self) -> Option<&'static str> {
+        self.stage
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> Option<&'static str> {
+        self.code
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.message
     }
 }
 
@@ -817,7 +872,10 @@ impl fmt::Debug for ProviderError {
                 "sensitive_context",
                 &self.sensitive_context_redacted.then_some("<redacted>"),
             )
-            .field("diagnostic", &self.diagnostic.as_ref().map(|_| "<present>"))
+            .field(
+                "diagnostic",
+                &self.diagnostic.as_deref().map(|_| "<present>"),
+            )
             .field(
                 "raw_upstream_error",
                 &self.raw_upstream_error.as_ref().map(|_| "<present>"),
@@ -915,7 +973,7 @@ impl GatewayErrorKind {
 pub struct GatewayError {
     kind: GatewayErrorKind,
     message: &'static str,
-    diagnostic: Option<ProviderDiagnostic>,
+    diagnostic: Option<Box<ProviderDiagnostic>>,
     client_visible_upstream_error: Option<ClientVisibleUpstreamError>,
 }
 
@@ -993,7 +1051,7 @@ impl GatewayError {
     /// 附加只供运维观测使用的脱敏 Provider 摘要。
     #[must_use]
     pub fn with_diagnostic(mut self, diagnostic: ProviderDiagnostic) -> Self {
-        self.diagnostic = Some(diagnostic);
+        self.diagnostic = Some(Box::new(diagnostic));
         self
     }
 
@@ -1019,7 +1077,7 @@ impl GatewayError {
     /// 返回可安全持久化和展示的 Provider 诊断摘要。
     #[must_use]
     pub fn diagnostic(&self) -> Option<&ProviderDiagnostic> {
-        self.diagnostic.as_ref()
+        self.diagnostic.as_deref()
     }
 
     /// 返回优先用于原客户端协议响应的 message；持久化和日志必须继续使用
@@ -1054,7 +1112,10 @@ impl fmt::Debug for GatewayError {
             .debug_struct("GatewayError")
             .field("kind", &self.kind)
             .field("message", &self.message)
-            .field("diagnostic", &self.diagnostic.as_ref().map(|_| "<present>"))
+            .field(
+                "diagnostic",
+                &self.diagnostic.as_deref().map(|_| "<present>"),
+            )
             .field(
                 "client_visible_upstream_error",
                 &self

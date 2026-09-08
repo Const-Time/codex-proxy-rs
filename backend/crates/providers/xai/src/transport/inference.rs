@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use futures::Stream;
-use gateway_core::error::{ClientVisibleUpstreamError, OpaqueUpstreamValue};
+use gateway_core::error::{ClientVisibleUpstreamError, OpaqueUpstreamValue, ProviderDiagnostic};
 use gateway_core::event::UpstreamHttpVersion;
 use gateway_core::upstream::UpstreamSendState;
 use url::Url;
@@ -318,6 +318,7 @@ pub enum GrokInferenceTransportErrorKind {
 #[derive(Clone, PartialEq, Eq)]
 pub struct GrokInferenceTransportError {
     kind: GrokInferenceTransportErrorKind,
+    diagnostic: Option<Box<ProviderDiagnostic>>,
     send_state: UpstreamSendState,
     status: Option<u16>,
     retry_after: Option<Duration>,
@@ -336,6 +337,7 @@ impl GrokInferenceTransportError {
     pub const fn new(kind: GrokInferenceTransportErrorKind, send_state: UpstreamSendState) -> Self {
         Self {
             kind,
+            diagnostic: None,
             send_state,
             status: None,
             retry_after: None,
@@ -351,6 +353,18 @@ impl GrokInferenceTransportError {
             credential_recovery_required: false,
             sensitive_context_redacted: false,
         }
+    }
+
+    /// 保存 transport 提取的安全诊断，避免 Provider 映射时丢失原因。
+    #[must_use]
+    pub fn with_diagnostic(mut self, diagnostic: ProviderDiagnostic) -> Self {
+        self.diagnostic = Some(Box::new(diagnostic));
+        self
+    }
+
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<&ProviderDiagnostic> {
+        self.diagnostic.as_deref()
     }
 
     /// 附着合法的 HTTP 状态码。
@@ -482,6 +496,7 @@ impl fmt::Debug for GrokInferenceTransportError {
         formatter
             .debug_struct("GrokInferenceTransportError")
             .field("kind", &self.kind)
+            .field("diagnostic", &self.diagnostic)
             .field("send_state", &self.send_state)
             .field("status", &self.status)
             .field("retry_after", &self.retry_after)

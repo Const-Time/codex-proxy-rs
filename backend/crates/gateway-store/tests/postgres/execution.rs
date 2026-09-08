@@ -1111,21 +1111,36 @@ async fn diagnostic_trace_is_finalized_atomically_and_available_for_failed_reque
     let mut finalization = successful_core_finalization("req_diagnostic_failed");
     finalization.outcome = ExecutionOutcome::Failed;
     finalization.client_status_code = Some(502);
-    finalization.error = Some(GatewayError::new(
-        GatewayErrorKind::UpstreamUnavailable,
-        "upstream closed",
-    ));
+    let diagnostic = gateway_core::error::ProviderDiagnostic::new(
+        "OpenAI WebSocket receive idle timeout after 300s",
+    )
+    .with_classification("receive", "receive_idle_timeout");
+    let provider_error = gateway_core::error::ProviderError::new(
+        gateway_core::error::ProviderErrorKind::Timeout,
+        UpstreamSendState::Ambiguous,
+    )
+    .with_diagnostic(diagnostic);
+    finalization.error = Some(GatewayError::from_provider(&provider_error));
     let trace = serde_json::json!({"schemaVersion": 1, "requestId": "req_diagnostic_failed", "events": [
-        {"attemptIndex": 1, "stage": "upstream.close", "data": {"code": 1000}},
+        {"attemptIndex": 1, "stage": "attempt.failed", "data": {"diagnostic": {
+            "stage": "receive", "code": "receive_idle_timeout", "message": "OpenAI WebSocket receive idle timeout after 300s"
+        }}},
     ]});
     finalization.diagnostic_trace_json = Some(trace.to_string());
     ExecutionStore::finalize_model_request(&store, finalization)
         .await
         .unwrap();
-    let persisted: (String, serde_json::Value) = sqlx::query_as(
-        "select outcome, diagnostic_trace_json from model_requests where id = 'req_diagnostic_failed'"
+    let persisted: (String, serde_json::Value, String) = sqlx::query_as(
+        "select outcome, diagnostic_trace_json, error_message from model_requests where id = 'req_diagnostic_failed'"
     ).fetch_one(&database.pool).await.unwrap();
-    assert_eq!(persisted, ("failed".to_owned(), trace.clone()));
+    assert_eq!(
+        persisted,
+        (
+            "failed".to_owned(),
+            trace.clone(),
+            "OpenAI WebSocket receive idle timeout after 300s".to_owned()
+        )
+    );
     let repository = super::observability_repository(&database.pool);
     let detail = repository
         .usage_record_detail("req_diagnostic_failed")

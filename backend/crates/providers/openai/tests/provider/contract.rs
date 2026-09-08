@@ -423,6 +423,7 @@ fn planned_provider_endpoint_request(provider_name: &str, operation: Operation) 
 fn contract_account_scope() -> Arc<FrozenAccountScope> {
     let provider = ProviderKind::new("openai").expect("provider");
     let accounts = [
+        "acct_abrupt_disconnect",
         "acct_affinity",
         "acct_affinity_switch_a",
         "acct_affinity_switch_b",
@@ -913,6 +914,11 @@ async fn truncated_http_stream_allows_account_rotation_only_before_client_delive
 
     assert_eq!(error.kind(), ProviderErrorKind::Transport);
     assert_eq!(error.send_state(), UpstreamSendState::Sent);
+    assert_eq!(
+        error.diagnostic().and_then(|diagnostic| diagnostic.code()),
+        Some("unexpected_eof")
+    );
+    assert!(!error.diagnostic().unwrap().as_str().contains("127.0.0.1"));
     assert!(error.allows_pre_delivery_retry());
     assert!(!error.replay_is_safe());
 }
@@ -2209,6 +2215,168 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
     assert_eq!(second_transport.as_deref(), Some("websocket"));
     assert_eq!(second_pool, Some(Some(WebSocketPoolKind::Reuse)));
     server.await.expect("HTTP and WebSocket upstream server");
+}
+
+#[tokio::test]
+async fn connection_failure_preserves_io_cause_without_claiming_payload_was_sent() {
+    for websocket in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_abrupt_disconnect").await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let operation = if websocket {
+            Operation::Generate(generate_with_persisted_session_context(
+                "acct_abrupt_disconnect",
+                "conversation-refused",
+                "session-refused",
+                "turn-refused",
+            ))
+        } else {
+            http_generate_operation()
+        };
+        let mut stream = provider_with_base_url(&store, base_url)
+            .execute(
+                planned_request("openai", operation),
+                context("req_connect_refused", CancellationToken::new()),
+            )
+            .await
+            .expect("prepare provider stream");
+        let error = loop {
+            match stream.next().await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => break error,
+                None => panic!("closed listener must fail"),
+            }
+        };
+        let diagnostic = error.diagnostic().expect("connection diagnosis");
+        assert_eq!(diagnostic.code(), Some("connection_refused"));
+        assert_eq!(diagnostic.stage(), Some("connect"));
+        assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+        assert!(!diagnostic.as_str().contains("after payload send"));
+        assert!(!diagnostic.as_str().contains("127.0.0.1"));
+    }
+}
+
+#[tokio::test]
+async fn abrupt_websocket_disconnect_preserves_diagnosis_and_ambiguous_send_state() {
+    const ACCOUNT_ID: &str = "acct_abrupt_disconnect";
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket.next().await.unwrap().unwrap();
+        // The peer disappears after receiving the payload, without sending a Close frame.
+    });
+    let operation = Operation::Generate(generate_with_persisted_session_context(
+        ACCOUNT_ID,
+        "conversation-abrupt-disconnect",
+        "session-abrupt-disconnect",
+        "turn-abrupt-disconnect",
+    ));
+    let mut stream = provider_with_base_url(&store, base_url)
+        .execute(
+            planned_request("openai", operation),
+            context("req_abrupt_disconnect", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare WebSocket provider stream");
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("abrupt disconnect must surface a provider error"),
+        }
+    };
+    server.await.unwrap();
+    assert_eq!(error.kind(), ProviderErrorKind::Transport);
+    assert_eq!(error.send_state(), UpstreamSendState::Ambiguous);
+    assert!(!error.replay_is_safe());
+    assert_eq!(error.pre_delivery_retry(), None);
+    assert_eq!(
+        error.diagnostic().map(|diagnostic| diagnostic.as_str()),
+        Some(
+            "OpenAI WebSocket disconnected without a closing handshake after payload send; result is ambiguous"
+        ),
+    );
+}
+
+#[tokio::test]
+async fn websocket_idle_timeout_diagnosis_survives_ambiguous_send_wrapping() {
+    const ACCOUNT_ID: &str = "acct_abrupt_disconnect";
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_codex_test_websocket(stream).await;
+            websocket.next().await.unwrap().unwrap();
+            websocket.send(Message::Text(json!({
+            "type": "response.created", "response": {"id": "resp_idle", "model": "gpt-5.4"},
+        }).to_string().into())).await.unwrap();
+            websocket
+                .send(Message::Text(
+                    json!({"type": "response.output_text.delta", "delta": "partial"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            futures::future::pending::<()>().await;
+        });
+    let operation = Operation::Generate(generate_with_persisted_session_context(
+        ACCOUNT_ID,
+        "conversation-idle-timeout",
+        "session-idle-timeout",
+        "turn-idle-timeout",
+    ));
+    let mut stream = provider_with_base_url(&store, base_url)
+        .execute(
+            planned_request("openai", operation),
+            context("req_idle_timeout", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare WebSocket provider stream");
+    loop {
+        let event = stream
+            .next()
+            .await
+            .expect("partial response")
+            .expect("valid partial response");
+        if event.has_client_event() {
+            break;
+        }
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(300)).await;
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("idle timeout must surface a provider error"),
+        }
+    };
+    server.abort();
+    assert_eq!(error.send_state(), UpstreamSendState::Ambiguous);
+    assert!(!error.replay_is_safe());
+    assert_eq!(error.pre_delivery_retry(), None);
+    assert_eq!(
+        error.diagnostic().and_then(|diagnostic| diagnostic.code()),
+        Some("receive_idle_timeout")
+    );
+    assert_eq!(
+        error.diagnostic().and_then(|diagnostic| diagnostic.stage()),
+        Some("receive")
+    );
+    assert_eq!(
+        error.diagnostic().map(|diagnostic| diagnostic.as_str()),
+        Some("OpenAI WebSocket receive idle timeout after 300s"),
+    );
 }
 
 #[tokio::test]

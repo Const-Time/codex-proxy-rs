@@ -1,6 +1,7 @@
 //! xAI 上游失败分类、账号反馈与恢复决策。
 
 use super::*;
+use gateway_core::error::ProviderDiagnostic;
 
 pub(super) fn is_invalid_encrypted_content_failure(error: &GrokInferenceTransportError) -> bool {
     error.kind() == GrokInferenceTransportErrorKind::InvalidRequest
@@ -509,6 +510,17 @@ pub(super) fn map_transport_error_with_state(
     if let Some(detail) = error.client_visible_upstream_error().cloned() {
         mapped = mapped.with_client_visible_upstream_error(detail);
     }
+    let diagnostic = error.diagnostic().cloned().unwrap_or_else(|| {
+        let status = error
+            .status()
+            .map_or_else(|| "none".to_owned(), |value| value.to_string());
+        ProviderDiagnostic::new(format!(
+            "xAI upstream failure: kind={}, status={status}",
+            kind.as_str()
+        ))
+        .with_classification("upstream", "upstream_failure")
+    });
+    mapped = mapped.with_diagnostic(diagnostic);
     if error.requires_credential_recovery() {
         mapped = mapped.with_credential_recovery().with_replay_safe();
     }

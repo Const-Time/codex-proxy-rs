@@ -13,7 +13,7 @@ use axum::Router;
 use gateway_admin::ports::{
     client_distribution::ClientDistributionResolver, system::SystemOperations,
 };
-use gateway_core::health::WorkerHealthSource;
+use gateway_core::health::{HealthProbe, WorkerHealthSource};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::lifecycle::ConnectionLifecycle;
 use gateway_core::task::{WorkerContribution, WorkerLeaderLeasePort};
@@ -29,7 +29,7 @@ use self::workers::WorkerSupervisor;
 /// Host 初始化的能力集；字段全部私有，不暴露内部监督器或进程状态。
 pub struct HostBundle {
     config: HostConfig,
-    _log_guard: LogGuard,
+    log_guard: LogGuard,
     cancellation: CancellationToken,
     connections: Arc<ConnectionTracker>,
     workers: WorkerSupervisor,
@@ -50,7 +50,7 @@ pub async fn initialize(config: HostConfig) -> Result<HostBundle, HostError> {
     let client_distribution = Arc::new(RgAdguardClientDistribution::new());
     Ok(HostBundle {
         config,
-        _log_guard: log_guard,
+        log_guard,
         cancellation,
         connections,
         workers,
@@ -84,6 +84,12 @@ impl HostBundle {
     #[must_use]
     pub fn connection_lifecycle(&self) -> Arc<dyn ConnectionLifecycle> {
         self.connections.clone()
+    }
+
+    /// 报告文件日志写入或归档失败，避免将缺失日志误报为完整。
+    #[must_use]
+    pub fn logging_health_probe(&self) -> Arc<dyn HealthProbe> {
+        self.log_guard.health_probe()
     }
 
     #[must_use]

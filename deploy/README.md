@@ -242,9 +242,39 @@ OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 Postgr
 
 数据库可用管理端的 S3/R2 逻辑备份，或停库后备份 `.runtime/postgres`。
 不要在 PostgreSQL 写入期间直接复制数据目录作为一致性备份。要保留 OAuth 的 AT/RT 恢复记录，需保持
-`host.logging.file.enabled: true` 并备份 `.runtime/logs`；恢复记录位于独立文件集，仍按普通日志的
-`retention_days` 和 `max_files` 分别约束。若希望保留短期 Redis 状态和会话锚点，也同时备份 `.runtime/redis` 与
+`host.logging.oauth_recovery: true` 并备份 `.runtime/logs`；恢复记录位于独立文件集，仍按普通日志的
+`retention_days` 按完整日期保留。若希望保留短期 Redis 状态和会话锚点，也同时备份 `.runtime/redis` 与
 `.runtime/data`。
+
+文件日志以时间完整性为清理依据，**没有文件数量淘汰上限**：
+
+| 文件集 | 保留配置 | 默认完整窗口 |
+| --- | --- | --- |
+| 普通日志、OAuth 恢复日志 | `host.logging.file.retention_days` | 至少 7×24 小时 |
+| 全量请求/响应报文 | `host.logging.request_dump_retention_days` | 至少 24 小时（默认 1） |
+
+文件名统一为 `codex-proxy-rs-<类别>.YYYY-MM-DD[.N].log[.gz]`，类别分别为
+`application`、`oauth-recovery`、`request-dump`。专用 tracing target 为 `oauth_recovery` 和
+`request_dump`；普通日志保留各 Rust 模块的 target，便于按模块过滤。
+程序只管理上述规范名称的日志，旧命名文件由运维手动清理。
+普通日志未配置 `retention_days` 时默认使用 7 天，显式配置优先。
+
+按 UTC 日期整组保留：例如 9 月 8 日配置 1 天，会保留 9 月 7 日全天及 9 月 8 日的所有分片，
+到 9 月 9 日才允许清理 9 月 7 日。这会略多保留，保证跨午夜及高流量时不留下半天日志。
+配置 7 天同理，保留前 7 个完整 UTC 日期及当天；若旧日期分片近期又被写入，整组延后删除。
+`max_file_size_mb` 仅决定分片大小（默认 20 MiB），不决定保存时长，单条大记录不会被截断。
+关闭的分片压缩为 `.log.gz`；成功压缩、同步并发布归档后才删除原文件，保留原修改时间。
+清理发生在启动和轮转时；空闲期间过期文件可能暂时多保留。检索时须同时读取 `.log` 与 `.log.gz`。
+
+升级旧配置时删除 `host.logging.file.max_files`；该字段已移除，旧配置会校验失败而不会继续按数量删日志。
+报文开关仍为 `host.logging.request_dump`，默认关闭；开启时原始报文按块完整写入独立文件，
+数据库请求诊断仍是有界摘要，不能用摘要事件数代替全量报文完整性。
+
+文件写入使用有界队列背压，正常退出会排空队列并同步文件。`file_logging` 健康探针在写入/同步失败后
+报告 `Unhealthy`，本次进程内恢复写入也不会清除已有缺口；压缩或清理失败报告 `Degraded`。
+这不是断电、强杀或磁盘故障下的零丢失承诺；已删除的历史文件也不能靠升级恢复。
+容量不足时不会提前删除保留窗口内日志，必须根据完整日期的压缩后实际用量规划空间，并监控磁盘余量和
+健康探针。Docker stdout 的独立轮转不承担应用文件日志的完整保留承诺。
 
 完整运行时、Provider、revision 与恢复边界见 [架构文档](../docs/architecture.md)。
 
@@ -340,10 +370,11 @@ Release 必须提供当前 OS/架构的 `codex-proxy-rs_<version>_<os>_<arch>.ta
   用户可读写）。部署卷至少预留一个最大数据库归档的空间。
 - OAuth 恢复记录通道使用 `oauth_recovery` 结构化日志事件；当前 OpenAI Provider 每次成功取得
   AT（以及存在时的 RT）后，都会在账号资料补全、过期时间计算和数据库写入前写入独立的
-  `codex-proxy-rs-oath.YYYY-MM-DD[.N].log` 文件集。事件含原始 AT/RT，并以 `provider`
-  字段标记来源，且与普通 `.runtime/logs` 完全相同地按日、按大小分割，并分别按相同 `retention_days` 与 `max_files`
-  清理；文件日志开启时不会被普通日志级别筛掉。它遵循普通日志现有的非阻塞写入机制，不会阻断
-  导入、授权或刷新。
+  `codex-proxy-rs-oauth-recovery.YYYY-MM-DD[.N].log` 文件集。事件含原始 AT/RT，并以 `provider`
+  字段标记来源，与普通日志一样按日、按大小分割，按 `retention_days` 保留完整日期。
+  `host.logging.oauth_recovery` 默认关闭，显式开启后才写独立文件，与普通文件日志开关分别控制。
+  开启时不会被普通日志级别筛掉；关闭时不会写入普通文件或 stdout，即使 `RUST_LOG` 提高此 target 的级别。
+  有界队列满时会等待写入，避免拥堵时静默丢记录。
   `.runtime/logs` 因此属于敏感数据，必须按现有普通日志的访问控制和加密备份策略处理。
 - S3/R2 存储、Cron 计划、保留策略与备份记录都保存在 PostgreSQL（`backup_settings` /
   `backup_records`），备份记录行在删除成功后硬删除，操作历史进入 `admin_audit_events`。

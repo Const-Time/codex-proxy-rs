@@ -4,6 +4,7 @@ use provider_openai::transport::{
     websocket::write_websocket_audit_artifact_for_dir,
 };
 
+mod diagnostics;
 mod metadata;
 
 fn rate_limit_event(used_percent: u64) -> String {

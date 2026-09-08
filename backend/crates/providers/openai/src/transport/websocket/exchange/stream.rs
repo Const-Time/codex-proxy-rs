@@ -185,14 +185,19 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         let message = match message {
             Ok(message) => message,
             Err(error) => {
+                let observation = connection_observation(&websocket, &error);
                 trace.record(
                     "upstream.read.failed",
                     json!({
                         "lastEventType": last_event_type,
+                        "failureReason": error.transport_failure_reason().unwrap_or_else(|| observation.exit_reason()),
+                        "connectionId": observation.connection_id().to_string(),
+                        "connectionAgeMs": observation.age_ms(),
+                        "connectionIdleMs": observation.idle_ms(),
+                        "reused": reused_connection,
                         "error": diagnostic_json(&json!({"message": error.to_string()})),
                     }),
                 );
-                let observation = connection_observation(&websocket, &error);
                 discard_stream_websocket(
                     websocket,
                     pool_return,

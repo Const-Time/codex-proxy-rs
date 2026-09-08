@@ -80,6 +80,51 @@ fn host_config_rejects_zero_drain_window() {
     );
 }
 
+#[test]
+fn logging_rejects_zero_retention_windows() {
+    for request_dump in [false, true] {
+        let mut config = valid_config();
+        if request_dump {
+            config.logging.request_dump_retention_days = 0;
+        } else {
+            config.logging.file.retention_days = 0;
+        }
+        assert!(
+            config
+                .resolve_and_validate(std::path::Path::new("/srv/gateway"))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn logging_defaults_to_seven_days_and_one_day_for_payloads_and_rejects_count_retention() {
+    let mut value = serde_json::json!({
+        "level": "info", "stdout": true,
+        "file": { "enabled": true, "directory": "logs", "max_file_size_mb": 20 }
+    });
+    let config: LoggingConfig = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(config.request_dump_retention_days, 1);
+    assert_eq!(config.file.retention_days, 7);
+    assert!(!config.oauth_recovery);
+    value["file"]["max_files"] = serde_json::json!(20);
+    assert!(serde_json::from_value::<LoggingConfig>(value).is_err());
+}
+
+#[test]
+fn dedicated_file_channels_can_be_enabled_without_application_sinks() {
+    for oauth_recovery in [false, true] {
+        let mut config = valid_config();
+        config.logging.stdout = false;
+        config.logging.file.enabled = false;
+        config.logging.oauth_recovery = oauth_recovery;
+        config.logging.request_dump = !oauth_recovery;
+        config
+            .resolve_and_validate(std::path::Path::new("/srv/gateway"))
+            .unwrap();
+    }
+}
+
 fn valid_config() -> HostConfig {
     let system_update = SystemUpdateConfig {
         update_state_file: PathBuf::from("update-state.json"),
@@ -101,9 +146,10 @@ fn valid_config() -> HostConfig {
                 directory: PathBuf::from(".runtime/logs"),
                 retention_days: 7,
                 max_file_size_mb: 100,
-                max_files: 30,
             },
+            oauth_recovery: false,
             request_dump: false,
+            request_dump_retention_days: 1,
         },
         system_update,
         drain_timeout_seconds: 30,

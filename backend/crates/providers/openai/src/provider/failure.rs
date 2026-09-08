@@ -703,10 +703,7 @@ pub(super) fn map_client_error(
     uncertain_state: UpstreamSendState,
     observe_transport: bool,
 ) -> MappedProviderFailure {
-    let websocket_diagnostic = match &error {
-        CodexClientError::WebSocket(error) => Some(websocket_diagnostic(error)),
-        _ => None,
-    };
+    let diagnostic = client_diagnostic(&error);
     let raw_upstream_error = match &error {
         CodexClientError::WebSocket(error) => websocket_raw_error(error),
         _ => None,
@@ -838,7 +835,7 @@ pub(super) fn map_client_error(
                 ContinuationRecoveryDisposition::ClientReplayRequired,
             );
     }
-    if let Some(diagnostic) = websocket_diagnostic {
+    if let Some(diagnostic) = diagnostic {
         failure.error = failure.error.with_diagnostic(diagnostic);
     }
     if let Some(raw) = raw_upstream_error {
@@ -853,7 +850,119 @@ pub(super) fn map_client_error(
     failure
 }
 
+/// 在消费 transport 错误前提取可持久化事实，不能使用可能携带 URL/凭据的 Display。
+fn client_diagnostic(error: &CodexClientError) -> Option<ProviderDiagnostic> {
+    let (stage, code, message) = match error {
+        CodexClientError::WebSocket(error) => return Some(websocket_diagnostic(error)),
+        CodexClientError::Http(error) | CodexClientError::HttpJson(error) => {
+            let (stage, code) = if error.is_builder() {
+                ("prepare", "http_request_build_failed")
+            } else if error.is_connect() && error.is_timeout() {
+                ("connect", "http_connect_timeout")
+            } else if error.is_connect() {
+                ("connect", "http_connect_failed")
+            } else if error.is_timeout() {
+                ("exchange", "http_timeout")
+            } else if error.is_decode() {
+                ("decode", "http_decode_failed")
+            } else if error.is_body() {
+                ("receive", "http_body_failed")
+            } else {
+                ("exchange", "http_transport_failed")
+            };
+            return Some(
+                ProviderDiagnostic::new(format!(
+                    "OpenAI HTTP failure: stage={stage}, cause={code}"
+                ))
+                .with_classification(stage, code)
+                .with_io_cause(error),
+            );
+        }
+        CodexClientError::StreamIdleTimeout { timeout } => (
+            "receive",
+            "receive_idle_timeout",
+            format!("OpenAI HTTP response event idle timeout after {timeout:?}"),
+        ),
+        CodexClientError::InvalidSse(_) => (
+            "decode",
+            "invalid_sse",
+            "OpenAI HTTP returned an invalid Responses event stream".to_owned(),
+        ),
+        CodexClientError::InvalidHeaderName(_) => (
+            "prepare",
+            "invalid_header_name",
+            "OpenAI request header name is invalid".to_owned(),
+        ),
+        CodexClientError::InvalidHeaderValue(_) => (
+            "prepare",
+            "invalid_header_value",
+            "OpenAI request header value is invalid".to_owned(),
+        ),
+        CodexClientError::WebSocketEncode(_) | CodexClientError::RequestBodyEncode(_) => (
+            "prepare",
+            "request_encode_failed",
+            "OpenAI request encoding failed".to_owned(),
+        ),
+        CodexClientError::RequestCompression(_) => (
+            "prepare",
+            "request_compression_failed",
+            "OpenAI request compression failed".to_owned(),
+        ),
+        CodexClientError::CustomCa(_) => (
+            "prepare",
+            "custom_ca_invalid",
+            "OpenAI custom CA configuration is invalid".to_owned(),
+        ),
+        CodexClientError::ModelCatalog(_) => (
+            "prepare",
+            "model_catalog_invalid",
+            "OpenAI model catalog validation failed".to_owned(),
+        ),
+        CodexClientError::Upstream { .. } => return None,
+    };
+    Some(ProviderDiagnostic::new(message).with_classification(stage, code))
+}
+
 fn websocket_diagnostic(error: &CodexWebSocketExchangeError) -> ProviderDiagnostic {
+    let (stage, code) = match error.diagnostic_cause() {
+        CodexWebSocketExchangeError::Connect(_) => (
+            "connect",
+            error
+                .transport_failure_reason()
+                .unwrap_or("websocket_connect_failed"),
+        ),
+        CodexWebSocketExchangeError::ConnectTimeout { .. } => ("connect", "connect_timeout"),
+        CodexWebSocketExchangeError::SharedConnectFailed => ("connect", "shared_connect_failed"),
+        CodexWebSocketExchangeError::OriginCircuitOpen => ("connect", "origin_circuit_open"),
+        CodexWebSocketExchangeError::OriginHalfOpenBusy => ("connect", "origin_half_open_busy"),
+        CodexWebSocketExchangeError::InvalidRequest(_) => ("prepare", "invalid_request"),
+        CodexWebSocketExchangeError::SendTimeout { .. } => ("send", "send_timeout"),
+        CodexWebSocketExchangeError::ReceiveIdleTimeout { .. } => {
+            ("receive", "receive_idle_timeout")
+        }
+        CodexWebSocketExchangeError::InvalidSse(_) => ("decode", "invalid_sse"),
+        CodexWebSocketExchangeError::UnexpectedBinaryEvent => ("decode", "unexpected_binary_event"),
+        CodexWebSocketExchangeError::ClosedBeforeTerminal(_) => {
+            ("receive", "closed_before_terminal")
+        }
+        CodexWebSocketExchangeError::ConnectionLimitReached => {
+            ("upstream", "connection_limit_reached")
+        }
+        CodexWebSocketExchangeError::ContinuationUnavailable { .. } => {
+            ("prepare", "continuation_unavailable")
+        }
+        CodexWebSocketExchangeError::Upstream(_) => ("connect", "websocket_opening_rejected"),
+        _ => (
+            "exchange",
+            error
+                .transport_failure_reason()
+                .unwrap_or("websocket_transport_failed"),
+        ),
+    };
+    websocket_diagnostic_message(error).with_classification(stage, code)
+}
+
+fn websocket_diagnostic_message(error: &CodexWebSocketExchangeError) -> ProviderDiagnostic {
     if let Some(close) = error.close_before_terminal() {
         let mut message = close.code().map_or_else(
             || "OpenAI WebSocket closed before a terminal response".to_owned(),
@@ -868,7 +977,25 @@ fn websocket_diagnostic(error: &CodexWebSocketExchangeError) -> ProviderDiagnost
         return ProviderDiagnostic::new(message);
     }
 
-    ProviderDiagnostic::new(match error.classified() {
+    if let Some(reason) = error.transport_failure_reason() {
+        if matches!(
+            error.diagnostic_cause(),
+            CodexWebSocketExchangeError::Connect(_)
+        ) {
+            return ProviderDiagnostic::new(format!(
+                "OpenAI WebSocket connection failed before payload send ({reason})"
+            ));
+        }
+        return ProviderDiagnostic::new(if reason == "reset_without_closing_handshake" {
+            "OpenAI WebSocket disconnected without a closing handshake after payload send; result is ambiguous".to_owned()
+        } else {
+            format!(
+                "OpenAI WebSocket transport failed after payload send ({reason}); result is ambiguous"
+            )
+        });
+    }
+
+    ProviderDiagnostic::new(match error.diagnostic_cause() {
         CodexWebSocketExchangeError::InvalidRequest(_) => {
             "OpenAI WebSocket request could not be constructed".to_owned()
         }
@@ -1041,10 +1168,13 @@ pub(super) fn map_upstream_failure(
         .upstream_code()
         .map_or_else(|| "none".to_owned(), |code| code.as_str().to_owned());
     let kind = error.kind().as_str();
-    error = error.with_diagnostic(ProviderDiagnostic::new(format!(
-        "OpenAI upstream failure: kind={}, status={status}, code={code}",
-        kind
-    )));
+    error = error.with_diagnostic(
+        ProviderDiagnostic::new(format!(
+            "OpenAI upstream failure: kind={}, status={status}, code={code}",
+            kind
+        ))
+        .with_classification("upstream", "upstream_rejected"),
+    );
     MappedProviderFailure {
         error,
         websocket_transport_retryable: false,

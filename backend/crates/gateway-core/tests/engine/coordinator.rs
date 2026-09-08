@@ -1292,7 +1292,13 @@ fn discarded_attempt_observation_does_not_leak_into_retry_result() {
                 Ok(ProviderEvent::observation(first_observation)),
                 Err(
                     ProviderError::new(ProviderErrorKind::Unavailable, UpstreamSendState::Sent)
-                        .with_replay_safe(),
+                        .with_replay_safe()
+                        .with_diagnostic(
+                            gateway_core::error::ProviderDiagnostic::new(
+                                "response event idle timeout after 300s",
+                            )
+                            .with_classification("receive", "receive_idle_timeout"),
+                        ),
                 ),
             ],
         },
@@ -1328,6 +1334,16 @@ fn discarded_attempt_observation_does_not_leak_into_retry_result() {
         events
             .iter()
             .any(|event| event["stage"] == "attempt.started" && event["attemptIndex"] == 2)
+    );
+    let failed = events
+        .iter()
+        .find(|event| event["stage"] == "attempt.failed")
+        .unwrap();
+    assert_eq!(
+        failed["data"]["diagnostic"],
+        serde_json::json!({
+            "stage": "receive", "code": "receive_idle_timeout", "message": "response event idle timeout after 300s"
+        })
     );
     assert_eq!(events.last().unwrap()["stage"], "request.finished");
 

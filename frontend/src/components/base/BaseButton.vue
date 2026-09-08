@@ -2,7 +2,7 @@
 import { LoaderCircle } from '@lucide/vue'
 import { computed } from 'vue'
 
-type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive'
+type ButtonVariant = 'primary' | 'secondary' | 'soft' | 'ghost' | 'destructive'
 type ButtonSize = 'sm' | 'md' | 'lg'
 
 const props = withDefaults(
@@ -33,6 +33,8 @@ const variantClasses: Record<ButtonVariant, string> = {
     'bg-(--cp-button-primary-bg) text-(--cp-button-primary-color) shadow-cp-tertiary hover:bg-(--cp-button-primary-hover-bg) active:bg-(--cp-button-primary-active-bg)',
   secondary:
     'bg-cp-fill-tertiary text-cp-text shadow-cp-tertiary hover:bg-cp-bg-text-active active:bg-cp-bg-text-active',
+  soft:
+    'bg-cp-primary-container text-cp-primary-on-container shadow-none hover:bg-cp-primary-container-hover active:bg-cp-primary-container-hover',
   ghost:
     'bg-transparent text-cp-text-secondary shadow-none hover:bg-cp-fill-quaternary hover:text-cp-text active:bg-cp-fill-tertiary',
   destructive: 'bg-cp-error-container text-cp-error-on-container shadow-none hover:bg-cp-error-container-hover active:bg-cp-error-container-active',

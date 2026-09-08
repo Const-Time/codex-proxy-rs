@@ -1,13 +1,16 @@
 <script setup lang="ts">
+import type { OpsErrorMetadata } from '@/api'
+import { Download, RefreshCw } from '@lucide/vue'
 import { computed } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useDownload } from '@/composables/useDownload'
 import { useRequestDiagnostics } from '../composables/useRequestDiagnostics'
+import RequestTransportFailure from './RequestTransportFailure.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 
-const props = defineProps<{ requestId: string }>()
+const props = defineProps<{ requestId: string, metadata?: OpsErrorMetadata }>()
 const { downloadJson } = useDownload()
 const { loading: exporting, run: runExport } = useAsyncAction()
 const { selectedId, detail, loading, error, refresh } = useRequestDiagnostics(() => props.requestId)
@@ -57,13 +60,19 @@ function download() {
         请求诊断
       </h3>
       <div class="flex flex-wrap gap-2">
-        <BaseButton v-if="selectedId !== requestId" size="sm" @click="selectedId = requestId">
+        <BaseButton v-if="selectedId !== requestId" variant="soft" size="sm" @click="selectedId = requestId">
           返回本次请求
         </BaseButton>
-        <BaseButton size="sm" :disabled="loading" @click="refresh">
+        <BaseButton variant="soft" size="sm" :loading="loading" @click="refresh">
+          <template #icon>
+            <RefreshCw :size="14" />
+          </template>
           刷新
         </BaseButton>
-        <BaseButton size="sm" :loading="exporting" :disabled="!detail" @click="download">
+        <BaseButton variant="soft" size="sm" :loading="exporting" :disabled="!detail" @click="download">
+          <template #icon>
+            <Download :size="14" />
+          </template>
           导出诊断包
         </BaseButton>
       </div>
@@ -79,10 +88,11 @@ function download() {
     </p>
     <template v-else-if="detail">
       <div v-if="detail.relatedRequests?.length" class="mb-3 flex flex-wrap gap-2">
-        <BaseButton v-for="related in detail.relatedRequests" :key="related.requestId" size="sm" @click="selectedId = related.requestId">
+        <BaseButton v-for="related in detail.relatedRequests" :key="related.requestId" variant="soft" size="sm" class="max-w-full" @click="selectedId = related.requestId">
           {{ related.relation === 'recovered_by' ? '查看恢复请求' : '查看先前失败' }} · {{ related.requestId }}
         </BaseButton>
       </div>
+      <RequestTransportFailure :events="trace?.events ?? []" :metadata="selectedId === requestId ? metadata : undefined" />
       <p v-if="!trace" class="text-cp-sm text-cp-text-secondary">
         这条记录没有保存诊断时间线。旧记录无法补回当时未采集的事件。
       </p>
@@ -97,16 +107,16 @@ function download() {
         </div>
         <BaseScrollbar max-height="32rem">
           <ol class="m-0 grid list-none gap-2 p-0 pr-3">
-            <li v-for="event in events" :key="event.sequence" class="min-w-0 rounded-cp bg-cp-bg-container">
-              <details>
-                <summary class="cursor-pointer rounded-cp px-3 py-2.5 break-all text-cp-xs leading-relaxed hover:bg-cp-fill-quaternary focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cp-primary">
-                  <span class="font-mono text-cp-text-secondary">+{{ event.elapsedMs }} ms · #{{ event.sequence }}</span>
+            <li v-for="event in events" :key="event.sequence" class="min-w-0">
+              <details class="group overflow-hidden rounded-cp bg-cp-bg-container">
+                <summary class="cursor-pointer px-3 py-2.5 break-all text-cp-xs leading-relaxed transition-colors hover:bg-cp-primary-container group-open:bg-cp-primary-container focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cp-primary motion-reduce:transition-none">
+                  <span class="font-mono tabular-nums text-cp-text-secondary">+{{ event.elapsedMs }} ms · #{{ event.sequence }}</span>
                   <span class="mx-2 font-mono text-cp-text">{{ event.stage }}</span>
                   <span v-if="event.attemptIndex" class="text-cp-text-secondary">尝试 {{ event.attemptIndex }}</span>
                   <span v-if="event.exchangeId" class="text-cp-text-secondary"> · 交换 {{ event.exchangeId }}</span>
                   <span v-if="event.count > 1" class="text-cp-text-secondary"> · {{ event.count }} 次（至 +{{ event.lastElapsedMs }} ms）</span>
                 </summary>
-                <div class="mx-3 border-t border-cp-border-secondary py-3">
+                <div class="mx-3 py-3">
                   <UsageDetailCodePanel title="诊断事实" :content="event.content" max-height="280px" />
                 </div>
               </details>
@@ -114,7 +124,7 @@ function download() {
           </ol>
         </BaseScrollbar>
         <p class="mt-3 mb-0 text-cp-xs leading-relaxed text-cp-text-secondary">
-          时间线保存至执行结束。客户端最终写入、进程退出等后续事实，可用此请求 ID 检索服务器日志。
+          时间线与导出诊断包均为摘要，保存至执行结束。完整报文如已启用，保存在服务器日志中，至少保留最近 24 小时；可用请求 ID 检索。
         </p>
       </template>
     </template>
