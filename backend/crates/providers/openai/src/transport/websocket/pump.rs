@@ -2,7 +2,7 @@
 //!
 //! 每条上游 WebSocket 连接都由一个后台 pump 任务独占：
 //!   - 持续读取 socket：一旦观察到 `Close` / EOF / 传输错误，立即把连接标记为 `closed`。
-//!   - 自动回应上游 `Ping`，并按 `ping_interval` 主动 `Ping`；匹配的 `Pong` 必须在 deadline 内返回。
+//!   - 自动回应上游 `Ping`，并按 `ping_interval` 主动 `Ping`；收到任意入站帧即解除本次心跳 deadline。
 //!   - 可选 `liveness_timeout`：长时间无任何入站活动时判定连接失活并退出。
 //!
 //! 因此空闲连接的“死没死”在后台被实时感知；复用方只需零成本读取 [`PumpedWebSocket::is_closed`]，
@@ -57,7 +57,7 @@ impl PumpLogContext {
 pub(crate) struct PumpKeepalive {
     /// 主动 `Ping` 间隔；`None` 表示 pump 不主动 ping（仅被动读取 + 回应上游 ping）。
     pub(crate) ping_interval: Option<Duration>,
-    /// 主动 `Ping` 发出后等待匹配 `Pong` 的 deadline；`None` 表示不校验响应。
+    /// 主动 `Ping` 发出后等待任意入站帧的 deadline；`None` 表示不校验响应。
     pub(crate) ping_timeout: Option<Duration>,
     /// 无入站活动多久后判定失活；`None` 表示只靠显式 close/传输错误发现死亡。
     pub(crate) liveness_timeout: Option<Duration>,

@@ -36,7 +36,8 @@ const DEFAULT_MAX_CONNECTING: usize = 16;
 const DEFAULT_MAX_AGE: Duration = Duration::from_mins(55);
 const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(25);
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(25);
-const DEFAULT_PING_TIMEOUT: Duration = Duration::from_secs(5);
+// 心跳也覆盖正在生成的连接，给短时链路停顿留出恢复余量。
+const DEFAULT_PING_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// WebSocket 连接池。
@@ -67,9 +68,9 @@ pub struct CodexWebSocketPoolConfig {
     pub max_connecting: usize,
     /// 后台维护间隔；`None` 表示不启动后台任务。
     pub maintenance_interval: Option<Duration>,
-    /// idle socket 探活 ping 间隔；`None` 表示维护时只做过期清理。
+    /// 池化连接的探活 ping 间隔（包括正在生成的连接）；`None` 表示不主动 ping。
     pub ping_interval: Option<Duration>,
-    /// 发送 ping 后等待上游响应的超时时间；零值表示不校验 Pong deadline。
+    /// 发送 ping 后等待任意入站帧的超时时间；零值表示不校验 Pong deadline。
     pub ping_timeout: Duration,
     /// idle socket 无活动多久后视为失活。
     pub liveness_timeout: Option<Duration>,

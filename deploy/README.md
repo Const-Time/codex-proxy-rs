@@ -90,6 +90,10 @@ Compose 默认只绑定 `127.0.0.1`。从其他设备访问时，在应用前配
 并设置 `X-Accel-Buffering: no` 和 `Cache-Control: no-cache, no-transform`。
 反向代理仍需允许这些响应头生效；首个事件到达前的等待也需要足够的读取超时。
 
+OpenAI 上游池化 WebSocket 默认每 25 秒发送一次 Ping，发出后允许等待 30 秒；
+收到 Pong 或其他入站帧即解除本次心跳截止，持续无响应则以 `pong_timeout` 关闭连接。
+此策略也覆盖正在生成的请求，与等待下一条上游消息的 `stream_idle_timeout_ms` 分别计时。
+
 若 Codex 在压缩或长时间生成时出现 `error decoding response body`，这表示
 客户端读取 HTTP 响应体失败。请结合网关请求诊断中的 `upstream.read.failed`、
 `downstream.body.closed` 和反向代理日志判断断开位置，不能仅凭此消息认定是 JSON 格式错误。
