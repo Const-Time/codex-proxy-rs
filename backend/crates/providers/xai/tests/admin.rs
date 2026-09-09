@@ -158,6 +158,26 @@ async fn xai_admin_provider_validates_known_billing_breakdown() {
     assert_eq!(billing.total_amount.amount.as_str(), "0.0002175");
     assert_eq!(billing.input_price_per_million.amount.as_str(), "2");
     assert_eq!(billing.output_price_per_million.amount.as_str(), "6");
+
+    let priority = admin
+        .calculated_billing(&ProviderBillingInput {
+            upstream_model_id: "grok-4.6".to_owned(),
+            service_tier: Some("priority".to_owned()),
+            input_tokens: Some(100),
+            output_tokens: Some(10),
+            cached_tokens: Some(20),
+            cache_write_tokens: Some(0),
+            total: CurrencyCost {
+                currency: "USD".to_owned(),
+                amount: "0.00046".parse().expect("amount"),
+            },
+        })
+        .expect("计费明细")
+        .expect("已知的 Priority 价格");
+    assert_eq!(priority.service_tier.as_deref(), Some("priority"));
+    assert_eq!(priority.standard_amount.amount.as_str(), "0.00023");
+    assert_eq!(priority.input_price_per_million.amount.as_str(), "4");
+    assert_eq!(priority.multiplier_percent, 200);
 }
 
 #[tokio::test]

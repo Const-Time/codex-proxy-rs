@@ -5,7 +5,10 @@ use gateway_core::policy::ClientApiKeyId;
 use gateway_protocol::openai::sse::{encode_sse_event, encode_sse_event_with_metadata};
 use serde_json::Value;
 
-use provider_xai::{GrokCanonicalDecoder, GrokResponsesRequest, grok_billing_breakdown};
+use provider_xai::{
+    GrokCanonicalDecoder, GrokResponsesRequest, grok_billing_breakdown,
+    grok_billing_breakdown_with_tier,
+};
 
 fn terminal_cost_events(
     model: &str,
@@ -231,17 +234,139 @@ fn billing_breakdown_should_match_the_calculated_terminal_cost() {
 
 #[test]
 fn decoder_should_price_official_grok_45_build_free_variant() {
-    let events = terminal_cost_events("grok-4.5-build-free", 201, 0, 76, Some(0));
+    let events = terminal_cost_events("grok-4.5-build-free", 201, 0, 76, None);
 
     assert_eq!(calculated_cost_ticks(&events), Some(8_580_000));
 }
 
 #[test]
-fn zero_provider_cost_should_fall_back_to_calculated_cost() {
+fn zero_provider_cost_should_remain_an_authoritative_zero() {
     let events = terminal_cost_events("grok-4.5", 1, 0, 1, Some(0));
 
-    assert_eq!(calculated_cost_ticks(&events), Some(80_000));
-    assert_eq!(provider_cost_ticks(&events), None);
+    assert_eq!(calculated_cost_ticks(&events), None);
+    assert_eq!(provider_cost_ticks(&events), Some(0));
+}
+
+#[test]
+fn billing_should_price_grok_46_cache_and_priority_at_the_context_boundary() {
+    // 短、长上下文分别检查普通输入、缓存、输出的单价，Priority 只采用已确认档位。
+    for (input, tier, expected) in [
+        (199_999, None, ["2", "0.5", "6"]),
+        (200_000, None, ["4", "1", "12"]),
+        (199_999, Some("priority"), ["4", "1", "12"]),
+        (200_000, Some("priority"), ["8", "2", "24"]),
+    ] {
+        let billing = grok_billing_breakdown_with_tier("grok-4.6", input, 10, 20, tier)
+            .expect("Grok 4.6 价格");
+        let rates = [
+            billing.input_price_per_million(),
+            billing.cache_read_price_per_million(),
+            billing.output_price_per_million(),
+        ]
+        .map(|money| {
+            money
+                .amount()
+                .to_string()
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned()
+        });
+        assert_eq!(rates, expected);
+    }
+    assert!(grok_billing_breakdown_with_tier("grok-4.6", 10, 1, 0, Some("future")).is_none());
+    let priority = grok_billing_breakdown_with_tier("grok-4.6", 100, 10, 20, Some("priority"))
+        .expect("Priority 价格");
+    assert_eq!(priority.standard_amount().amount().scaled(), 2_300_000);
+    assert_eq!(priority.total_amount().amount().scaled(), 4_600_000);
+    assert_eq!(priority.multiplier_percent(), 200);
+}
+
+fn pricing_events(
+    mut response: Value,
+    request: Option<&GrokResponsesRequest>,
+) -> Vec<GatewayEvent> {
+    response["id"] = serde_json::json!("resp_pricing");
+    response["model"] = serde_json::json!("grok-4.6");
+    response["status"] = serde_json::json!("completed");
+    let created = serde_json::json!({"type": "response.created", "response": {"id": "resp_pricing", "model": "grok-4.6", "service_tier": "priority"}});
+    let completed = serde_json::json!({"type": "response.completed", "response": response});
+    let body = format!(
+        "event: response.created\ndata: {created}\n\nevent: response.completed\ndata: {completed}\n\n"
+    );
+    let mut decoder = request.map_or_else(
+        || GrokCanonicalDecoder::new("grok-4.6"),
+        |request| GrokCanonicalDecoder::for_request("grok-4.6", request),
+    );
+    let events = decoder
+        .push(body.as_bytes())
+        .expect("计费未知时仍应交付响应");
+    let facts: Vec<_> = events
+        .into_iter()
+        .flat_map(|event| event.into_parts().0)
+        .collect();
+    assert!(
+        facts
+            .iter()
+            .any(|event| matches!(event, GatewayEvent::Completed(_)))
+    );
+    facts
+}
+
+#[test]
+fn billing_should_use_the_final_response_tier_and_preserve_provider_cost() {
+    for (tier, ticks, calculated, provider) in [
+        ("priority", None, Some(400_000_000), None),
+        ("default", None, Some(200_000_000), None),
+        ("future", None, None, None),
+        ("priority", Some(0), None, Some(0)),
+        ("priority", Some(123), None, Some(123)),
+    ] {
+        let mut response = serde_json::json!({"service_tier": tier, "output": [], "usage": {"input_tokens": 10_000, "output_tokens": 0}});
+        if let Some(ticks) = ticks {
+            response["usage"]["cost_in_usd_ticks"] = serde_json::json!(ticks);
+        }
+        let events = pricing_events(response, None);
+        assert_eq!(
+            (calculated_cost_ticks(&events), provider_cost_ticks(&events)),
+            (calculated, provider),
+            "{tier}"
+        );
+    }
+}
+
+#[test]
+fn billing_should_require_provider_totals_for_server_tools() {
+    for kind in [
+        "web_search_call",
+        "x_search_call",
+        "code_interpreter_call",
+        "file_search_call",
+        "image_generation_call",
+        "future_tool_call",
+    ] {
+        let response = serde_json::json!({"output": [{"type": kind, "id": "tool_1", "status": "completed"}], "usage": {"input_tokens": 100, "output_tokens": 1}});
+        assert_eq!(
+            calculated_cost_ticks(&pricing_events(response, None)),
+            None,
+            "{kind}"
+        );
+    }
+    let request =
+        tool_request(serde_json::json!({"input": "查资料", "tools": [{"type": "web_search"}]}));
+    // 工具结果可能被上游省略，允许调用收费工具时不能仅靠空 output 认定没有附加费。
+    let mut response =
+        serde_json::json!({"output": [], "usage": {"input_tokens": 100, "output_tokens": 1}});
+    assert_eq!(
+        calculated_cost_ticks(&pricing_events(response.clone(), Some(&request))),
+        None
+    );
+    response["usage"]["cost_in_usd_ticks"] = serde_json::json!(0);
+    assert_eq!(
+        provider_cost_ticks(&pricing_events(response, Some(&request))),
+        Some(0)
+    );
+    let response = serde_json::json!({"output": [], "usage": {"input_tokens": 100, "output_tokens": 1, "num_server_side_tool_calls": 1}});
+    assert_eq!(calculated_cost_ticks(&pricing_events(response, None)), None);
 }
 
 #[test]

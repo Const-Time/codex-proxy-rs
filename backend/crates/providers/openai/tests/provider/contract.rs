@@ -1001,6 +1001,18 @@ async fn image_endpoints_bypass_only_the_text_catalog_and_preserve_the_current_c
             br#"{"model":"gpt-image-2","images":[{"image_url":"data:image/png;base64,AAEC"}],"prompt":"add fog","prompt":"duplicate remains opaque"}"#.as_slice(),
             br#"{"created":1787212801,"data":[{"b64_json":"AwQF"}],"quality":"high"}"#.as_slice(),
         ),
+        (
+            ImageRequestKind::Generation,
+            "/codex/images/generations",
+            br#"{"model":"gpt-image-2.5-flare","prompt":"a lighthouse","quality":"xhigh"}"#.as_slice(),
+            br#"{"created":1788900000,"data":[{"b64_json":"AAEC"}],"quality":"xhigh"}"#.as_slice(),
+        ),
+        (
+            ImageRequestKind::Edit,
+            "/codex/images/edits",
+            br#"{"model":"gpt-image-2.5-sunburst","images":[{"image_url":"data:image/png;base64,AAEC"}],"prompt":"add fog","quality":"max"}"#.as_slice(),
+            br#"{"created":1788900001,"data":[{"b64_json":"AwQF"}],"quality":"max"}"#.as_slice(),
+        ),
     ];
     for (_, endpoint, body, response_body) in &cases {
         Mock::given(method("POST"))
@@ -1225,6 +1237,10 @@ async fn image_prices_should_use_modality_rates_and_precede_delivery() {
         for (kind, model) in [
             (ImageRequestKind::Generation, "gpt-image-2"),
             (ImageRequestKind::Edit, "gpt-image-2-2026-04-21"),
+            (ImageRequestKind::Generation, "gpt-image-2.5-sunburst"),
+            (ImageRequestKind::Edit, "gpt-image-2.5-sunburst-2026-09-08"),
+            (ImageRequestKind::Generation, "gpt-image-2.5-flare"),
+            (ImageRequestKind::Edit, "gpt-image-2.5-flare-2026-09-08"),
         ] {
             let events = image_metering_events(kind, &response, model).await;
             let costs = events
@@ -1240,9 +1256,13 @@ async fn image_prices_should_use_modality_rates_and_precede_delivery() {
                         })
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(costs.len(), 1);
+            assert_eq!(costs.len(), 1, "model={model}");
             let (cost_index, cost) = costs[0];
-            assert_eq!(cost.total().amount().scaled(), expected_ticks);
+            assert_eq!(
+                cost.total().amount().scaled(),
+                expected_ticks,
+                "model={model}"
+            );
             assert_eq!(cost.into_estimate().source().as_str(), "calculated");
             let wire_index = events
                 .iter()
@@ -1272,6 +1292,9 @@ async fn image_prices_should_remain_unknown_when_modality_or_model_is_uncertain(
     let mut cases = vec![
         ("gpt-image-future", valid.clone()),
         ("gpt-image-2-future", valid.clone()),
+        ("gpt-image-2.5", valid.clone()),
+        ("gpt-image-2.5-sunburst-future", valid.clone()),
+        ("gpt-image-2.5-flare-future", valid.clone()),
         ("gpt-image-2", json!(null)),
         (
             "gpt-image-2",
@@ -4820,7 +4843,7 @@ async fn completed_response_persists_session_affinity_before_stream_consumer_sto
     drop(stream);
 
     assert_eq!(affinity.binding_count(), 1);
-    assert_eq!(observed_service_tier.as_deref(), Some("priority"));
+    assert_eq!(observed_service_tier.as_deref(), Some("default"));
     assert_eq!(upstream_service_tier.as_deref(), Some("default"));
 }
 

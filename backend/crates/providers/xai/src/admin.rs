@@ -56,7 +56,7 @@ use crate::credential::{
     RotateManagedGrokCredential, SecretValue, VerifiedGrokAccount, VerifiedTokenSet,
 };
 use crate::transport::profile::{GrokCliReleaseSnapshot, GrokCliReleaseStatus};
-use crate::transport::{GROK_CLI_BASE_URL, XAI_PROVIDER_NAME, grok_billing_breakdown};
+use crate::transport::{GROK_CLI_BASE_URL, XAI_PROVIDER_NAME, grok_billing_breakdown_with_tier};
 
 const PENDING_SCHEMA_VERSION: u64 = 3;
 const PENDING_TTL: TimeDelta = TimeDelta::minutes(30);
@@ -390,11 +390,12 @@ impl ProviderAdmin for XaiAdminProvider {
         else {
             return Ok(None);
         };
-        let Some(breakdown) = grok_billing_breakdown(
+        let Some(breakdown) = grok_billing_breakdown_with_tier(
             &input.upstream_model_id,
             input_tokens,
             output_tokens,
             input.cached_tokens.unwrap_or_default(),
+            input.service_tier.as_deref(),
         ) else {
             return Ok(None);
         };

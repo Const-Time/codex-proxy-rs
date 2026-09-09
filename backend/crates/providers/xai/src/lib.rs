@@ -79,7 +79,7 @@ pub use transport::{
     MAX_GROK_BILLING_BYTES, MAX_GROK_MODEL_CATALOG_BYTES, OfficialGrokEndpointPolicy,
     ReqwestGrokInferenceTransport, ReqwestGrokModelCatalogTransport, ReqwestOAuthTransport,
     SelectedGrokSession, XAI_PROVIDER_NAME, build_grok_headers, grok_billing_breakdown,
-    parse_grok_billing, parse_grok_model_catalog,
+    grok_billing_breakdown_with_tier, parse_grok_billing, parse_grok_model_catalog,
 };
 
 /// xAI 初始化后交给组装根的最小能力集。

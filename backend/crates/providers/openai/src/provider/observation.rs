@@ -145,9 +145,9 @@ impl OpenAiResponseObservationState {
     }
 
     pub(super) fn effective_service_tier(&self) -> Option<&str> {
-        self.requested_service_tier
+        self.upstream_service_tier
             .as_deref()
-            .or(self.upstream_service_tier.as_deref())
+            .or(self.requested_service_tier.as_deref())
     }
 
     pub(super) fn merge_rate_limit_headers(&mut self, updates: &[(String, String)]) -> bool {

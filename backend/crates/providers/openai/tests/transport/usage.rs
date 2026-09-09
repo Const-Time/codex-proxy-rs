@@ -239,6 +239,90 @@ async fn exact_limit_success_body_should_be_accepted() {
     assert!(usage["rate_limit"].is_object());
 }
 
+#[test]
+fn billing_should_use_explicit_variant_prices_and_verified_snapshots() {
+    // 每个用例包含一个普通输入 token 和一个输出 token，金额单位为 USD ticks。
+    for (model, expected) in [
+        ("gpt-5.1-codex-mini", 22_500),
+        ("gpt-5.3-chat-latest", 157_500),
+        ("gpt-5.6-cyber", 875_000),
+        ("gpt-5.5-cyber", 875_000),
+        ("gpt-daybreak-red-latest", 875_000),
+        ("gpt-daybreak-blue-latest", 350_000),
+        ("chat-latest", 350_000),
+        ("gpt-5.1-codex-max", 112_500),
+        ("gpt-5.2-codex", 157_500),
+        ("gpt-5.4-2026-03-05", 175_000),
+        (" OpenAI/GPT-4o-2024-08-06 ", 125_000),
+        ("gpt-4o-2024-05-13", 200_000),
+        ("gpt-3.5-turbo-0125", 20_000),
+        ("gpt-3.5-turbo-1106", 30_000),
+    ] {
+        let billing =
+            openai_billing_breakdown(model, billing_usage(1, 1, 0, 0), None).expect(model);
+        assert_eq!(
+            billing.total_amount().amount().scaled(),
+            expected,
+            "{model}"
+        );
+    }
+}
+
+#[test]
+fn billing_should_not_inherit_prices_for_unknown_models_or_tiers() {
+    for model in [
+        "gpt-6-astra-future",
+        "gpt-6-astra-2099-01-01",
+        "gpt-5.6-sol-wm",
+        "gpt-5.6-cyber-future",
+        "gpt-5.4-cyber",
+        "gpt-5.3-codex-spark",
+        "gpt-4.5-preview",
+        "gpt-4-32k",
+        "gpt-5.4:custom",
+        "gpt-5.4.1",
+    ] {
+        assert!(
+            openai_billing_breakdown(model, billing_usage(1, 1, 0, 0), None).is_none(),
+            "{model}"
+        );
+    }
+    for (model, input, tier) in [
+        ("gpt-5.6-cyber", 272_001, None),
+        ("gpt-5.5-cyber", 272_001, None),
+        ("gpt-5.6-cyber", 1, Some("fast")),
+        ("gpt-5.1-codex-mini", 1, Some("flex")),
+        ("gpt-6-astra", 1, Some("auto")),
+        ("gpt-6-astra", 1, Some("ultrafast")),
+    ] {
+        assert!(
+            openai_billing_breakdown(model, billing_usage(input, 1, 0, 0), tier).is_none(),
+            "{model} {tier:?}"
+        );
+    }
+}
+
+#[test]
+fn billing_should_reject_overlapping_or_overflowing_cache_counts() {
+    for (input, cached, written) in [(100, 20, 90), (100, 0, 101), (u64::MAX, u64::MAX, 1)] {
+        assert!(
+            openai_billing_breakdown(
+                "gpt-6-astra",
+                billing_usage(input, 0, cached, written),
+                None
+            )
+            .is_none()
+        );
+    }
+    let cyber = openai_billing_breakdown("gpt-5.6-cyber", billing_usage(100, 10, 20, 10), None)
+        .expect("已公开的 Cyber 缓存写价格");
+    assert_eq!(
+        cyber.cache_write_price_per_million().amount().to_string(),
+        "15.6250000000"
+    );
+    assert_eq!(cyber.total_amount().amount().scaled(), 18_062_500);
+}
+
 #[tokio::test]
 async fn fetch_should_use_wham_usage_headers_only() {
     let server = MockServer::start().await;

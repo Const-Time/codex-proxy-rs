@@ -11,7 +11,9 @@ pub(crate) mod profile;
 mod request;
 mod session;
 
-pub use canonical::{GrokCanonicalDecoder, grok_billing_breakdown};
+pub use canonical::{
+    GrokCanonicalDecoder, grok_billing_breakdown, grok_billing_breakdown_with_tier,
+};
 pub use catalog::{
     GROK_BILLING_URL, GROK_MODEL_CATALOG_URL, GrokBillingClient, GrokBillingError,
     GrokBillingRequest, GrokBillingSnapshot, GrokBillingTransport, GrokBillingTransportError,

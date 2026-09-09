@@ -185,7 +185,8 @@ pub(super) fn cold_compaction_http_sse_stream(
                 }
             }
         };
-        yield ProviderEvent::observation(accepted.observation);
+        let mut observation = accepted.observation;
+        yield ProviderEvent::observation(observation.clone());
 
         let mut body = accepted.response.into_body();
         let mut canonical = GrokCanonicalDecoder::new(upstream_model.as_str());
@@ -251,6 +252,10 @@ pub(super) fn cold_compaction_http_sse_stream(
             }
         }
 
+        if let Some(tier) = canonical.response_service_tier() {
+            observation = observation.with_service_tier_if_valid(tier.to_owned());
+            yield ProviderEvent::observation(observation);
+        }
         let started = facts
             .started
             .ok_or_else(|| mark_transient_compaction_failure(protocol_sent()))?;
@@ -460,7 +465,7 @@ pub(super) fn cold_http_sse_stream(
             }
         };
 
-        let observation = xai_response_observation(&response)?;
+        let mut observation = xai_response_observation(&response)?;
         let base_timings = observation.timings();
         let mut first_token_ms: Option<u64> = None;
         yield ProviderEvent::observation(observation.clone());
@@ -529,6 +534,14 @@ pub(super) fn cold_http_sse_stream(
                         }),
                 );
             }
+            if let Some(tier) = decoder.response_service_tier()
+                && observation.service_tier() != Some(tier)
+            {
+                observation = observation.with_service_tier_if_valid(tier.to_owned());
+                yield ProviderEvent::observation(observation.clone().with_timings(
+                    ProviderResponseTimings { first_token_ms, ..base_timings },
+                ));
+            }
             let completed = events
                 .iter()
                 .flat_map(ProviderEvent::canonical_facts)
@@ -580,6 +593,14 @@ pub(super) fn cold_http_sse_stream(
                         ..base_timings
                     }),
             );
+        }
+        if let Some(tier) = decoder.response_service_tier()
+            && observation.service_tier() != Some(tier)
+        {
+            observation = observation.with_service_tier_if_valid(tier.to_owned());
+            yield ProviderEvent::observation(observation.clone().with_timings(
+                ProviderResponseTimings { first_token_ms, ..base_timings },
+            ));
         }
         attach_xai_session_update(&mut final_events, &mut session_capture)?;
         if let Some(capture) = reasoning_replay_capture.as_mut() {

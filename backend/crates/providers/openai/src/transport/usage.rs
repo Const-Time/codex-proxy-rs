@@ -16,6 +16,7 @@ use super::{
 const LONG_CONTEXT_THRESHOLD: u64 = 272_000;
 const WEB_SEARCH_CALL_TICKS: u128 = 100_000_000;
 const WEB_SEARCH_PREVIEW_NON_REASONING_CALL_TICKS: u128 = 250_000_000;
+const FILE_SEARCH_CALL_TICKS: u128 = 25_000_000;
 
 /// OpenAI 公开 Token 价格计算所需的单次用量事实。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -27,6 +28,7 @@ pub struct OpenAiBillingUsage {
     image_input_tokens: u64,
     image_output_tokens: u64,
     web_search_calls: u64,
+    file_search_calls: u64,
     web_search_pricing: Option<WebSearchPricing>,
 }
 
@@ -47,6 +49,7 @@ impl OpenAiBillingUsage {
             image_input_tokens: 0,
             image_output_tokens: 0,
             web_search_calls: 0,
+            file_search_calls: 0,
             web_search_pricing: None,
         }
     }
@@ -58,6 +61,11 @@ impl OpenAiBillingUsage {
     ) -> Self {
         self.web_search_calls = calls;
         self.web_search_pricing = pricing;
+        self
+    }
+
+    pub(crate) const fn with_file_search_calls(mut self, calls: u64) -> Self {
+        self.file_search_calls = calls;
         self
     }
 }
@@ -72,6 +80,7 @@ impl From<TokenUsage> for OpenAiBillingUsage {
             image_input_tokens: usage.image_input_tokens,
             image_output_tokens: usage.image_output_tokens,
             web_search_calls: 0,
+            file_search_calls: 0,
             web_search_pricing: None,
         }
     }
@@ -125,6 +134,7 @@ struct ModelPricing {
     long_flex: TokenRates,
     long_fast: TokenRates,
     cache_write_percent: u32,
+    unpriced_long_context: bool,
 }
 
 impl ModelPricing {
@@ -137,6 +147,7 @@ impl ModelPricing {
             long_flex: TokenRates::ZERO,
             long_fast: TokenRates::ZERO,
             cache_write_percent: 0,
+            unpriced_long_context: false,
         }
     }
 
@@ -170,7 +181,15 @@ impl ModelPricing {
         self
     }
 
+    const fn with_unpriced_long_context(mut self) -> Self {
+        self.unpriced_long_context = true;
+        self
+    }
+
     fn rates(self, tier: PricingTier, long_context: bool) -> Option<TokenRates> {
+        if long_context && self.unpriced_long_context {
+            return None;
+        }
         // Only models with a published long-context column switch at the threshold.
         // A dash in that column is not a second, unavailable price tier for models
         // whose entire supported context is covered by the short-context price.
@@ -200,10 +219,12 @@ struct PricingRule {
     pricing: ModelPricing,
 }
 
-// Source: https://developers.openai.com/api/docs/pricing (verified 2026-08-14).
+// 价格来源：https://developers.openai.com/api/docs/pricing，核验日期 2026-09-09。
+// 使用常规价，不采用 Sol 的临时 $4/$20 优惠；缓存、Flex、Fast 和长上下文
+// 档位也统一按常规价计算。
 const PRICING_RULES: &[PricingRule] = &[
-    // Astra: https://developers.openai.com/api/docs/models/gpt-6-astra
-    // Rates verified against the pricing table on 2026-09-05.
+    // Astra：https://developers.openai.com/api/docs/models/gpt-6-astra
+    // 已于 2026-09-09 对照官方价目表核验。
     PricingRule {
         model: "gpt-6-astra",
         pricing: ModelPricing::new(100_000, 500_000, 10_000)
@@ -405,9 +426,59 @@ const PRICING_RULES: &[PricingRule] = &[
         model: "gpt-3.5-turbo",
         pricing: ModelPricing::new(5_000, 15_000, 0),
     },
+    // 各变体独立采用已公开的价格与档位，不能继承父型号的所有档位。
+    // Cyber 长上下文的官方来源存在差异，该区间暂不估价。
+    PricingRule {
+        model: "gpt-5.1-codex-mini",
+        pricing: ModelPricing::new(2_500, 20_000, 250),
+    },
+    PricingRule {
+        model: "gpt-5.3-chat-latest",
+        pricing: ModelPricing::new(17_500, 140_000, 1_750),
+    },
+    PricingRule {
+        model: "gpt-5.6-cyber",
+        pricing: ModelPricing::new(125_000, 750_000, 12_500)
+            .with_cache_write(125)
+            .with_unpriced_long_context(),
+    },
+    PricingRule {
+        model: "gpt-5.5-cyber",
+        pricing: ModelPricing::new(125_000, 750_000, 12_500).with_unpriced_long_context(),
+    },
+    PricingRule {
+        model: "chat-latest",
+        pricing: ModelPricing::new(50_000, 300_000, 5_000),
+    },
+    PricingRule {
+        model: "gpt-5-codex",
+        pricing: ModelPricing::new(12_500, 100_000, 1_250),
+    },
+    PricingRule {
+        model: "gpt-5.1-codex",
+        pricing: ModelPricing::new(12_500, 100_000, 1_250),
+    },
+    PricingRule {
+        model: "gpt-5.1-codex-max",
+        pricing: ModelPricing::new(12_500, 100_000, 1_250),
+    },
+    PricingRule {
+        model: "gpt-5-chat-latest",
+        pricing: ModelPricing::new(12_500, 100_000, 1_250),
+    },
+    PricingRule {
+        model: "gpt-5.1-chat-latest",
+        pricing: ModelPricing::new(12_500, 100_000, 1_250),
+    },
+    PricingRule {
+        model: "gpt-5.2-codex",
+        pricing: ModelPricing::new(17_500, 140_000, 1_750),
+    },
+    PricingRule {
+        model: "gpt-5.2-chat-latest",
+        pricing: ModelPricing::new(17_500, 140_000, 1_750),
+    },
 ];
-
-const UNPRICED_MODELS: &[&str] = &["gpt-5.3-codex-spark"];
 
 #[derive(Clone, Copy)]
 struct TokenAmounts {
@@ -439,13 +510,14 @@ fn openai_billing_breakdown_with_context(
     service_tier: Option<&str>,
     long_context: bool,
 ) -> Option<CalculatedCostBreakdown> {
-    if usage.cached_tokens > usage.input_tokens
+    if usage.cached_tokens.checked_add(usage.cache_write_tokens)? > usage.input_tokens
         || usage.image_input_tokens > 0
         || usage.image_output_tokens > 0
     {
         return None;
     }
-    let web_search_ticks = web_search_amount_ticks(usage)?;
+    let tool_ticks = web_search_amount_ticks(usage)?
+        .checked_add(u128::from(usage.file_search_calls).checked_mul(FILE_SEARCH_CALL_TICKS)?)?;
     let pricing = model_pricing(model)?;
     let normalized_tier = normalize_service_tier(service_tier);
     let tier = pricing_tier(normalized_tier.as_deref())?;
@@ -467,8 +539,8 @@ fn openai_billing_breakdown_with_context(
         usage.cached_tokens,
         usage.cache_write_tokens,
     )?;
-    standard.total_ticks = standard.total_ticks.checked_add(web_search_ticks)?;
-    selected.total_ticks = selected.total_ticks.checked_add(web_search_ticks)?;
+    standard.total_ticks = standard.total_ticks.checked_add(tool_ticks)?;
+    selected.total_ticks = selected.total_ticks.checked_add(tool_ticks)?;
     let multiplier_percent =
         effective_multiplier_percent(selected.total_ticks, standard.total_ticks)?;
     let cache_write_rate = cache_write_rate(selected_rates, pricing.cache_write_percent)?;
@@ -503,7 +575,12 @@ pub(crate) fn image_calculated_cost(request_body: &[u8], usage: &Value) -> Optio
     let request = serde_json::from_slice::<ImageModel>(request_body).ok()?;
     if !matches!(
         request.model.as_str(),
-        "gpt-image-2" | "gpt-image-2-2026-04-21"
+        "gpt-image-2"
+            | "gpt-image-2-2026-04-21"
+            | "gpt-image-2.5-sunburst"
+            | "gpt-image-2.5-sunburst-2026-09-08"
+            | "gpt-image-2.5-flare"
+            | "gpt-image-2.5-flare-2026-09-08"
     ) {
         return None;
     }
@@ -542,8 +619,9 @@ pub(crate) fn image_calculated_cost(request_body: &[u8], usage: &Value) -> Optio
         (_, _, cached) if cached == input => (text_input, image_input),
         _ => return None,
     };
-    // https://developers.openai.com/api/docs/pricing (2026-09-08)
-    // USD / 1M tokens: text 5 / cached 1.25; image 8 / cached 2 / output 30.
+    // 价格来源：https://developers.openai.com/api/docs/pricing，核验日期 2026-09-09。
+    // GPT Image 2 和两个 2.5 型号按相同的 token 单价计费，不使用按张估价。
+    // 每百万 token 的美元单价：文本 5 / 缓存 1.25；图片 8 / 缓存 2 / 输出 30。
     let text = token_amounts(
         TokenRates::new(50_000, 0, 12_500),
         0,
@@ -565,16 +643,10 @@ pub(crate) fn image_calculated_cost(request_body: &[u8], usage: &Value) -> Optio
 
 fn model_pricing(model: &str) -> Option<ModelPricing> {
     let normalized = normalize_model_name(model);
-    if UNPRICED_MODELS
-        .iter()
-        .any(|rule| model_matches_rule(&normalized, rule))
-    {
-        return None;
-    }
+    let model = pricing_model_name(&normalized);
     PRICING_RULES
         .iter()
-        .filter(|rule| model_matches_rule(&normalized, rule.model))
-        .max_by_key(|rule| rule.model.len())
+        .find(|rule| model == rule.model)
         .map(|rule| rule.pricing)
 }
 
@@ -613,16 +685,17 @@ fn fixed_block_web_search_model(model: &str) -> bool {
 
 fn reasoning_model(model: &str) -> bool {
     let normalized = normalize_model_name(model);
-    normalized.starts_with("gpt-5")
-        || model_matches_rule(&normalized, "gpt-6-astra")
-        || normalized.starts_with("o1")
-        || normalized.starts_with("o3")
-        || normalized.starts_with("o4")
+    let model = pricing_model_name(&normalized);
+    model.starts_with("gpt-5")
+        || model == "gpt-6-astra"
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
 }
 
 fn pricing_tier(service_tier: Option<&str>) -> Option<PricingTier> {
     match service_tier {
-        None | Some("auto" | "default" | "standard") => Some(PricingTier::Standard),
+        None | Some("default" | "standard") => Some(PricingTier::Standard),
         Some("flex") => Some(PricingTier::Flex),
         Some("fast" | "priority") => Some(PricingTier::Fast),
         Some(_) => None,
@@ -644,20 +717,23 @@ fn token_amounts(
     cached_tokens: u64,
     cache_write_tokens: u64,
 ) -> Option<TokenAmounts> {
+    if cached_tokens.checked_add(cache_write_tokens)? > input_tokens {
+        return None;
+    }
     let billed_cache_read = if rates.cache_read_ticks > 0 {
-        cached_tokens.min(input_tokens)
+        cached_tokens
     } else {
         0
     };
     let cache_write_rate = cache_write_rate(rates, cache_write_percent)?;
     let billed_cache_write = if cache_write_rate > 0 {
-        cache_write_tokens.min(input_tokens.saturating_sub(billed_cache_read))
+        cache_write_tokens
     } else {
         0
     };
     let uncached_input = input_tokens
-        .saturating_sub(billed_cache_read)
-        .saturating_sub(billed_cache_write);
+        .checked_sub(billed_cache_read)?
+        .checked_sub(billed_cache_write)?;
     let input_ticks = u128::from(uncached_input).checked_mul(rates.input_ticks)?;
     let output_ticks = u128::from(output_tokens).checked_mul(rates.output_ticks)?;
     let cache_read_ticks = u128::from(billed_cache_read).checked_mul(rates.cache_read_ticks)?;
@@ -703,13 +779,47 @@ fn normalize_model_name(model: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn model_matches_rule(model: &str, rule: &str) -> bool {
-    if model == rule {
-        return true;
+// 仅已核验的别名和快照可以共用价格；未知后缀、未来日期和微调模型
+// 不得直接继承父型号的价格。
+fn pricing_model_name(model: &str) -> &str {
+    match model {
+        "gpt-3.5-turbo-0125" => "gpt-3.5-turbo",
+        "gpt-4-0314" => "gpt-4",
+        "gpt-4-0613" => "gpt-4",
+        "gpt-4-turbo-2024-04-09" => "gpt-4-turbo",
+        "gpt-4.1-2025-04-14" => "gpt-4.1",
+        "gpt-4.1-mini-2025-04-14" => "gpt-4.1-mini",
+        "gpt-4.1-nano-2025-04-14" => "gpt-4.1-nano",
+        "gpt-4o-2024-08-06" => "gpt-4o",
+        "gpt-4o-2024-11-20" => "gpt-4o",
+        "gpt-4o-mini-2024-07-18" => "gpt-4o-mini",
+        "gpt-5-2025-08-07" => "gpt-5",
+        "gpt-5-mini-2025-08-07" => "gpt-5-mini",
+        "gpt-5-nano-2025-08-07" => "gpt-5-nano",
+        "gpt-5-pro-2025-10-06" => "gpt-5-pro",
+        "gpt-5.1-2025-11-13" => "gpt-5.1",
+        "gpt-5.2-2025-12-11" => "gpt-5.2",
+        "gpt-5.2-pro-2025-12-11" => "gpt-5.2-pro",
+        "gpt-5.4-2026-03-05" => "gpt-5.4",
+        "gpt-5.4-mini-2026-03-17" => "gpt-5.4-mini",
+        "gpt-5.4-nano-2026-03-17" => "gpt-5.4-nano",
+        "gpt-5.4-pro-2026-03-05" => "gpt-5.4-pro",
+        "gpt-5.5-2026-04-23" => "gpt-5.5",
+        "gpt-5.5-pro-2026-04-23" => "gpt-5.5-pro",
+        "gpt-daybreak-blue-latest" => "gpt-5.6-sol",
+        "gpt-daybreak-red-latest" => "gpt-5.6-cyber",
+        "o1-2024-12-17" => "o1",
+        "o1-pro-2025-03-19" => "o1-pro",
+        "o3-2025-04-16" => "o3",
+        "o3-mini-2025-01-31" => "o3-mini",
+        "o3-pro-2025-06-10" => "o3-pro",
+        "o4-mini-2025-04-16" => "o4-mini",
+        _ => model,
     }
-    model
-        .strip_prefix(rule)
-        .is_some_and(|suffix| matches!(suffix.as_bytes().first(), Some(b'-' | b'.' | b':')))
+}
+
+fn model_matches_rule(model: &str, rule: &str) -> bool {
+    pricing_model_name(model) == rule
 }
 
 /// 规范化请求或响应携带的服务档位，供观测与计费共用。

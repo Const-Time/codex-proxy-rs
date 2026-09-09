@@ -38,6 +38,20 @@ struct ModelPricing {
     long: TokenRates,
 }
 
+// 价格来源：https://docs.x.ai/developers/pricing，核验日期 2026-09-09。
+const GROK_46_PRICING: ModelPricing = ModelPricing {
+    short: TokenRates {
+        input_ticks: 20_000,
+        cached_input_ticks: 5_000,
+        output_ticks: 60_000,
+    },
+    long: TokenRates {
+        input_ticks: 40_000,
+        cached_input_ticks: 10_000,
+        output_ticks: 120_000,
+    },
+};
+
 const GROK_45_PRICING: ModelPricing = ModelPricing {
     short: TokenRates {
         input_ticks: 20_000,
@@ -85,6 +99,23 @@ pub fn grok_billing_breakdown(
     output_tokens: u64,
     cached_tokens: u64,
 ) -> Option<CalculatedCostBreakdown> {
+    grok_billing_breakdown_with_tier(model, input_tokens, output_tokens, cached_tokens, None)
+}
+
+/// 按响应确认的实际档位计算 xAI Token 费用；未知档位不估算。
+#[must_use]
+pub fn grok_billing_breakdown_with_tier(
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+    service_tier: Option<&str>,
+) -> Option<CalculatedCostBreakdown> {
+    let (tier, multiplier) = match service_tier.map(str::trim) {
+        None | Some("default" | "standard") => ("default", 1_u128),
+        Some("priority") => ("priority", 2),
+        Some(_) => return None,
+    };
     let pricing = model_pricing(model)?;
     let rates = if input_tokens >= LONG_CONTEXT_THRESHOLD {
         pricing.long
@@ -101,21 +132,21 @@ pub fn grok_billing_breakdown(
         .checked_add(output_amount_ticks)?;
     Some(CalculatedCostBreakdown::new(
         CalculatedCostAmounts::new(
-            usd_money(input_amount_ticks)?,
-            usd_money(output_amount_ticks)?,
-            usd_money(cache_read_amount_ticks)?,
+            usd_money(input_amount_ticks.checked_mul(multiplier)?)?,
+            usd_money(output_amount_ticks.checked_mul(multiplier)?)?,
+            usd_money(cache_read_amount_ticks.checked_mul(multiplier)?)?,
             usd_money(0)?,
             usd_money(standard_amount_ticks)?,
-            usd_money(standard_amount_ticks)?,
+            usd_money(standard_amount_ticks.checked_mul(multiplier)?)?,
         ),
         CalculatedCostRates::new(
-            usd_price_per_million(rates.input_ticks)?,
-            usd_price_per_million(rates.output_ticks)?,
-            usd_price_per_million(rates.cached_input_ticks)?,
+            usd_price_per_million(rates.input_ticks.checked_mul(multiplier)?)?,
+            usd_price_per_million(rates.output_ticks.checked_mul(multiplier)?)?,
+            usd_price_per_million(rates.cached_input_ticks.checked_mul(multiplier)?)?,
             usd_money(0)?,
         ),
-        Some("default".to_owned()),
-        100,
+        Some(tier.to_owned()),
+        if multiplier == 2 { 200 } else { 100 },
     ))
 }
 
@@ -144,6 +175,8 @@ pub struct GrokCanonicalDecoder {
     tool_arguments_seen: BTreeSet<u32>,
     usage_emitted: bool,
     output_start_seen: bool,
+    response_service_tier: Option<String>,
+    requires_provider_cost: bool,
 }
 
 impl GrokCanonicalDecoder {
@@ -159,6 +192,8 @@ impl GrokCanonicalDecoder {
             tool_arguments_seen: BTreeSet::new(),
             usage_emitted: false,
             output_start_seen: false,
+            response_service_tier: None,
+            requires_provider_cost: false,
         }
     }
 
@@ -168,8 +203,28 @@ impl GrokCanonicalDecoder {
     pub fn for_request(fallback_model: impl Into<String>, request: &GrokResponsesRequest) -> Self {
         Self {
             response_transform: request.response_transform(),
+            requires_provider_cost: request.body().get("tool_choice").and_then(Value::as_str)
+                != Some("none")
+                && request
+                    .body()
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| {
+                        tools.iter().any(|tool| {
+                            !matches!(
+                                tool.get("type").and_then(Value::as_str),
+                                Some("function" | "custom" | "mcp")
+                            )
+                        })
+                    }),
             ..Self::new(fallback_model)
         }
+    }
+
+    /// 上游报告的实际服务档位，供费用与持久观测共用。
+    #[must_use]
+    pub fn response_service_tier(&self) -> Option<&str> {
+        self.response_service_tier.as_deref()
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -259,6 +314,16 @@ impl GrokCanonicalDecoder {
                 continue;
             };
             let event_type = event_type.to_owned();
+            // 工具转换可能隐藏注入的调用，计费事实必须从转换前的上游事件读取。
+            if let Some(response) = value.get("response") {
+                if let Some(tier) = response.get("service_tier").and_then(Value::as_str) {
+                    self.response_service_tier = Some(tier.trim().to_owned());
+                }
+                self.requires_provider_cost |= !token_only_response(response);
+            }
+            if let Some(item) = value.get("item") {
+                self.requires_provider_cost |= !token_only_output(item);
+            }
             // 无法转换的上游帧（多为畸形帧）直接丢弃，保持已开始的客户端流不中断。
             let Ok(transformed) = self
                 .response_transform
@@ -590,7 +655,10 @@ impl GrokCanonicalDecoder {
             .to_owned();
         if let Some(cost) = provider_reported_cost(response)? {
             output.push(GatewayEvent::ProviderCost(cost));
-        } else if let Some(cost) = usage.and_then(|usage| calculated_cost(response, &model, usage))
+        } else if !self.requires_provider_cost
+            && let Some(cost) = usage.and_then(|usage| {
+                calculated_cost(response, &model, usage, self.response_service_tier())
+            })
         {
             output.push(GatewayEvent::CalculatedCost(cost));
         }
@@ -729,29 +797,71 @@ fn provider_reported_cost(response: &Value) -> Result<Option<ProviderReportedCos
         return Ok(None);
     };
     let ticks = value.as_u64().ok_or_else(protocol_error_marker)?;
-    if ticks == 0 {
-        return Ok(None);
-    }
+    // 明确返回的零费用也是上游账单事实，不能当作缺失而改用本地估算。
     ProviderReportedCost::from_usd_ticks(u128::from(ticks))
         .map(Some)
         .map_err(protocol_error)
 }
 
-fn calculated_cost(response: &Value, model: &str, usage: TokenUsage) -> Option<CalculatedCost> {
-    if !billable_usage_is_complete(response, usage) {
+// cost_in_usd_ticks 已包含服务端工具费；缺少该字段时，只有全部按 token
+// 计费的响应才能确定总价。
+fn token_only_output(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some(
+            "message"
+                | "reasoning"
+                | "function_call"
+                | "custom_tool_call"
+                | "mcp_call"
+                | "mcp_list_tools"
+                | "mcp_approval_request"
+                | "compaction"
+        )
+    )
+}
+
+fn token_only_response(response: &Value) -> bool {
+    let empty = |value: &Value| value.as_object().is_some_and(serde_json::Map::is_empty);
+    response.get("tool_usage").is_none_or(empty)
+        && response
+            .pointer("/usage/server_side_tool_usage")
+            .is_none_or(empty)
+        && response
+            .pointer("/usage/num_server_side_tool_calls")
+            .is_none_or(|value| value.as_u64() == Some(0))
+        && response.get("output").is_none_or(|value| {
+            value
+                .as_array()
+                .is_some_and(|items| items.iter().all(token_only_output))
+        })
+}
+
+fn calculated_cost(
+    response: &Value,
+    model: &str,
+    usage: TokenUsage,
+    service_tier: Option<&str>,
+) -> Option<CalculatedCost> {
+    if !billable_usage_is_complete(response, usage)
+        || usage.image_input_tokens > 0
+        || usage.image_output_tokens > 0
+    {
         return None;
     }
-    let breakdown = grok_billing_breakdown(
+    let breakdown = grok_billing_breakdown_with_tier(
         model,
         usage.input_tokens,
         usage.output_tokens,
         usage.cached_tokens,
+        service_tier,
     )?;
     Some(breakdown.calculated_cost())
 }
 
 fn model_pricing(model: &str) -> Option<ModelPricing> {
     match model {
+        "grok-4.6" | "grok-4.6-latest" => Some(GROK_46_PRICING),
         "grok-4.5" | "grok-4.5-latest" | "grok-4.5-build-free" | "grok-build-latest" => {
             Some(GROK_45_PRICING)
         }

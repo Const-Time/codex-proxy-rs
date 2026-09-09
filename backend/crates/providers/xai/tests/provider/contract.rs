@@ -1240,6 +1240,56 @@ async fn transport_error_observation_should_retain_available_metrics() {
 }
 
 #[tokio::test]
+async fn billing_observation_should_persist_the_final_response_tier_before_completion() {
+    for (actual, expected_cost) in [("priority", 400_000_000), ("default", 200_000_000)] {
+        let body = format!(
+            concat!(
+                "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_tier\",\"model\":\"grok-4.6\",\"service_tier\":\"priority\"}}}}\n\n",
+                "event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_tier\",\"model\":\"grok-4.6\",\"service_tier\":\"{}\",\"status\":\"completed\",\"output\":[],\"usage\":{{\"input_tokens\":10000,\"output_tokens\":0}}}}}}\n\n"
+            ),
+            actual
+        );
+        let transport =
+            StubInferenceTransport::sequence([InferenceMode::SuccessBody(body.into_bytes())]);
+        let provider = provider(StubSelector::success(), transport).await;
+        let mut stream = provider
+            .execute(
+                provider_request("xai"),
+                context(CancellationToken::new(), None),
+            )
+            .await
+            .expect("provider stream");
+        let mut tier = None;
+        let mut cost = None;
+        let mut completed = false;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("provider event");
+            if let Some(value) = event
+                .response_observation()
+                .and_then(|value| value.service_tier())
+            {
+                tier = Some(value.to_owned());
+            }
+            for fact in event.canonical_facts() {
+                match fact {
+                    GatewayEvent::CalculatedCost(value) => {
+                        cost = Some(value.total().amount().scaled())
+                    }
+                    GatewayEvent::Completed(_) => completed = true,
+                    _ => {}
+                }
+            }
+            if completed {
+                break;
+            }
+        }
+        assert!(completed);
+        assert_eq!(tier.as_deref(), Some(actual));
+        assert_eq!(cost, Some(expected_cost));
+    }
+}
+
+#[tokio::test]
 async fn compaction_stream_should_emit_openai_wire_and_keep_only_metering_canonical() {
     let summary = valid_compaction_summary("validated summary");
     let transport = StubInferenceTransport::sequence([InferenceMode::SuccessBody(compaction_sse(

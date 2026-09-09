@@ -65,7 +65,8 @@ pub fn extract_usage(body: &Value) -> Option<TokenUsage> {
     let image_output_tokens =
         nested_number_field(body, &["tool_usage", "image_gen", "output_tokens"])
             .unwrap_or_default();
-    let total_tokens = number_field(usage, "total_tokens").unwrap_or(input_tokens + output_tokens);
+    let total_tokens = number_field(usage, "total_tokens")
+        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
 
     let has_usage = [
         "input_tokens",
@@ -98,7 +99,7 @@ pub fn extract_usage(body: &Value) -> Option<TokenUsage> {
     })
 }
 
-/// 校验计价所需的输入、输出和缓存读取字段，拒绝缺失、非法或不一致的数值。
+/// 校验计价所需的 token 字段，拒绝缺失、非法、溢出或不一致的数值。
 ///
 /// 用量提取允许缺失字段补零；计价必须额外确认这些零值有明确的上游事实。
 #[must_use]
@@ -122,11 +123,28 @@ pub fn billable_usage_is_complete(response: &Value, usage: TokenUsage) -> bool {
         Some(value) => value.as_u64(),
         None => Some(0),
     };
+    let written = raw
+        .pointer("/input_tokens_details/cache_write_tokens")
+        .or_else(|| raw.pointer("/prompt_tokens_details/cache_write_tokens"))
+        .or_else(|| raw.get("cache_write_tokens"));
+    let written = match written {
+        Some(value) => value.as_u64(),
+        None => Some(0),
+    };
+    let total = usage.input_tokens.checked_add(usage.output_tokens);
 
     input == Some(usage.input_tokens)
         && output == Some(usage.output_tokens)
         && cached == Some(usage.cached_tokens)
-        && usage.cached_tokens <= usage.input_tokens
+        && written == Some(usage.cache_write_tokens)
+        && usage
+            .cached_tokens
+            .checked_add(usage.cache_write_tokens)
+            .is_some_and(|cached| cached <= usage.input_tokens)
+        && total == Some(usage.total_tokens)
+        && raw
+            .get("total_tokens")
+            .is_none_or(|value| value.as_u64() == total)
 }
 
 /// 从完整 SSE 文本中提取最终可见用量。

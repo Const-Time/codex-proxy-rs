@@ -219,7 +219,7 @@ fn decoder_should_emit_calculated_cost_for_complete_known_model_usage() {
 }
 
 #[test]
-fn decoder_should_prefer_requested_service_tier_over_response_tier_for_billing() {
+fn decoder_should_prefer_response_service_tier_over_requested_tier_for_billing() {
     let body = concat!(
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fast_cost\",\"model\":\"gpt-5.4\",\"service_tier\":\"default\"}}\n\n",
@@ -236,7 +236,7 @@ fn decoder_should_prefer_requested_service_tier_over_response_tier_for_billing()
     assert!(canonical_facts(&events).into_iter().any(|event| matches!(
         event,
         GatewayEvent::CalculatedCost(cost)
-            if cost.total().amount().scaled() == 6_875_000
+            if cost.total().amount().scaled() == 3_437_500
     )));
 }
 
@@ -346,7 +346,7 @@ fn decoder_should_fail_closed_for_fixed_block_web_search_content() {
 }
 
 #[test]
-fn websocket_decoder_should_prefer_requested_service_tier_over_response_tier_for_billing() {
+fn websocket_decoder_should_prefer_response_service_tier_over_requested_tier_for_billing() {
     let created = websocket_event_to_sse_frame(
         r#"{"type":"response.created","response":{"id":"resp_ws_fast_cost","model":"gpt-5.4","service_tier":"default"}}"#,
     )
@@ -366,7 +366,7 @@ fn websocket_decoder_should_prefer_requested_service_tier_over_response_tier_for
     assert!(canonical_facts(&events).into_iter().any(|event| matches!(
         event,
         GatewayEvent::CalculatedCost(cost)
-            if cost.total().amount().scaled() == 6_875_000
+            if cost.total().amount().scaled() == 3_437_500
     )));
 }
 
@@ -935,4 +935,97 @@ fn canonical_facts(events: &[ProviderEvent]) -> Vec<&GatewayEvent> {
         .iter()
         .flat_map(ProviderEvent::canonical_facts)
         .collect()
+}
+
+fn pricing_response_cost(
+    requested: Option<&str>,
+    actual: Option<&str>,
+    output: serde_json::Value,
+    tools: &[serde_json::Value],
+) -> Option<u128> {
+    let mut response = json!({
+        "id": "resp_pricing", "model": "gpt-6-astra", "status": "completed",
+        "output": output, "usage": {"input_tokens": 10_000, "output_tokens": 0, "total_tokens": 10_000}
+    });
+    if let Some(tier) = actual {
+        response["service_tier"] = json!(tier);
+    }
+    let created = json!({"type": "response.created", "response": {"id": "resp_pricing", "model": "gpt-6-astra"}});
+    let completed = json!({"type": "response.completed", "response": response});
+    let body = format!(
+        "event: response.created\ndata: {created}\n\nevent: response.completed\ndata: {completed}\n\n"
+    );
+    let events = CodexCanonicalDecoder::new("gpt-6-astra")
+        .with_requested_service_tier(requested)
+        .with_request_tool_pricing("gpt-6-astra", Some(tools))
+        .with_raw_sse_passthrough()
+        .push(body.as_bytes())
+        .expect("计费不确定时仍须正常透传响应");
+    assert!(
+        canonical_facts(&events)
+            .iter()
+            .any(|event| matches!(event, GatewayEvent::Completed(_)))
+    );
+    canonical_facts(&events)
+        .into_iter()
+        .find_map(|event| match event {
+            GatewayEvent::CalculatedCost(cost) => Some(cost.total().amount().scaled()),
+            _ => None,
+        })
+}
+
+#[test]
+fn billing_should_follow_actual_tier_and_only_fall_back_when_it_is_absent() {
+    for (requested, actual, expected) in [
+        (Some("fast"), Some("default"), Some(1_000_000_000)),
+        (Some("auto"), Some("fast"), Some(2_000_000_000)),
+        (Some("default"), Some("flex"), Some(500_000_000)),
+        (Some("fast"), None, Some(2_000_000_000)),
+        (Some("auto"), None, None),
+        (Some("default"), Some("future"), None),
+    ] {
+        assert_eq!(
+            pricing_response_cost(requested, actual, json!([]), &[]),
+            expected,
+            "{requested:?} -> {actual:?}"
+        );
+    }
+}
+
+#[test]
+fn billing_should_add_file_and_web_search_fees_without_tier_markup() {
+    let output = json!([
+        {"type": "file_search_call", "id": "fs_1", "status": "completed"},
+        {"type": "file_search_call", "id": "fs_2", "status": "completed"},
+        {"type": "web_search_call", "id": "ws_1", "status": "completed", "action": {"type": "search"}}
+    ]);
+    for (tier, expected) in [("default", 1_150_000_000), ("fast", 2_150_000_000)] {
+        assert_eq!(
+            pricing_response_cost(
+                None,
+                Some(tier),
+                output.clone(),
+                &[json!({"type": "web_search"})]
+            ),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn billing_should_not_emit_partial_totals_for_unpriced_tool_outputs() {
+    for output in [
+        json!([{"type": "code_interpreter_call", "id": "ci_1", "status": "completed"}]),
+        json!([{"type": "shell_call", "id": "sh_1", "status": "completed"}]),
+        json!([{"type": "image_generation_call", "id": "ig_1", "status": "completed"}]),
+        json!([{"type": "future_paid_tool_call", "id": "tool_1"}]),
+        json!([{"type": "file_search_call", "id": "fs_1", "status": "failed"}]),
+        json!({"malformed": true}),
+    ] {
+        assert_eq!(
+            pricing_response_cost(None, None, output.clone(), &[]),
+            None,
+            "{output}"
+        );
+    }
 }

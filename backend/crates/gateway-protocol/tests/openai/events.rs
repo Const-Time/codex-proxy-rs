@@ -6,6 +6,57 @@ use gateway_protocol::openai::events::{
 use serde_json::json;
 
 #[test]
+fn billable_usage_should_validate_cache_writes_totals_and_overflow() {
+    for (raw, expected) in [
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 80}, "total_tokens": 110}),
+            true,
+        ),
+        (
+            json!({"prompt_tokens": 100, "completion_tokens": 10, "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 80}}),
+            true,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "cached_tokens": 20, "cache_write_tokens": 90}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "cache_write_tokens": -1}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "input_tokens_details": {"cache_write_tokens": "1"}, "cache_write_tokens": 1}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "cache_write_tokens": 1.5}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "total_tokens": 111}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "total_tokens": "110"}),
+            false,
+        ),
+        (json!({"input_tokens": u64::MAX, "output_tokens": 1}), false),
+        (
+            json!({"input_tokens": u64::MAX, "output_tokens": 0, "cached_tokens": u64::MAX, "cache_write_tokens": 1}),
+            false,
+        ),
+    ] {
+        let response = json!({"usage": raw});
+        let usage = extract_usage(&response).expect("提取用量不得因溢出而崩溃");
+        assert_eq!(
+            billable_usage_is_complete(&response, usage),
+            expected,
+            "{response}"
+        );
+    }
+}
+
+#[test]
 fn billable_usage_should_require_valid_input_output_and_cache_facts() {
     for (raw, expected) in [
         (json!({}), false),
