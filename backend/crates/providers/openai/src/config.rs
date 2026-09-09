@@ -213,6 +213,7 @@ impl CodexWebSocketPoolSettings {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodexQuotaSettings {
+    /// 保留模型目录的刷新周期；额度独立每 30 秒检查周期复核和 reset 到期条件。
     pub refresh_interval_minutes: u64,
 }
 

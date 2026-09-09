@@ -74,7 +74,7 @@ async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions
     assert_eq!(bundle.core_provider().name(), "openai");
     assert_eq!(bundle.admin_provider().provider_kind().as_str(), "openai");
     let contributions = bundle.take_worker_contributions();
-    assert_eq!(contributions.len(), 4);
+    assert_eq!(contributions.len(), 5);
     assert!(
         contributions
             .iter()
@@ -101,6 +101,30 @@ async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions
         panic!("Desktop release worker must be scheduled");
     };
     assert_eq!(schedule.interval(), APPCAST_POLL_INTERVAL);
+    for (owner, interval) in [
+        ("openai", Duration::from_secs(30)),
+        (
+            "openai-model-catalog",
+            config.config.quota_refresh_policy().interval(),
+        ),
+    ] {
+        let schedule = contributions
+            .iter()
+            .find_map(|contribution| match contribution {
+                WorkerContribution::Registration(registration)
+                    if registration.id.kind() == WorkerKind::QuotaCatalogHealth
+                        && registration.id.owner() == owner =>
+                {
+                    match &registration.runnable {
+                        WorkerRunnable::Scheduled { schedule, .. } => Some(schedule),
+                        WorkerRunnable::Daemon { .. } => None,
+                    }
+                }
+                _ => None,
+            })
+            .expect("quota/catalog scheduled worker");
+        assert_eq!(schedule.interval(), interval, "{owner}");
+    }
     assert!(contributions.iter().any(|contribution| {
         matches!(
             contribution,

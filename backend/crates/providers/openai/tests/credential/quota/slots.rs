@@ -173,6 +173,99 @@ async fn recovery_checks_each_exhausted_slot_in_worker_and_manual_refresh() {
 }
 
 #[tokio::test]
+async fn worker_detects_early_resets_without_unlocking_other_exhausted_windows() {
+    let short_reset = Utc::now().timestamp() + 18_000;
+    let week_reset = Utc::now().timestamp() + 604_800;
+    for (name, old_short, old_week, new_short, new_week, recovered) in [
+        ("short_only", Some(100), None, Some(0), None, true),
+        ("weekly_only", None, Some(100), None, Some(0), true),
+        (
+            "short_with_weekly_available",
+            Some(100),
+            Some(45),
+            Some(0),
+            Some(45),
+            true,
+        ),
+        (
+            "weekly_still_exhausted",
+            Some(100),
+            Some(100),
+            Some(0),
+            Some(100),
+            false,
+        ),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = format!("acct_early_{name}");
+        create_account(&store, &account_id).await;
+        let account = store.account(&account_id).expect("account");
+        let server = MockServer::start().await;
+        let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
+        let window = |used: Option<u64>, reset, seconds| {
+            used.map(|used| {
+                json!({
+                    "used_percent": used,
+                    "reset_at": reset,
+                    "limit_window_seconds": seconds,
+                })
+            })
+        };
+        mount_usage(
+            &server,
+            json!({"rate_limit": {
+                "allowed": false,
+                "primary_window": window(old_short, short_reset, 18_000),
+                "secondary_window": window(old_week, week_reset, 604_800),
+            }}),
+        )
+        .await;
+        let baseline = service
+            .refresh_account(account.id())
+            .await
+            .expect("seed exhaustion");
+        assert!(baseline.quota().reset_at().expect("future reset") > SystemTime::now());
+
+        mount_usage(
+            &server,
+            json!({"rate_limit": {
+                "allowed": recovered,
+                "primary_window": window(new_short, short_reset + 18_000, 18_000),
+                "secondary_window": window(new_week, if new_week == Some(0) {
+                    week_reset + 604_800
+                } else {
+                    week_reset
+                }, 604_800),
+            }}),
+        )
+        .await;
+        let summary = service
+            .synchronize()
+            .await
+            .expect("periodic early reset check");
+        assert_eq!(summary.updated, u64::from(recovered), "{name}");
+        assert_eq!(summary.exhausted, u64::from(!recovered), "{name}");
+        assert_eq!(
+            store
+                .account(&account_id)
+                .expect("updated account")
+                .quota()
+                .is_exhausted(),
+            !recovered,
+            "{name}"
+        );
+
+        // 未恢复的周窗口仍在未来，也必须保留复核节流；恢复后则退出定时复核。
+        service.synchronize().await.expect("next worker cycle");
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            1,
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn partial_recovery_survives_restart_missing_windows_and_changed_roles() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_partial").await;

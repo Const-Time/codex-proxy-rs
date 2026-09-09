@@ -57,8 +57,8 @@ use snapshot::{
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 pub(crate) const QUOTA_SCHEDULING_TTL: Duration = Duration::from_secs(10 * 60);
 const QUOTA_HYDRATION_FAILURE_TTL: Duration = Duration::from_secs(5);
-const EXHAUSTED_QUOTA_FALLBACK_RECHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const EXHAUSTED_QUOTA_RESET_GRACE: Duration = Duration::from_secs(2 * 60);
 /// 首次 OAuth 异步观察失败时，由既有 quota worker 兜底重试的单轮上限。
 const INITIAL_QUOTA_SYNC_BATCH: usize = 100;
 // 5xx 上游拒绝的短退避重试预算；指数退避 1s/2s，吞掉瞬时抖动。
@@ -68,8 +68,8 @@ const QUOTA_FETCH_5XX_BASE_DELAY: Duration = Duration::from_secs(1);
 /// OpenAI Provider 主动额度刷新的调度策略。
 ///
 /// 正常账号依赖请求响应的被动额度同步；周期 worker 仅复核已耗尽账号。
-/// 该策略只控制 Provider 自己的 quota worker 频率，避免把 OpenAI
-/// 额度语义泄漏到公共调度层。
+/// 该策略保留模型目录的周期刷新频率；额度到期检查使用独立的短周期，
+/// 避免到达 reset 后还要等待完整的目录刷新周期。
 #[derive(Debug, Clone, Copy)]
 pub struct CodexQuotaRefreshPolicy {
     interval: Duration,
@@ -204,7 +204,12 @@ struct CodexQuotaSchedulingProjection {
 struct CodexQuotaProjectionState {
     next_version: u64,
     entries: BTreeMap<ProviderAccountId, CodexQuotaSchedulingEntry>,
-    last_periodic_refresh_at: BTreeMap<ProviderAccountId, Instant>,
+    last_periodic_refresh_at: BTreeMap<ProviderAccountId, CodexQuotaRefreshAttempt>,
+}
+
+struct CodexQuotaRefreshAttempt {
+    monotonic_at: Instant,
+    wall_at: SystemTime,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -398,16 +403,27 @@ impl CodexQuotaSchedulingProjection {
             .last_periodic_refresh_at
             .retain(|account_id, _| candidate_ids.contains(account_id));
 
-        // 正常账号只由真实请求的响应头和 `codex.rate_limits` 被动同步。定时器只复核
-        // 已耗尽且已到 reset/fallback 时刻的账号；重复复核至少间隔 30 分钟。
+        // 正常账号只由真实请求的响应头和 `codex.rate_limits` 被动同步。
+        // 已耗尽账号每 30 分钟复核，不能等待旧 reset：官方活动可能提前重置额度。
+        // reset + 2 分钟可提前触发一次复核，给上游重置留出传播时间。
         let mut reserved = Vec::new();
         for account in candidates {
-            if !periodic_quota_refresh_due(&state, account.id(), refreshed_at) {
+            if !periodic_quota_refresh_due(
+                &state,
+                account.id(),
+                account.quota().reset_at(),
+                now,
+                refreshed_at,
+            ) {
                 continue;
             }
-            state
-                .last_periodic_refresh_at
-                .insert(account.id().clone(), refreshed_at);
+            state.last_periodic_refresh_at.insert(
+                account.id().clone(),
+                CodexQuotaRefreshAttempt {
+                    monotonic_at: refreshed_at,
+                    wall_at: now,
+                },
+            );
             reserved.push(account);
         }
         reserved
@@ -415,24 +431,27 @@ impl CodexQuotaSchedulingProjection {
 }
 
 fn quota_refresh_candidate(account: ProviderAccount, now: SystemTime) -> Option<ProviderAccount> {
-    // reset 到期是“应刷新”的信号，不是“已恢复”的证据。
-    (eligible_periodic_quota_refresh(&account, now)
-        && account
-            .quota()
-            .exhaustion_refresh_due(now, EXHAUSTED_QUOTA_FALLBACK_RECHECK_INTERVAL))
-    .then_some(account)
+    (eligible_periodic_quota_refresh(&account, now) && account.quota().is_exhausted())
+        .then_some(account)
 }
 
 fn periodic_quota_refresh_due(
     state: &CodexQuotaProjectionState,
     account_id: &ProviderAccountId,
-    now: Instant,
+    reset_at: Option<SystemTime>,
+    now: SystemTime,
+    monotonic_now: Instant,
 ) -> bool {
     state
         .last_periodic_refresh_at
         .get(account_id)
         .is_none_or(|last| {
-            now.saturating_duration_since(*last) >= EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL
+            monotonic_now.saturating_duration_since(last.monotonic_at)
+                >= EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL
+                || reset_at
+                    .and_then(|reset| reset.checked_add(EXHAUSTED_QUOTA_RESET_GRACE))
+                    // 已在该边界之后复核过时回到周期重试，避免过期 reset 每轮触发。
+                    .is_some_and(|due_at| last.wall_at < due_at && due_at <= now)
         })
 }
 

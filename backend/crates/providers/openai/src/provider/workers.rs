@@ -7,8 +7,10 @@ pub(super) const WORKER_MAXIMUM_BACKOFF: Duration = Duration::from_secs(60);
 pub(super) const WORKER_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 pub(super) const WORKER_LEASE_RENEWAL: Duration = Duration::from_secs(5 * 60);
 pub(super) const OAUTH_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) const QUOTA_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const DESKTOP_RELEASE_WORKER_OWNER: &str = "openai-desktop-release";
 pub(super) const MODEL_ETAG_WORKER_OWNER: &str = "openai-model-etag";
+pub(super) const MODEL_CATALOG_WORKER_OWNER: &str = "openai-model-catalog";
 
 pub(crate) fn worker_contributions(
     refresh: Arc<CodexCredentialRefreshService>,
@@ -20,6 +22,7 @@ pub(crate) fn worker_contributions(
 ) -> Result<Vec<WorkerContribution>, WorkerDefinitionError> {
     let refresh_id = WorkerId::try_new(WorkerKind::OAuthRefresh, PROVIDER_NAME)?;
     let quota_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, PROVIDER_NAME)?;
+    let catalog_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, MODEL_CATALOG_WORKER_OWNER)?;
     let etag_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, MODEL_ETAG_WORKER_OWNER)?;
     let desktop_release_id =
         WorkerId::try_new(WorkerKind::QuotaCatalogHealth, DESKTOP_RELEASE_WORKER_OWNER)?;
@@ -34,9 +37,13 @@ pub(crate) fn worker_contributions(
     contributions.extend([
         WorkerContribution::Registration(scheduled_registration(
             quota_id,
+            QUOTA_CHECK_INTERVAL,
+            Box::new(OpenAiQuotaTask { quota }),
+        )?),
+        WorkerContribution::Registration(scheduled_registration(
+            catalog_id,
             quota_refresh_policy.interval(),
-            Box::new(OpenAiQuotaTask {
-                quota,
+            Box::new(OpenAiCatalogTask {
                 catalog: Arc::clone(&catalog),
             }),
         )?),
@@ -159,6 +166,9 @@ impl ScheduledTask for OpenAiOAuthRefreshTask {
 
 pub(super) struct OpenAiQuotaTask {
     quota: Arc<CodexCredentialQuotaService>,
+}
+
+pub(super) struct OpenAiCatalogTask {
     catalog: Arc<CodexCredentialCatalogService>,
 }
 
@@ -195,7 +205,6 @@ impl ScheduledTask for OpenAiQuotaTask {
             if context.cancellation().is_cancelled() {
                 return Ok(());
             }
-            let mut failures = false;
             match self.quota.synchronize().await {
                 Ok(summary) if summary.has_operational_failures() => {
                     tracing::warn!(
@@ -209,29 +218,32 @@ impl ScheduledTask for OpenAiQuotaTask {
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    failures = true;
                     tracing::warn!(
                         error = %error,
                         "OpenAI quota synchronization failed"
                     );
+                    return Err(WorkerTaskError::safe("OpenAI quota synchronization failed"));
                 }
             }
+            Ok(())
+        })
+    }
+}
+
+impl ScheduledTask for OpenAiCatalogTask {
+    fn run_cycle(&self, context: WorkerCycleContext) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
             if context.cancellation().is_cancelled() {
                 return Ok(());
             }
             match self.catalog.refresh_catalogs().await {
-                Ok(_) | Err(CodexCredentialCatalogError::NoEligibleCredential) => {}
+                Ok(_) | Err(CodexCredentialCatalogError::NoEligibleCredential) => Ok(()),
                 Err(error) => {
-                    failures = true;
                     tracing::warn!(error = %error, "OpenAI model catalog refresh failed");
+                    Err(WorkerTaskError::safe(
+                        "OpenAI model catalog synchronization failed",
+                    ))
                 }
-            }
-            if failures {
-                Err(WorkerTaskError::safe(
-                    "OpenAI quota or catalog synchronization failed",
-                ))
-            } else {
-                Ok(())
             }
         })
     }
