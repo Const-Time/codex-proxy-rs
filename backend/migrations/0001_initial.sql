@@ -33,18 +33,18 @@ create table admin_audit_events (
   constraint admin_audit_events_actor_fk foreign key (actor_admin_user_id)
     references admin_users (id)
     on update restrict
-    on delete set null
+    on delete set null,
+  constraint admin_audit_events_actor_identity_ck check (
+    actor_admin_user_id is null
+    or (actor_kind = 'admin_session' and actor_ref = 'admin:' || actor_admin_user_id)
+  )
 );
 
 create index admin_audit_events_actor_idx
-  on admin_audit_events (actor_admin_user_id, created_at desc, id desc)
+  on admin_audit_events (actor_admin_user_id)
   where actor_admin_user_id is not null;
 create index admin_audit_events_created_idx
   on admin_audit_events (created_at desc, id desc);
-create index admin_audit_events_entity_idx
-  on admin_audit_events (entity_kind, entity_ref, created_at desc, id desc);
-create index admin_audit_events_actor_ref_idx
-  on admin_audit_events (actor_ref, created_at desc, id desc);
 
 -- 客户端 API 密钥、鉴权范围与限额。
 create table client_api_keys (
@@ -70,8 +70,6 @@ create table client_api_keys (
 
 create index client_api_keys_created_idx
   on client_api_keys (created_at desc, id desc);
-create index client_api_keys_last_used_idx
-  on client_api_keys (last_used_at desc, id desc);
 
 -- 全局运行参数与配置版本。
 create table runtime_settings (
@@ -88,6 +86,8 @@ create table runtime_settings (
   ops_event_retention_days bigint not null default 30,
   audit_retention_days bigint not null default 90,
   updated_at timestamptz not null,
+  min_codex_desktop_version text,
+  min_codex_cli_version text,
   constraint runtime_settings_singleton_ck check (id = 1),
   constraint runtime_settings_revision_ck check (config_revision > 0),
   constraint runtime_settings_refresh_ck check (
@@ -107,6 +107,24 @@ create table runtime_settings (
     usage_retention_days >= 31
     and ops_event_retention_days > 0
     and audit_retention_days > 0
+  ),
+  constraint runtime_settings_client_versions_ck check (
+    (
+      min_codex_desktop_version is null
+      or (
+        octet_length(min_codex_desktop_version) between 1 and 64
+        and min_codex_desktop_version = btrim(min_codex_desktop_version)
+        and min_codex_desktop_version !~ '[[:cntrl:]]'
+      )
+    )
+    and (
+      min_codex_cli_version is null
+      or (
+        octet_length(min_codex_cli_version) between 1 and 64
+        and min_codex_cli_version = btrim(min_codex_cli_version)
+        and min_codex_cli_version !~ '[[:cntrl:]]'
+      )
+    )
   )
 );
 
@@ -224,13 +242,8 @@ create index provider_accounts_runtime_idx
   on provider_accounts (provider_kind, enabled, id);
 create index provider_accounts_credential_state_idx
   on provider_accounts (credential_state, id);
-create index provider_accounts_quota_access_idx
-  on provider_accounts (quota_access_state, quota_reset_at, id);
 create index provider_accounts_access_expiry_idx
   on provider_accounts (access_token_expires_at, id);
-create index provider_accounts_refresh_due_idx
-  on provider_accounts (next_refresh_at, id)
-  where enabled and has_refresh_token and next_refresh_at is not null;
 create index provider_accounts_email_idx
   on provider_accounts (provider_kind, lower(email))
   where email is not null;
@@ -266,8 +279,6 @@ create table account_groups (
 
 create unique index account_groups_name_uq
   on account_groups (lower(name));
-create index account_groups_list_idx
-  on account_groups (enabled, created_at desc, id desc);
 
 create table account_group_accounts (
   account_group_id text not null,
@@ -376,6 +387,25 @@ create table model_requests (
   routing_scope text not null,
   routing_group_refs text[] not null default '{}',
   routing_group_names_snapshot jsonb not null default '[]'::jsonb,
+  admission_decision_ms bigint,
+  account_selection_wait_ms bigint,
+  capacity_used_slots bigint,
+  capacity_total_slots bigint,
+  raw_upstream_error text,
+  continuation_affinity_hash text,
+  continuation_previous_response_id_hash text,
+  continuation_requested boolean not null default false,
+  continuation_unavailable_reason text,
+  upstream_connection_id text,
+  upstream_connection_exit_reason text,
+  upstream_connection_age_ms bigint,
+  upstream_connection_idle_ms bigint,
+  recovery_request_id text,
+  recovered_at timestamptz,
+  recovery_attempt_count integer not null default 0,
+  recovery_retry_delay_ms bigint,
+  recovery_total_latency_ms bigint,
+  diagnostic_trace_json jsonb,
   constraint model_requests_client_ref_ck check (
     client_api_key_id is null or client_api_key_id = client_api_key_ref
   ),
@@ -523,18 +553,97 @@ create table model_requests (
   constraint model_requests_account_fk foreign key (provider_account_id)
     references provider_accounts (id)
     on update restrict
-    on delete set null
+    on delete set null,
+  constraint model_requests_runtime_pressure_ck check (
+    (admission_decision_ms is null or admission_decision_ms >= 0)
+    and (account_selection_wait_ms is null or account_selection_wait_ms >= 0)
+    and (
+      (capacity_used_slots is null and capacity_total_slots is null)
+      or (
+        capacity_used_slots >= 0
+        and capacity_total_slots > 0
+        and capacity_used_slots <= capacity_total_slots
+      )
+    )
+  ),
+  constraint model_requests_continuation_hashes_ck check (
+    (continuation_affinity_hash is null
+      or continuation_affinity_hash ~ '^[0-9a-f]{64}$')
+    and (continuation_previous_response_id_hash is null
+      or continuation_previous_response_id_hash ~ '^[0-9a-f]{64}$')
+    and (continuation_requested
+      or continuation_previous_response_id_hash is null)
+  ),
+  constraint model_requests_continuation_reason_ck check (
+    continuation_unavailable_reason is null
+    or (
+      octet_length(continuation_unavailable_reason) between 1 and 64
+      and continuation_unavailable_reason ~ '^[a-z][a-z0-9_]*$'
+    )
+  ),
+  constraint model_requests_upstream_connection_ck check (
+    (
+      upstream_connection_id is null
+      and upstream_connection_exit_reason is null
+      and upstream_connection_age_ms is null
+      and upstream_connection_idle_ms is null
+    )
+    or (
+      octet_length(upstream_connection_id) between 1 and 128
+      and upstream_connection_id !~ '[[:cntrl:]]'
+      and octet_length(upstream_connection_exit_reason) between 1 and 64
+      and upstream_connection_exit_reason ~ '^[a-z][a-z0-9_]*$'
+      and upstream_connection_age_ms >= 0
+      and upstream_connection_idle_ms between 0 and upstream_connection_age_ms
+    )
+  ),
+  constraint model_requests_recovery_ck check (
+    recovery_attempt_count >= 0
+    and (
+      (
+        recovered_at is null
+        and recovery_request_id is null
+        and recovery_retry_delay_ms is null
+        and recovery_total_latency_ms is null
+      )
+      or (
+        recovered_at is not null
+        and recovered_at >= completed_at
+        and recovery_request_id is not null
+        and octet_length(recovery_request_id) between 1 and 128
+        and recovery_attempt_count > 0
+        and recovery_retry_delay_ms >= 0
+        and recovery_total_latency_ms >= recovery_retry_delay_ms
+      )
+    )
+  ),
+  constraint model_requests_diagnostic_trace_object
+    check (diagnostic_trace_json is null or jsonb_typeof(diagnostic_trace_json) = 'object'),
+  constraint model_requests_fact_completeness_ck check (
+    (provider_account_id is null or provider_account_ref is not null)
+    and (cost_source = 'unavailable' or cost_currency is not null)
+    and num_nonnulls(capacity_used_slots, capacity_total_slots) in (0, 2)
+    and num_nonnulls(
+      upstream_connection_id, upstream_connection_exit_reason,
+      upstream_connection_age_ms, upstream_connection_idle_ms
+    ) in (0, 4)
+    and (
+      recovered_at is null
+      or (
+        completed_at is not null
+        and recovery_retry_delay_ms is not null
+        and recovery_total_latency_ms is not null
+      )
+    )
+  )
 );
 
 create index model_requests_client_idx
-  on model_requests (client_api_key_id, started_at desc, id desc);
+  on model_requests (client_api_key_id)
+  where client_api_key_id is not null;
 create index model_requests_account_idx
-  on model_requests (
-    provider_account_id,
-    provider_kind,
-    started_at desc,
-    id desc
-  );
+  on model_requests (provider_account_id)
+  where provider_account_id is not null;
 create index model_requests_started_idx
   on model_requests (started_at desc, id desc);
 create index model_requests_client_ref_idx
@@ -561,6 +670,37 @@ create index model_requests_retention_idx
 create index model_requests_routing_group_refs_idx
   on model_requests using gin (routing_group_refs);
 
+create index model_requests_pending_continuation_recovery_idx
+  on model_requests (
+    client_api_key_ref,
+    continuation_affinity_hash,
+    completed_at desc,
+    id desc
+  )
+  where error_kind = 'continuation_recovery_required'
+    and recovered_at is null
+    and continuation_affinity_hash is not null;
+
+create index model_requests_recovery_request_idx
+  on model_requests (recovery_request_id)
+  where recovery_request_id is not null;
+
+create index model_requests_pending_ws_transport_recovery_idx
+  on model_requests (
+    client_api_key_ref,
+    continuation_affinity_hash,
+    completed_at desc,
+    id desc
+  )
+  where provider_kind = 'openai'
+    and outcome = 'failed'
+    and error_kind = 'upstream_unavailable'
+    and upstream_transport = 'websocket'
+    and upstream_send_state = 'ambiguous'
+    and downstream_committed_at is null
+    and recovered_at is null
+    and continuation_affinity_hash is not null;
+
 -- 运行期警告与错误事件。
 create table ops_events (
   id text primary key,
@@ -583,8 +723,9 @@ create table ops_events (
   upstream_request_id text,
   latency_ms bigint,
   message text not null,
-  occurrence_count integer not null default 1,
   created_at timestamptz not null,
+  upstream_send_state text,
+  raw_upstream_error text,
   constraint ops_events_request_attempt_ck check (
     (
       model_request_id is null
@@ -601,7 +742,6 @@ create table ops_events (
     (status_code is null or status_code between 100 and 599)
     and (retry_after_ms is null or retry_after_ms >= 0)
     and (latency_ms is null or latency_ms >= 0)
-    and occurrence_count > 0
   ),
   constraint ops_events_account_ref_ck check (
     provider_account_id is null or provider_account_id = provider_account_ref
@@ -613,24 +753,23 @@ create table ops_events (
   constraint ops_events_account_fk foreign key (provider_account_id)
     references provider_accounts (id)
     on update restrict
-    on delete set null
+    on delete set null,
+  constraint ops_events_upstream_send_state_ck check (
+    upstream_send_state is null
+    or upstream_send_state in ('not_sent', 'sent', 'ambiguous')
+  ),
+  constraint ops_events_account_snapshot_present_ck check (
+    provider_account_id is null or provider_account_ref is not null
+  )
 );
 
 create index ops_events_request_idx
   on ops_events (model_request_id, attempt_index, id);
 create index ops_events_account_idx
-  on ops_events (
-    provider_account_id,
-    provider_kind,
-    created_at desc,
-    id desc
-  );
+  on ops_events (provider_account_id)
+  where provider_account_id is not null;
 create index ops_events_created_idx
   on ops_events (created_at desc, id desc);
-create index ops_events_component_idx
-  on ops_events (component, created_at desc, id desc);
-create index ops_events_failure_idx
-  on ops_events (failure_kind, created_at desc, id desc);
 create index ops_events_account_ref_idx
   on ops_events (provider_account_ref, created_at desc, id desc)
   where provider_account_ref is not null;
@@ -798,6 +937,9 @@ create table backup_records (
   -- expires_at 为空，或不早于创建时间（创建时 now + 天数 恒晚于 created_at）。
   constraint backup_records_expiry_ck check (
     expires_at is null or expires_at >= created_at
+  ),
+  constraint backup_records_completion_order_ck check (
+    completed_at is null or completed_at >= started_at
   )
 );
 

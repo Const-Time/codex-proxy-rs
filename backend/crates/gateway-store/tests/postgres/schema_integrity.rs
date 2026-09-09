@@ -1,4 +1,4 @@
-use super::{TEST_MIGRATOR, TestDatabase};
+use super::TestDatabase;
 
 async fn seed_request(pool: &sqlx::PgPool) {
     sqlx::query(
@@ -101,8 +101,8 @@ async fn account_snapshots_are_required_before_live_foreign_keys_can_be_cleared(
 }
 
 #[tokio::test]
-async fn upgrade_normalizes_admin_identity_and_preserves_existing_event_rows() {
-    let Some(db) = TestDatabase::create_at("audit_upgrade", 7).await else {
+async fn audit_requires_canonical_admin_identity_and_retains_it_after_admin_deletion() {
+    let Some(db) = TestDatabase::create("audit_identity").await else {
         return;
     };
     sqlx::raw_sql(
@@ -110,28 +110,12 @@ async fn upgrade_normalizes_admin_identity_and_preserves_existing_event_rows() {
            values ('admin_test', 'test_hash', now(), now());
          insert into admin_audit_events (id, actor_kind, actor_admin_user_id, actor_ref,
            action, entity_kind, entity_ref, created_at)
-           values ('audit_before_upgrade', 'admin_session', 'admin_test', 'admin_test',
-             'update', 'settings', '1', now());
-         insert into ops_events (id, level, component, operation, failure_kind, message, created_at)
-           values ('ops_before_upgrade', 'error', 'probe', 'probe', 'timeout', 'test', now());",
+           values ('audit_identity', 'admin_session', 'admin_test', 'admin:admin_test',
+             'update', 'settings', '1', now());",
     )
     .execute(&db.pool)
     .await
-    .expect("seed data from pre-optimization schema");
-    TEST_MIGRATOR
-        .run(&db.pool)
-        .await
-        .expect("upgrade populated database");
-    let identity: String = sqlx::query_scalar("select actor_ref from admin_audit_events")
-        .fetch_one(&db.pool)
-        .await
-        .expect("read normalized identity");
-    assert_eq!(identity, "admin:admin_test");
-    let events: i64 = sqlx::query_scalar("select count(*) from ops_events")
-        .fetch_one(&db.pool)
-        .await
-        .expect("read retained events");
-    assert_eq!(events, 1);
+    .expect("seed audit event with canonical admin identity");
     let error = sqlx::query("update admin_audit_events set actor_ref = 'admin_test'")
         .execute(&db.pool)
         .await
