@@ -2,7 +2,7 @@
 name = "gateway-protocol"
 version = "0.0.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 publish = false
 rust-version = "1.97"
 autotests = false
