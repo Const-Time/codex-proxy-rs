@@ -1,28 +1,30 @@
 <script setup lang="ts">
-import type { Account } from '@/api'
+import type { Account, AccountResetCredit } from '@/api'
 import { AlertTriangle, RefreshCw, TicketCheck } from '@lucide/vue'
 import dayjs from 'dayjs'
-import { computed, shallowRef, useId, watch } from 'vue'
+import utc from 'dayjs/plugin/utc'
+import { computed, shallowRef, watch } from 'vue'
 
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
-import BaseRadio from '@/components/base/BaseRadio.vue'
 import { useAccountResetCredits } from '../../composables/useAccountResetCredits'
+import UsageLimits from './UsageLimits.vue'
 
 const props = defineProps<{
-  accountId: string
+  account: Account
 }>()
 
 const emit = defineEmits<{
   accountUpdated: [account: Account]
 }>()
 
+dayjs.extend(utc)
+
 const {
   availableCredits,
   availableCount,
-  selectedCreditId,
   consumptionCredit,
   canRequestConsume,
   hasSnapshot,
@@ -37,18 +39,16 @@ const {
   cancelConsume,
   confirmConsume,
 } = useAccountResetCredits({
-  accountId: () => props.accountId,
+  accountId: () => props.account.id,
   onAccountUpdated: account => emit('accountUpdated', account),
 })
 
 const panelOpen = shallowRef(false)
-const creditRadioName = `account-reset-credit-${useId()}`
 const modalTitle = computed(() => {
   if (!showConfirm.value)
-    return '主动重置额度'
+    return '额度重置'
   return ambiguous.value ? '确认上次重置' : '确认重置额度'
 })
-const modalDescription = computed(() => (showConfirm.value ? undefined : '选择一张重置卡后继续'))
 const triggerLabel = computed(() => {
   if (ambiguous.value)
     return '查看主动重置卡，有一项操作待确认'
@@ -60,7 +60,17 @@ const triggerLabel = computed(() => {
   return hasSnapshot.value ? `查看主动重置卡，最近查询 ${availableCount.value} 张可用` : '查看主动重置卡'
 })
 const showTriggerCount = computed(() => hasSnapshot.value && availableCount.value > 0)
-const confirmCreditTitle = computed(() => consumptionCredit.value?.title || 'Codex 主动重置卡')
+const confirmCreditTitle = computed(() => creditTitle(consumptionCredit.value))
+const creditItems = computed(() => availableCredits.value.map(credit => ({
+  id: credit.id,
+  title: creditTitle(credit),
+  expiry: expiryLabel(credit.expiresAt),
+})))
+const countLabel = computed(() => {
+  if (!hasSnapshot.value)
+    return loading.value ? '查询中' : '待查询'
+  return `可用 ${availableCount.value} 次`
+})
 
 watch(panelOpen, (isOpen) => {
   if (isOpen) {
@@ -75,25 +85,18 @@ function expiryLabel(value: string | null) {
   if (!value)
     return '有效期由上游决定'
   const expiry = dayjs(value)
-  return expiry.isValid() ? `${expiry.format('YYYY-MM-DD HH:mm')} 到期` : '到期时间未知'
+  return expiry.isValid() ? `将于 ${expiry.utcOffset(8).format('YYYY-MM-DD HH:mm')} 到期` : '到期时间未知'
 }
 
-function creditOptionClasses(creditId: string) {
-  return [
-    'w-full min-w-0 rounded-cp px-4 py-3 outline-none transition-colors duration-150 motion-reduce:transition-none',
-    selectedCreditId.value === creditId
-      ? 'bg-cp-control-item-bg-active'
-      : 'bg-cp-fill-quaternary hover:bg-cp-bg-text-hover',
-  ]
+function creditTitle(credit: AccountResetCredit | undefined) {
+  return credit?.title?.trim() || '用量重置'
 }
 
-function creditOptionLabel(credit: { title: string | null, expiresAt: string | null }) {
-  return `${credit.title || 'Codex 主动重置卡'}，${expiryLabel(credit.expiresAt)}`
-}
-
-async function handleConfirmConsume() {
-  if (await confirmConsume())
-    panelOpen.value = false
+function handleRequestConsume(creditId: string) {
+  if (loading.value || consuming.value || ambiguous.value)
+    return
+  selectCredit(creditId)
+  requestConsume()
 }
 </script>
 
@@ -116,9 +119,8 @@ async function handleConfirmConsume() {
   <BaseModal
     v-model="panelOpen"
     :title="modalTitle"
-    :description="modalDescription"
     :tone="showConfirm ? 'warning' : 'neutral'"
-    size="sm"
+    :size="showConfirm ? 'sm' : 'md'"
     :dismissible="!consuming"
   >
     <div v-if="showConfirm" class="grid gap-3">
@@ -139,43 +141,35 @@ async function handleConfirmConsume() {
     </div>
 
     <div v-else class="grid gap-4">
+      <UsageLimits :windows="account.quota.windows" />
+
       <section v-if="ambiguous" class="flex items-start gap-3 rounded-cp bg-cp-warning-container px-4 py-3.5" role="status">
         <AlertTriangle class="mt-0.5 size-4 shrink-0 text-cp-warning-on-container" />
-        <div class="min-w-0">
+        <div class="min-w-0 flex-1">
           <p class="m-0 text-cp-sm font-heavy text-cp-warning-on-container">
             上次操作结果待确认
           </p>
           <p class="mt-1 mb-0 text-cp-xs leading-normal font-emphasis text-cp-text-secondary">
-            再确认一次即可。
+            请继续确认上次重置结果。
           </p>
         </div>
+        <BaseButton size="sm" variant="soft" :disabled="loading || consuming || !canRequestConsume" @click="requestConsume">
+          继续确认
+        </BaseButton>
       </section>
 
-      <section class="flex items-center gap-3 rounded-cp bg-cp-fill-quaternary px-4 py-3.5">
-        <span
-          class="inline-grid size-9 shrink-0 place-items-center rounded-cp bg-cp-fill-tertiary text-cp-primary-text"
-        >
-          <TicketCheck class="size-4" />
-        </span>
-        <div class="min-w-0">
-          <p class="m-0 text-cp-sm font-heavy text-cp-text">
-            可用重置卡
-          </p>
-          <p class="mt-1 mb-0 text-cp-xs leading-none font-emphasis text-cp-text-secondary">
-            每次操作消费一张
-          </p>
-        </div>
-        <strong class="ml-auto font-mono text-[22px] leading-none font-extrabold text-cp-text">
-          {{ availableCount }}
-          <span class="ml-0.5 text-cp-xs font-heavy text-cp-text-quaternary">张</span>
-        </strong>
-      </section>
-
-      <section class="grid gap-2.5">
-        <div class="flex min-h-8 items-center justify-between gap-3">
-          <h3 class="m-0 text-cp-sm font-heavy text-cp-text-quaternary">
-            选择重置卡
+      <section class="overflow-hidden rounded-cp bg-cp-fill-quaternary" aria-label="使用限额重置">
+        <div class="flex items-center gap-3 pt-4 pr-3 pb-1 pl-4">
+          <h3 class="m-0 min-w-0 flex-1 text-cp-sm font-heavy text-cp-text">
+            使用限额重置
           </h3>
+          <span
+            class="shrink-0 rounded-cp-sm px-2 py-1 text-cp-xs leading-none font-heavy tabular-nums"
+            :class="hasSnapshot && availableCount > 0 ? 'bg-cp-success-container text-cp-success-on-container' : 'bg-cp-fill-tertiary text-cp-text-secondary'"
+            role="status"
+          >
+            {{ countLabel }}
+          </span>
           <BaseIconButton
             variant="ghost"
             size="sm"
@@ -191,66 +185,66 @@ async function handleConfirmConsume() {
           </BaseIconButton>
         </div>
 
-        <p
-          v-if="loadError"
-          class="m-0 rounded-cp bg-cp-error-container px-4 py-3 text-cp-xs leading-normal font-emphasis text-cp-error-on-container"
-          role="status"
-        >
-          {{ loadError }}，请刷新重试。
-        </p>
-
-        <div v-else-if="availableCredits.length" class="grid gap-2" role="radiogroup" aria-label="选择要使用的重置卡">
-          <BaseRadio
-            v-for="credit in availableCredits"
-            :key="credit.id"
-            :model-value="selectedCreditId"
-            :value="credit.id"
-            :name="creditRadioName"
-            :label="creditOptionLabel(credit)"
-            :disabled="ambiguous || consuming"
-            :class="creditOptionClasses(credit.id)"
-            @update:model-value="selectCredit"
+        <div :aria-busy="loading || consuming">
+          <p
+            v-if="loadError"
+            class="mx-4 mt-0 mb-4 rounded-cp bg-cp-error-container px-4 py-3 text-cp-xs leading-normal font-emphasis text-cp-error-on-container"
+            role="status"
           >
-            <span class="block min-w-0">
-              <span class="block truncate text-cp-sm font-heavy text-cp-text">
-                {{ credit.title || 'Codex 主动重置卡' }}
-              </span>
-              <span class="mt-1 block truncate font-mono text-[10px] font-emphasis text-cp-text-quaternary">
-                {{ expiryLabel(credit.expiresAt) }}
-              </span>
-            </span>
-          </BaseRadio>
-        </div>
+            {{ loadError }}，请刷新重试。
+          </p>
+          <p
+            v-else-if="loading && !hasSnapshot"
+            class="m-0 px-4 pt-1 pb-4 text-cp-xs font-emphasis text-cp-text-secondary"
+            role="status"
+          >
+            正在查询可用重置次数…
+          </p>
+          <ul v-else-if="creditItems.length" class="m-0 list-none px-0 pt-0 pb-1">
+            <li
+              v-for="credit in creditItems"
+              :key="credit.id"
+              class="flex items-center gap-4 px-4 py-3"
+            >
+              <div class="min-w-0 flex-1">
+                <p class="m-0 text-cp-sm leading-normal font-heavy wrap-anywhere text-cp-text">
+                  {{ credit.title }}
+                </p>
+                <p class="mt-1 mb-0 text-cp-xs leading-normal font-emphasis text-cp-text-secondary">
+                  {{ credit.expiry }}
+                </p>
+              </div>
+              <BaseButton
+                size="sm"
+                variant="primary"
+                :disabled="loading || consuming || ambiguous || availableCount <= 0"
+                :aria-label="`使用重置：${credit.title}，${credit.expiry}`"
+                @click="handleRequestConsume(credit.id)"
+              >
+                使用重置
+              </BaseButton>
+            </li>
+          </ul>
 
-        <div v-else class="overflow-hidden rounded-cp bg-cp-fill-quaternary">
           <BaseEmpty
+            v-else
             :icon="TicketCheck"
             size="sm"
             surface="none"
-            title="当前没有可用重置卡"
+            title="当前没有可用重置次数"
             description="可刷新列表，重新读取上游状态"
           />
         </div>
       </section>
     </div>
 
-    <template #footer>
-      <template v-if="showConfirm">
-        <BaseButton variant="ghost" :disabled="consuming" @click="cancelConsume">
-          返回
-        </BaseButton>
-        <BaseButton variant="primary" :loading="consuming" @click="handleConfirmConsume">
-          {{ ambiguous ? '再次确认' : '确认重置' }}
-        </BaseButton>
-      </template>
-      <template v-else>
-        <BaseButton variant="ghost" :disabled="consuming" @click="panelOpen = false">
-          关闭
-        </BaseButton>
-        <BaseButton variant="primary" :disabled="loading || consuming || !canRequestConsume" @click="requestConsume">
-          {{ ambiguous ? '继续确认' : '下一步' }}
-        </BaseButton>
-      </template>
+    <template v-if="showConfirm" #footer>
+      <BaseButton variant="ghost" :disabled="consuming" @click="cancelConsume">
+        返回
+      </BaseButton>
+      <BaseButton variant="primary" :loading="consuming" @click="confirmConsume">
+        {{ ambiguous ? '再次确认' : '确认重置' }}
+      </BaseButton>
     </template>
   </BaseModal>
 </template>

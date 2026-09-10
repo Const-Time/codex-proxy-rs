@@ -58,7 +58,7 @@ const additionalEntryCount = computed(() => Math.max(summaryEntries.value.length
       </div>
 
       <div v-if="recentUsageEntry" class="flex min-w-0 items-end gap-2">
-        <div class="min-w-0 flex-1">
+        <div class="flex min-w-0 flex-1">
           <AccountQuotaSummaryEntry
             :label="recentUsageEntry.label"
             :windows="recentUsageEntry.windows"

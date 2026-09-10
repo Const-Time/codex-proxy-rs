@@ -58,7 +58,7 @@ const profileOpen = shallowRef(false)
         </BaseIconButton>
         <AccountResetCredits
           v-if="account.provider === 'openai'"
-          :account-id="account.id"
+          :account="account"
           @account-updated="emit('accountUpdated', $event)"
         />
         <BaseIconButton

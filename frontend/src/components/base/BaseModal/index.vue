@@ -239,7 +239,7 @@ onBeforeUnmount(() => {
               </slot>
             </span>
             <div class="min-w-0">
-              <h2 :id="titleId" class="m-0 text-lg leading-[1.15] font-heavy text-cp-text">
+              <h2 :id="titleId" class="relative top-px m-0 text-lg leading-[1.15] font-heavy text-cp-text">
                 {{ title }}
               </h2>
               <p
