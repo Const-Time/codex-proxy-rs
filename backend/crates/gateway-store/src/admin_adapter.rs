@@ -196,6 +196,18 @@ pub(crate) fn store_model_mappings(
 
 #[async_trait::async_trait]
 impl AuthStore for UserAuthStore {
+    async fn subscriptions(
+        &self,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserSubscription>> {
+        self.subscription_records().await
+    }
+    async fn reset_subscriptions(
+        &self,
+        event_id: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<u64> {
+        self.reset_all_subscriptions(event_id, context).await
+    }
     async fn user_groups(
         &self,
         id: &str,

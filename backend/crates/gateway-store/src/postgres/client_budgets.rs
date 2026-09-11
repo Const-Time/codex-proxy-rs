@@ -41,7 +41,7 @@ impl PgClientBudgetStore {
             )
         })?;
         // Recheck live grants, enabled state, and the routing snapshot at admission.
-        let row = sqlx::query("select k.owner_user_id, g.daily_limit_usd::text, g.weekly_limit_usd::text
+        let row = sqlx::query("select k.owner_user_id, user_group_quota_limit(g.daily_limit_usd, k.owner_user_id, g.id)::text as daily_limit_usd, user_group_quota_limit(g.weekly_limit_usd, k.owner_user_id, g.id)::text as weekly_limit_usd
             from client_api_keys k join users u on u.id = k.owner_user_id and u.enabled
             join client_api_key_groups kg on kg.client_api_key_id = k.id
             join account_groups g on g.id = kg.account_group_id and g.enabled
@@ -195,7 +195,7 @@ pub(super) async fn load_client_key_budgets(
         .map(|record| record.id.as_str())
         .collect::<Vec<_>>();
     let rows = sqlx::query(
-        "select k.id, g.daily_limit_usd::text, g.weekly_limit_usd::text,
+        "select k.id, user_group_quota_limit(g.daily_limit_usd, k.owner_user_id, g.id)::text as daily_limit_usd, user_group_quota_limit(g.weekly_limit_usd, k.owner_user_id, g.id)::text as weekly_limit_usd,
         (case when w.daily_end > now() then w.daily_used_usd else 0 end)::text as daily_used,
         (case when w.weekly_end > now() then w.weekly_used_usd else 0 end)::text as weekly_used,
         case when w.daily_end > now() then w.daily_end end as daily_end,

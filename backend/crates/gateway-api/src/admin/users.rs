@@ -22,6 +22,7 @@ pub struct UserView {
     role: &'static str,
     enabled: bool,
     group_ids: Vec<String>,
+    quota_multipliers: std::collections::BTreeMap<String, String>,
     max_concurrency: u64,
     requests_per_minute: u64,
     created_at: String,
@@ -38,6 +39,7 @@ impl From<UserRecord> for UserView {
             max_concurrency: user.limits.max_concurrency,
             requests_per_minute: user.limits.requests_per_minute,
             group_ids: user.group_ids,
+            quota_multipliers: user.quota_multipliers,
             created_at: user.created_at.to_rfc3339(),
             updated_at: user.updated_at.to_rfc3339(),
         }
@@ -61,6 +63,8 @@ struct CreateUserRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateUserRequest {
     #[serde(default)]
+    quota_multipliers: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
     max_concurrency: u64,
     #[serde(default)]
     requests_per_minute: u64,
@@ -82,11 +86,95 @@ where
 {
     Router::new()
         .route("/api/admin/users", get(list::<S>))
+        .route("/api/admin/subscriptions", get(subscriptions::<S>))
+        .route(
+            "/api/admin/subscriptions/reset",
+            post(reset_subscriptions::<S>),
+        )
         .route("/api/admin/users/create", post(create::<S>))
         .route("/api/admin/users/update", post(update::<S>))
         .route("/api/profile", get(profile::<S>))
         .route("/api/profile/groups", get(groups::<S>))
         .route("/api/profile/password", post(change_password::<S>))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubscriptionView {
+    user_id: String,
+    username: String,
+    enabled: bool,
+    group_id: String,
+    group_name: String,
+    quota_multiplier: String,
+    daily_limit_usd: String,
+    weekly_limit_usd: String,
+    daily_used_usd: String,
+    weekly_used_usd: String,
+    daily_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    weekly_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_reset_reason: Option<String>,
+}
+
+async fn subscriptions<S>(
+    State(state): State<S>,
+    _auth: AdminAuth,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let data = state
+        .admin_services()
+        .auth()
+        .subscriptions()
+        .await
+        .map_err(map_admin_service_error)?;
+    let data = data
+        .into_iter()
+        .map(|s| SubscriptionView {
+            user_id: s.user_id,
+            username: s.username,
+            enabled: s.enabled,
+            group_id: s.group_id,
+            group_name: s.group_name,
+            quota_multiplier: s.quota_multiplier,
+            daily_limit_usd: s.daily_limit_usd,
+            weekly_limit_usd: s.weekly_limit_usd,
+            daily_used_usd: s.daily_used_usd,
+            weekly_used_usd: s.weekly_used_usd,
+            daily_resets_at: s.daily_resets_at,
+            weekly_resets_at: s.weekly_resets_at,
+            last_reset_at: s.last_reset_at,
+            last_reset_reason: s.last_reset_reason,
+        })
+        .collect::<Vec<_>>();
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResetSubscriptionsRequest {
+    request_id: String,
+}
+
+async fn reset_subscriptions<S>(
+    State(state): State<S>,
+    auth: AdminAuth,
+    AdminJson(body): AdminJson<ResetSubscriptionsRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let request_id = uuid::Uuid::parse_str(&body.request_id)
+        .map_err(|_| AdminError::bad_request("requestId 必须是 UUID"))?;
+    let count = state
+        .admin_services()
+        .auth()
+        .reset_subscriptions(request_id, &auth.context().mutation_context())
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(count)))
 }
 
 #[derive(Serialize)]
@@ -192,6 +280,7 @@ where
         .auth()
         .update_user(
             UpdateUser {
+                quota_multipliers: body.quota_multipliers,
                 id: body.id,
                 enabled: body.enabled,
                 group_ids: body.group_ids,

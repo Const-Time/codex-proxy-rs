@@ -26,6 +26,7 @@ pub struct UserRecord {
     pub auth_version: i64,
     pub limits: gateway_core::policy::RateLimits,
     pub group_ids: Vec<String>,
+    pub quota_multipliers: std::collections::BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -40,6 +41,7 @@ pub struct CreateUser {
 
 #[derive(Debug, Clone)]
 pub struct UpdateUser {
+    pub quota_multipliers: Option<std::collections::BTreeMap<String, String>>,
     pub limits: gateway_core::policy::RateLimits,
     pub id: String,
     pub enabled: bool,
@@ -53,4 +55,23 @@ pub struct UserGroup {
     pub color: String,
     pub enabled: bool,
     pub budget: gateway_core::engine::budget::ClientBudgetStatus,
+}
+
+/// One currently authorized user/group subscription, including its effective quota.
+#[derive(Debug, Clone)]
+pub struct UserSubscription {
+    pub user_id: String,
+    pub username: String,
+    pub enabled: bool,
+    pub group_id: String,
+    pub group_name: String,
+    pub quota_multiplier: String,
+    pub daily_limit_usd: String,
+    pub weekly_limit_usd: String,
+    pub daily_used_usd: String,
+    pub weekly_used_usd: String,
+    pub daily_resets_at: Option<DateTime<Utc>>,
+    pub weekly_resets_at: Option<DateTime<Utc>>,
+    pub last_reset_at: Option<DateTime<Utc>>,
+    pub last_reset_reason: Option<String>,
 }

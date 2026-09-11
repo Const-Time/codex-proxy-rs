@@ -10,7 +10,9 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use crate::{admin_adapter::UserAuthStore, admin_store_error, mutation_audit};
 
 const USER_SELECT: &str = "select u.id, u.username, u.role, u.enabled, u.auth_version, u.max_concurrency, u.requests_per_minute, u.created_at, u.updated_at,
-    array(select account_group_id from user_account_groups where user_id = u.id order by account_group_id) as group_ids from users u";
+    array(select account_group_id from user_account_groups where user_id = u.id order by account_group_id) as group_ids,
+    coalesce((select jsonb_object_agg(account_group_id, quota_multiplier::text) from user_account_groups where user_id = u.id), '{}'::jsonb) as quota_multipliers
+    from users u";
 
 fn decode(row: PgRow) -> UserRecord {
     UserRecord {
@@ -28,6 +30,11 @@ fn decode(row: PgRow) -> UserRecord {
             requests_per_minute: row.get::<i64, _>("requests_per_minute").unsigned_abs(),
         },
         group_ids: row.get("group_ids"),
+        quota_multipliers: row
+            .get::<sqlx::types::Json<std::collections::BTreeMap<String, String>>, _>(
+                "quota_multipliers",
+            )
+            .0,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -92,13 +99,16 @@ async fn grants(
     id: &str,
     group_ids: &[String],
 ) -> AdminStoreResult<()> {
-    sqlx::query("delete from user_account_groups where user_id = $1")
-        .bind(id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
+    sqlx::query(
+        "delete from user_account_groups where user_id = $1 and not (account_group_id = any($2))",
+    )
+    .bind(id)
+    .bind(group_ids)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_error)?;
     for group in group_ids {
-        sqlx::query("insert into user_account_groups(user_id, account_group_id) values ($1, $2)")
+        sqlx::query("insert into user_account_groups(user_id, account_group_id) values ($1, $2) on conflict do nothing")
             .bind(id)
             .bind(group)
             .execute(&mut **tx)
@@ -134,11 +144,77 @@ async fn audit(
 }
 
 impl UserAuthStore {
+    pub(crate) async fn subscription_records(
+        &self,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserSubscription>> {
+        let rows = sqlx::query("with scopes as (
+            select user_id, account_group_id from user_account_groups
+            union select k.owner_user_id, kg.account_group_id from client_api_keys k
+            join client_api_key_groups kg on kg.client_api_key_id = k.id)
+            select u.id as user_id, u.username, u.enabled and g.enabled as enabled,
+            g.id as group_id, g.name as group_name, coalesce(ug.quota_multiplier, 1)::text as quota_multiplier,
+            user_group_quota_limit(g.daily_limit_usd, u.id, g.id)::text as daily_limit_usd,
+            user_group_quota_limit(g.weekly_limit_usd, u.id, g.id)::text as weekly_limit_usd,
+            (case when w.daily_end > now() then w.daily_used_usd else 0 end)::text as daily_used_usd,
+            (case when w.weekly_end > now() then w.weekly_used_usd else 0 end)::text as weekly_used_usd,
+            case when w.daily_end > now() then w.daily_end end as daily_resets_at,
+            case when w.weekly_end > now() then w.weekly_end end as weekly_resets_at,
+            w.last_reset_at, w.last_reset_reason
+            from scopes s join users u on u.id = s.user_id join account_groups g on g.id = s.account_group_id
+            left join user_account_groups ug on ug.user_id = u.id and ug.account_group_id = g.id
+            left join user_group_budget_windows w on w.user_id = u.id and w.account_group_id = g.id
+            order by u.username, g.name, u.id, g.id")
+            .fetch_all(&self.security.pool).await.map_err(db_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| gateway_admin::model::users::UserSubscription {
+                user_id: row.get("user_id"),
+                username: row.get("username"),
+                enabled: row.get("enabled"),
+                group_id: row.get("group_id"),
+                group_name: row.get("group_name"),
+                quota_multiplier: row.get("quota_multiplier"),
+                daily_limit_usd: row.get("daily_limit_usd"),
+                weekly_limit_usd: row.get("weekly_limit_usd"),
+                daily_used_usd: row.get("daily_used_usd"),
+                weekly_used_usd: row.get("weekly_used_usd"),
+                daily_resets_at: row.get("daily_resets_at"),
+                weekly_resets_at: row.get("weekly_resets_at"),
+                last_reset_at: row.get("last_reset_at"),
+                last_reset_reason: row.get("last_reset_reason"),
+            })
+            .collect())
+    }
+
+    pub(crate) async fn reset_all_subscriptions(
+        &self,
+        event_id: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<u64> {
+        let mut tx = self.security.pool.begin().await.map_err(db_error)?;
+        audit(
+            &mut tx,
+            context,
+            event_id,
+            "subscriptions.reset_all",
+            &["daily_used_usd", "weekly_used_usd"],
+        )
+        .await?;
+        require_administrator(&mut tx, context).await?;
+        let count: i64 =
+            sqlx::query_scalar("select reset_user_subscriptions($1, null, null, 'manual', now())")
+                .bind(event_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db_error)?;
+        tx.commit().await.map_err(db_error)?;
+        Ok(count.unsigned_abs())
+    }
     pub(crate) async fn available_groups(
         &self,
         id: &str,
     ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserGroup>> {
-        let rows = sqlx::query("select g.id, g.name, g.color, g.enabled, g.daily_limit_usd::text, g.weekly_limit_usd::text,
+        let rows = sqlx::query("select g.id, g.name, g.color, g.enabled, user_group_quota_limit(g.daily_limit_usd, u.id, g.id)::text as daily_limit_usd, user_group_quota_limit(g.weekly_limit_usd, u.id, g.id)::text as weekly_limit_usd,
             (case when w.daily_end > now() then w.daily_used_usd else 0 end)::text as daily_used,
             (case when w.weekly_end > now() then w.weekly_used_usd else 0 end)::text as weekly_used,
             case when w.daily_end > now() then w.daily_end end as daily_end,
@@ -282,6 +358,13 @@ impl UserAuthStore {
         sqlx::query("update users set enabled = $2, max_concurrency = $3, requests_per_minute = $4, auth_version = auth_version + 1, updated_at = now() where id = $1")
             .bind(&command.id).bind(command.enabled).bind(i64::try_from(command.limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(command.limits.requests_per_minute).map_err(|_| invalid_limits())?).execute(&mut *tx).await.map_err(db_error)?;
         grants(&mut tx, &command.id, &command.group_ids).await?;
+        if let Some(multipliers) = &command.quota_multipliers {
+            for group in &command.group_ids {
+                sqlx::query("update user_account_groups set quota_multiplier = $3::text::numeric where user_id = $1 and account_group_id = $2")
+                    .bind(&command.id).bind(group).bind(multipliers.get(group).map_or("1", String::as_str))
+                    .execute(&mut *tx).await.map_err(db_error)?;
+            }
+        }
         crate::postgres::append_admin_audit_event_in_transaction(
             &mut tx,
             mutation_audit(
@@ -292,6 +375,7 @@ impl UserAuthStore {
                 vec![
                     "enabled".into(),
                     "group_ids".into(),
+                    "quota_multipliers".into(),
                     "max_concurrency".into(),
                     "requests_per_minute".into(),
                 ],

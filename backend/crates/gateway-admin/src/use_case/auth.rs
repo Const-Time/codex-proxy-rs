@@ -38,6 +38,13 @@ fn validate_user_limits(limits: gateway_core::policy::RateLimits) -> Result<(), 
 /// API 鉴权与管理员登录消费的统一服务。
 #[async_trait]
 pub trait AuthService: Send + Sync {
+    async fn subscriptions(&self)
+    -> Result<Vec<crate::model::users::UserSubscription>, AdminError>;
+    async fn reset_subscriptions(
+        &self,
+        event_id: uuid::Uuid,
+        context: &MutationContext,
+    ) -> Result<u64, AdminError>;
     async fn user_groups(
         &self,
         id: &str,
@@ -125,6 +132,24 @@ impl DefaultAuthService {
 
 #[async_trait]
 impl AuthService for DefaultAuthService {
+    async fn subscriptions(
+        &self,
+    ) -> Result<Vec<crate::model::users::UserSubscription>, AdminError> {
+        self.store
+            .subscriptions()
+            .await
+            .map_err(|e| map_store_error(e, "subscriptions"))
+    }
+    async fn reset_subscriptions(
+        &self,
+        event_id: uuid::Uuid,
+        context: &MutationContext,
+    ) -> Result<u64, AdminError> {
+        self.store
+            .reset_subscriptions(&format!("manual:{event_id}"), context)
+            .await
+            .map_err(|e| map_store_error(e, "subscriptions"))
+    }
     async fn user_groups(
         &self,
         id: &str,
@@ -201,6 +226,23 @@ impl AuthService for DefaultAuthService {
         context: &MutationContext,
     ) -> Result<UserRecord, AdminError> {
         validate_grants(&command.group_ids)?;
+        if let Some(multipliers) = &command.quota_multipliers {
+            for (group, value) in multipliers {
+                let valid_number = value.parse::<gateway_core::metering::Decimal>().is_ok()
+                    && value
+                        .parse::<f64>()
+                        .is_ok_and(|n| (0.01..=1000.0).contains(&n))
+                    && value
+                        .split('.')
+                        .nth(1)
+                        .is_none_or(|fraction| fraction.len() <= 2);
+                if !command.group_ids.contains(group) || !valid_number {
+                    return Err(AdminError::invalid(
+                        "额度倍率须对应授权分组，为 0.01 至 1000 之间、最多两位小数的数值",
+                    ));
+                }
+            }
+        }
         validate_user_limits(command.limits)?;
         let (revision, user) = self
             .store

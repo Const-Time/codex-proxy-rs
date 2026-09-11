@@ -87,6 +87,62 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
         assert!(created.enabled);
     }
     assert_eq!(auth.find_user("ALICE").await.unwrap().unwrap().id, "alice");
+    sqlx::query(
+        "update account_groups set daily_limit_usd = 10, weekly_limit_usd = 100 where id = $1",
+    )
+    .bind(GROUP)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut update = UpdateUser {
+        id: "alice".into(),
+        enabled: true,
+        group_ids: vec![GROUP.into()],
+        limits: RateLimits::unlimited(),
+        quota_multipliers: Some([(GROUP.into(), "2".into())].into()),
+    };
+    auth.update_user(update.clone(), &context("admin"))
+        .await
+        .unwrap();
+    update.quota_multipliers = None;
+    auth.update_user(update, &context("admin")).await.unwrap();
+    assert_eq!(
+        auth.load_user("alice")
+            .await
+            .unwrap()
+            .unwrap()
+            .quota_multipliers[GROUP],
+        "2.00"
+    );
+    assert_eq!(
+        auth.user_groups("alice").await.unwrap()[0]
+            .budget
+            .limits
+            .weekly_usd
+            .canonical(),
+        "200"
+    );
+    assert_eq!(
+        auth.user_groups("bob").await.unwrap()[0]
+            .budget
+            .limits
+            .weekly_usd
+            .canonical(),
+        "100"
+    );
+    let subscriptions = auth.subscriptions().await.unwrap();
+    assert_eq!(subscriptions.len(), 2);
+    assert!(
+        auth.reset_subscriptions("test-reset", &context("alice"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        auth.reset_subscriptions("test-reset", &context("admin"))
+            .await
+            .unwrap(),
+        2
+    );
     assert_eq!(
         auth.create_user(
             "duplicate",
@@ -172,6 +228,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     );
     auth.update_user(
         UpdateUser {
+            quota_multipliers: Default::default(),
             limits: gateway_core::policy::RateLimits::unlimited(),
             id: "alice".into(),
             enabled: true,
@@ -234,6 +291,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     let (_, disabled) = auth
         .update_user(
             UpdateUser {
+                quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: "alice".into(),
                 enabled: false,
@@ -248,6 +306,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     assert!(
         auth.update_user(
             UpdateUser {
+                quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: "admin".into(),
                 enabled: false,

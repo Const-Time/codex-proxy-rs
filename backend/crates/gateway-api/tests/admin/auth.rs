@@ -6,6 +6,56 @@ use serde_json::json;
 
 use super::AdminTestFixture;
 
+#[tokio::test]
+async fn subscriptions_are_admin_only_and_reset_requires_valid_request_id() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt as _;
+    let fixture = AdminTestFixture::new().await;
+    fixture
+        .auth
+        .insert_user_session("ordinary-session", "ordinary");
+    fixture.auth.insert_session("admin-session");
+    for (method, path) in [
+        ("GET", "/api/admin/subscriptions"),
+        ("POST", "/api/admin/subscriptions/reset"),
+    ] {
+        let response = gateway_api::admin::users::router::<super::AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(header::COOKIE, "cpr_admin_session=ordinary-session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"requestId":"00000000-0000-4000-8000-000000000001"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let response = gateway_api::admin::users::router::<super::AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/subscriptions/reset")
+                .header(header::COOKIE, "cpr_admin_session=admin-session")
+                .header("x-request-id", "subscriptions-validation")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"requestId":"invalid"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 #[test]
 fn login_request_should_deny_unknown_fields_and_redact_password_debug() {
     let password = "admin-password-must-not-leak";
