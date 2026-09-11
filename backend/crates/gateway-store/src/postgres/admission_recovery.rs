@@ -63,8 +63,18 @@ impl ClientAdmissionRecoveryRepository for PgClientAdmissionRecoveryRepository {
         &self,
         window_started_at: DateTime<Utc>,
     ) -> StoreResult<Vec<ClientAdmissionRecovery>> {
-        let rows = sqlx::query_as::<_, (String, String, DateTime<Utc>, DateTime<Utc>, String)>(
-            "select client_api_key_ref, id, started_at, deadline_at, outcome
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                DateTime<Utc>,
+                DateTime<Utc>,
+                String,
+                Option<String>,
+            ),
+        >(
+            "select client_api_key_ref, id, started_at, deadline_at, outcome, user_id
              from model_requests
              where started_at >= $1 or outcome = 'running'
              order by client_api_key_ref, started_at, id",
@@ -74,27 +84,35 @@ impl ClientAdmissionRecoveryRepository for PgClientAdmissionRecoveryRepository {
         .await
         .map_err(|_| postgres_unavailable("load client admission recovery"))?;
         let mut recoveries = BTreeMap::<String, ClientAdmissionRecovery>::new();
-        for (client_api_key_ref, model_request_id, started_at, deadline_at, outcome) in rows {
-            let recovery = recoveries
-                .entry(client_api_key_ref.clone())
-                .or_insert_with(|| ClientAdmissionRecovery {
-                    client_api_key_ref,
-                    recent_requests: Vec::new(),
-                    running_requests: Vec::new(),
-                });
-            if started_at >= window_started_at {
-                recovery.recent_requests.push(ClientAdmissionRecentRequest {
-                    model_request_id: model_request_id.clone(),
-                    started_at,
-                });
+        for (client_api_key_ref, model_request_id, started_at, deadline_at, outcome, user_id) in
+            rows
+        {
+            let mut scopes = vec![client_api_key_ref];
+            if let Some(user_id) = user_id {
+                scopes.push(ClientApiKeyId::user_admission(&user_id).to_string());
             }
-            if outcome == "running" {
-                recovery
-                    .running_requests
-                    .push(ClientAdmissionRunningRequest {
-                        model_request_id,
-                        deadline_at,
+            for client_api_key_ref in scopes {
+                let recovery = recoveries
+                    .entry(client_api_key_ref.clone())
+                    .or_insert_with(|| ClientAdmissionRecovery {
+                        client_api_key_ref,
+                        recent_requests: Vec::new(),
+                        running_requests: Vec::new(),
                     });
+                if started_at >= window_started_at {
+                    recovery.recent_requests.push(ClientAdmissionRecentRequest {
+                        model_request_id: model_request_id.clone(),
+                        started_at,
+                    });
+                }
+                if outcome == "running" {
+                    recovery
+                        .running_requests
+                        .push(ClientAdmissionRunningRequest {
+                            model_request_id: model_request_id.clone(),
+                            deadline_at,
+                        });
+                }
             }
         }
         Ok(recoveries.into_values().collect())

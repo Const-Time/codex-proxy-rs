@@ -158,6 +158,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                         key.group_ids,
                         key.limits,
                     )
+                    .with_user_admission(key.user_admission)
                 })
                 .collect();
             let account_groups = data
@@ -261,24 +262,35 @@ async fn load_settings(
 async fn load_client_keys(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<Vec<ClientApiKeySnapshot>> {
-    let rows = sqlx::query_as::<_, (String, String, Vec<String>, i64, i64)>(
+    let rows = sqlx::query_as::<_, (String, String, Vec<String>, i64, i64, String, i64, i64)>(
         "select k.id, k.key,
                 coalesce(array_agg(kg.account_group_id order by kg.account_group_id)
                   filter (where kg.account_group_id is not null), '{}') as group_ids,
-                k.max_concurrency, k.requests_per_minute
+                k.max_concurrency, k.requests_per_minute, owner.id, owner.max_concurrency, owner.requests_per_minute
          from client_api_keys k
+         join users owner on owner.id = k.owner_user_id
          join client_api_key_groups kg on kg.client_api_key_id = k.id
          join account_groups g on g.id = kg.account_group_id and g.enabled
          where k.enabled and exists(select 1 from users u where u.id = k.owner_user_id and u.enabled
              and (u.role = 'admin' or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = kg.account_group_id)))
-         group by k.id
+         group by k.id, owner.id
          order by k.id",
     )
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("load snapshot client policies"))?;
     rows.into_iter()
-        .map(|row| ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4))
+        .map(|row| {
+            let mut key = ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4)?;
+            key.user_admission = Some((
+                gateway_core::policy::ClientApiKeyId::user_admission(&row.5),
+                gateway_core::policy::RateLimits {
+                    max_concurrency: to_u64(row.6)?,
+                    requests_per_minute: to_u64(row.7)?,
+                },
+            ));
+            Ok(key)
+        })
         .collect()
 }
 

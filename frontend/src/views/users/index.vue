@@ -30,6 +30,8 @@ const username = ref('')
 const password = ref('')
 const groupIds = ref<string[]>([])
 const enabled = ref(true)
+const maxConcurrency = ref('')
+const requestsPerMinute = ref('')
 const search = ref('')
 const visibleUsers = computed(() => users.value.filter(user => user.username.toLowerCase().includes(search.value.toLowerCase())))
 const groupNames = (user: User) => user.role === 'admin' ? '全部分组' : user.groupIds.map(id => groups.value.find(group => group.id === id)?.name ?? id).join('、') || '未分配'
@@ -51,6 +53,8 @@ function edit(user: User | null) {
   password.value = ''
   groupIds.value = [...(user?.groupIds ?? [])]
   enabled.value = user?.enabled ?? true
+  maxConcurrency.value = String(user?.maxConcurrency || '')
+  requestsPerMinute.value = String(user?.requestsPerMinute || '')
   open.value = true
   void loadGroups()
 }
@@ -63,9 +67,14 @@ async function save() {
   }
   saving.value = true
   try {
+    const limits = { maxConcurrency: Number(maxConcurrency.value || 0), requestsPerMinute: Number(requestsPerMinute.value || 0) }
+    if (Object.values(limits).some(value => !Number.isSafeInteger(value) || value < 0)) {
+      toast.warning('并发和 RPM 必须为非负整数，0 表示不限制')
+      return
+    }
     if (editing.value)
-      await updateUser({ id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value })
-    else await createUser({ username: username.value.trim(), password: password.value, groupIds: groupIds.value })
+      await updateUser({ id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value, ...limits })
+    else await createUser({ username: username.value.trim(), password: password.value, groupIds: groupIds.value, ...limits })
     password.value = ''
     open.value = false
     toast.success(editing.value ? '用户已更新' : '普通用户已创建')
@@ -110,6 +119,8 @@ onMounted(load)
               </th><th class="p-3">
                 授权分组
               </th><th class="p-3">
+                并发 / RPM
+              </th><th class="p-3">
                 操作
               </th>
             </tr>
@@ -128,6 +139,9 @@ onMounted(load)
               <td class="max-w-md p-3">
                 {{ groupNames(user) }}
               </td>
+              <td class="p-3 font-mono">
+                {{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}
+              </td>
               <td class="p-3">
                 <BaseButton v-if="user.role !== 'admin'" variant="secondary" @click="edit(user)">
                   编辑
@@ -135,7 +149,7 @@ onMounted(load)
               </td>
             </tr>
             <tr v-if="!loading && !visibleUsers.length">
-              <td colspan="5" class="p-6 text-center text-cp-text-secondary">
+              <td colspan="6" class="p-6 text-center text-cp-text-secondary">
                 没有匹配的用户
               </td>
             </tr>
@@ -154,6 +168,17 @@ onMounted(load)
         <label v-if="editing" for="user-enabled" class="flex items-center gap-2"><input id="user-enabled" v-model="enabled" type="checkbox" :disabled="saving">启用用户</label>
         <p v-if="editing" class="text-cp-sm text-cp-text-secondary">
           禁用后无法登录，已有密钥不能发起新请求。
+        </p>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <BaseFormItem label="最大并发">
+            <BaseInput v-model="maxConcurrency" type="number" min="0" step="1" aria-label="最大并发" placeholder="不限制" :disabled="saving" />
+          </BaseFormItem>
+          <BaseFormItem label="每分钟请求数（RPM）">
+            <BaseInput v-model="requestsPerMinute" type="number" min="0" step="1" aria-label="每分钟请求数（RPM）" placeholder="不限制" :disabled="saving" />
+          </BaseFormItem>
+        </div>
+        <p class="text-cp-sm text-cp-text-secondary">
+          0 表示不限制。同一用户的所有密钥共用并发和 RPM 限制。
         </p>
         <BaseFormItem label="授权分组">
           <AccountGroupCheckboxGrid v-model="groupIds" :groups="groups" :loading="groupsLoading" :disabled="saving" />

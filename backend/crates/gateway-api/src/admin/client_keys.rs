@@ -139,7 +139,9 @@ pub struct CreateClientKeyRequest {
     name: String,
     label: Option<String>,
     group_ids: Vec<String>,
+    #[serde(default)]
     max_concurrency: u64,
+    #[serde(default)]
     requests_per_minute: u64,
 }
 
@@ -174,7 +176,9 @@ pub struct UpdateClientKeyRequest {
     name: String,
     label: Option<String>,
     group_ids: Vec<String>,
+    #[serde(default)]
     max_concurrency: u64,
+    #[serde(default)]
     requests_per_minute: u64,
 }
 
@@ -711,6 +715,13 @@ async fn create_client_key<S>(
 where
     S: AdminSessionState + Send + Sync,
 {
+    if auth.user.role != gateway_admin::model::users::UserRole::Admin
+        && (payload.max_concurrency != 0 || payload.requests_per_minute != 0)
+    {
+        return Err(AdminError::bad_request(
+            "并发和 RPM 由管理员在用户管理中设置",
+        ));
+    }
     let command = payload.into_command().map_err(map_wire_error)?;
     let result = state
         .admin_services()
@@ -758,6 +769,13 @@ async fn update_client_key<S>(
 where
     S: AdminSessionState + Send + Sync,
 {
+    if auth.user.role != gateway_admin::model::users::UserRole::Admin
+        && (payload.max_concurrency != 0 || payload.requests_per_minute != 0)
+    {
+        return Err(AdminError::bad_request(
+            "并发和 RPM 由管理员在用户管理中设置",
+        ));
+    }
     let command = payload.into_command().map_err(map_wire_error)?;
     mutation_response(
         state

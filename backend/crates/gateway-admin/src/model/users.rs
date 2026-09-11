@@ -24,6 +24,7 @@ pub struct UserRecord {
     pub role: UserRole,
     pub enabled: bool,
     pub auth_version: i64,
+    pub limits: gateway_core::policy::RateLimits,
     pub group_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -31,6 +32,7 @@ pub struct UserRecord {
 
 // Deliberately no Debug: password material must never enter logs.
 pub struct CreateUser {
+    pub limits: gateway_core::policy::RateLimits,
     pub username: String,
     pub password: String,
     pub group_ids: Vec<String>,
@@ -38,6 +40,7 @@ pub struct CreateUser {
 
 #[derive(Debug, Clone)]
 pub struct UpdateUser {
+    pub limits: gateway_core::policy::RateLimits,
     pub id: String,
     pub enabled: bool,
     pub group_ids: Vec<String>,

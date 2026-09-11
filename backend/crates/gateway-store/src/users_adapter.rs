@@ -9,7 +9,7 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 
 use crate::{admin_adapter::UserAuthStore, admin_store_error, mutation_audit};
 
-const USER_SELECT: &str = "select u.id, u.username, u.role, u.enabled, u.auth_version, u.created_at, u.updated_at,
+const USER_SELECT: &str = "select u.id, u.username, u.role, u.enabled, u.auth_version, u.max_concurrency, u.requests_per_minute, u.created_at, u.updated_at,
     array(select account_group_id from user_account_groups where user_id = u.id order by account_group_id) as group_ids from users u";
 
 fn decode(row: PgRow) -> UserRecord {
@@ -23,10 +23,18 @@ fn decode(row: PgRow) -> UserRecord {
         },
         enabled: row.get("enabled"),
         auth_version: row.get("auth_version"),
+        limits: gateway_core::policy::RateLimits {
+            max_concurrency: row.get::<i64, _>("max_concurrency").unsigned_abs(),
+            requests_per_minute: row.get::<i64, _>("requests_per_minute").unsigned_abs(),
+        },
         group_ids: row.get("group_ids"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
+}
+
+fn invalid_limits() -> AdminStoreError {
+    AdminStoreError::new(AdminStoreErrorKind::Invalid, "user", "invalid rate limits")
 }
 
 fn db_error(error: sqlx::Error) -> AdminStoreError {
@@ -213,6 +221,7 @@ impl UserAuthStore {
         username: &str,
         password_hash: &str,
         group_ids: &[String],
+        limits: gateway_core::policy::RateLimits,
         context: &MutationContext,
     ) -> AdminStoreResult<UserRecord> {
         let mut tx = self.security.pool.begin().await.map_err(db_error)?;
@@ -221,12 +230,17 @@ impl UserAuthStore {
             context,
             id,
             "user.create",
-            &["username", "group_ids"],
+            &[
+                "username",
+                "group_ids",
+                "max_concurrency",
+                "requests_per_minute",
+            ],
         )
         .await?;
         require_administrator(&mut tx, context).await?;
-        sqlx::query("insert into users(id, username, password_hash, created_at, updated_at) values ($1, $2, $3, now(), now())")
-            .bind(id).bind(username).bind(password_hash).execute(&mut *tx).await.map_err(db_error)?;
+        sqlx::query("insert into users(id, username, password_hash, max_concurrency, requests_per_minute, created_at, updated_at) values ($1, $2, $3, $4, $5, now(), now())")
+            .bind(id).bind(username).bind(password_hash).bind(i64::try_from(limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(limits.requests_per_minute).map_err(|_| invalid_limits())?).execute(&mut *tx).await.map_err(db_error)?;
         grants(&mut tx, id, group_ids).await?;
         let record = sqlx::QueryBuilder::<Postgres>::new(USER_SELECT)
             .push(" where u.id = $1")
@@ -265,8 +279,8 @@ impl UserAuthStore {
                 "cannot disable administrator",
             ));
         }
-        sqlx::query("update users set enabled = $2, auth_version = auth_version + 1, updated_at = now() where id = $1")
-            .bind(&command.id).bind(command.enabled).execute(&mut *tx).await.map_err(db_error)?;
+        sqlx::query("update users set enabled = $2, max_concurrency = $3, requests_per_minute = $4, auth_version = auth_version + 1, updated_at = now() where id = $1")
+            .bind(&command.id).bind(command.enabled).bind(i64::try_from(command.limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(command.limits.requests_per_minute).map_err(|_| invalid_limits())?).execute(&mut *tx).await.map_err(db_error)?;
         grants(&mut tx, &command.id, &command.group_ids).await?;
         crate::postgres::append_admin_audit_event_in_transaction(
             &mut tx,
@@ -275,7 +289,12 @@ impl UserAuthStore {
                 "user.update",
                 "user",
                 &command.id,
-                vec!["enabled".into(), "group_ids".into()],
+                vec![
+                    "enabled".into(),
+                    "group_ids".into(),
+                    "max_concurrency".into(),
+                    "requests_per_minute".into(),
+                ],
             ),
             revision,
         )

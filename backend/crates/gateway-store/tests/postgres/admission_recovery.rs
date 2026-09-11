@@ -110,3 +110,35 @@ async fn seed_request(
     .await
     .expect("seed model request recovery fact");
 }
+
+#[tokio::test]
+async fn recovery_restores_one_user_bucket_across_multiple_keys() {
+    let Some(db) = TestDatabase::create("user_admission_recovery").await else {
+        return;
+    };
+    let now = Utc::now();
+    for id in ["user-key-a", "user-key-b"] {
+        seed_request(
+            &db.pool,
+            id,
+            now - Duration::seconds(5),
+            now + Duration::seconds(55),
+            "running",
+        )
+        .await;
+        sqlx::query("update model_requests set client_api_key_ref = $1, user_id = 'test-owner' where id = $1").bind(id).execute(&db.pool).await.unwrap();
+    }
+    let facts = PgClientAdmissionRecoveryRepository::new(db.pool.clone())
+        .load_client_admission_recovery(now - Duration::seconds(60))
+        .await
+        .unwrap();
+    let user_scope = gateway_core::policy::ClientApiKeyId::user_admission("test-owner");
+    let user = facts
+        .iter()
+        .find(|fact| fact.client_api_key_ref == user_scope.as_str())
+        .unwrap();
+    assert_eq!(facts.len(), 3);
+    assert_eq!(user.running_requests.len(), 2);
+    assert_eq!(user.recent_requests.len(), 2);
+    db.close().await;
+}

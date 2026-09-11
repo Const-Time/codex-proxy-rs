@@ -19,6 +19,16 @@ use crate::validation::{IdentifierError, PolicyError, validate_text};
 pub struct ClientApiKeyId(String);
 
 impl ClientApiKeyId {
+    /// Internal admission bucket shared by all of a user's keys. Never used for authentication.
+    #[must_use]
+    pub fn user_admission(user_id: &str) -> Self {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use sha2::{Digest as _, Sha256};
+        Self(format!(
+            "user-admission:{}",
+            URL_SAFE_NO_PAD.encode(Sha256::digest(user_id.as_bytes()))
+        ))
+    }
     /// 校验并创建 Key ID。
     ///
     /// # Errors
@@ -93,6 +103,7 @@ impl RateLimits {
 /// 从 `client_api_keys` 冻结的公开准入事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientPolicy {
+    user_admission: Option<(ClientApiKeyId, RateLimits)>,
     key_id: ClientApiKeyId,
     plaintext_key: PlaintextClientApiKey,
     account_scope: Arc<FrozenAccountScope>,
@@ -115,12 +126,24 @@ impl ClientPolicy {
             account_scope,
             enabled,
             limits,
+            user_admission: None,
         }
     }
 
     #[must_use]
     pub const fn key_id(&self) -> &ClientApiKeyId {
         &self.key_id
+    }
+
+    #[must_use]
+    pub fn with_user_admission(mut self, scope: Option<(ClientApiKeyId, RateLimits)>) -> Self {
+        self.user_admission = scope;
+        self
+    }
+
+    #[must_use]
+    pub const fn user_admission(&self) -> Option<&(ClientApiKeyId, RateLimits)> {
+        self.user_admission.as_ref()
     }
 
     #[must_use]

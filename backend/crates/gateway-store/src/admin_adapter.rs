@@ -223,9 +223,10 @@ impl AuthStore for UserAuthStore {
         username: &str,
         password_hash: &str,
         groups: &[String],
+        limits: gateway_core::policy::RateLimits,
         context: &MutationContext,
     ) -> AdminStoreResult<gateway_admin::model::users::UserRecord> {
-        self.insert_user(id, username, password_hash, groups, context)
+        self.insert_user(id, username, password_hash, groups, limits, context)
             .await
     }
     async fn update_user(
