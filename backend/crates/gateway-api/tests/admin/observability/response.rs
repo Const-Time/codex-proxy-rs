@@ -936,6 +936,48 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             records.push(image);
         }
     }
+    fixture
+        .auth
+        .insert_user_session("personal-session", "ordinary");
+    let personal_response = observability::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/usage/records")
+                .header(header::COOKIE, "cpr_admin_session=personal-session")
+                .header("x-request-id", "personal-usage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(personal_response.status(), StatusCode::OK);
+    let personal_bytes = to_bytes(personal_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let personal: serde_json::Value = serde_json::from_slice(&personal_bytes).unwrap();
+    let item = &personal["data"]["items"][0];
+    assert_eq!(item["requestedModel"], "grok-4.5");
+    assert_eq!(item["tokenDetails"]["imageInputTokens"], 31);
+    for field in [
+        "accountId",
+        "accountName",
+        "accountEmail",
+        "authenticationKind",
+        "upstreamModel",
+        "upstreamTransport",
+        "latencyDetails",
+    ] {
+        assert!(
+            item.get(field).is_none(),
+            "personal response exposes {field}"
+        );
+    }
+    assert!(
+        !String::from_utf8(personal_bytes.to_vec())
+            .unwrap()
+            .contains("alpha@example.invalid")
+    );
     let response = observability::router::<AdminTestState>()
         .with_state(fixture.state())
         .oneshot(

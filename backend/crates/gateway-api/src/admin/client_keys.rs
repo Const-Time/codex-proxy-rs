@@ -11,8 +11,6 @@ use gateway_admin::model::client_keys::{
     CreatedClientKey, DeleteClientKey, SetClientKeyEnabled, SortDirection, UpdateClientKey,
 };
 use gateway_core::{
-    engine::budget::ClientBudgetLimits,
-    metering::Decimal,
     policy::{ClientApiKeyId, RateLimits},
     routing::AccountGroupId,
 };
@@ -26,23 +24,15 @@ use axum::{
     routing::{get, post},
 };
 
+use super::auth::UserAuth;
 use super::{
-    AdminAuth, AdminEnvelope, AdminError, AdminJson, AdminQuery, AdminResponse, AdminSessionState,
+    AdminEnvelope, AdminError, AdminJson, AdminQuery, AdminResponse, AdminSessionState,
     WireValidationError, wire::map_admin_service_error,
 };
 
 const MAX_CURSOR_BYTES: usize = 512;
 const MAX_SEARCH_BYTES: usize = 256;
 const DEFAULT_PAGE_SIZE: u16 = 50;
-
-fn parse_budget(
-    value: Option<String>,
-    field: &'static str,
-) -> Result<Option<Decimal>, WireValidationError> {
-    value
-        .map(|value| value.parse().map_err(|_| WireValidationError::new(field)))
-        .transpose()
-}
 
 /// Client Key 列表查询。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -151,8 +141,6 @@ pub struct CreateClientKeyRequest {
     group_ids: Vec<String>,
     max_concurrency: u64,
     requests_per_minute: u64,
-    daily_limit_usd: Option<String>,
-    weekly_limit_usd: Option<String>,
 }
 
 impl CreateClientKeyRequest {
@@ -161,17 +149,15 @@ impl CreateClientKeyRequest {
         validate_required_text(&self.name, "name")?;
         validate_optional_text(self.label.as_deref(), "label")?;
         let group_ids = validate_group_ids(self.group_ids)?;
+        if group_ids.len() != 1 {
+            return Err(WireValidationError::new("groupIds"));
+        }
         validate_limit(self.max_concurrency, "maxConcurrency")?;
         validate_limit(self.requests_per_minute, "requestsPerMinute")?;
         Ok(CreateClientKey {
             name: self.name,
             label: self.label,
             group_ids,
-            budget: ClientBudgetLimits {
-                daily_usd: parse_budget(self.daily_limit_usd, "dailyLimitUsd")?.unwrap_or_default(),
-                weekly_usd: parse_budget(self.weekly_limit_usd, "weeklyLimitUsd")?
-                    .unwrap_or_default(),
-            },
             limits: RateLimits {
                 max_concurrency: self.max_concurrency,
                 requests_per_minute: self.requests_per_minute,
@@ -190,8 +176,6 @@ pub struct UpdateClientKeyRequest {
     group_ids: Vec<String>,
     max_concurrency: u64,
     requests_per_minute: u64,
-    daily_limit_usd: Option<String>,
-    weekly_limit_usd: Option<String>,
 }
 
 impl UpdateClientKeyRequest {
@@ -201,6 +185,9 @@ impl UpdateClientKeyRequest {
         validate_required_text(&self.name, "name")?;
         validate_optional_text(self.label.as_deref(), "label")?;
         let group_ids = validate_group_ids(self.group_ids)?;
+        if group_ids.len() != 1 {
+            return Err(WireValidationError::new("groupIds"));
+        }
         validate_limit(self.max_concurrency, "maxConcurrency")?;
         validate_limit(self.requests_per_minute, "requestsPerMinute")?;
         Ok(UpdateClientKey {
@@ -208,8 +195,6 @@ impl UpdateClientKeyRequest {
             name: self.name,
             label: self.label,
             group_ids,
-            daily_limit_usd: parse_budget(self.daily_limit_usd, "dailyLimitUsd")?,
-            weekly_limit_usd: parse_budget(self.weekly_limit_usd, "weeklyLimitUsd")?,
             limits: RateLimits {
                 max_concurrency: self.max_concurrency,
                 requests_per_minute: self.requests_per_minute,
@@ -701,7 +686,7 @@ where
 }
 
 async fn list_client_keys<S>(
-    _auth: AdminAuth,
+    auth: UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<ListClientKeysQuery>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -711,7 +696,7 @@ where
     let result = state
         .admin_services()
         .client_keys()
-        .list(query.into_command().map_err(map_wire_error)?)
+        .list(&auth.user.id, query.into_command().map_err(map_wire_error)?)
         .await
         .map_err(map_service_error)?;
     let data = ClientKeyListData::try_from(result).map_err(|_| AdminError::internal())?;
@@ -719,7 +704,7 @@ where
 }
 
 async fn create_client_key<S>(
-    auth: AdminAuth,
+    auth: UserAuth,
     State(state): State<S>,
     AdminJson(payload): AdminJson<CreateClientKeyRequest>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -740,7 +725,7 @@ where
 }
 
 async fn reveal_client_key<S>(
-    _auth: AdminAuth,
+    auth: UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<ClientKeyIdQuery>,
 ) -> Result<Response, AdminError>
@@ -751,7 +736,7 @@ where
     let result = state
         .admin_services()
         .client_keys()
-        .reveal(&id)
+        .reveal(&auth.user.id, &id)
         .await
         .map_err(map_service_error)?;
     let mut response = AdminResponse::new(
@@ -766,7 +751,7 @@ where
 }
 
 async fn update_client_key<S>(
-    auth: AdminAuth,
+    auth: UserAuth,
     State(state): State<S>,
     AdminJson(payload): AdminJson<UpdateClientKeyRequest>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -784,7 +769,7 @@ where
 }
 
 async fn disable_client_key<S>(
-    auth: AdminAuth,
+    auth: UserAuth,
     State(state): State<S>,
     AdminJson(payload): AdminJson<ClientKeyMutationRequest>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -805,7 +790,7 @@ where
 }
 
 async fn enable_client_key<S>(
-    auth: AdminAuth,
+    auth: UserAuth,
     State(state): State<S>,
     AdminJson(payload): AdminJson<ClientKeyMutationRequest>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -826,7 +811,7 @@ where
 }
 
 async fn delete_client_key<S>(
-    auth: AdminAuth,
+    auth: UserAuth,
     State(state): State<S>,
     AdminJson(payload): AdminJson<ClientKeyMutationRequest>,
 ) -> Result<impl IntoResponse, AdminError>

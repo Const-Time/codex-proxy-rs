@@ -305,14 +305,28 @@ impl PgControlPlaneRepository {
             let revision = bump_config_revision_in_transaction(&mut transaction).await?;
             match mutation {
                 ControlPlaneMutation::CreateClientApiKey(key) => {
+                    let owner = client_keys::authorize_key_mutation(
+                        &mut transaction,
+                        &audit,
+                        None,
+                        Some(&key.group_ids),
+                    )
+                    .await?;
                     audit.changed_fields.push(if key.group_ids.is_empty() {
                         "routing_scope:all".to_owned()
                     } else {
                         "routing_scope:groups".to_owned()
                     });
-                    insert_client_api_key_in_transaction(&mut transaction, &key).await?;
+                    insert_client_api_key_in_transaction(&mut transaction, &key, &owner).await?;
                 }
                 ControlPlaneMutation::UpdateClientApiKey(key) => {
+                    client_keys::authorize_key_mutation(
+                        &mut transaction,
+                        &audit,
+                        Some(&key.id),
+                        Some(&key.group_ids),
+                    )
+                    .await?;
                     let previously_restricted = sqlx::query_scalar::<_, bool>(
                         "select exists(
                            select 1 from client_api_key_groups where client_api_key_id = $1
@@ -336,10 +350,14 @@ impl PgControlPlaneRepository {
                     update_client_api_key_in_transaction(&mut transaction, &key).await?;
                 }
                 ControlPlaneMutation::SetClientApiKeyEnabled { id, enabled } => {
+                    client_keys::authorize_key_mutation(&mut transaction, &audit, Some(&id), None)
+                        .await?;
                     set_client_api_key_enabled_in_transaction(&mut transaction, &id, enabled)
                         .await?;
                 }
                 ControlPlaneMutation::DeleteClientApiKey(id) => {
+                    client_keys::authorize_key_mutation(&mut transaction, &audit, Some(&id), None)
+                        .await?;
                     delete_client_api_key_in_transaction(&mut transaction, &id).await?;
                 }
                 ControlPlaneMutation::SetAdminApiKey(key) => {

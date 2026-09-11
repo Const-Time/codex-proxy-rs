@@ -103,6 +103,8 @@ impl OtherRequestOutcome {
 /// 用量记录过滤条件。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFilter {
+    /// Trusted scope supplied by authentication, never by query parameters.
+    pub owner_user_id: Option<String>,
     pub client_api_key_ref: Option<String>,
     pub request_id: Option<String>,
     pub provider_account_ref: Option<String>,

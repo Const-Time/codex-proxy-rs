@@ -11,43 +11,35 @@ use serde_json::json;
 use super::{AdminTestFixture, AdminTestState};
 
 #[test]
-fn budget_inputs_preserve_decimal_precision_and_omitted_updates() {
-    let payload = json!({"name": "budget", "groupIds": [], "maxConcurrency": 3,
-        "requestsPerMinute": 0, "dailyLimitUsd": "0.1234567891", "weeklyLimitUsd": "15"});
-    let command = serde_json::from_value::<CreateClientKeyRequest>(payload.clone())
-        .unwrap()
-        .into_command()
-        .unwrap();
-    assert_eq!(command.budget.daily_usd.canonical(), "0.1234567891");
-    assert_eq!(command.budget.weekly_usd.canonical(), "15");
-    assert_eq!(command.limits.max_concurrency, 3);
-    for field in ["dailyLimitUsd", "weeklyLimitUsd"] {
-        for invalid in ["-1", "NaN", "1e3", "10000000000", "0.00000000001", ""] {
-            let mut payload = payload.clone();
-            payload[field] = json!(invalid);
-            assert_eq!(
-                serde_json::from_value::<CreateClientKeyRequest>(payload)
-                    .unwrap()
-                    .into_command()
-                    .unwrap_err()
-                    .field(),
-                field
-            );
-        }
-    }
-    let mut update = payload;
-    update["id"] = json!("key_budget");
-    update.as_object_mut().unwrap().remove("dailyLimitUsd");
-    update["weeklyLimitUsd"] = json!("0");
-    let command = serde_json::from_value::<UpdateClientKeyRequest>(update)
-        .unwrap()
-        .into_command()
-        .unwrap();
-    assert_eq!(command.daily_limit_usd, None);
-    assert_eq!(
-        command.weekly_limit_usd,
-        Some(gateway_core::metering::Decimal::ZERO)
+fn key_inputs_cannot_override_group_budgets() {
+    let payload = json!({"name": "budget", "groupIds": ["grp_00000000000000000000000000000001"], "maxConcurrency": 3, "requestsPerMinute": 0});
+    assert!(
+        serde_json::from_value::<CreateClientKeyRequest>(payload.clone())
+            .unwrap()
+            .into_command()
+            .is_ok()
     );
+    for field in ["dailyLimitUsd", "weeklyLimitUsd", "ownerUserId"] {
+        let mut body = payload.clone();
+        body[field] = json!("10");
+        assert!(serde_json::from_value::<CreateClientKeyRequest>(body).is_err());
+    }
+    for groups in [
+        json!([]),
+        json!([
+            "grp_00000000000000000000000000000001",
+            "grp_00000000000000000000000000000002"
+        ]),
+    ] {
+        let mut body = payload.clone();
+        body["groupIds"] = groups;
+        assert!(
+            serde_json::from_value::<CreateClientKeyRequest>(body)
+                .unwrap()
+                .into_command()
+                .is_err()
+        );
+    }
 }
 
 #[test]
@@ -145,7 +137,7 @@ fn client_key_mutations_should_validate_text_limits_and_unknown_fields() {
     let valid = serde_json::from_value::<CreateClientKeyRequest>(json!({
         "name": "terminal key",
         "label": "production",
-        "groupIds": [],
+        "groupIds": ["grp_00000000000000000000000000000001"],
         "maxConcurrency": 2,
         "requestsPerMinute": 60
     }))
@@ -158,7 +150,7 @@ fn client_key_mutations_should_validate_text_limits_and_unknown_fields() {
         (
             json!({
                 "name": " ",
-                "groupIds": [],
+                "groupIds": ["grp_00000000000000000000000000000001"],
                 "maxConcurrency": 0,
                 "requestsPerMinute": 0
             }),
@@ -167,7 +159,7 @@ fn client_key_mutations_should_validate_text_limits_and_unknown_fields() {
         (
             json!({
                 "name": "key",
-                "groupIds": [],
+                "groupIds": ["grp_00000000000000000000000000000001"],
                 "maxConcurrency": u64::MAX,
                 "requestsPerMinute": 0
             }),
@@ -190,7 +182,7 @@ fn client_key_mutations_should_validate_text_limits_and_unknown_fields() {
             "id": "key_1",
             "expectedConfigRevision": 1,
             "name": "key",
-            "groupIds": [],
+            "groupIds": ["grp_00000000000000000000000000000001"],
             "maxConcurrency": 0,
             "requestsPerMinute": 0,
             "tokensPerMinute": 0
@@ -201,7 +193,7 @@ fn client_key_mutations_should_validate_text_limits_and_unknown_fields() {
         serde_json::from_value::<CreateClientKeyRequest>(json!({
             "expectedConfigRevision": 7,
             "name": "terminal key",
-            "groupIds": [],
+            "groupIds": ["grp_00000000000000000000000000000001"],
             "maxConcurrency": 2,
             "requestsPerMinute": 60
         }))

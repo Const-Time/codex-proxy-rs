@@ -1,4 +1,4 @@
-//! `admin_users` 与 `admin_audit_events` 的唯一 PostgreSQL owner。
+//! `users` 与 `admin_audit_events` 的唯一 PostgreSQL owner。
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -82,7 +82,7 @@ pub trait AdminSecurityAuditRepository: Send + Sync {
 
 #[derive(Clone)]
 pub struct PgAdminSecurityAuditRepository {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl PgAdminSecurityAuditRepository {
@@ -96,7 +96,7 @@ impl PgAdminSecurityAuditRepository {
 impl AdminSecurityAuditRepository for PgAdminSecurityAuditRepository {
     async fn password_hash(&self, admin_user_id: &str) -> StoreResult<Option<String>> {
         require_nonempty("admin user", "id", admin_user_id)?;
-        sqlx::query_scalar("select password_hash from admin_users where id = $1")
+        sqlx::query_scalar("select password_hash from users where id = $1")
             .bind(admin_user_id)
             .fetch_optional(&self.pool)
             .await
@@ -111,8 +111,8 @@ impl AdminSecurityAuditRepository for PgAdminSecurityAuditRepository {
         require_nonempty("admin user", "id", admin_user_id)?;
         require_nonempty("admin user", "password_hash", password_hash)?;
         let result = sqlx::query(
-            "insert into admin_users (id, password_hash, created_at, updated_at)
-             values ($1, $2, now(), now())
+            "insert into users (id, username, role, password_hash, created_at, updated_at)
+             values ($1, $1, 'admin', $2, now(), now())
              on conflict (id) do nothing",
         )
         .bind(admin_user_id)

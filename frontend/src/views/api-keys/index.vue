@@ -8,8 +8,8 @@ import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
-import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { usePageSelection } from '@/composables/usePageSelection'
+import { useUserGroupCatalog } from '@/composables/useUserGroupCatalog'
 import ApiKeyActions from './components/ApiKeyActions.vue'
 import ApiKeyBudgetCell from './components/ApiKeyBudgetCell.vue'
 import ApiKeyCreateModal from './components/ApiKeyCreateModal.vue'
@@ -41,14 +41,13 @@ const {
   groups,
   loading: loadingGroups,
   loadGroups,
-} = useAccountGroupCatalog({ immediate: false })
+} = useUserGroupCatalog({ immediate: false })
 
 const {
   showFormModal,
   showDeleteModal,
   showSingleDeleteModal,
   showKeyModal,
-  showAllAccountsConfirm,
   createdKey,
   createdKeyName,
   editingKey,
@@ -62,7 +61,6 @@ const {
   openCreate,
   openEdit,
   requestSave,
-  confirmAllAccountsScope,
   requestDeleteKey,
   handleDelete,
   handleBatchDelete,
@@ -100,7 +98,7 @@ watch(
   <div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
     <BasePageHeader
       class="h-17"
-      title="API 密钥"
+      title="我的密钥"
       description="创建和管理 API 密钥，并设置每个密钥可以使用的账号"
     />
 
@@ -226,19 +224,6 @@ watch(
       :api-base-url="openAiBaseUrl"
       @copy="copyToClipboard"
     />
-
-    <BaseConfirmModal
-      v-model="showAllAccountsConfirm"
-      title="授予全部账号权限"
-      description="保存后，该密钥可以使用所有账号。"
-      confirm-text="确认授予全部账号"
-      :loading="savingKey"
-      @confirm="confirmAllAccountsScope"
-    >
-      <p class="m-0">
-        该密钥可以使用所有账号，包括以后新增和未分组的账号。
-      </p>
-    </BaseConfirmModal>
 
     <BaseConfirmModal
       v-model="showDeleteModal"

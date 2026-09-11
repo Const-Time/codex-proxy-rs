@@ -2,8 +2,9 @@
 import { storeToRefs } from 'pinia'
 import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
-
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
+
+import { useAuthStore } from '@/stores/modules/auth'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { useUiStore } from '@/stores/modules/ui'
 
@@ -51,7 +52,8 @@ async function openSystemUpdate() {
 }
 
 onMounted(() => {
-  void systemUpdateStore.loadVersion().catch(() => undefined)
+  if (useAuthStore().isAdmin)
+    void systemUpdateStore.loadVersion().catch(() => undefined)
 })
 
 onBeforeUnmount(() => {

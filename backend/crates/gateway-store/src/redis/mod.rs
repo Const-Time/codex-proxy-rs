@@ -43,6 +43,7 @@ pub(crate) const MAX_REDIS_EXACT_INTEGER: u64 = (1_u64 << 53) - 1;
 /// Redis 中可丢失的管理员会话事实；认证秘密不属于该结构。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminSessionRecord {
+    pub auth_version: i64,
     pub admin_user_id: String,
     pub expires_at: DateTime<Utc>,
 }
@@ -161,12 +162,15 @@ impl AdminAuthStateRepository for RedisAdminAuthStateRepository {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AdminSessionWire {
+    #[serde(default)]
+    auth_version: i64,
     admin_user_id: String,
     expires_at: String,
 }
 
 fn encode_admin_session(session: &AdminSessionRecord) -> StoreResult<String> {
     serde_json::to_string(&AdminSessionWire {
+        auth_version: session.auth_version,
         admin_user_id: session.admin_user_id.clone(),
         expires_at: session
             .expires_at
@@ -183,6 +187,7 @@ fn decode_admin_session(value: &str) -> StoreResult<AdminSessionRecord> {
         .map_err(|_| admin_auth_invalid("Redis returned an invalid session expiry"))?
         .with_timezone(&Utc);
     Ok(AdminSessionRecord {
+        auth_version: wire.auth_version,
         admin_user_id: wire.admin_user_id,
         expires_at,
     })

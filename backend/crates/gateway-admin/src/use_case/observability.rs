@@ -105,7 +105,11 @@ pub trait ObservabilityService: Send + Sync {
     async fn dashboard_trend(&self, range: TimeRange, kind: TrendKind)
     -> Result<Trend, AdminError>;
     async fn usage_records(&self, query: UsageQuery) -> Result<UsagePage, AdminError>;
-    async fn usage_record_detail(&self, request_id: &str) -> Result<UsageDetail, AdminError>;
+    async fn usage_record_detail(
+        &self,
+        request_id: &str,
+        owner: Option<&str>,
+    ) -> Result<UsageDetail, AdminError>;
     async fn usage_summary(
         &self,
         range: TimeRange,
@@ -272,13 +276,17 @@ impl ObservabilityService for DefaultObservabilityService {
         Ok(page)
     }
 
-    async fn usage_record_detail(&self, request_id: &str) -> Result<UsageDetail, AdminError> {
+    async fn usage_record_detail(
+        &self,
+        request_id: &str,
+        owner: Option<&str>,
+    ) -> Result<UsageDetail, AdminError> {
         if request_id.trim().is_empty() {
             return Err(AdminError::invalid("用量记录 ID 不能为空"));
         }
         let mut detail = self
             .store
-            .usage_record_detail(request_id)
+            .usage_record_detail(request_id, owner)
             .await
             .map_err(|error| map_store_error(error, "usage record"))?;
         self.enrich_detail_billing(std::slice::from_mut(&mut detail.request));

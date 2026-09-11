@@ -9,7 +9,9 @@ import {
   revealApiKey,
   updateApiKey,
 } from '@/api'
-import { toast } from '@/components/base/BaseToast'
+import {
+  toast,
+} from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useCopyText } from '@/composables/useCopyText'
 import { useIdSet } from '@/composables/useIdSet'
@@ -23,8 +25,6 @@ export interface ApiKeyFormValue {
   groupIds: string[]
   maxConcurrency: string
   requestsPerMinute: string
-  dailyLimitUsd: string
-  weeklyLimitUsd: string
 }
 
 export function useApiKeyMutations(options: {
@@ -36,7 +36,6 @@ export function useApiKeyMutations(options: {
   const showDeleteModal = shallowRef(false)
   const showSingleDeleteModal = shallowRef(false)
   const showKeyModal = shallowRef(false)
-  const showAllAccountsConfirm = shallowRef(false)
   const createdKey = shallowRef('')
   const createdKeyName = shallowRef('')
   const editingKey = shallowRef<ApiKeyRow | null>(null)
@@ -67,8 +66,6 @@ export function useApiKeyMutations(options: {
       groupIds: key.groups.map(group => group.id),
       maxConcurrency: limitInputValue(key.maxConcurrency),
       requestsPerMinute: limitInputValue(key.requestsPerMinute),
-      dailyLimitUsd: limitInputValue(key.dailyLimitUsd),
-      weeklyLimitUsd: limitInputValue(key.weeklyLimitUsd),
     }
     showFormModal.value = true
   }
@@ -76,16 +73,7 @@ export function useApiKeyMutations(options: {
   function requestSave() {
     if (!validateForm() || savingKey.value)
       return
-    if (form.value.groupIds.length === 0) {
-      showAllAccountsConfirm.value = true
-      return
-    }
     void save()
-  }
-
-  async function confirmAllAccountsScope() {
-    showAllAccountsConfirm.value = false
-    await save()
   }
 
   async function save() {
@@ -100,8 +88,6 @@ export function useApiKeyMutations(options: {
           groupIds: [...new Set(form.value.groupIds)],
           maxConcurrency: parseLimit(form.value.maxConcurrency),
           requestsPerMinute: parseLimit(form.value.requestsPerMinute),
-          dailyLimitUsd: form.value.dailyLimitUsd.trim() || '0',
-          weeklyLimitUsd: form.value.weeklyLimitUsd.trim() || '0',
         }
         const current = editingKey.value
         if (current) {
@@ -130,11 +116,9 @@ export function useApiKeyMutations(options: {
   }
 
   function validateForm() {
-    for (const [label, value] of [['日限额', form.value.dailyLimitUsd], ['周限额', form.value.weeklyLimitUsd]]) {
-      if (value.trim() && !/^\d{1,10}(?:\.\d{1,10})?$/.test(value.trim())) {
-        toast.warning(`${label}必须是非负金额，最多 10 位小数`)
-        return false
-      }
+    if (form.value.groupIds.length !== 1) {
+      toast.warning('请选择一个授权分组')
+      return false
     }
     if (!form.value.name.trim()) {
       toast.warning('请输入 API Key 名称')
@@ -254,7 +238,6 @@ export function useApiKeyMutations(options: {
     showDeleteModal,
     showSingleDeleteModal,
     showKeyModal,
-    showAllAccountsConfirm,
     createdKey,
     createdKeyName,
     editingKey,
@@ -268,7 +251,6 @@ export function useApiKeyMutations(options: {
     openCreate,
     openEdit,
     requestSave,
-    confirmAllAccountsScope,
     requestDeleteKey,
     handleDelete,
     handleBatchDelete,
@@ -286,8 +268,6 @@ function emptyForm(): ApiKeyFormValue {
     groupIds: [],
     maxConcurrency: '',
     requestsPerMinute: '',
-    dailyLimitUsd: '',
-    weeklyLimitUsd: '',
   }
 }
 

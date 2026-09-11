@@ -77,6 +77,7 @@ pub enum LoginError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminSession {
     pub admin_user_id: String,
+    pub auth_version: i64,
     pub expires_at: DateTime<Utc>,
 }
 

@@ -153,13 +153,32 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 上游结构化错误的 message/code/type 会透传给客户端，其中内嵌的账号指纹 UUID 已脱敏。模型映射是
 全局精确映射，未命中时模型名原样交给候选 Provider；分组只限定账号集合，不参与模型改名。
 
-## 4. 管理员认证
+## 4. 用户认证与授权
 
 | 方法 | 路由 | 请求 | 说明 |
 | --- | --- | --- | --- |
-| `POST` | `/api/admin/auth/login` | `{ username?, password }` | 创建管理员会话并设置 Cookie |
+| `POST` | `/api/admin/auth/login` | `{ username?, password }` | 创建用户会话并设置 Cookie |
 | `GET` | `/api/admin/auth/status` | 无 | 返回当前 Cookie 是否已认证 |
 | `POST` | `/api/admin/auth/logout` | 无 | 删除当前会话并清除 Cookie |
+
+### 用户与个人接口
+
+登录返回的 Cookie 名仍为 `cpr_admin_session`，适用于管理员和普通用户。`GET /api/admin/auth/status` 返回 `{ authenticated, user }`，未登录时 user 为 null；用户包含 id、username、role、enabled、groupIds、createdAt、updatedAt。用户名不区分大小写。停用用户或修改密码后，旧会话失效；更改分组授权也会使旧会话失效。
+
+| 方法 | 路由 | body | 权限 |
+| --- | --- | --- | --- |
+| GET | /api/admin/users | — | 管理员；用户列表，无密码或密钥 |
+| POST | /api/admin/users/create | { username, password, groupIds } | 管理员；创建已启用的普通用户，不能指定角色 |
+| POST | /api/admin/users/update | { id, enabled, groupIds } | 管理员；替换分组授权，不能禁用管理员 |
+| GET | /api/profile | — | 本人会话；个人资料 |
+| GET | /api/profile/groups | — | 本人会话；获授权分组及本人的共享额度，不含上游账号资料 |
+| POST | /api/profile/password | { currentPassword, newPassword } | 本人会话；验证原密码、改密后重新登录 |
+
+新密码为 12–1024 字节；用户名最长 128 字符，不允许控制字符。没有自助注册或管理员代用户创建密钥入口。
+
+管理接口要求 admin 角色或部署级管理 API Key；个人接口、Client Key 全部操作以及使用记录接口必须使用本人 Cookie，不接受部署级 API Key。普通用户访问管理接口返回 403。Client Key 的所有权由会话决定，任何角色均无法列出、读取、修改或删除他人的 Key；请求体不接受 owner/role 等代操作字段。
+
+使用记录列表、详情、摘要及洞察概览对普通用户强制按持久化 user_id 过滤，客户端不能覆盖该条件；管理员登录后可查看全局记录。普通用户的列表/详情只保留自身请求、token、费用、延迟等字段，不返回上游账号身份、错误原文、重试轨迹或原始观测数据。全局仪表盘、诊断和运维错误仅管理员可访问。搜索不再匹配密钥明文。
 
 ## 5. 账号
 
@@ -467,11 +486,11 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 | 方法 | 路由 | 主要 query/body | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/account-groups` | `page`、`pageSize`、`search`、`enabled` | 分页查询分组；返回账号可用性、并发槽位（Redis 不可用时 `usedSlots=null`）及成功请求 USD 用量 |
-| `POST` | `/api/admin/account-groups/create` | `{ name, description, color }` | 创建空分组；`color` 严格为 `#RRGGBBAA`，返回时统一大写 |
-| `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color }` | 更新名称、描述和颜色 |
+| `POST` | `/api/admin/account-groups/create` | `{ name, description, color, dailyLimitUsd?, weeklyLimitUsd? }` | 创建空分组；`color` 严格为 `#RRGGBBAA`，返回时统一大写 |
+| `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, dailyLimitUsd, weeklyLimitUsd }` | 更新名称、描述、颜色和日/周额度 |
 | `POST` | `/api/admin/account-groups/enable` | `{ id }` | 启用 |
 | `POST` | `/api/admin/account-groups/disable` | `{ id }` | 禁用；已绑定 Key 保持受限，不回退到全部账号 |
-| `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除未被 Client Key 引用的组 |
+| `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除未被 Client Key 或计费账本引用的组；已有账本的组可禁用 |
 
 列表数据为 `{ items, page, configRevision }`，其中 item 返回 `memberCount`、按 Provider 聚合的
 `providerCounts` 和 `clientKeyCount`。查询分组成员使用账号列表的 `groupId` 筛选，
@@ -489,18 +508,12 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 | `POST` | `/api/admin/client-keys/disable` | `{ id }` | 禁用 |
 | `POST` | `/api/admin/client-keys/delete` | `{ id }` | 删除 |
 
-创建字段为 `name`、可选 `label`、`groupIds`、`maxConcurrency`、`requestsPerMinute`、可选
-`dailyLimitUsd` 和 `weeklyLimitUsd`，更新请求再增加
-`id`。`groupIds` 必须显式提交：空数组派生 `routingScope: "all"`，非空数组派生
-`routingScope: "groups"`。响应同时返回分组引用 `groups`，以及从当前有效账号池派生、仅供展示的
-`providerKinds`；Client Key 不再保存 `providerKind`。创建和 reveal 响应会返回完整明文 Key，调用方
-必须立即安全保存。
+创建字段为 `name`、可选 `label`、`groupIds`、`maxConcurrency`、`requestsPerMinute`，更新再增加 `id`。`groupIds` 必须且只能包含一个本人获授权的启用分组；空数组和多分组均拒绝。创建和 reveal 返回本人 Key 明文，其他操作不返回明文。金额字段不再接受写入 Key。
 
-金额字段为非负十进制字符串，最多 10 位整数与 10 位小数，`"0"` 表示不限额。
-创建时省略金额字段默认为零；更新时省略或 `null` 保留当前值，修改限额不会清空已用金额。
-`maxConcurrency` 和 `requestsPerMinute` 是非负整数，零表示不限。
+日/周额度在分组创建/更新接口配置，分组列表返回同名字段。金额为非负十进制字符串，最多 10 位整数和 10 位小数，`"0"` 表示不限；创建分组时省略默认为零，更新必须提交。修改限额不会清空已用金额。同一用户同一分组下所有 Key 共用窗口，不同用户独立累计；分组内全部账号共同适用这套额度。
+`maxConcurrency` 和 `requestsPerMinute` 仍按 Key 配置，非负整数，零表示不限。
 
-列表增加 `dailyLimitUsd`、`weeklyLimitUsd`、`dailyUsedUsd`、`weeklyUsedUsd`（均为字符串）、
+Key 列表继承分组策略和本人在组内的用量：`dailyLimitUsd`、`weeklyLimitUsd`、`dailyUsedUsd`、`weeklyUsedUsd`（均为字符串）、
 `dailyResetsAt`、`weeklyResetsAt`（RFC3339 或 `null`）。
 管理端日／周金额显示两位小数，悬停可查看原始值；记账和限额比较保留完整精度。
 日窗口按北京时间零点重置；周窗口从首次准入当天零点起持续七天，到期后在下一次使用时重新开启。
@@ -509,14 +522,13 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 修改 Key 策略对既有 WebSocket 连接的下一次请求同样生效，已开始的请求保持原有快照。
 
 任一已结算金额达到限额后拒绝新请求，已准入请求可完成并使金额超过阈值。
-HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly_budget_exceeded`，
+HTTP 返回 `429`，`error.code` 为 `group_daily_budget_exceeded` 或 `group_weekly_budget_exceeded`，
 并附 `Retry-After`；WebSocket 每次 `response.create` 执行相同检查并返回协议错误事件。
 只累计上游上报或按用量与模型价格计算出的 USD 费用；无法取得费用的尝试按零累计，
 保留错误和用量诊断，不产生待核账记录或阻断。内部重试中已经取得的费用仍会累计。
 预算存储不可用时返回 `503`、`key_budget_unavailable`。
 
-自动结算按网关请求 ID 幂等执行。账本独立于使用统计日志，记录保留至删除 Key，
-不受 `usageRetentionDays` 影响。
+自动结算按网关请求 ID 幂等执行。准入时冻结 user_id 和 group_id，改绑或删除 Key 不改变在途请求的计费归属，也不清空旧分组已用额度。账本独立于使用统计日志，删除 Key 后仍保留，不受 `usageRetentionDays` 影响。
 
 English: Daily and weekly budgets use automatically recorded costs. Missing usage or interrupted requests
 do not block a Key, and no manual reconciliation is required. New requests receive `429` once recorded

@@ -1,0 +1,171 @@
+<script setup lang="ts">
+import type { User } from '@/api/modules/users'
+import { computed, onMounted, ref } from 'vue'
+import { createUser, getUsers, updateUser } from '@/api/modules/users'
+import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
+import BaseCard from '@/components/base/BaseCard.vue'
+import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
+import BaseInput from '@/components/base/BaseInput.vue'
+import BaseModal from '@/components/base/BaseModal/index.vue'
+import BasePageHeader from '@/components/base/BasePageHeader.vue'
+import {
+  toast,
+} from '@/components/base/BaseToast'
+import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
+import { errorMessage } from '@/utils/async'
+
+const {
+  groups,
+  loading: groupsLoading,
+  loadGroups,
+} = useAccountGroupCatalog()
+const users = ref<User[]>([])
+const loading = ref(false)
+const saving = ref(false)
+const error = ref('')
+const open = ref(false)
+const editing = ref<User | null>(null)
+const username = ref('')
+const password = ref('')
+const groupIds = ref<string[]>([])
+const enabled = ref(true)
+const search = ref('')
+const visibleUsers = computed(() => users.value.filter(user => user.username.toLowerCase().includes(search.value.toLowerCase())))
+const groupNames = (user: User) => user.role === 'admin' ? '全部分组' : user.groupIds.map(id => groups.value.find(group => group.id === id)?.name ?? id).join('、') || '未分配'
+
+async function load() {
+  loading.value = true
+  error.value = ''
+  try {
+    users.value = await getUsers()
+  }
+  catch (cause) { error.value = errorMessage(cause, '用户加载失败') }
+  finally {
+    loading.value = false
+  }
+}
+function edit(user: User | null) {
+  editing.value = user
+  username.value = user?.username ?? ''
+  password.value = ''
+  groupIds.value = [...(user?.groupIds ?? [])]
+  enabled.value = user?.enabled ?? true
+  open.value = true
+  void loadGroups()
+}
+async function save() {
+  if (saving.value)
+    return
+  if (!editing.value && (!username.value.trim() || password.value.length < 12)) {
+    toast.warning('请输入用户名和至少 12 位初始密码')
+    return
+  }
+  saving.value = true
+  try {
+    if (editing.value)
+      await updateUser({ id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value })
+    else await createUser({ username: username.value.trim(), password: password.value, groupIds: groupIds.value })
+    password.value = ''
+    open.value = false
+    toast.success(editing.value ? '用户已更新' : '普通用户已创建')
+    await load()
+  }
+  catch (cause) {
+    toast.error(errorMessage(cause, '保存失败'))
+  }
+  finally {
+    saving.value = false
+  }
+}
+onMounted(load)
+</script>
+
+<template>
+  <div class="flex flex-col gap-5">
+    <BasePageHeader title="用户管理" description="创建普通用户并分配可用分组。用户自行创建和管理密钥。" />
+    <div class="flex flex-wrap items-center gap-3">
+      <BaseInput v-model="search" aria-label="搜索用户" placeholder="搜索用户名" class="max-w-sm" />
+      <BaseButton variant="primary" @click="edit(null)">
+        新建用户
+      </BaseButton>
+      <BaseButton variant="secondary" :loading="loading" @click="load">
+        刷新
+      </BaseButton>
+    </div>
+    <p v-if="error" role="alert" class="text-cp-error">
+      {{ error }}
+    </p>
+    <BaseCard>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-cp-sm">
+          <thead class="text-cp-text-secondary">
+            <tr>
+              <th class="p-3">
+                用户名
+              </th><th class="p-3">
+                角色
+              </th><th class="p-3">
+                状态
+              </th><th class="p-3">
+                授权分组
+              </th><th class="p-3">
+                操作
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="user in visibleUsers" :key="user.id" class="border-t border-cp-border">
+              <td class="p-3 font-medium">
+                {{ user.username }}
+              </td>
+              <td class="p-3">
+                {{ user.role === 'admin' ? '管理员' : '普通用户' }}
+              </td>
+              <td class="p-3">
+                {{ user.enabled ? '已启用' : '已禁用' }}
+              </td>
+              <td class="max-w-md p-3">
+                {{ groupNames(user) }}
+              </td>
+              <td class="p-3">
+                <BaseButton v-if="user.role !== 'admin'" variant="secondary" @click="edit(user)">
+                  编辑
+                </BaseButton>
+              </td>
+            </tr>
+            <tr v-if="!loading && !visibleUsers.length">
+              <td colspan="5" class="p-6 text-center text-cp-text-secondary">
+                没有匹配的用户
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </BaseCard>
+    <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!saving" size="md">
+      <div class="grid gap-5">
+        <BaseFormItem label="用户名" required>
+          <BaseInput v-model="username" aria-label="用户名" :disabled="saving || !!editing" maxlength="128" autocomplete="off" />
+        </BaseFormItem>
+        <BaseFormItem v-if="!editing" label="初始密码" required>
+          <BaseInput v-model="password" aria-label="初始密码" type="password" autocomplete="new-password" :disabled="saving" placeholder="至少 12 位" />
+        </BaseFormItem>
+        <label v-if="editing" for="user-enabled" class="flex items-center gap-2"><input id="user-enabled" v-model="enabled" type="checkbox" :disabled="saving">启用用户</label>
+        <p v-if="editing" class="text-cp-sm text-cp-text-secondary">
+          禁用后无法登录，已有密钥不能发起新请求。
+        </p>
+        <BaseFormItem label="授权分组">
+          <AccountGroupCheckboxGrid v-model="groupIds" :groups="groups" :loading="groupsLoading" :disabled="saving" />
+        </BaseFormItem>
+      </div>
+      <template #footer>
+        <BaseButton variant="secondary" :disabled="saving" @click="open = false; password = ''">
+          取消
+        </BaseButton><BaseButton variant="primary" :loading="saving" @click="save">
+          保存
+        </BaseButton>
+      </template>
+    </BaseModal>
+  </div>
+</template>

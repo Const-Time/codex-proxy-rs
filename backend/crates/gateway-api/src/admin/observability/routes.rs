@@ -77,14 +77,15 @@ where
 }
 
 pub(crate) async fn usage_records<S>(
-    _auth: AdminAuth,
+    auth: super::super::auth::UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<UsageQuery>,
 ) -> Result<impl IntoResponse, AdminError>
 where
     S: AdminSessionState + Send + Sync,
 {
-    let command = usage_command(&query).map_err(map_wire_error)?;
+    let mut command = usage_command(&query).map_err(map_wire_error)?;
+    command.filter.owner_user_id = personal_owner(&auth);
     let result = state
         .admin_services()
         .observability()
@@ -92,11 +93,21 @@ where
         .await
         .map_err(map_service_error)?;
     let data = usage_page_view(result);
+    let mut data = serde_json::to_value(data).map_err(|_| AdminError::internal())?;
+    if personal_owner(&auth).is_some()
+        && let Some(items) = data
+            .get_mut("items")
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in items {
+            retain_personal_fields(item);
+        }
+    }
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
 }
 
 pub(crate) async fn usage_record_detail<S>(
-    _auth: AdminAuth,
+    auth: super::super::auth::UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<DetailQuery>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -107,17 +118,19 @@ where
     let result = state
         .admin_services()
         .observability()
-        .usage_record_detail(query.id.trim())
+        .usage_record_detail(query.id.trim(), personal_owner(&auth).as_deref())
         .await
         .map_err(map_service_error)?;
-    Ok(AdminResponse::new(
-        StatusCode::OK,
-        AdminEnvelope::ok(usage_detail_view(result)),
-    ))
+    let mut data =
+        serde_json::to_value(usage_detail_view(result)).map_err(|_| AdminError::internal())?;
+    if personal_owner(&auth).is_some() {
+        retain_personal_fields(&mut data);
+    }
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
 }
 
 pub(crate) async fn usage_records_summary<S>(
-    _auth: AdminAuth,
+    auth: super::super::auth::UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<UsageQuery>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -126,7 +139,8 @@ where
 {
     let range = usage_range(query.start_time.as_deref(), query.end_time.as_deref())
         .map_err(map_wire_error)?;
-    let filter = usage_filter(&query).map_err(map_wire_error)?;
+    let mut filter = usage_filter(&query).map_err(map_wire_error)?;
+    filter.owner_user_id = personal_owner(&auth);
     let result = state
         .admin_services()
         .observability()
@@ -140,7 +154,7 @@ where
 }
 
 pub(crate) async fn usage_insights_overview<S>(
-    _auth: AdminAuth,
+    auth: super::super::auth::UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<UsageQuery>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -149,7 +163,8 @@ where
 {
     let range = usage_range(query.start_time.as_deref(), query.end_time.as_deref())
         .map_err(map_wire_error)?;
-    let filter = usage_filter(&query).map_err(map_wire_error)?;
+    let mut filter = usage_filter(&query).map_err(map_wire_error)?;
+    filter.owner_user_id = personal_owner(&auth);
     let result = state
         .admin_services()
         .observability()
@@ -209,4 +224,61 @@ where
         .map_err(map_service_error)?;
     let data = ops_page_view(result);
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+fn personal_owner(auth: &super::super::auth::UserAuth) -> Option<String> {
+    (auth.user.role == gateway_admin::model::users::UserRole::User).then(|| auth.user.id.clone())
+}
+
+/// An explicit public field contract: newly added administrator diagnostics do
+/// not become visible to ordinary users automatically.
+fn retain_personal_fields(value: &mut serde_json::Value) {
+    const FIELDS: &[&str] = &[
+        "id",
+        "requestId",
+        "clientApiKeyId",
+        "routingScope",
+        "routingGroupRefs",
+        "routingGroupNamesSnapshot",
+        "kind",
+        "provider",
+        "route",
+        "model",
+        "requestedModel",
+        "serviceTier",
+        "statusCode",
+        "clientTransport",
+        "imageGenerationRequested",
+        "imageGenerationSucceeded",
+        "responseId",
+        "latencyMs",
+        "firstTokenMs",
+        "inputTokens",
+        "outputTokens",
+        "cachedTokens",
+        "cacheWriteTokens",
+        "reasoningTokens",
+        "imageInputTokens",
+        "imageOutputTokens",
+        "createdAt",
+        "createdAtDisplay",
+        "clientIp",
+        "userAgent",
+        "reasoningEffort",
+        "reasoningPreset",
+        "compact",
+        "requestKind",
+        "subagentKind",
+        "tokenDetails",
+        "billing",
+        "costs",
+        "costCoverage",
+        "firstTokenLatencyMs",
+        "firstTokenLatencyMsDisplay",
+        "latencyMsDisplay",
+        "logicalOutcome",
+    ];
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| FIELDS.contains(&key.as_str()));
+    }
 }

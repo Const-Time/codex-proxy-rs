@@ -106,8 +106,8 @@ async fn audit_requires_canonical_admin_identity_and_retains_it_after_admin_dele
         return;
     };
     sqlx::raw_sql(
-        "insert into admin_users (id, password_hash, created_at, updated_at)
-           values ('admin_test', 'test_hash', now(), now());
+        "insert into users (id, username, password_hash, created_at, updated_at)
+           values ('admin_test', 'admin_test', 'test_hash', now(), now());
          insert into admin_audit_events (id, actor_kind, actor_admin_user_id, actor_ref,
            action, entity_kind, entity_ref, created_at)
            values ('audit_identity', 'admin_session', 'admin_test', 'admin:admin_test',
@@ -121,7 +121,7 @@ async fn audit_requires_canonical_admin_identity_and_retains_it_after_admin_dele
         .await
         .expect_err("new writes require the canonical actor identity");
     assert_check_rejected(&error);
-    sqlx::query("delete from admin_users where id = 'admin_test'")
+    sqlx::query("delete from users where id = 'admin_test'")
         .execute(&db.pool)
         .await
         .expect("audit retains identity when live admin is deleted");

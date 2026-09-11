@@ -16,7 +16,7 @@ router.beforeEach(async (to) => {
   if (to.path === '/login') {
     // 如果已登录，重定向到首页
     if (authStore.isAuthenticated) {
-      return '/'
+      return authStore.isAdmin ? '/' : '/api-keys'
     }
     return
   }
@@ -34,4 +34,6 @@ router.beforeEach(async (to) => {
   if (!authStore.isAuthenticated) {
     return '/login'
   }
+  if (!authStore.isAdmin && !['/api-keys', '/my-usage', '/profile', '/theme'].includes(to.path))
+    return '/api-keys'
 })

@@ -19,6 +19,7 @@ pub mod presenter;
 pub mod proxies;
 pub mod settings;
 pub mod system;
+pub mod users;
 pub mod wire;
 
 pub use auth::{AdminAuth, AdminSessionState};
@@ -38,6 +39,7 @@ where
         .merge(proxies::router::<S>())
         .merge(accounts::router::<S>())
         .merge(auth::router::<S>())
+        .merge(users::router::<S>())
         .merge(backups::router::<S>())
         .merge(client_keys::router::<S>())
         .merge(observability::router::<S>())

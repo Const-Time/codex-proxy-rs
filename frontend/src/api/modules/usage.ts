@@ -96,6 +96,7 @@ export interface UsageListRecord {
 }
 
 export interface UsageRecord {
+  routingGroupNamesSnapshot: string[]
   id: string
   requestId: string
   clientApiKeyId: string | null

@@ -1,3 +1,4 @@
+import type { User } from './users'
 import request from '../request'
 
 export interface LoginResponse {
@@ -6,6 +7,7 @@ export interface LoginResponse {
 
 export interface AuthStatusResponse {
   authenticated: boolean
+  user: User | null
 }
 
 export interface LogoutResponse {

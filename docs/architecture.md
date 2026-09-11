@@ -9,7 +9,7 @@
 Codex Proxy RS 是单进程、单副本运行的多 Provider AI 网关，同时提供：
 
 - 面向客户端的 OpenAI Responses、Images、standalone Search 和模型目录协议；
-- 面向管理员的 `/api/admin/*` 控制面和 Vue 管理端；
+- 带管理员/普通用户角色隔离的控制面和 Vue 界面；
 - OpenAI 与 xAI 两个编译期 Provider；
 - PostgreSQL 持久化、Redis 协调状态以及 S3/R2 数据库备份。
 
@@ -430,3 +430,13 @@ docker compose -f deploy/compose.yaml config --quiet
 
 行为、配置或边界变化必须同步其唯一文档 owner：用户入口写入根 README，HTTP 合同写入 `docs/api.md`，
 部署操作写入 `deploy/README.md`，架构不变量保留在本文。
+
+## 用户隔离与分组额度
+
+用户统一存于 users；原管理员迁移为 admin，后台新建身份固定为 user。Redis 会话保存用户 ID 与 auth_version，每次鉴权回读 enabled/version。AdminAuth 负责全局管理，UserAuth 只接受个人会话；部署级 API Key 不可代用户访问密钥。
+
+client_api_keys.owner_user_id 不可由 API 修改。创建/变更在事务内重新校验所有权和 user_account_groups 授权，唯一索引限制一个 Key 一个组。快照排除禁用用户、未授权或未绑定启用组的 Key。请求准入再次检查实时用户/组权限，返回冻结的 ClientBudgetScope；model_requests.user_id 独立于可删除的密钥外键保存。
+
+account_groups 配置日/周 USD 限额；user_group_budget_windows 按 (user_id, account_group_id) 维护窗口，user_group_charge_events 按 request_id 幂等结算。删除/改绑 Key 不改变计费归属和已用金额。使用记录查询在 SQL 层按可信用户 ID 限定，个人响应采用字段允许清单，避免新增诊断字段自动暴露。
+
+密钥仍以明文持久化，以支持本人再次读取；“管理员不能查看”由应用权限保证，不隔离数据库、备份或部署主机的操作者。后台备份仍属于部署管理权限。

@@ -24,6 +24,8 @@ export interface AccountGroupUsage {
 }
 
 export interface AccountGroup extends AccountGroupRef {
+  dailyLimitUsd: string
+  weeklyLimitUsd: string
   description: string | null
   memberCount: number
   providerCounts: Record<string, number>
@@ -62,12 +64,16 @@ interface AccountGroupListParams {
 }
 
 interface AccountGroupCreateParam {
+  dailyLimitUsd: string
+  weeklyLimitUsd: string
   name: string
   description: string | null
   color: string
 }
 
 interface AccountGroupUpdateParam {
+  dailyLimitUsd: string
+  weeklyLimitUsd: string
   id: string
   name: string
   description: string | null

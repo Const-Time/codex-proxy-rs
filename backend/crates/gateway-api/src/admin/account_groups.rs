@@ -70,6 +70,8 @@ impl ListAccountGroupsQuery {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateAccountGroupRequest {
+    daily_limit_usd: Option<String>,
+    weekly_limit_usd: Option<String>,
     name: String,
     description: Option<String>,
     color: String,
@@ -78,6 +80,8 @@ struct CreateAccountGroupRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateAccountGroupRequest {
+    daily_limit_usd: String,
+    weekly_limit_usd: String,
     id: String,
     name: String,
     description: Option<String>,
@@ -93,6 +97,8 @@ struct AccountGroupIdRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountGroupView {
+    daily_limit_usd: String,
+    weekly_limit_usd: String,
     id: String,
     name: String,
     description: Option<String>,
@@ -133,6 +139,8 @@ struct AccountGroupUsageView {
 impl From<AccountGroupRecord> for AccountGroupView {
     fn from(record: AccountGroupRecord) -> Self {
         Self {
+            daily_limit_usd: record.budget.daily_usd.canonical(),
+            weekly_limit_usd: record.budget.weekly_usd.canonical(),
             id: record.id.to_string(),
             name: record.name,
             description: record.description,
@@ -269,6 +277,10 @@ where
             .create(
                 &auth.context().mutation_context(),
                 CreateAccountGroup {
+                    budget: parse_group_budget(
+                        request.daily_limit_usd.as_deref().unwrap_or("0"),
+                        request.weekly_limit_usd.as_deref().unwrap_or("0"),
+                    )?,
                     name: request.name,
                     description: request.description,
                     color: group_color(&request.color)?,
@@ -295,6 +307,10 @@ where
             .update(
                 &auth.context().mutation_context(),
                 UpdateAccountGroup {
+                    budget: parse_group_budget(
+                        &request.daily_limit_usd,
+                        &request.weekly_limit_usd,
+                    )?,
                     id: group_id(request.id)?,
                     name: request.name,
                     description: request.description,
@@ -413,4 +429,18 @@ fn map_wire_error(_: WireValidationError) -> AdminError {
 
 fn map_service_error(error: gateway_admin::model::AdminError) -> AdminError {
     map_admin_service_error(error)
+}
+
+fn parse_group_budget(
+    daily: &str,
+    weekly: &str,
+) -> Result<gateway_core::engine::budget::ClientBudgetLimits, AdminError> {
+    Ok(gateway_core::engine::budget::ClientBudgetLimits {
+        daily_usd: daily
+            .parse()
+            .map_err(|_| AdminError::bad_request("日限额须为非负 USD 金额"))?,
+        weekly_usd: weekly
+            .parse()
+            .map_err(|_| AdminError::bad_request("周限额须为非负 USD 金额"))?,
+    })
 }

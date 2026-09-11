@@ -2,10 +2,20 @@
 
 use super::*;
 
-pub(crate) struct AdminAuthStoreAdapter {
+pub struct UserAuthStore {
     pub(crate) security: postgres::PgAdminSecurityAuditRepository,
     pub(crate) settings: postgres::PgRuntimeSettingsRepository,
     pub(crate) state: redis::RedisAdminAuthStateRepository,
+}
+
+impl UserAuthStore {
+    pub fn new(pool: sqlx::PgPool, state: redis::RedisAdminAuthStateRepository) -> Self {
+        Self {
+            security: postgres::PgAdminSecurityAuditRepository::new(pool.clone()),
+            settings: postgres::PgRuntimeSettingsRepository::new(pool),
+            state,
+        }
+    }
 }
 
 pub(crate) struct AdminSettingsStoreAdapter {
@@ -185,7 +195,59 @@ pub(crate) fn store_model_mappings(
 }
 
 #[async_trait::async_trait]
-impl AuthStore for AdminAuthStoreAdapter {
+impl AuthStore for UserAuthStore {
+    async fn user_groups(
+        &self,
+        id: &str,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserGroup>> {
+        self.available_groups(id).await
+    }
+    async fn find_user(
+        &self,
+        username: &str,
+    ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
+        self.user_by(username, true).await
+    }
+    async fn load_user(
+        &self,
+        id: &str,
+    ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
+        self.user_by(id, false).await
+    }
+    async fn list_users(&self) -> AdminStoreResult<Vec<gateway_admin::model::users::UserRecord>> {
+        self.users().await
+    }
+    async fn create_user(
+        &self,
+        id: &str,
+        username: &str,
+        password_hash: &str,
+        groups: &[String],
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::users::UserRecord> {
+        self.insert_user(id, username, password_hash, groups, context)
+            .await
+    }
+    async fn update_user(
+        &self,
+        command: gateway_admin::model::users::UpdateUser,
+        context: &MutationContext,
+    ) -> AdminStoreResult<(
+        gateway_admin::model::Revision,
+        gateway_admin::model::users::UserRecord,
+    )> {
+        self.modify_user(command, context).await
+    }
+    async fn change_password(
+        &self,
+        id: &str,
+        version: i64,
+        hash: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<()> {
+        self.replace_password(id, version, hash, context).await
+    }
+
     async fn load_password_hash(&self, admin_user_id: &str) -> AdminStoreResult<Option<String>> {
         postgres::AdminSecurityAuditRepository::password_hash(&self.security, admin_user_id)
             .await
@@ -218,6 +280,7 @@ impl AuthStore for AdminAuthStoreAdapter {
             .await
             .map(|session| {
                 session.map(|record| AdminSession {
+                    auth_version: record.auth_version,
                     admin_user_id: record.admin_user_id,
                     expires_at: record.expires_at,
                 })
@@ -234,6 +297,7 @@ impl AuthStore for AdminAuthStoreAdapter {
             &self.state,
             session_id,
             &redis::AdminSessionRecord {
+                auth_version: session.auth_version,
                 admin_user_id: session.admin_user_id.clone(),
                 expires_at: session.expires_at,
             },
@@ -247,6 +311,7 @@ impl AuthStore for AdminAuthStoreAdapter {
             .await
             .map(|session| {
                 session.map(|record| AdminSession {
+                    auth_version: record.auth_version,
                     admin_user_id: record.admin_user_id,
                     expires_at: record.expires_at,
                 })

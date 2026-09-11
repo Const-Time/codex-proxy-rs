@@ -59,6 +59,8 @@ pub(crate) fn observability_page_offset(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageRecordFilter {
+    /// Trusted scope supplied by authentication, never by query parameters.
+    pub owner_user_id: Option<String>,
     pub client_api_key_ref: Option<String>,
     pub request_id: Option<String>,
     pub provider_account_ref: Option<String>,
@@ -774,7 +776,11 @@ pub trait ObservabilityRepository: Send + Sync {
         query: ProviderAccountUsageQuery,
     ) -> StoreResult<Vec<ProviderAccountUsageObservation>>;
     async fn list_usage_records(&self, query: UsageRecordQuery) -> StoreResult<UsageRecordPage>;
-    async fn usage_record_detail(&self, request_id: &str) -> StoreResult<UsageRecordDetail>;
+    async fn usage_record_detail(
+        &self,
+        request_id: &str,
+        owner: Option<&str>,
+    ) -> StoreResult<UsageRecordDetail>;
     async fn usage_summary(
         &self,
         range: ObservabilityRange,

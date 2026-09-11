@@ -183,7 +183,7 @@ async fn request_snapshots_should_survive_account_deletion() {
     );
 
     let detail = repository
-        .usage_record_detail("req_snap_a")
+        .usage_record_detail("req_snap_a", None)
         .await
         .expect("usage record detail after deletion");
     assert_eq!(
@@ -277,7 +277,7 @@ async fn attempts_should_keep_their_own_account_snapshots() {
 
     let repository = observability_repository(&database.pool);
     let detail = repository
-        .usage_record_detail("req_snap_ab")
+        .usage_record_detail("req_snap_ab", None)
         .await
         .expect("usage detail with mixed attempts");
     let intermediate = detail
@@ -968,6 +968,8 @@ async fn renaming_account_should_not_rewrite_historical_snapshots() {
 
 fn new_request(id: &str, started_at: DateTime<Utc>) -> NewModelRequest {
     NewModelRequest {
+        user_id: None,
+
         admission_decision_ms: None,
         id: id.to_owned(),
         client_api_key_id: None,
@@ -1098,8 +1100,12 @@ async fn finalize_request_without_client_status(
 
 async fn seed_api_key(pool: &PgPool, id: &str, name: &str, now: DateTime<Utc>) {
     sqlx::query(
-        "insert into client_api_keys (id, name, key, enabled, created_at, updated_at)
-         values ($1, $2, 'sk_' || $3, true, $4, $4)",
+        "with fixture_group as (
+           insert into account_groups(id, name, color, created_at, updated_at) values ('grp_ffffffffffffffffffffffffffffffff','Fixture group','#64748BFF',now(),now()) on conflict do nothing
+         ), fixture_key as (
+           insert into client_api_keys (owner_user_id, id, name, key, enabled, created_at, updated_at) values ('test-owner', $1, $2, 'sk_' || $3, true, $4, $4) returning id
+         ) insert into client_api_key_groups(client_api_key_id, account_group_id, created_at)
+           select id, 'grp_ffffffffffffffffffffffffffffffff', now() from fixture_key",
     )
     .bind(id)
     .bind(name)

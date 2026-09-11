@@ -49,6 +49,8 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                budget: Default::default(),
+
                 id: mixed_group.clone(),
                 name: "Mixed Production".to_owned(),
                 description: Some("cross-provider".to_owned()),
@@ -61,6 +63,8 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                budget: Default::default(),
+
                 id: empty_group.clone(),
                 name: "Empty Pool".to_owned(),
                 description: None,
@@ -81,7 +85,6 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
         ("key_group_one", vec![mixed_group.clone()]),
         ("key_group_two", vec![mixed_group.clone()]),
         ("key_empty_pool", vec![empty_group.clone()]),
-        ("key_all_accounts", Vec::new()),
     ] {
         keys.create_client_key(new_key(id, group_ids), &context(id))
             .await
@@ -142,59 +145,33 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     assert_eq!(empty.usage.today_usd.as_str(), "1.5");
     assert_eq!(empty.usage.retained_total_usd.as_str(), "1.5");
 
-    let all_key = keys
-        .reveal_client_key(&client_key_id("key_all_accounts"))
-        .await
-        .expect("reveal all-accounts key")
-        .expect("all-accounts key exists");
-    assert!(all_key.record.groups.is_empty());
-    assert_eq!(
-        all_key
-            .record
-            .provider_kinds
-            .iter()
-            .map(|kind| kind.as_str())
-            .collect::<Vec<_>>(),
-        ["openai", "xai"]
-    );
     let empty_pool_key = keys
-        .reveal_client_key(&client_key_id("key_empty_pool"))
+        .reveal_client_key("test-owner", &client_key_id("key_empty_pool"))
         .await
         .expect("reveal empty-pool key")
         .expect("empty-pool key exists");
     assert_eq!(empty_pool_key.record.groups.len(), 1);
     assert!(empty_pool_key.record.provider_kinds.is_empty());
 
-    let (scope_revision, widened) = keys
-        .update_client_key(
+    let revision_before = current_revision(&database.pool).await;
+    assert!(
+        keys.update_client_key(
             UpdateClientKey {
-                daily_limit_usd: None,
-                weekly_limit_usd: None,
                 id: client_key_id("key_group_one"),
-                name: "key_group_one".to_owned(),
+                name: "key_group_one".into(),
                 label: None,
                 group_ids: Vec::new(),
                 limits: RateLimits::unlimited(),
             },
-            &context("widen-group-key"),
+            &context("reject-ungrouped-key")
         )
         .await
-        .expect("widen restricted key to all accounts");
-    assert!(widened.groups.is_empty());
-    let scope_audit: Vec<String> = sqlx::query_scalar(
-        "select changed_fields from admin_audit_events
-         where admin_request_id = 'widen-group-key'",
-    )
-    .fetch_one(&database.pool)
-    .await
-    .expect("load scope widening audit");
-    assert!(scope_audit.contains(&"routing_scope:groups->all".to_owned()));
-    assert_eq!(current_revision(&database.pool).await, scope_revision.get());
+        .is_err()
+    );
+    assert_eq!(current_revision(&database.pool).await, revision_before);
     let (restricted_revision, restricted) = keys
         .update_client_key(
             UpdateClientKey {
-                daily_limit_usd: None,
-                weekly_limit_usd: None,
                 id: client_key_id("key_group_one"),
                 name: "key_group_one".to_owned(),
                 label: None,
@@ -213,7 +190,7 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     .fetch_one(&database.pool)
     .await
     .expect("load scope restriction audit");
-    assert!(restricted_audit.contains(&"routing_scope:all->groups".to_owned()));
+    assert!(restricted_audit.contains(&"group_ids".to_owned()));
     assert_eq!(
         current_revision(&database.pool).await,
         restricted_revision.get()
@@ -255,6 +232,8 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
     groups
         .create_account_group(
             NewAccountGroup {
+                budget: Default::default(),
+
                 id: group_id(EMPTY_GROUP),
                 name: "Statusless Costs".to_owned(),
                 description: None,
@@ -315,7 +294,6 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
 fn new_key(id: &str, group_ids: Vec<AccountGroupId>) -> NewClientKey {
     let marker = char::from(id.as_bytes().last().copied().unwrap_or(b'k'));
     NewClientKey {
-        budget: Default::default(),
         id: client_key_id(id),
         name: id.to_owned(),
         label: None,
@@ -339,7 +317,9 @@ fn client_key_id(value: &str) -> ClientApiKeyId {
 
 fn context(request_id: &str) -> MutationContext {
     MutationContext {
-        actor: MutationActor::System,
+        actor: MutationActor::AdminSession {
+            admin_user_id: "test-owner".into(),
+        },
         request_id: request_id.to_owned(),
     }
 }

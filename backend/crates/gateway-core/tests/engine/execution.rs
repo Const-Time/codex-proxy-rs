@@ -49,7 +49,11 @@ struct Budget {
 }
 
 impl ClientBudgetPort for Budget {
-    fn admit(&self, _: ClientApiKeyId) -> BoxFuture<'_, Result<(), GatewayError>> {
+    fn admit(
+        &self,
+        _: ClientApiKeyId,
+        _: Option<gateway_core::routing::AccountGroupId>,
+    ) -> BoxFuture<'_, Result<gateway_core::engine::budget::ClientBudgetScope, GatewayError>> {
         Box::pin(async {
             assert!(self.active.load(Ordering::SeqCst));
             if self.reject {
@@ -58,7 +62,13 @@ impl ClientBudgetPort for Budget {
                         .with_client_code("key_daily_budget_exceeded"),
                 )
             } else {
-                Ok(())
+                Ok(gateway_core::engine::budget::ClientBudgetScope {
+                    user_id: "user-1".into(),
+                    group_id: gateway_core::routing::AccountGroupId::new(
+                        "grp_00000000000000000000000000000001",
+                    )
+                    .unwrap(),
+                })
             }
         })
     }

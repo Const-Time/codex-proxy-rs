@@ -17,6 +17,51 @@ use serde::{Deserialize, Serialize};
 use tower_http::request_id::RequestId;
 
 use super::{AdminEnvelope, AdminError, AdminJson, AdminResponse};
+use gateway_admin::model::users::UserRecord;
+
+/// A personal session. Deployment API keys cannot impersonate a user.
+pub struct UserAuth {
+    pub user: UserRecord,
+    context: AdminRequestContext,
+}
+
+impl UserAuth {
+    pub const fn context(&self) -> &AdminRequestContext {
+        &self.context
+    }
+}
+
+impl<S> FromRequestParts<S> for UserAuth
+where
+    S: AdminSessionState + Send + Sync,
+{
+    type Rejection = AdminError;
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if admin_api_key_header(&parts.headers).is_some() {
+            return Err(AdminError::invalid_request(
+                StatusCode::FORBIDDEN,
+                "个人操作需要本人登录",
+            ));
+        }
+        let user = state
+            .admin_services()
+            .auth()
+            .current_user(admin_session_cookie(&parts.headers).as_deref())
+            .await
+            .map_err(super::wire::map_admin_service_error)?
+            .ok_or_else(AdminError::admin_session_required)?;
+        let request_id = admin_request_id(parts).ok_or_else(AdminError::internal)?;
+        Ok(Self {
+            context: AdminRequestContext {
+                principal: AdminPrincipal::Session {
+                    admin_user_id: user.id.clone(),
+                },
+                request_id,
+            },
+            user,
+        })
+    }
+}
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const ADMIN_SESSION_COOKIE: &str = "cpr_admin_session";
@@ -84,7 +129,7 @@ where
     {
         Ok(Some(admin_user_id)) => Ok(admin_user_id),
         Ok(None) => Err(AdminError::admin_session_required()),
-        Err(_) => Err(AdminError::internal()),
+        Err(error) => Err(super::wire::map_admin_service_error(error)),
     }
 }
 
@@ -156,16 +201,20 @@ impl AdminLoginData {
 }
 
 /// 管理员会话状态响应。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminSessionStatusData {
     authenticated: bool,
+    user: Option<super::users::UserView>,
 }
 
 impl AdminSessionStatusData {
     #[must_use]
     pub const fn new(authenticated: bool) -> Self {
-        Self { authenticated }
+        Self {
+            authenticated,
+            user: None,
+        }
     }
 }
 
@@ -238,15 +287,18 @@ async fn session_status<S>(
 where
     S: AdminSessionState + Send + Sync,
 {
-    let authenticated = state
+    let user = state
         .admin_services()
         .auth()
-        .validate_session(admin_session_cookie(&headers).as_deref())
+        .current_user(admin_session_cookie(&headers).as_deref())
         .await
         .map_err(|_| AdminError::internal())?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(AdminSessionStatusData::new(authenticated)),
+        AdminEnvelope::ok(AdminSessionStatusData {
+            authenticated: user.is_some(),
+            user: user.map(Into::into),
+        }),
     ))
 }
 

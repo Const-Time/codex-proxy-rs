@@ -318,3 +318,55 @@ async fn admin_auth_failures_should_use_stable_chinese_contracts() {
         ]
     );
 }
+
+#[tokio::test]
+async fn ordinary_sessions_are_rejected_by_administrator_routes_and_api_keys_by_personal_routes() {
+    let fixture = AdminTestFixture::new().await;
+    fixture
+        .auth
+        .insert_user_session("ordinary-session", "ordinary");
+    let router = app(fixture.state());
+    for path in [
+        "/api/admin/users",
+        "/api/admin/accounts",
+        "/api/admin/account-groups",
+        "/api/admin/settings",
+        "/api/admin/dashboard/summary",
+        "/api/admin/operations/errors",
+        "/api/admin/usage/insights/diagnostics",
+    ] {
+        let mut req = request(Method::GET, path, Body::empty());
+        req.headers_mut().insert(
+            header::COOKIE,
+            "cpr_admin_session=ordinary-session".parse().unwrap(),
+        );
+        let response = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    for path in [
+        "/api/profile",
+        "/api/profile/groups",
+        "/api/admin/client-keys",
+        "/api/admin/usage/records",
+        "/api/admin/usage/records/summary",
+    ] {
+        let mut req = request(Method::GET, path, Body::empty());
+        req.headers_mut().insert(
+            header::COOKIE,
+            "cpr_admin_session=ordinary-session".parse().unwrap(),
+        );
+        let response = router.clone().oneshot(req).await.unwrap();
+        // The fixture intentionally returns an unavailable summary store after authentication.
+        let expected = if path.ends_with("/summary") {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(response.status(), expected, "{path}");
+        let mut req = request(Method::GET, path, Body::empty());
+        req.headers_mut()
+            .insert("x-api-key", "deployment-key".parse().unwrap());
+        let response = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+}
