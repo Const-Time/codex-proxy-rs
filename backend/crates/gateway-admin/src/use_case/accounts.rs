@@ -31,7 +31,7 @@ use crate::{
     },
     ports::{
         provider::ProviderAdminRegistry,
-        store::{AccountRuntimeStore, AccountStore},
+        store::{AccountRuntimeStore, AccountStore, SettingsStore},
     },
 };
 
@@ -129,6 +129,7 @@ pub trait AccountsService: Send + Sync {
 pub(crate) struct DefaultAccountsService {
     accounts: Arc<dyn AccountStore>,
     account_runtime: Arc<dyn AccountRuntimeStore>,
+    settings: Arc<dyn SettingsStore>,
     providers: ProviderAdminRegistry,
     snapshot: Arc<dyn SnapshotControl>,
     probe: Arc<dyn AccountProbe>,
@@ -141,6 +142,7 @@ impl DefaultAccountsService {
     pub(crate) fn new(
         accounts: Arc<dyn AccountStore>,
         account_runtime: Arc<dyn AccountRuntimeStore>,
+        settings: Arc<dyn SettingsStore>,
         providers: ProviderAdminRegistry,
         snapshot: Arc<dyn SnapshotControl>,
         probe: Arc<dyn AccountProbe>,
@@ -148,6 +150,7 @@ impl DefaultAccountsService {
         Self {
             accounts,
             account_runtime,
+            settings,
             providers,
             snapshot,
             probe,
@@ -255,6 +258,23 @@ impl DefaultAccountsService {
             end: now,
         };
         let ids = vec![account.id.clone()];
+        let runtime = self
+            .account_runtime
+            .account_runtime(&ids)
+            .await
+            .unwrap_or_default();
+        let settings = self
+            .settings
+            .load_runtime_settings()
+            .await
+            .map_err(|error| map_store_error(error, "account capacity settings"))?;
+        let used_slots = runtime
+            .in_flight
+            .as_ref()
+            .map(|slots| slots.get(&account.id).copied().unwrap_or(0));
+        let total_slots = account
+            .concurrency_limit
+            .map_or(settings.max_concurrent_per_account, |limit| limit.get());
         let rolling_usage = self
             .accounts
             .load_account_usage(rolling_range, &ids)
@@ -281,6 +301,8 @@ impl DefaultAccountsService {
         .await?;
         let usage = quota.representative_window_usage().cloned();
         Ok(AccountDirectoryItem {
+            used_slots,
+            total_slots,
             plan_type_display: self.providers.resolve_account_plan(
                 stored.account.provider_kind.as_str(),
                 &mut stored.account.plan_type,
@@ -367,6 +389,16 @@ impl AccountsService for DefaultAccountsService {
         .collect::<Result<Vec<_>, AdminError>>()?;
         self.attach_quota_local_usage(&page.items, &mut quotas)
             .await?;
+        let runtime = self
+            .account_runtime
+            .account_runtime(&ids)
+            .await
+            .unwrap_or_default();
+        let settings = self
+            .settings
+            .load_runtime_settings()
+            .await
+            .map_err(|error| map_store_error(error, "account capacity settings"))?;
         let items = page
             .items
             .into_iter()
@@ -374,6 +406,14 @@ impl AccountsService for DefaultAccountsService {
             .map(|(mut item, quota)| {
                 let usage = quota.representative_window_usage().cloned();
                 AccountDirectoryItem {
+                    used_slots: runtime
+                        .in_flight
+                        .as_ref()
+                        .map(|slots| slots.get(&item.account.id).copied().unwrap_or(0)),
+                    total_slots: item
+                        .account
+                        .concurrency_limit
+                        .map_or(settings.max_concurrent_per_account, |limit| limit.get()),
                     plan_type_display: self.providers.resolve_account_plan(
                         item.account.provider_kind.as_str(),
                         &mut item.account.plan_type,
