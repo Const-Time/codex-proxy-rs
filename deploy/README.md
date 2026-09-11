@@ -331,7 +331,7 @@ docker compose -f deploy/compose.yaml build codex-proxy-rs
 
 Compose 已显式装配正式发布构建所需的运行参数：
 
-- `CPR_UPDATE_REPOSITORY`：只接受 `owner/repository`；默认 `zyycn/codex-proxy-rs`。
+- `CPR_UPDATE_REPOSITORY`：只接受 `owner/repository`；默认 `Const-Time/codex-proxy-rs`。
 - `CPR_GITHUB_API_BASE`：正式环境必须为 `https://api.github.com/repos`。
 - `CPR_UPDATE_CHANNEL`：`stable` 会拒绝 prerelease。
 - `CPR_UPDATE_EXE_PATH`、`CPR_WEB_DIST_DIR`：分别指向容器内二进制和前端静态目录。
@@ -407,3 +407,13 @@ pg_restore --no-owner --no-privileges --password \
 旧会话升级后需重新登录。管理员在「用户管理」创建普通用户并授权分组，用户自行创建 Key、查看个人记录和改密。日/周 USD 限额改在「分组」编辑，每位用户在组内共用额度。已删除 Key 且无法追溯用户的旧记录只出现在管理员历史记录中。
 
 管理员在网页/API 中不能读取其他用户密钥；数据库与备份操作者仍能接触明文，应按现有部署权限保护备份。
+
+### 发布到本仓库与私有仓库
+
+镜像发布到当前仓库对应的小写 GHCR 路径：`ghcr.io/const-time/codex-proxy-rs`。先提交以 `# v<版本号>` 开头的 `release/notes.md`，再执行 `bash release/publish <版本号>`；脚本更新版本并推送分支和标签，`v*` 标签推送自动启动 Release。仍支持在 Actions 中按已有标签手动重跑。质量检查、各平台镜像验证全部通过后才更新版本标签、稳定版 `latest` 和 GitHub Release。
+
+私有仓库也可运行 Actions 和发布 GHCR 镜像，但使用私有仓库的分钟数/存储配额。GHCR 包可见性单独配置；新包默认私有，公开包可匿名拉取。私有包需使用有包访问权且包含 `read:packages` 的 classic PAT，通过 `docker login ghcr.io -u Const-Time --password-stdin` 登录后拉取；不要将令牌写进 Compose 文件。仓库转私有不会自动改变已有包的可见性。
+
+发布流程在私有仓库保留构建、测试、Trivy 漏洞门禁和镜像验证，跳过公开透明日志签名及需要 Enterprise Cloud 的 GitHub artifact attestations。SARIF 仍保存在诊断附件中；如已购买并启用私有仓库 Code Security，可设置仓库变量 `ENABLE_PRIVATE_CODE_SCANNING=true` 上传到安全页面。
+
+当前在线更新客户端不支持 GitHub 私有仓库认证，私有仓库的 Release 不能直接用于应用内在线更新；请登录 GHCR 后使用 `docker compose pull` 和 `docker compose up -d` 升级。私有仓库的源码/部署文件下载同样需要认证。公开 Fork 需先脱离 Fork 网络或迁移到独立仓库，才能改为私有。
