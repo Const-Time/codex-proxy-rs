@@ -358,7 +358,9 @@ impl DefaultAccountsService {
             std::slice::from_mut(&mut quota),
         )
         .await?;
-        let usage = quota.representative_window_usage().cloned();
+        let usage = quota
+            .usage_window()
+            .and_then(|(window, _)| window.local_usage.clone());
         Ok(AccountDirectoryItem {
             used_slots,
             total_slots,
@@ -469,7 +471,9 @@ impl AccountsService for DefaultAccountsService {
             .into_iter()
             .zip(quotas)
             .map(|(mut item, quota)| {
-                let usage = quota.representative_window_usage().cloned();
+                let usage = quota
+                    .usage_window()
+                    .and_then(|(window, _)| window.local_usage.clone());
                 AccountDirectoryItem {
                     used_slots: runtime
                         .in_flight
