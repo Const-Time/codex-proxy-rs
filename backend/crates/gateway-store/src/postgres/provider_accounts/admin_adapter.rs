@@ -365,6 +365,20 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn observe_subscription_quota(
+        &self,
+        account_id: &str,
+        quota: &gateway_admin::model::provider_credentials::ProviderQuota,
+    ) -> AdminStoreResult<()> {
+        crate::subscription_quota::observe(&self.pool, account_id, quota).await
+    }
+    async fn reset_account_subscriptions(
+        &self,
+        account_id: &str,
+        event_id: &str,
+    ) -> AdminStoreResult<()> {
+        crate::subscription_quota::reset_account(&self.pool, account_id, event_id).await
+    }
     async fn list_accounts(
         &self,
         query: AdminAccountListQuery,

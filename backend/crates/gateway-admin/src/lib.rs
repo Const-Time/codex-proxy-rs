@@ -19,6 +19,7 @@ use serde::Deserialize;
 pub mod backup;
 pub mod model;
 pub mod ports;
+mod subscription_task;
 mod use_case;
 
 pub use use_case::{
@@ -306,7 +307,7 @@ pub async fn initialize(
             registry.clone(),
         )),
         auth,
-        accounts,
+        accounts: accounts.clone(),
         account_groups: Arc::new(DefaultAccountGroupService::new(
             store.account_groups(),
             store.account_runtime(),
@@ -342,7 +343,22 @@ pub async fn initialize(
         )),
         backups,
     };
-    let worker_contributions = backup_worker_contribution(backup_task)?;
+    let mut worker_contributions = backup_worker_contribution(backup_task)?;
+    worker_contributions.push(WorkerContribution::Registration(
+        WorkerRegistration::try_new(
+            WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "subscriptions")
+                .map_err(|_| AdminError::internal("invalid subscription worker id"))?,
+            WorkerRunnable::Daemon {
+                restart: DaemonRestartPolicy::try_new(
+                    Duration::from_secs(5),
+                    Duration::from_secs(60),
+                )
+                .map_err(|_| AdminError::internal("invalid subscription restart policy"))?,
+                task: Box::new(subscription_task::SubscriptionTask(accounts)),
+            },
+        )
+        .map_err(|_| AdminError::internal("invalid subscription worker"))?,
+    ));
     Ok(AdminBundle {
         services,
         worker_contributions,

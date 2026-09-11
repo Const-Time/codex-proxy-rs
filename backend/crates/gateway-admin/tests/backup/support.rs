@@ -627,6 +627,7 @@ impl AuthStore for FakeAuthStore {
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
         Ok(
             (id == "admin").then(|| gateway_admin::model::users::UserRecord {
+                quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: id.to_owned(),
                 username: id.to_owned(),

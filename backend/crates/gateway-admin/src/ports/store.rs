@@ -87,6 +87,22 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
+    async fn observe_subscription_quota(
+        &self,
+        account_id: &str,
+        quota: &crate::model::provider_credentials::ProviderQuota,
+    ) -> AdminStoreResult<()> {
+        let _ = (account_id, quota);
+        Ok(())
+    }
+    async fn reset_account_subscriptions(
+        &self,
+        account_id: &str,
+        event_id: &str,
+    ) -> AdminStoreResult<()> {
+        let _ = (account_id, event_id);
+        Ok(())
+    }
     async fn list_accounts(
         &self,
         query: AccountListQuery,
@@ -197,6 +213,25 @@ pub trait AccountRuntimeStore: Send + Sync {
 /// 管理员密码、会话和安全审计。
 #[async_trait]
 pub trait AuthStore: Send + Sync {
+    async fn subscriptions(&self) -> AdminStoreResult<Vec<crate::model::users::UserSubscription>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "subscriptions",
+            "unavailable",
+        ))
+    }
+    async fn reset_subscriptions(
+        &self,
+        event_id: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<u64> {
+        let _ = (event_id, context);
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "subscriptions",
+            "unavailable",
+        ))
+    }
     async fn user_groups(&self, id: &str) -> AdminStoreResult<Vec<crate::model::users::UserGroup>>;
     async fn find_user(
         &self,

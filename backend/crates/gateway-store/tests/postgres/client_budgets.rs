@@ -82,6 +82,233 @@ fn context() -> MutationContext {
 }
 
 #[tokio::test]
+async fn user_quota_multiplier_changes_limits_without_repricing_consumption() {
+    let Some(db) = TestDatabase::create("quota_multiplier").await else {
+        return;
+    };
+    seed(&db, "factor", "10", "100").await;
+    sqlx::query(
+        "update user_account_groups set quota_multiplier = 2 where user_id = 'budget-user'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    store
+        .settle(charge("factor", "factor", "15"))
+        .await
+        .unwrap();
+    let current = status(&db, "factor").await;
+    assert_eq!(current.limits.daily_usd.canonical(), "20");
+    assert_eq!(current.limits.weekly_usd.canonical(), "200");
+    assert_eq!(current.daily_used_usd.canonical(), "15");
+    store
+        .admit(key_id("factor"), Some(group_id("factor")))
+        .await
+        .unwrap();
+    sqlx::query(
+        "update user_account_groups set quota_multiplier = 1 where user_id = 'budget-user'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .admit(key_id("factor"), Some(group_id("factor")))
+            .await
+            .unwrap_err()
+            .client_error_code(),
+        Some("group_daily_budget_exceeded")
+    );
+    assert!(
+        sqlx::query("update user_account_groups set quota_multiplier = 0")
+            .execute(&db.pool)
+            .await
+            .is_err()
+    );
+    sqlx::query("update account_groups set daily_limit_usd = 0, weekly_limit_usd = 0")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "factor").await.limits.daily_usd.canonical(),
+        "0"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn subscription_resets_preserve_history_and_retry_does_not_clear_new_usage() {
+    let Some(db) = TestDatabase::create("subscription_reset").await else {
+        return;
+    };
+    seed(&db, "reset", "10", "100").await;
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    store
+        .settle(charge("reset", "before-reset", "7"))
+        .await
+        .unwrap();
+    let reset = "select reset_user_subscriptions('manual:test', null, null, 'manual', now())";
+    let count: i64 = sqlx::query_scalar(reset).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(status(&db, "reset").await.weekly_used_usd.canonical(), "0");
+    store
+        .settle(charge("reset", "after-reset", "2"))
+        .await
+        .unwrap();
+    sqlx::query(reset).execute(&db.pool).await.unwrap();
+    assert_eq!(status(&db, "reset").await.weekly_used_usd.canonical(), "2");
+    let historical: String =
+        sqlx::query_scalar("select sum(amount_usd)::text from user_group_charge_events")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(historical, "9.0000000000");
+    // A delayed observation must retain already settled requests after the upstream boundary.
+    let boundary = Utc::now() - chrono::Duration::minutes(1);
+    sqlx::query("update user_group_budget_windows set last_reset_at = null")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "select reset_user_subscriptions('observed:test', null, null, 'upstream_window', $1)",
+    )
+    .bind(boundary)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(status(&db, "reset").await.weekly_used_usd.canonical(), "9");
+    db.close().await;
+}
+
+#[tokio::test]
+async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
+    use gateway_admin::{
+        model::provider_credentials::{
+            ProviderQuota, ProviderQuotaWindow, QuotaLocalUsageAttribution,
+        },
+        ports::store::AccountStore as _,
+    };
+    let Some(db) = TestDatabase::create("upstream_reset").await else {
+        return;
+    };
+    seed(&db, "linked", "10", "100").await;
+    seed(&db, "other", "10", "100").await;
+    let account = "acct_00000000000000000000000000000991";
+    sqlx::query("insert into provider_accounts(id, provider_kind, name, authentication_kind, provider_credentials_json, has_refresh_token, credential_observed_at, created_at, updated_at) values ($1, 'openai', 'test', 'oauth', '{}', false, now(), now(), now())")
+        .bind(account).execute(&db.pool).await.unwrap();
+    sqlx::query("insert into account_group_accounts values ($1, $2, now())")
+        .bind(group_id("linked").as_str())
+        .bind(account)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    store
+        .settle(charge("linked", "linked-before", "3"))
+        .await
+        .unwrap();
+    store
+        .settle(charge("other", "other-before", "4"))
+        .await
+        .unwrap();
+    let admin = super::admin_account_store(&db.pool);
+    let now = Utc::now();
+    let mut quota = ProviderQuota {
+        plan_type: None,
+        observed_at: Some(now),
+        refresh_token_expires_at: None,
+        limit_reached: false,
+        provider_data: None,
+        windows: vec![ProviderQuotaWindow {
+            key: "codex:weekly".into(),
+            group: "shortTerm".into(),
+            label: "weekly".into(),
+            limit_id: None,
+            limit_name: None,
+            role: None,
+            local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
+            window_seconds: Some(604800),
+            used_percent: Some(75.0),
+            reset_at: Some(now + chrono::Duration::days(1)),
+            limit_reached: false,
+            local_usage: None,
+            provider_data: None,
+        }],
+    };
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "linked").await.weekly_used_usd.canonical(),
+        "3",
+        "first observation is a baseline"
+    );
+    quota.observed_at = Some(now + chrono::Duration::seconds(1));
+    quota.windows[0].used_percent = Some(0.0);
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    assert_eq!(status(&db, "linked").await.weekly_used_usd.canonical(), "0");
+    assert_eq!(status(&db, "other").await.weekly_used_usd.canonical(), "4");
+    let mut after = charge("linked", "linked-after", "2");
+    after.completed_at = (now + chrono::Duration::seconds(2)).into();
+    store.settle(after).await.unwrap();
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    quota.observed_at = Some(now);
+    quota.windows[0].used_percent = Some(75.0);
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "linked").await.weekly_used_usd.canonical(),
+        "2",
+        "duplicates and stale snapshots cannot reset again"
+    );
+    // Natural window rollover is recognized even if the observed usage is higher.
+    sqlx::query("update subscription_quota_observations set reset_at = now() - interval '1 hour', observed_at = now() - interval '2 hours'").execute(&db.pool).await.unwrap();
+    sqlx::query("update user_group_budget_windows set last_reset_at = null")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    quota.observed_at = Some(now + chrono::Duration::seconds(3));
+    quota.windows[0].reset_at = Some(now + chrono::Duration::days(7) - chrono::Duration::hours(1));
+    quota.windows[0].used_percent = Some(80.0);
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    let reason: String = sqlx::query_scalar(
+        "select last_reset_reason from user_group_budget_windows where account_group_id = $1",
+    )
+    .bind(group_id("linked").as_str())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(reason, "upstream_window");
+    admin
+        .reset_account_subscriptions(account, "credit-test")
+        .await
+        .unwrap();
+    admin
+        .reset_account_subscriptions(account, "credit-test")
+        .await
+        .unwrap();
+    let events: i64 = sqlx::query_scalar("select count(*) from subscription_reset_events")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(events, 3);
+    db.close().await;
+}
+
+#[tokio::test]
 async fn model_billing_freezes_rates_and_charges_exactly_once() {
     let Some(db) = TestDatabase::create("model_billing").await else {
         return;
@@ -95,7 +322,7 @@ async fn model_billing_freezes_rates_and_charges_exactly_once() {
     .await
     .unwrap();
     let insert = "insert into model_requests(id, client_api_key_ref, user_id, config_revision, protocol, operation, endpoint, client_transport, requested_model_id, routing_scope, routing_group_refs, routing_group_names_snapshot, started_at, deadline_at, outcome, completed_at, cost_source, cost_amount, cost_currency)
-        values ($1, 'priced', 'budget-user', 1, 'openai', 'responses', '/v1/responses', 'http_sse', $2, 'groups', $3, '[{\"id\":\"placeholder\",\"name\":\"priced\"}]', now(), now() + interval '1 hour', 'failed', now(), 'calculated', 0.2, 'USD')";
+        values ($1, 'priced', 'budget-user', 1, 'openai', 'responses', '/v1/responses', 'http_sse', $2, 'groups', $3, '[\"priced\"]', now(), now() + interval '1 hour', 'failed', now(), 'calculated', 0.2, 'USD')";
     for (id, model) in [
         ("req_rate-old", "test-model"),
         ("req_rate-default", "other-model"),
@@ -135,6 +362,28 @@ async fn model_billing_freezes_rates_and_charges_exactly_once() {
             ("req_rate-old".into(), "0.5000000000".into())
         ]
     );
+    // The list adapter must carry the original amount separately for provider price validation.
+    use gateway_admin::ports::store::ObservabilityStore as _;
+    let detail = super::admin_observability_store(&db.pool)
+        .usage_record_detail("req_rate-old", None)
+        .await
+        .unwrap();
+    let original = &detail.request;
+    let Some(gateway_admin::model::observability::UsageBilling::GroupAdjusted {
+        multiplier,
+        original,
+        total,
+    }) = &original.billing
+    else {
+        panic!("frozen group billing missing");
+    };
+    assert_eq!(multiplier.as_str(), "2.5");
+    assert_eq!(total.amount.as_str(), "0.5");
+    let gateway_admin::model::observability::UsageBilling::Total { total, .. } = original.as_ref()
+    else {
+        panic!("original bill missing");
+    };
+    assert_eq!(total.amount.as_str(), "0.2");
     let store = PgClientBudgetStore::new(db.pool.clone());
     for _ in 0..2 {
         store
@@ -163,7 +412,6 @@ async fn model_billing_freezes_rates_and_charges_exactly_once() {
             "0.5000000000".into()
         )
     );
-    use gateway_admin::ports::store::ObservabilityStore as _;
     let summary = super::admin_observability_store(&db.pool)
         .usage_summary(
             gateway_admin::model::observability::TimeRange {

@@ -29,6 +29,7 @@ const editing = ref<User | null>(null)
 const username = ref('')
 const password = ref('')
 const groupIds = ref<string[]>([])
+const quotaMultipliers = ref<Record<string, string>>({})
 const enabled = ref(true)
 const maxConcurrency = ref('')
 const requestsPerMinute = ref('')
@@ -52,6 +53,7 @@ function edit(user: User | null) {
   username.value = user?.username ?? ''
   password.value = ''
   groupIds.value = [...(user?.groupIds ?? [])]
+  quotaMultipliers.value = { ...(user?.quotaMultipliers ?? {}) }
   enabled.value = user?.enabled ?? true
   maxConcurrency.value = String(user?.maxConcurrency || '')
   requestsPerMinute.value = String(user?.requestsPerMinute || '')
@@ -73,7 +75,7 @@ async function save() {
       return
     }
     if (editing.value)
-      await updateUser({ id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value, ...limits })
+      await updateUser({ quotaMultipliers: Object.fromEntries(groupIds.value.map(id => [id, quotaMultipliers.value[id] || '1'])), id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value, ...limits })
     else await createUser({ username: username.value.trim(), password: password.value, groupIds: groupIds.value, ...limits })
     password.value = ''
     open.value = false
@@ -183,6 +185,14 @@ onMounted(load)
         <BaseFormItem label="授权分组">
           <AccountGroupCheckboxGrid v-model="groupIds" :groups="groups" :loading="groupsLoading" :disabled="saving" />
         </BaseFormItem>
+        <div v-if="editing && groupIds.length" class="grid gap-3">
+          <p class="text-cp-sm text-cp-text-secondary">
+            额度倍率同时调整该用户的日限和周限，不改变消费计价。默认 1 倍，分组不限额时仍不限额。
+          </p>
+          <BaseFormItem v-for="id in groupIds" :key="id" :label="`${groups.find(group => group.id === id)?.name ?? id} · 额度倍率`">
+            <BaseInput v-model="quotaMultipliers[id]" type="number" min="0.01" max="1000" step="0.01" placeholder="1" :aria-label="`${groups.find(group => group.id === id)?.name ?? id}额度倍率`" :disabled="saving" />
+          </BaseFormItem>
+        </div>
       </div>
       <template #footer>
         <BaseButton variant="secondary" :disabled="saving" @click="open = false; password = ''">

@@ -251,6 +251,8 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "outbound_proxies",
             "provider_accounts",
             "runtime_settings",
+            "subscription_quota_observations",
+            "subscription_reset_events",
             "user_account_groups",
             "user_group_budget_windows",
             "user_group_charge_events",

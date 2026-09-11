@@ -169,7 +169,9 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 | --- | --- | --- | --- |
 | GET | /api/admin/users | — | 管理员；用户列表，无密码或密钥 |
 | POST | /api/admin/users/create | { username, password, groupIds, maxConcurrency?, requestsPerMinute? } | 管理员；创建已启用的普通用户，不能指定角色 |
-| POST | /api/admin/users/update | { id, enabled, groupIds, maxConcurrency?, requestsPerMinute? } | 管理员；替换分组授权及用户限流，不能禁用管理员 |
+| POST | /api/admin/users/update | { id, enabled, groupIds, quotaMultipliers?, maxConcurrency?, requestsPerMinute? } | 管理员；替换分组授权、额度倍率及用户限流，不能禁用管理员 |
+| GET | /api/admin/subscriptions | — | 管理员；当前用户分组订阅、有效日周限额、已用额度、刷新时间及最近重置 |
+| POST | /api/admin/subscriptions/reset | { requestId } | 管理员；幂等重置全部当前订阅，requestId 为 UUID，返回影响的用户分组数量 |
 | GET | /api/profile | — | 本人会话；个人资料 |
 | GET | /api/profile/groups | — | 本人会话；获授权分组及本人的共享额度，不含上游账号资料 |
 | POST | /api/profile/password | { currentPassword, newPassword } | 本人会话；验证原密码、改密后重新登录 |
@@ -179,6 +181,14 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 管理接口要求 admin 角色或部署级管理 API Key；个人接口、Client Key 全部操作以及使用记录接口必须使用本人 Cookie，不接受部署级 API Key。普通用户访问管理接口返回 403。Client Key 的所有权由会话决定，任何角色均无法列出、读取、修改或删除他人的 Key；请求体不接受 owner/role 等代操作字段。
 
 用户字段另包含 `maxConcurrency`、`requestsPerMinute`；两者为非负安全整数，省略或零表示不限。同一用户的全部密钥共享限流，管理员修改后发布运行时快照；已准入请求可完成。
+
+`quotaMultipliers` 是分组 ID 到十进制字符串的映射，如 `{"grp_…":"2"}`，只允许授权分组，范围 0.01–1000，最多两位小数。用户编辑可配置；新用户默认 1 倍。有效日/周限额 = 分组日/周限额 × 用户额度倍率，分组为 0 时仍不限额。它不影响模型计费、历史消费和已用额度。更新接口省略该映射时保留已有授权的倍率；提交映射时未列出的授权分组恢复 1 倍。删除授权会删除对应倍率，再次授权默认为 1 倍。
+
+订阅管理的“全部重置”不受页面筛选影响，保留历史请求和计费账本。日窗口至下一个北京时间零点，周窗口从重置时间开始 7 天；同一 requestId 重试不会清除后续消费。重置与在途结算按数据库事务串行化，重置之后完成的请求仍计入配额。
+
+账号主动重置成功会重置该账号关联的所有分组下、所有用户的日/周额度。上游自行重置和自然恢复通过已持久化的配额快照识别：同一窗口刷新边界向后推进超过 60 秒，或已用比例从至少 5% 回到不高于 1%。首次观察只建立基线，重复、过期快照及重复兑换不重复重置；后台每 60 秒检查一次已取得的上游配额，账号页面读取新配额时也会检查。自然窗口有明确边界时，保留边界之后已经产生的消费。识别时效取决于上游配额刷新；未被快照观察到的外部重置无法可靠识别。
+
+请求费用展示额外提供 `billing.originalAmountDisplay`、`billing.groupMultiplierDisplay`。模型原始费用先按 Provider 价格规则校验和分解，再单独展示请求发生时冻结的分组模型倍率与最终总费用。`multiplierDisplay` 仍表示服务档位倍率，两者不混用。列表和详情金额不再添加 `≈`；无法恢复单价的历史请求仍保留原始总额、分组倍率和实际总额。
 
 使用记录列表、详情、摘要、洞察概览、诊断及错误排查对普通用户强制按持久化 user_id 过滤，客户端不能覆盖该条件；管理员默认查看全局记录，在这些接口传 `personal=true` 时也限定本人。个人列表/详情只保留自身请求、token、费用、延迟等字段，不返回上游账号身份、错误原文、重试轨迹或原始观测数据；错误排查同样脱敏，诊断不允许账号维度。全局仪表盘和底层请求诊断仅管理员可访问。搜索不再匹配密钥明文。
 

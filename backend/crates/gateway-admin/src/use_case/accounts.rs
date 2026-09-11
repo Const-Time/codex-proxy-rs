@@ -158,6 +158,61 @@ impl DefaultAccountsService {
         }
     }
 
+    pub(crate) async fn sync_subscription_quotas(&self) -> Result<(), AdminError> {
+        let mut page = 1;
+        loop {
+            let batch = self
+                .accounts
+                .list_accounts(
+                    AccountListQuery {
+                        page,
+                        page_size: crate::model::PageSize::new(100)
+                            .map_err(|_| AdminError::internal("invalid quota page size"))?,
+                        provider_kind: None,
+                        group_filter: None,
+                        search: None,
+                        status: None,
+                        sort: None,
+                    },
+                    Default::default(),
+                )
+                .await
+                .map_err(|e| map_store_error(e, "subscription accounts"))?;
+            for item in &batch.items {
+                if item.account.groups.is_empty() {
+                    continue;
+                }
+                let Ok(provider) = self.providers.require(&item.account.provider_kind) else {
+                    continue;
+                };
+                let account_id = ProviderAccountId::new(item.account.id.clone())
+                    .map_err(|_| AdminError::internal("invalid account id"))?;
+                match provider
+                    .quota(ProviderQuotaRequest {
+                        account_id,
+                        refresh: false,
+                        rolling_usage: None,
+                    })
+                    .await
+                {
+                    Ok(quota) => self
+                        .accounts
+                        .observe_subscription_quota(&item.account.id, &quota)
+                        .await
+                        .map_err(|e| map_store_error(e, "subscription quota"))?,
+                    Err(_) => {
+                        tracing::warn!(account_id = %item.account.id, "subscription quota observation unavailable")
+                    }
+                }
+            }
+            if batch.items.is_empty() || u64::from(page) * 100 >= batch.total {
+                break;
+            }
+            page += 1;
+        }
+        Ok(())
+    }
+
     async fn reset_credit_lock(
         &self,
         account_id: &ProviderAccountId,
@@ -289,6 +344,10 @@ impl DefaultAccountsService {
             })
             .await
             .map_err(|error| map_provider_error(error, "provider quota"))?;
+        self.accounts
+            .observe_subscription_quota(account_id.as_str(), &quota)
+            .await
+            .map_err(|e| map_store_error(e, "subscription quota"))?;
         let mut stored = if refresh_quota {
             self.load_account(account_id).await?
         } else {
@@ -373,7 +432,13 @@ impl AccountsService for DefaultAccountsService {
                 })
                 .await
             {
-                Ok(quota) => Ok(quota),
+                Ok(quota) => {
+                    self.accounts
+                        .observe_subscription_quota(&account.id, &quota)
+                        .await
+                        .map_err(|e| map_store_error(e, "subscription quota"))?;
+                    Ok(quota)
+                }
                 Err(error) => {
                     tracing::warn!(
                         account_id = %account.id,
@@ -673,7 +738,8 @@ impl AccountsService for DefaultAccountsService {
         let lock = self.reset_credit_lock(&account_id).await;
         let _guard = lock.lock().await;
         let (_, provider) = self.provider_for_account(&account_id).await?;
-        match provider.consume_reset_credit(command.clone()).await {
+        let event_id = command.redeem_request_id.to_string();
+        let result = match provider.consume_reset_credit(command.clone()).await {
             Ok(result) => Ok(result),
             Err(error)
                 if error.kind()
@@ -687,7 +753,18 @@ impl AccountsService for DefaultAccountsService {
                     .map_err(map_reset_credits_error_after_refresh)
             }
             Err(error) => Err(map_provider_error(error, "provider reset-credit consume")),
+        }?;
+        if matches!(result.code.as_str(), "reset" | "alreadyRedeemed") {
+            let event_id = result
+                .credit
+                .as_ref()
+                .map_or(event_id, |credit| format!("credit:{}", credit.id));
+            self.accounts
+                .reset_account_subscriptions(account_id.as_str(), &event_id)
+                .await
+                .map_err(|e| map_store_error(e, "subscription reset"))?;
         }
+        Ok(result)
     }
 
     async fn models(
