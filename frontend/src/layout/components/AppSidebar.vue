@@ -59,25 +59,29 @@ const preferredMotion = usePreferredReducedMotion()
 
 const adminNavItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
-  { label: '账号管理', icon: Users, path: '/accounts' },
-  { label: '代理管理', icon: Network, path: '/proxies' },
-  { label: '分组管理', icon: FolderTree, path: '/account-groups' },
   { label: '用户管理', icon: Users, path: '/users' },
-  { label: '个人资料', icon: Users, path: '/profile' },
-  { label: '我的密钥', icon: KeyRound, path: '/api-keys' },
+  { label: '分组管理', icon: FolderTree, path: '/account-groups' },
+  { label: '账号管理', icon: Users, path: '/accounts' },
   { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
-  { label: '主题设置', icon: Palette, path: '/theme' },
+  { label: '代理管理', icon: Network, path: '/proxies' },
   { label: '系统设置', icon: Settings, path: '/settings' },
 ]
 
-const navItems = computed(() => authStore.isAdmin
-  ? adminNavItems
-  : [
-      { label: '我的密钥', icon: KeyRound, path: '/api-keys' },
-      { label: '我的使用记录', icon: ChartNoAxesColumn, path: '/my-usage' },
-      { label: '个人资料', icon: Users, path: '/profile' },
-      { label: '主题设置', icon: Palette, path: '/theme' },
-    ])
+const personalNavItems = [
+  { label: '我的密钥', icon: KeyRound, path: '/api-keys' },
+  { label: '使用记录', icon: ChartNoAxesColumn, path: '/my-usage' },
+  { label: '个人资料', icon: Users, path: '/profile' },
+  { label: '主题设置', icon: Palette, path: '/theme' },
+]
+const navItems = computed(() => [
+  ...(authStore.isAdmin ? adminNavItems : []),
+  ...personalNavItems,
+])
+function sectionLabel(index: number) {
+  if (authStore.isAdmin && index === 0)
+    return '系统管理'
+  return index === (authStore.isAdmin ? adminNavItems.length : 0) ? '我的账户' : null
+}
 
 function isActive(path: string) {
   if (path === '/')
@@ -90,7 +94,7 @@ const activeNavIndex = computed(() => {
   return Math.max(0, index)
 })
 const activeNavIndicatorStyle = computed(() => ({
-  transform: `translate3d(0, ${activeNavIndex.value * 58}px, 0)`,
+  transform: `translate3d(0, ${activeNavIndex.value * 58 + (authStore.isAdmin && activeNavIndex.value >= adminNavItems.length ? 88 : 44)}px, 0)`,
 }))
 const navFeedbackMuted = shallowRef(false)
 const { start: restoreNavFeedback, stop: stopNavFeedbackRestore } = useTimeoutFn(
@@ -383,31 +387,35 @@ onBeforeUnmount(() => {
               class="absolute inset-y-0 left-0 w-2/3 [background:linear-gradient(90deg,transparent,color-mix(in_srgb,var(--cp-color-info)_9%,transparent),transparent)]"
             />
           </span>
-          <button
-            v-for="item in navItems"
-            :key="item.label"
-            type="button"
-            class="relative z-10 inline-flex h-11.5 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container"
-            :class="[
-              isCollapsed ? 'w-11.5 justify-center' : 'w-full gap-3 px-4',
-              isActive(item.path)
-                ? navFeedbackMuted
-                  ? 'bg-transparent font-bold text-cp-text transition-none'
-                  : 'bg-transparent font-bold text-cp-text transition-colors duration-200'
-                : navFeedbackMuted
-                  ? 'bg-transparent font-semibold text-cp-text-secondary transition-none'
-                  : 'bg-transparent font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
-            ]"
-            @click="navigate(item.path)"
-          >
-            <component :is="item.icon" class="shrink-0" :size="20" />
-            <span
-              class="sidebar-label overflow-hidden whitespace-nowrap transition-[opacity,transform] duration-200"
-              :class="isCollapsed ? 'pointer-events-none w-0' : 'w-auto'"
+          <template v-for="(item, index) in navItems" :key="item.path">
+            <div v-if="sectionLabel(index)" class="flex h-8 items-end px-4 pb-1 text-xs font-semibold text-cp-text-quaternary">
+              <span :class="isCollapsed ? 'sr-only' : 'sidebar-label whitespace-nowrap'">{{ sectionLabel(index) }}</span>
+              <span v-if="isCollapsed" class="h-px w-full bg-cp-fill-tertiary" aria-hidden="true" />
+            </div>
+            <button
+              type="button"
+              class="relative z-10 inline-flex h-11.5 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container"
+              :class="[
+                isCollapsed ? 'w-11.5 justify-center' : 'w-full gap-3 px-4',
+                isActive(item.path)
+                  ? navFeedbackMuted
+                    ? 'bg-transparent font-bold text-cp-text transition-none'
+                    : 'bg-transparent font-bold text-cp-text transition-colors duration-200'
+                  : navFeedbackMuted
+                    ? 'bg-transparent font-semibold text-cp-text-secondary transition-none'
+                    : 'bg-transparent font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
+              ]"
+              @click="navigate(item.path)"
             >
-              {{ item.label }}
-            </span>
-          </button>
+              <component :is="item.icon" class="shrink-0" :size="20" />
+              <span
+                class="sidebar-label overflow-hidden whitespace-nowrap transition-[opacity,transform] duration-200"
+                :class="isCollapsed ? 'pointer-events-none w-0' : 'w-auto'"
+              >
+                {{ item.label }}
+              </span>
+            </button>
+          </template>
         </nav>
       </div>
     </BaseScrollbar>
