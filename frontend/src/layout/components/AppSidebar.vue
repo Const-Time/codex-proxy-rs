@@ -2,6 +2,7 @@
 import {
   ArrowUpCircle,
   ChartNoAxesColumn,
+  ClipboardList,
   FolderTree,
   Info,
   KeyRound,
@@ -12,8 +13,10 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
+  Server,
   Settings,
   Sun,
+  UserRound,
   Users,
 } from '@lucide/vue'
 import { usePreferredReducedMotion, useTimeoutFn } from '@vueuse/core'
@@ -61,7 +64,8 @@ const adminNavItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
   { label: '用户管理', icon: Users, path: '/users' },
   { label: '分组管理', icon: FolderTree, path: '/account-groups' },
-  { label: '账号管理', icon: Users, path: '/accounts' },
+  { label: '订阅管理', icon: ClipboardList, path: '/subscriptions' },
+  { label: '账号管理', icon: Server, path: '/accounts' },
   { label: '代理管理', icon: Network, path: '/proxies' },
   { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
   { label: '系统设置', icon: Settings, path: '/settings' },
@@ -70,7 +74,7 @@ const adminNavItems = [
 const personalNavItems = [
   { label: '我的密钥', icon: KeyRound, path: '/api-keys' },
   { label: '使用记录', icon: ChartNoAxesColumn, path: '/my-usage' },
-  { label: '个人资料', icon: Users, path: '/profile' },
+  { label: '个人资料', icon: UserRound, path: '/profile' },
   { label: '主题设置', icon: Palette, path: '/theme' },
 ]
 const navItems = computed(() => [
