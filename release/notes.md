@@ -1,17 +1,24 @@
-# v3.3.32
+# v3.4.0
 
-## Fixes
+## 新功能
 
-- Remove manual charge reconciliation. Requests without available usage or pricing no longer block API keys; known costs from internal retries still count toward spending limits.
-- Correct xAI subscription plan labels using current subscription information, without treating failed subscription lookups as Free accounts.
-- Fix Codex custom tool calls, tool output pairing, and conversation continuations through xAI.
-- Distinguish missing OpenAI WebSocket closing handshakes from TCP resets in connection diagnostics.
+- 新增用户管理：管理员创建普通用户、授予分组并停用用户；用户可修改自己的密码。
+- 密钥按用户隔离，管理员也不能查看或管理其他用户的密钥；普通用户只能查看自己的使用记录。
+- 日限额和周限额移至分组配置，同一用户同一分组下的密钥共用额度，不同用户独立累计。
+- 新增代理质量检测报告，分别检查基础出口、各模型平台 HTTPS 和 Codex WebSocket，并展示状态与耗时。
+- 使用统计请求明细支持按分组、账号、用户、模型和接入类型组合筛选，成功记录与错误排查共享筛选条件。
 
-## Improvements
+## 修复与发布
 
-- Display daily and weekly API key amounts with two decimal places. Hover to see the full amount; accounting and limit checks retain their original precision.
-- Include version-specific update notes on release pages.
+- 修复 SOCKS5 本地 DNS 解析后只尝试首个地址的问题；部分代理连接失败会继续尝试其他解析地址，并细化连接诊断。
+- 镜像发布至本仓库的 GHCR 命名空间；部署、关于页面和在线更新来源统一为 Const-Time/codex-proxy-rs。
+- 推送版本标签自动触发正式发布，生成 Linux amd64/arm64 镜像和安装包，以及 macOS arm64 安装包。
+- 发布流程兼容私有仓库的证明与安全报告上传限制，仍执行测试、漏洞扫描和镜像验证。
 
-## Upgrade
+## 升级说明
 
-The database migration automatically settles legacy pending and unknown charges at zero and removes reconciliation state. Previously recorded costs and daily/weekly totals are preserved. Request errors and usage diagnostics remain available.
+- 启动时自动执行用户和分组额度迁移。已有管理员保留身份；已有密钥归属最早创建的管理员。
+- 为每个旧密钥建立独立迁移分组，保留原有账号范围、限额、用量和窗口；管理员之后可按需合并分组。
+- 新建密钥必须选择一个本人获授权的启用分组，限额不再在密钥上单独设置。
+- 升级前备份 PostgreSQL；迁移后如需回退旧程序，应同时恢复升级前数据库。
+- 私有仓库的应用内在线更新暂不支持 GitHub 认证，请通过已登录 GHCR 的 Docker 客户端拉取并重新创建容器。
