@@ -6248,6 +6248,8 @@ async fn provider_compiles_catalog_presentation_for_codex_models() {
     );
     assert_eq!(presentation.supported_reasoning_efforts(), ["low", "high"]);
     assert_eq!(presentation.default_reasoning_effort(), Some("low"));
+    assert_eq!(presentation.service_tiers().len(), 1);
+    assert_eq!(presentation.service_tiers()[0].speed_tier(), Some("fast"));
     assert_eq!(presentation.context_window_tokens(), Some(272_000));
     assert!(presentation.image_input());
     assert!(presentation.agent_tools());

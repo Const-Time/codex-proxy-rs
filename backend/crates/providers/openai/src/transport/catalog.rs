@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
-use gateway_core::routing::UpstreamModelId;
+use gateway_core::routing::{ModelServiceTier, UpstreamModelId};
 use reqwest::header::{ETAG, HeaderMap};
 use serde::Deserialize;
 
@@ -48,6 +48,7 @@ pub struct CodexCatalogCapabilities {
     web_search: CodexCatalogCapabilityEvidence,
     verbosity: CodexCatalogCapabilityEvidence,
     reasoning_efforts: Vec<String>,
+    service_tiers: Vec<ModelServiceTier>,
 }
 
 impl CodexCatalogCapabilities {
@@ -103,6 +104,12 @@ impl CodexCatalogCapabilities {
     #[must_use]
     pub fn reasoning_efforts(&self) -> &[String] {
         &self.reasoning_efforts
+    }
+
+    /// 返回上游明确声明的服务档位；缺失时不推断 Fast 支持。
+    #[must_use]
+    pub fn service_tiers(&self) -> &[ModelServiceTier] {
+        &self.service_tiers
     }
 }
 
@@ -289,6 +296,16 @@ struct CodexModelWire {
     context_window: Option<i64>,
     max_context_window: Option<i64>,
     input_modalities: Option<Vec<CodexInputModalityWire>>,
+    additional_speed_tiers: Option<Vec<String>>,
+    service_tiers: Option<Vec<CodexServiceTierWire>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexServiceTierWire {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -396,6 +413,7 @@ fn normalize_model(wire: CodexModelWire) -> Result<CodexCatalogModel, CodexModel
             web_search: CodexCatalogCapabilityEvidence::from_wire(wire.supports_search_tool),
             verbosity: CodexCatalogCapabilityEvidence::from_wire(wire.support_verbosity),
             reasoning_efforts,
+            service_tiers: service_tier_evidence(wire.service_tiers, wire.additional_speed_tiers)?,
         },
         limits: CodexCatalogLimits {
             context_window_tokens,
@@ -407,6 +425,43 @@ fn normalize_model(wire: CodexModelWire) -> Result<CodexCatalogModel, CodexModel
             visibility: wire.visibility,
         },
     })
+}
+
+fn service_tier_evidence(
+    tiers: Option<Vec<CodexServiceTierWire>>,
+    speeds: Option<Vec<String>>,
+) -> Result<Vec<ModelServiceTier>, CodexModelCatalogError> {
+    let mut result = Vec::new();
+    let mut seen = BTreeSet::new();
+    for tier in tiers.unwrap_or_default() {
+        if !valid_model_slug(&tier.id) {
+            return Err(CodexModelCatalogError::InvalidCapabilities);
+        }
+        validate_public_text(&tier.name, MAX_DISPLAY_NAME_BYTES, false)?;
+        validate_public_text(&tier.description, MAX_DESCRIPTION_BYTES, true)?;
+        if seen.insert(tier.id.clone()) {
+            let speed = match tier.id.as_str() {
+                "fast" | "priority" => Some("fast"),
+                _ => None,
+            };
+            let mut presentation = ModelServiceTier::new(tier.id, tier.name, tier.description);
+            if let Some(speed) = speed {
+                presentation = presentation.with_speed_tier(speed);
+            }
+            result.push(presentation);
+        }
+    }
+    // 旧目录只声明 additional_speed_tiers；仅映射已知协议，不为所有模型猜测能力。
+    if speeds
+        .unwrap_or_default()
+        .iter()
+        .any(|speed| speed == "fast")
+        && !result.iter().any(|tier| tier.speed_tier() == Some("fast"))
+    {
+        result
+            .push(ModelServiceTier::new("fast", "Fast", "Fast processing").with_speed_tier("fast"));
+    }
+    Ok(result)
 }
 
 fn optional_positive(value: Option<i64>) -> Result<Option<NonZeroU64>, CodexModelCatalogError> {

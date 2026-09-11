@@ -13,6 +13,7 @@
       "supports_image_detail_original": true,
       "supports_search_tool": true,
       "support_verbosity": true,
+      "additional_speed_tiers": ["fast"],
       "supported_reasoning_levels": [
         {
           "effort": "low",

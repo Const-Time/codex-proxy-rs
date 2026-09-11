@@ -11,6 +11,50 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const OFFICIAL_FIXTURE: &[u8] = include_bytes!("fixtures/official_models_snapshot.json");
 
 #[test]
+fn speed_capabilities_should_follow_catalog_evidence_without_inventing_fast_support() {
+    for (fields, expected) in [
+        (serde_json::json!({}), false),
+        (serde_json::json!({"additional_speed_tiers": []}), false),
+        (
+            serde_json::json!({"additional_speed_tiers": ["future-speed"]}),
+            false,
+        ),
+        (
+            serde_json::json!({"additional_speed_tiers": ["fast"]}),
+            true,
+        ),
+        (
+            serde_json::json!({"service_tiers": [{"id": "priority", "name": "Fast"}]}),
+            true,
+        ),
+        (
+            serde_json::json!({"additional_speed_tiers": ["fast", "fast"], "service_tiers": [{"id": "fast", "name": "Fast"}]}),
+            true,
+        ),
+    ] {
+        let mut model = fields;
+        model["slug"] = "test-model".into();
+        model["display_name"] = "Test".into();
+        let body = serde_json::to_vec(&serde_json::json!({"models": [model]})).unwrap();
+        let snapshot = parse_codex_model_catalog(&body, None).expect("catalog");
+        let tiers = snapshot.models()[0].capabilities().service_tiers();
+        assert_eq!(
+            tiers
+                .iter()
+                .filter(|tier| tier.speed_tier() == Some("fast"))
+                .count(),
+            usize::from(expected)
+        );
+    }
+}
+
+#[test]
+fn unsafe_service_tier_metadata_should_be_rejected() {
+    let body = br#"{"models":[{"slug":"test","display_name":"Test","service_tiers":[{"id":"fast","name":"Fast\u0000"}]}]}"#;
+    assert!(parse_codex_model_catalog(body, None).is_err());
+}
+
+#[test]
 fn official_fixture_should_produce_safe_full_snapshot() {
     let snapshot = parse_codex_model_catalog(OFFICIAL_FIXTURE, Some("W/\"codex-v1\""))
         .expect("official fixture should parse");

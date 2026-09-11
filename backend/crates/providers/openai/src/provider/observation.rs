@@ -556,6 +556,7 @@ pub(super) fn codex_model_presentation(model: &CodexCatalogModel) -> ModelPresen
         model.metadata().description().map(str::to_owned),
     )
     .with_reasoning(default_reasoning, reasoning_efforts)
+    .with_service_tiers(capabilities.service_tiers().to_vec())
     .with_context_window_tokens(
         model
             .limits()

@@ -133,6 +133,8 @@ fn codex_model_json(profile: &PublicModelProfile, index: usize) -> Value {
         .service_tiers()
         .iter()
         .filter_map(|tier| tier.speed_tier())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
     let service_tiers = presentation
         .service_tiers()
