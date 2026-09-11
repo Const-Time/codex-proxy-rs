@@ -992,7 +992,8 @@ pub(crate) fn dashboard_view(
 pub(crate) fn usage_summary_view(summary: domain::UsageSummary) -> UsageSummaryView {
     let overview = summary.overview;
     UsageSummaryView {
-        total_requests: format_compact_number(overview.requests.request_count),
+        total_cost_usd: overview.total_cost_usd.as_str().to_owned(),
+        total_requests: format_compact_number(overview.requests.success_count),
         input_tokens: format_compact_number(overview.requests.input_tokens),
         output_tokens: format_compact_number(overview.requests.output_tokens),
         cached_tokens: format_compact_number(overview.requests.cached_tokens),

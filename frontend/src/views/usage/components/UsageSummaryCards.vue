@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { getUsageRecordSummary } from '@/api'
-import { Activity, Database, FileText, Timer } from '@lucide/vue'
+import { Activity, CircleDollarSign, FileText, Timer } from '@lucide/vue'
 
 import { computed } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -28,15 +28,15 @@ const items = computed(() => [
     label: '总 Token',
     icon: FileText,
     value: props.summary.totalTokens,
-    detail: `输入 ${props.summary.inputTokens} / 输出 ${props.summary.outputTokens}`,
+    detail: `输入 ${props.summary.inputTokens} / 输出 ${props.summary.outputTokens} / 缓存 ${props.summary.cachedTokens}`,
     tone: 'bg-cp-green-container text-cp-green-on-container',
   },
   {
-    key: 'cached',
-    label: '缓存 Token',
-    icon: Database,
-    value: props.summary.cachedTokens,
-    detail: '缓存读取命中',
+    key: 'cost',
+    label: '总消费',
+    icon: CircleDollarSign,
+    value: `$${props.summary.totalCostUsd}`,
+    detail: 'USD · 已按分组模型倍率计费',
     tone: 'bg-cp-orange-container text-cp-orange-on-container',
   },
   {
@@ -69,7 +69,7 @@ const items = computed(() => [
         <strong class="block truncate text-[22px] leading-none font-extrabold text-cp-text">
           {{ item.value }}
         </strong>
-        <span class="block truncate text-cp-sm leading-none font-emphasis text-cp-text-secondary">
+        <span class="block text-cp-sm leading-snug font-emphasis text-cp-text-secondary">
           {{ item.detail }}
         </span>
       </div>

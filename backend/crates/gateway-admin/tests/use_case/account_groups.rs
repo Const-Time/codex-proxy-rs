@@ -226,6 +226,7 @@ impl AccountRuntimeStore for FakeRuntimeStore {
 fn group_record() -> AccountGroupRecord {
     let now = Utc::now();
     AccountGroupRecord {
+        model_multipliers: Default::default(),
         budget: Default::default(),
         id: group_id(),
         name: "Primary".to_owned(),

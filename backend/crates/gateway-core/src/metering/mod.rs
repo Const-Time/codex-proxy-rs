@@ -42,6 +42,15 @@ impl Decimal {
             .map(Self)
     }
 
+    /// Multiply and round half up to ten decimal places, matching PostgreSQL.
+    #[must_use]
+    pub fn checked_mul(self, other: Self) -> Option<Self> {
+        self.0
+            .checked_mul(other.0)?
+            .checked_add(DECIMAL_SCALE / 2)
+            .and_then(|value| Self::from_scaled(value / DECIMAL_SCALE).ok())
+    }
+
     /// 除以非零整数，保留最多十位小数。
     #[must_use]
     pub fn checked_div_u64(self, divisor: u64) -> Option<Self> {

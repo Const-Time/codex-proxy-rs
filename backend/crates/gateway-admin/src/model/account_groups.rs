@@ -7,6 +7,20 @@ use gateway_core::{account::AccountStatusFacts, routing::AccountGroupId};
 
 use super::{PageSize, Revision, observability::DecimalAmount};
 
+/// Exact public model names mapped to nonnegative decimal billing rates.
+pub fn valid_model_multipliers(rates: &BTreeMap<String, String>) -> bool {
+    rates.len() <= 200
+        && rates.iter().all(|(model, value)| {
+            !model.is_empty()
+                && model.len() <= 256
+                && model.trim() == model
+                && !model.chars().any(char::is_control)
+                && value
+                    .parse::<gateway_core::metering::Decimal>()
+                    .is_ok_and(|rate| rate.scaled() <= 10_000_000_000_000)
+        })
+}
+
 /// Canonical `#RRGGBBAA` color persisted with an account group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountGroupColor(String);
@@ -80,6 +94,7 @@ pub struct AccountGroupListQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountGroupRecord {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
+    pub model_multipliers: BTreeMap<String, String>,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,
@@ -109,6 +124,7 @@ pub struct AccountGroupPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateAccountGroup {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
+    pub model_multipliers: BTreeMap<String, String>,
     pub name: String,
     pub description: Option<String>,
     pub color: AccountGroupColor,
@@ -118,6 +134,7 @@ pub struct CreateAccountGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAccountGroup {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
+    pub model_multipliers: BTreeMap<String, String>,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,
@@ -128,6 +145,7 @@ pub struct NewAccountGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAccountGroup {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
+    pub model_multipliers: BTreeMap<String, String>,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,

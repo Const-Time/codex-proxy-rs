@@ -82,6 +82,110 @@ fn context() -> MutationContext {
 }
 
 #[tokio::test]
+async fn model_billing_freezes_rates_and_charges_exactly_once() {
+    let Some(db) = TestDatabase::create("model_billing").await else {
+        return;
+    };
+    seed(&db, "priced", "0.5", "5").await;
+    sqlx::query(
+        "update account_groups set model_multipliers = '{\"test-model\":\"2.5\"}' where id = $1",
+    )
+    .bind(group_id("priced").as_str())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let insert = "insert into model_requests(id, client_api_key_ref, user_id, config_revision, protocol, operation, endpoint, client_transport, requested_model_id, routing_scope, routing_group_refs, routing_group_names_snapshot, started_at, deadline_at, outcome, completed_at, cost_source, cost_amount, cost_currency)
+        values ($1, 'priced', 'budget-user', 1, 'openai', 'responses', '/v1/responses', 'http_sse', $2, 'groups', $3, '[{\"id\":\"placeholder\",\"name\":\"priced\"}]', now(), now() + interval '1 hour', 'failed', now(), 'calculated', 0.2, 'USD')";
+    for (id, model) in [
+        ("req_rate-old", "test-model"),
+        ("req_rate-default", "other-model"),
+    ] {
+        sqlx::query(insert)
+            .bind(id)
+            .bind(model)
+            .bind(vec![group_id("priced").to_string()])
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "update account_groups set model_multipliers = '{\"test-model\":\"4\"}' where id = $1",
+    )
+    .bind(group_id("priced").as_str())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(insert)
+        .bind("req_rate-new")
+        .bind("test-model")
+        .bind(vec![group_id("priced").to_string()])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let rates: Vec<(String, String)> =
+        sqlx::query_as("select id, billed_cost_amount::text from model_requests order by id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rates,
+        vec![
+            ("req_rate-default".into(), "0.2000000000".into()),
+            ("req_rate-new".into(), "0.8000000000".into()),
+            ("req_rate-old".into(), "0.5000000000".into())
+        ]
+    );
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    for _ in 0..2 {
+        store
+            .settle(charge("priced", "rate-old", "0.2"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        status(&db, "priced").await.daily_used_usd.canonical(),
+        "0.5"
+    );
+    assert_eq!(
+        store
+            .admit(key_id("priced"), Some(group_id("priced")))
+            .await
+            .unwrap_err()
+            .client_error_code(),
+        Some("group_daily_budget_exceeded")
+    );
+    let audit: (String, String, String) = sqlx::query_as("select raw_amount_usd::text, billing_multiplier::text, amount_usd::text from user_group_charge_events").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        audit,
+        (
+            "0.2000000000".into(),
+            "2.5000000000".into(),
+            "0.5000000000".into()
+        )
+    );
+    use gateway_admin::ports::store::ObservabilityStore as _;
+    let summary = super::admin_observability_store(&db.pool)
+        .usage_summary(
+            gateway_admin::model::observability::TimeRange {
+                start: Utc::now() - chrono::Duration::hours(1),
+                end: Utc::now() + chrono::Duration::hours(1),
+            },
+            gateway_admin::model::observability::UsageFilter {
+                owner_user_id: Some("budget-user".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        summary.total_cost_usd.as_str(),
+        "1.5",
+        "includes interrupted billable requests without charging twice"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
 async fn budgets_settle_exactly_once_and_enforce_each_threshold_across_store_instances() {
     let Some(database) = TestDatabase::create("budgets_exact").await else {
         return;
@@ -301,6 +405,7 @@ async fn group_budget_updates_preserve_usage_and_disable_live_access() {
         .await
         .unwrap();
     let mut update = UpdateAccountGroup {
+        model_multipliers: Default::default(),
         id: group_id("key"),
         name: "key".into(),
         description: None,

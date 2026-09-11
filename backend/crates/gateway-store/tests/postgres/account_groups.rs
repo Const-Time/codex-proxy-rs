@@ -41,6 +41,7 @@ async fn group_deletion_reports_budget_references_without_losing_history() {
         groups
             .create_account_group(
                 NewAccountGroup {
+                    model_multipliers: Default::default(),
                     id: group_id(id),
                     name: id.to_owned(),
                     description: None,
@@ -99,6 +100,7 @@ async fn unreferenced_group_deletion_removes_memberships_but_preserves_accounts(
     groups
         .create_account_group(
             NewAccountGroup {
+                model_multipliers: Default::default(),
                 id: group_id(EMPTY_GROUP),
                 name: "Unused group".into(),
                 description: None,
@@ -185,6 +187,7 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                model_multipliers: Default::default(),
                 budget: Default::default(),
 
                 id: mixed_group.clone(),
@@ -199,6 +202,7 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                model_multipliers: Default::default(),
                 budget: Default::default(),
 
                 id: empty_group.clone(),
@@ -368,6 +372,7 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
     groups
         .create_account_group(
             NewAccountGroup {
+                model_multipliers: Default::default(),
                 budget: Default::default(),
 
                 id: group_id(EMPTY_GROUP),

@@ -29,6 +29,25 @@ fn decimal_div_u64_should_keep_up_to_ten_fraction_digits() {
 }
 
 #[test]
+fn decimal_multiplication_rounds_billing_and_rejects_overflow() {
+    let decimal = |value| Decimal::from_str(value).unwrap();
+    for (amount, rate, expected) in [
+        ("0.2", "2.5", "0.5"),
+        ("0.0000000001", "0.5", "0.0000000001"),
+        ("0.0000000001", "0.49", "0"),
+        ("9999999999.9999999999", "0", "0"),
+    ] {
+        assert_eq!(
+            decimal(amount).checked_mul(decimal(rate)),
+            Some(decimal(expected))
+        );
+    }
+    assert_eq!(Decimal::MAX.checked_mul(decimal("1")), Some(Decimal::MAX));
+    assert_eq!(Decimal::MAX.checked_mul(decimal("2")), None);
+    assert_eq!(Decimal::MAX.checked_mul(Decimal::MAX), None);
+}
+
+#[test]
 fn provider_usd_ticks_should_map_exactly_to_decimal_scale() {
     let estimate = ProviderReportedCost::from_usd_ticks(12_345_678_901)
         .expect("valid provider ticks")

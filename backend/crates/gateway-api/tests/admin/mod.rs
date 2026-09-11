@@ -485,6 +485,7 @@ impl MemoryAccountGroupStore {
             (
                 primary_id.clone(),
                 AccountGroupRecord {
+                    model_multipliers: Default::default(),
                     budget: Default::default(),
                     id: primary_id,
                     name: "Alpha routing".to_owned(),
@@ -507,6 +508,7 @@ impl MemoryAccountGroupStore {
             (
                 secondary_id.clone(),
                 AccountGroupRecord {
+                    model_multipliers: Default::default(),
                     budget: Default::default(),
                     id: secondary_id,
                     name: "Beta routing".to_owned(),
@@ -623,6 +625,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         let mut state = self.state.lock().expect("account groups");
         let now = Utc::now();
         let record = AccountGroupRecord {
+            model_multipliers: Default::default(),
             budget: command.budget,
             id: command.id.clone(),
             name: command.name,

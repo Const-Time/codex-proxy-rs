@@ -567,6 +567,7 @@ pub struct DashboardDataView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummaryView {
+    pub total_cost_usd: String,
     pub total_requests: String,
     pub input_tokens: String,
     pub output_tokens: String,

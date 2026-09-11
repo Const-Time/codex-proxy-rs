@@ -349,6 +349,7 @@ pub struct RequestMetricPoint {
 /// 已完整交付且由 Provider 计算费用的请求事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalculatedUsageBillingFact {
+    pub billing_multiplier: DecimalAmount,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
     pub upstream_model_id: String,
@@ -676,6 +677,7 @@ pub struct ProviderObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageOverview {
+    pub total_cost_usd: DecimalAmount,
     pub range: ObservabilityRange,
     pub requests: RequestMetrics,
     pub attempts: AttemptMetrics,

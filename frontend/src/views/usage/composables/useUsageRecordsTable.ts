@@ -257,6 +257,7 @@ function usageSearchParam(value: string) {
 function emptySummary() {
   const summary: Awaited<ReturnType<typeof getUsageRecordSummary>> = {
     totalRequests: '0',
+    totalCostUsd: '0',
     inputTokens: '0',
     outputTokens: '0',
     cachedTokens: '0',

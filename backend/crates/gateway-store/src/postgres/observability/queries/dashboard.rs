@@ -112,7 +112,7 @@ pub(crate) async fn dashboard_totals(pool: &PgPool) -> StoreResult<DashboardTota
                 coalesce(sum(input_tokens) filter (where {fact}), 0)::bigint as input_tokens,
                 coalesce(sum(cached_tokens) filter (where {fact}), 0)::bigint as cached_tokens,
                 coalesce(sum(total_tokens) filter (where {fact}), 0)::bigint as total_tokens,
-                sum(cost_amount) filter (where {fact} and cost_currency = 'USD')::text
+                sum(billed_cost_amount) filter (where {fact} and cost_currency = 'USD')::text
                   as billing_usd
            from model_requests mr
           where mr.recovered_at is null"
@@ -299,7 +299,7 @@ pub(crate) fn calculated_usage_billing_facts(
             "::interval, mr.started_at, timestamptz '1970-01-01 00:00:00+00') as bucket_start,
                     mr.provider_kind, mr.upstream_model_id, mr.service_tier,
                     mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
-                    mr.cost_currency, mr.cost_amount::text as amount
+                    mr.cost_currency, mr.cost_amount::text as amount, mr.billing_multiplier::text
              from model_requests mr where mr.started_at >= ",
         );
         query.push_bind(range.start);
@@ -333,7 +333,7 @@ pub(crate) async fn request_costs_by_bucket(
     query.push_bind(granularity.sql_interval());
     query.push(
         "::interval, mr.started_at, timestamptz '1970-01-01 00:00:00+00') as bucket_start,
-                mr.cost_currency, sum(mr.cost_amount)::text as amount
+                mr.cost_currency, sum(mr.billed_cost_amount)::text as amount
          from model_requests mr
          where mr.started_at >= ",
     );
@@ -484,7 +484,7 @@ pub(crate) async fn request_costs(
     filter: &UsageRecordFilter,
 ) -> StoreResult<Vec<CurrencyCostTotal>> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "select mr.cost_currency, sum(mr.cost_amount)::text as amount
+        "select mr.cost_currency, sum(mr.billed_cost_amount)::text as amount
          from model_requests mr where mr.started_at >= ",
     );
     query.push_bind(range.start);
@@ -502,6 +502,30 @@ pub(crate) async fn request_costs(
         .iter()
         .map(cost_from_row)
         .collect()
+}
+
+/// Actual user consumption includes billable interrupted requests and retries.
+pub(crate) async fn total_billed_consumption(
+    pool: &PgPool,
+    range: ObservabilityRange,
+    filter: &UsageRecordFilter,
+) -> StoreResult<DecimalAmount> {
+    let mut query = QueryBuilder::<Postgres>::new(
+        "select coalesce(sum(coalesce(charge.amount_usd, case when mr.cost_currency = 'USD' then mr.billed_cost_amount end)), 0)::text as amount
+         from model_requests mr left join user_group_charge_events charge on charge.request_id = mr.id
+         where mr.started_at >= ",
+    );
+    query
+        .push_bind(range.start)
+        .push(" and mr.started_at < ")
+        .push_bind(range.end);
+    push_usage_filter(&mut query, filter, "mr");
+    let row = query
+        .build()
+        .fetch_one(pool)
+        .await
+        .map_err(|_| postgres_unavailable("load billed consumption"))?;
+    DecimalAmount::from_str(&get::<String>(&row, "amount")?)
 }
 
 pub(crate) async fn provider_observations(
