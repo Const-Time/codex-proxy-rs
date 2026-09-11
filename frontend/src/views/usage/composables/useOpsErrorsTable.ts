@@ -2,18 +2,20 @@ import type { Ref } from 'vue'
 import type { UsageTimeRangeParams } from './useUsageTimeRange'
 import { watchDebounced } from '@vueuse/core'
 
-import { computed, onMounted, shallowRef, watch } from 'vue'
+import { computed, inject, onMounted, shallowRef, watch } from 'vue'
 import { getOpsErrors } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 import { useStablePagedQuery } from '@/composables/useStablePagedQuery'
 import { errorMessage, withMinimumDuration } from '@/utils/async'
 
 export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>, filters?: Readonly<Ref<Record<string, string | undefined>>>) {
+  const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
   const refreshing = shallowRef(false)
   const searchQuery = shallowRef('')
   const query = useStablePagedQuery({
     initialPageSize: 10,
     load: ({ currentPage, pageSize }) => getOpsErrors({
+      personal: personal?.value,
       currentPage,
       pageSize,
       search: searchQuery.value.trim() || undefined,

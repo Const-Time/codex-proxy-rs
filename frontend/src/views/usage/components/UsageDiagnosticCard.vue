@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import type { Ref } from 'vue'
 import type { getUsageRecordInsightsDiagnostics } from '@/api'
-import { CornerDownRight } from '@lucide/vue'
 
-import { computed } from 'vue'
+import { CornerDownRight } from '@lucide/vue'
+import { computed, inject } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
@@ -26,14 +27,15 @@ const props = withDefaults(
 
 const dimension = defineModel('dimension', { type: String, required: true })
 
-const dimensionOptions = [
+const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
+const dimensionOptions = computed(() => [
   { label: '模型', value: 'model' },
   { label: '账号', value: 'account' },
   { label: '密钥', value: 'apiKey' },
   { label: '上游', value: 'provider' },
   { label: '传输', value: 'transport' },
   { label: '错误', value: 'failureClass' },
-]
+].filter(option => !personal?.value || option.value !== 'account'))
 
 const diagnosticColumns = defineTableColumns<DiagnosticDisplayItem>([
   {
@@ -70,12 +72,12 @@ const diagnosticColumns = defineTableColumns<DiagnosticDisplayItem>([
 ])
 
 const selectedDimensionLabel = computed(
-  () => dimensionOptions.find(option => option.value === dimension.value)?.label ?? '维度',
+  () => dimensionOptions.value.find(option => option.value === dimension.value)?.label ?? '维度',
 )
 
 const resultDimension = computed(() => props.diagnostics.dimension || dimension.value)
 const resultDimensionLabel = computed(
-  () => dimensionOptions.find(option => option.value === resultDimension.value)?.label ?? '维度',
+  () => dimensionOptions.value.find(option => option.value === resultDimension.value)?.label ?? '维度',
 )
 
 const sortedItems = computed(() =>

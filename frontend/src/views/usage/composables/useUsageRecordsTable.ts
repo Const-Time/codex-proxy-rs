@@ -15,6 +15,7 @@ import { toast } from '@/components/base/BaseToast'
 import { errorMessage, withMinimumDuration } from '@/utils/async'
 
 interface UseUsageRecordsTableOptions {
+  personal?: boolean
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>
   latestTimeRangeParams: () => UsageTimeRangeParams
   recordFilters?: Readonly<Ref<Record<string, string | undefined>>>
@@ -49,10 +50,12 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   let analyticsRequestId = 0
   let diagnosticRequestId = 0
   const scopedParams = () => ({
+    personal: options.personal,
     ...options.timeRangeParams.value,
     ...(providerQuery.value ? { provider: providerQuery.value } : {}),
   })
   const filterParams = () => ({
+    personal: options.personal,
     ...options.recordFilters?.value,
     provider: providerQuery.value || undefined,
     search: usageSearchParam(searchQuery.value),
@@ -73,7 +76,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     const globalParams = scopedParams()
     if (scope === 'all') {
       resetPagination()
-      tableTimeRangeParams.value = { ...globalParams }
+      tableTimeRangeParams.value = { startTime: globalParams.startTime, endTime: globalParams.endTime }
     }
 
     await Promise.all([
