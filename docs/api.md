@@ -168,8 +168,8 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 | 方法 | 路由 | body | 权限 |
 | --- | --- | --- | --- |
 | GET | /api/admin/users | — | 管理员；用户列表，无密码或密钥 |
-| POST | /api/admin/users/create | { username, password, groupIds } | 管理员；创建已启用的普通用户，不能指定角色 |
-| POST | /api/admin/users/update | { id, enabled, groupIds } | 管理员；替换分组授权，不能禁用管理员 |
+| POST | /api/admin/users/create | { username, password, groupIds, maxConcurrency?, requestsPerMinute? } | 管理员；创建已启用的普通用户，不能指定角色 |
+| POST | /api/admin/users/update | { id, enabled, groupIds, maxConcurrency?, requestsPerMinute? } | 管理员；替换分组授权及用户限流，不能禁用管理员 |
 | GET | /api/profile | — | 本人会话；个人资料 |
 | GET | /api/profile/groups | — | 本人会话；获授权分组及本人的共享额度，不含上游账号资料 |
 | POST | /api/profile/password | { currentPassword, newPassword } | 本人会话；验证原密码、改密后重新登录 |
@@ -178,7 +178,9 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 
 管理接口要求 admin 角色或部署级管理 API Key；个人接口、Client Key 全部操作以及使用记录接口必须使用本人 Cookie，不接受部署级 API Key。普通用户访问管理接口返回 403。Client Key 的所有权由会话决定，任何角色均无法列出、读取、修改或删除他人的 Key；请求体不接受 owner/role 等代操作字段。
 
-使用记录列表、详情、摘要及洞察概览对普通用户强制按持久化 user_id 过滤，客户端不能覆盖该条件；管理员登录后可查看全局记录。普通用户的列表/详情只保留自身请求、token、费用、延迟等字段，不返回上游账号身份、错误原文、重试轨迹或原始观测数据。全局仪表盘、诊断和运维错误仅管理员可访问。搜索不再匹配密钥明文。
+用户字段另包含 `maxConcurrency`、`requestsPerMinute`；两者为非负安全整数，省略或零表示不限。同一用户的全部密钥共享限流，管理员修改后发布运行时快照；已准入请求可完成。
+
+使用记录列表、详情、摘要、洞察概览、诊断及错误排查对普通用户强制按持久化 user_id 过滤，客户端不能覆盖该条件；管理员默认查看全局记录，在这些接口传 `personal=true` 时也限定本人。个人列表/详情只保留自身请求、token、费用、延迟等字段，不返回上游账号身份、错误原文、重试轨迹或原始观测数据；错误排查同样脱敏，诊断不允许账号维度。全局仪表盘和底层请求诊断仅管理员可访问。搜索不再匹配密钥明文。
 
 ## 5. 账号
 
@@ -498,8 +500,8 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 | 方法 | 路由 | 主要 query/body | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/account-groups` | `page`、`pageSize`、`search`、`enabled` | 分页查询分组；返回账号可用性、并发槽位（Redis 不可用时 `usedSlots=null`）及成功请求 USD 用量 |
-| `POST` | `/api/admin/account-groups/create` | `{ name, description, color, dailyLimitUsd?, weeklyLimitUsd? }` | 创建空分组；`color` 严格为 `#RRGGBBAA`，返回时统一大写 |
-| `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, dailyLimitUsd, weeklyLimitUsd }` | 更新名称、描述、颜色和日/周额度 |
+| `POST` | `/api/admin/account-groups/create` | `{ name, description, color, dailyLimitUsd?, weeklyLimitUsd?, modelMultipliers? }` | 创建空分组；`color` 严格为 `#RRGGBBAA`，返回时统一大写 |
+| `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, dailyLimitUsd, weeklyLimitUsd, modelMultipliers? }` | 更新名称、描述、颜色、日/周额度和模型倍率 |
 | `POST` | `/api/admin/account-groups/enable` | `{ id }` | 启用 |
 | `POST` | `/api/admin/account-groups/disable` | `{ id }` | 禁用；已绑定 Key 保持受限，不回退到全部账号 |
 | `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除未被 Client Key、额度窗口或计费账本引用的组；有引用时返回 409 并提示处理方式，已有额度或计费记录的组可禁用 |
@@ -523,13 +525,13 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 创建字段为 `name`、可选 `label`、`groupIds`、`maxConcurrency`、`requestsPerMinute`，更新再增加 `id`。`groupIds` 必须且只能包含一个本人获授权的启用分组；空数组和多分组均拒绝。创建和 reveal 返回本人 Key 明文，其他操作不返回明文。金额字段不再接受写入 Key。
 
 日/周额度在分组创建/更新接口配置，分组列表返回同名字段。金额为非负十进制字符串，最多 10 位整数和 10 位小数，`"0"` 表示不限；创建分组时省略默认为零，更新必须提交。修改限额不会清空已用金额。同一用户同一分组下所有 Key 共用窗口，不同用户独立累计；分组内全部账号共同适用这套额度。
-`maxConcurrency` 和 `requestsPerMinute` 仍按 Key 配置，非负整数，零表示不限。
+普通用户不能在 Key 创建/编辑时设置 `maxConcurrency` 和 `requestsPerMinute`，传入非零值返回 400；省略或传零不会移除旧 Key 已有的限制。管理员自己的 Key 可继续配置额外上限，Key 上限和用户共享上限同时生效。页面显示两者中的有效上限。
 
 Key 列表继承分组策略和本人在组内的用量：`dailyLimitUsd`、`weeklyLimitUsd`、`dailyUsedUsd`、`weeklyUsedUsd`（均为字符串）、
 `dailyResetsAt`、`weeklyResetsAt`（RFC3339 或 `null`）。
 管理端日／周金额显示两位小数，悬停可查看原始值；记账和限额比较保留完整精度。
 日窗口按北京时间零点重置；周窗口从首次准入当天零点起持续七天，到期后在下一次使用时重新开启。
-费用按请求完成时间归属窗口。并发按同一 Key 的执行中请求累计，包含 SSE 与每个 WebSocket
+费用按请求完成时间归属窗口。用户并发按其全部 Key 的执行中请求累计，包含 SSE 与每个 WebSocket
 `response.create`；空闲连接不占名额，内部重试不重复占用。
 修改 Key 策略对既有 WebSocket 连接的下一次请求同样生效，已开始的请求保持原有快照。
 
@@ -743,4 +745,12 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 
 分组匹配请求保存的 `routing_group_refs`，用户匹配请求的 `user_id`；账号当前分组变化不会改写历史筛选结果。模型精确匹配请求模型或上游模型。`clientTransport` 只匹配客户端接入方式，允许 `http_json`、`http_sse`、`websocket`；原有 `transport` 参数语义保持不变。无请求关联的运维事件在设置分组、用户或接入类型条件时不匹配。
 
-普通用户查询仍叠加会话用户范围，传入 `userId` 不能扩大可见范围；错误排查仍仅限管理员。页面中的新增筛选只作用于请求明细，成功记录与错误排查共享条件，修改条件时回到第一页。
+普通用户查询仍叠加会话用户范围，传入 `userId` 不能扩大可见范围；个人错误排查也只展示本人请求。页面中的新增筛选只作用于请求明细，成功记录与错误排查共享条件，修改条件时回到第一页。
+
+### v3.5 计费与容量字段
+
+分组 `modelMultipliers` 为模型名到十进制字符串的映射，例如 `{"gpt-5.5":"1.5"}`。最多 200 项，模型名最长 256 字符，倍率范围 0–1000、最多十位小数；更新提交完整映射，省略或空对象清除配置。按客户端请求模型名称精确匹配，未配置时为 1 倍。
+
+请求建立时冻结倍率，原始模型费用 × 倍率（四舍五入至十位小数）作为消费并计入日/周额度。历史请求及账本保留当时倍率，后来修改分组不会重算。`GET /api/admin/usage/records/summary` 新增 `totalCostUsd` 字符串，按时间和查询范围汇总 USD 消费，也包括已产生费用的失败请求及内部重试；已结算账本优先，避免重复计费。成功请求指标保持成功范围，缓存 Token 合并显示在总 Token 卡片中。
+
+账号列表及详情新增 `usedSlots: number | null`、`totalSlots: number`。分别表示当前占用和总并发容量；账号未单独设置并发上限时，总容量继承运行设置，Redis 不可用时占用返回 null，页面显示“未知”。
