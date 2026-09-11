@@ -2,6 +2,7 @@
 import type { useAccountConnectionTest } from '../composables/useAccountConnectionTest'
 
 import { RefreshCw } from '@lucide/vue'
+import { computed } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
@@ -12,7 +13,7 @@ import AccountStatusBadge from './AccountStatusBadge/index.vue'
 
 type ConnectionTest = ReturnType<typeof useAccountConnectionTest>
 
-defineProps<{
+const props = defineProps<{
   account: ConnectionTest['testingAccount']['value']
   status: ConnectionTest['connectionTestStatus']['value']
   model: string
@@ -33,6 +34,8 @@ const emit = defineEmits<{
 }>()
 const open = defineModel<boolean>({ default: false })
 const selectedModel = defineModel<string>('selectedModel', { required: true })
+const testPrompt = computed(() => props.logs.find(item => item.key === 'request')?.detail ?? '')
+const modelResponse = computed(() => props.logs.find(item => item.key === 'response')?.detail ?? '')
 
 function connectionLogClass(tone: string) {
   if (tone === 'success')
@@ -156,6 +159,21 @@ function connectionLogClass(tone: string) {
             </p>
           </div>
         </div>
+
+        <section v-if="testPrompt" class="mt-3 rounded-lg bg-cp-bg-container px-3 py-2.5" aria-label="测试提示词">
+          <h3 class="m-0 text-cp-sm font-heavy">
+            测试提示词
+          </h3>
+          <pre class="mt-2 mb-0 whitespace-pre-wrap wrap-break-word font-mono text-cp-sm" v-text="testPrompt" />
+        </section>
+        <section v-if="logs.length" class="mt-3 rounded-lg bg-cp-bg-container px-3 py-2.5" aria-label="模型响应">
+          <h3 class="m-0 text-cp-sm font-heavy">
+            模型响应
+          </h3>
+          <BaseScrollbar max-height="260px">
+            <pre class="mt-2 mb-0 whitespace-pre-wrap wrap-break-word font-mono text-cp-sm" v-text="modelResponse || (status === 'running' ? '等待模型响应...' : '未收到模型响应')" />
+          </BaseScrollbar>
+        </section>
 
         <div class="mt-3 rounded-lg bg-cp-bg-container px-3 py-2.5">
           <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
