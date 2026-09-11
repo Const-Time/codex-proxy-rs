@@ -502,6 +502,7 @@ jobs:
       - name: Verify exact app image digest
         uses: ./.github/actions/verify-container
         with:
+          private-code-scanning: ${{ vars.ENABLE_PRIVATE_CODE_SCANNING || 'false' }}
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-and-push.outputs.digest }}
           platform: ${{ matrix.dockerPlatform }}
           artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}

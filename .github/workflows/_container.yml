@@ -72,6 +72,7 @@ jobs:
       - name: Verify runtime image
         uses: ./.github/actions/verify-container
         with:
+          private-code-scanning: ${{ vars.ENABLE_PRIVATE_CODE_SCANNING || 'false' }}
           image: ${{ env.CPR_IMAGE }}
           platform: linux/amd64
           artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-amd64
