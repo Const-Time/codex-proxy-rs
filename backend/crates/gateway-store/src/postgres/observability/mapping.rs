@@ -420,13 +420,35 @@ pub(crate) fn admin_usage_list_record(
     record: UsageListRecord,
 ) -> AdminStoreResult<admin_observability::UsageListRecord> {
     let billing = match (&record.cost_amount, &record.cost_currency) {
-        (Some(amount), Some(currency)) => Some(admin_observability::UsageBilling::Total {
-            source: record.cost_source.clone(),
-            total: admin_observability::CurrencyCost {
-                currency: currency.clone(),
-                amount: admin_decimal_amount(amount.clone())?,
-            },
-        }),
+        (Some(amount), Some(currency)) => {
+            let original = admin_observability::UsageBilling::Total {
+                source: record.cost_source.clone(),
+                total: admin_observability::CurrencyCost {
+                    currency: currency.clone(),
+                    amount: admin_decimal_amount(record.raw_cost_amount.clone().ok_or_else(
+                        || {
+                            observability_error(StoreError::InvalidData {
+                                entity: "observability request billing",
+                                message: "missing original cost".to_owned(),
+                            })
+                        },
+                    )?)?,
+                },
+            };
+            let multiplier = admin_decimal_amount(record.billing_multiplier.clone())?;
+            Some(if multiplier.as_str() == "1" {
+                original
+            } else {
+                admin_observability::UsageBilling::GroupAdjusted {
+                    multiplier,
+                    original: Box::new(original),
+                    total: admin_observability::CurrencyCost {
+                        currency: currency.clone(),
+                        amount: admin_decimal_amount(amount.clone())?,
+                    },
+                }
+            })
+        }
         (None, None) => None,
         _ => {
             return Err(observability_error(StoreError::InvalidData {
@@ -487,13 +509,35 @@ pub(crate) fn admin_usage_record(
     record: UsageRecord,
 ) -> AdminStoreResult<admin_observability::UsageRecord> {
     let billing = match (&record.cost_amount, &record.cost_currency) {
-        (Some(amount), Some(currency)) => Some(admin_observability::UsageBilling::Total {
-            source: record.cost_source.clone(),
-            total: admin_observability::CurrencyCost {
-                currency: currency.clone(),
-                amount: admin_decimal_amount(amount.clone())?,
-            },
-        }),
+        (Some(amount), Some(currency)) => {
+            let original = admin_observability::UsageBilling::Total {
+                source: record.cost_source.clone(),
+                total: admin_observability::CurrencyCost {
+                    currency: currency.clone(),
+                    amount: admin_decimal_amount(record.raw_cost_amount.clone().ok_or_else(
+                        || {
+                            observability_error(StoreError::InvalidData {
+                                entity: "observability request billing",
+                                message: "missing original cost".to_owned(),
+                            })
+                        },
+                    )?)?,
+                },
+            };
+            let multiplier = admin_decimal_amount(record.billing_multiplier.clone())?;
+            Some(if multiplier.as_str() == "1" {
+                original
+            } else {
+                admin_observability::UsageBilling::GroupAdjusted {
+                    multiplier,
+                    original: Box::new(original),
+                    total: admin_observability::CurrencyCost {
+                        currency: currency.clone(),
+                        amount: admin_decimal_amount(amount.clone())?,
+                    },
+                }
+            })
+        }
         (None, None) => None,
         _ => {
             return Err(observability_error(StoreError::InvalidData {
@@ -782,6 +826,8 @@ pub(crate) fn usage_list_record_from_row(
         image_input_tokens: optional_unsigned(row, "image_input_tokens")?,
         image_output_tokens: optional_unsigned(row, "image_output_tokens")?,
         total_tokens: optional_unsigned(row, "total_tokens")?,
+        raw_cost_amount: optional_decimal(row, "raw_cost_amount")?,
+        billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
         cost_source: get(row, "cost_source")?,
         cost_amount: optional_decimal(row, "cost_amount")?,
         cost_currency: get(row, "cost_currency")?,
@@ -860,6 +906,8 @@ pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<
         image_input_tokens: optional_unsigned(row, "image_input_tokens")?,
         image_output_tokens: optional_unsigned(row, "image_output_tokens")?,
         total_tokens: optional_unsigned(row, "total_tokens")?,
+        raw_cost_amount: optional_decimal(row, "raw_cost_amount")?,
+        billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
         cost_source: get(row, "cost_source")?,
         cost_amount: optional_decimal(row, "cost_amount")?,
         cost_currency: get(row, "cost_currency")?,

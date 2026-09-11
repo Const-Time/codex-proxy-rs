@@ -56,6 +56,8 @@ pub struct CostCoverageView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingView {
+    pub group_multiplier_display: String,
+    pub original_amount_display: String,
     pub input_amount_display: String,
     pub output_amount_display: String,
     pub cache_read_amount_display: String,

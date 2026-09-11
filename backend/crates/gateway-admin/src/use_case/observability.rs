@@ -801,7 +801,14 @@ impl DefaultObservabilityService {
     /// 不支持的来源或费用规则失败）只保留该条已存的总额，不影响整页返回。
     fn enrich_list_billing(&self, records: &mut [crate::model::observability::UsageListRecord]) {
         for record in records {
-            let Some(UsageBilling::Total { source, total }) = record.billing.as_ref() else {
+            let Some(billing) = record.billing.as_mut() else {
+                continue;
+            };
+            let billing = match billing {
+                UsageBilling::GroupAdjusted { original, .. } => original.as_mut(),
+                other => other,
+            };
+            let UsageBilling::Total { source, total } = billing else {
                 continue;
             };
             if !matches!(source.as_str(), "calculated" | "provider_reported") {
@@ -826,14 +833,21 @@ impl DefaultObservabilityService {
                 total: total.clone(),
             };
             if let Ok(Some(breakdown)) = self.providers.calculated_billing(&provider_kind, &input) {
-                record.billing = Some(UsageBilling::Calculated(Box::new(breakdown)));
+                *billing = UsageBilling::Calculated(Box::new(breakdown));
             }
         }
     }
 
     fn enrich_detail_billing(&self, records: &mut [crate::model::observability::UsageRecord]) {
         for record in records {
-            let Some(UsageBilling::Total { source, total }) = record.billing.as_ref() else {
+            let Some(billing) = record.billing.as_mut() else {
+                continue;
+            };
+            let billing = match billing {
+                UsageBilling::GroupAdjusted { original, .. } => original.as_mut(),
+                other => other,
+            };
+            let UsageBilling::Total { source, total } = billing else {
                 continue;
             };
             if !matches!(source.as_str(), "calculated" | "provider_reported") {
@@ -858,7 +872,7 @@ impl DefaultObservabilityService {
                 total: total.clone(),
             };
             if let Ok(Some(breakdown)) = self.providers.calculated_billing(&provider_kind, &input) {
-                record.billing = Some(UsageBilling::Calculated(Box::new(breakdown)));
+                *billing = UsageBilling::Calculated(Box::new(breakdown));
             }
         }
     }

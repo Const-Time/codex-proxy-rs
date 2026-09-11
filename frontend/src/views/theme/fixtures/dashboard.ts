@@ -158,6 +158,8 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
       cacheWritePriceDisplay: '$0.00 / 1M',
       serviceTierDisplay: options.provider === 'openai' ? 'Fast' : 'Standard',
       multiplierDisplay: '1.0x',
+      groupMultiplierDisplay: '1x',
+      originalAmountDisplay: '$0.00',
     },
     latencyDetails: {
       transportDecisionWaitMs: 4,
