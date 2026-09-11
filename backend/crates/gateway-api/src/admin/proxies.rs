@@ -170,6 +170,7 @@ where
         .route("/api/admin/proxies/update", post(update::<S>))
         .route("/api/admin/proxies/delete", post(delete::<S>))
         .route("/api/admin/proxies/test", post(test::<S>))
+        .route("/api/admin/proxies/quality-test", post(quality_test::<S>))
 }
 
 fn revision(value: u64) -> Result<Revision, AdminError> {
@@ -410,5 +411,116 @@ where
     Ok(AdminResponse::new(
         StatusCode::OK,
         AdminEnvelope::ok(ProxyView::from(result)),
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QualityCheckView {
+    name: String,
+    status: &'static str,
+    http_status: Option<u16>,
+    latency_ms: u64,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QualityReportView {
+    tested_at: String,
+    duration_ms: u64,
+    exit_ip: Option<String>,
+    basic_latency_ms: u64,
+    score: u32,
+    grade: &'static str,
+    passed: u32,
+    warnings: u32,
+    failed: u32,
+    challenges: u32,
+    checks: Vec<QualityCheckView>,
+}
+
+impl From<gateway_admin::model::proxies::ProxyQualityReport> for QualityReportView {
+    fn from(report: gateway_admin::model::proxies::ProxyQualityReport) -> Self {
+        use gateway_admin::model::proxies::ProxyQualityStatus;
+        let (mut passed, mut warnings, mut failed, mut challenges) = (0_u32, 0_u32, 0_u32, 0_u32);
+        let checks = report
+            .checks
+            .into_iter()
+            .map(|check| {
+                let status = match check.status {
+                    ProxyQualityStatus::Passed => {
+                        passed += 1;
+                        "passed"
+                    }
+                    ProxyQualityStatus::Warning => {
+                        warnings += 1;
+                        "warning"
+                    }
+                    ProxyQualityStatus::Failed => {
+                        failed += 1;
+                        "failed"
+                    }
+                    ProxyQualityStatus::Challenge => {
+                        challenges += 1;
+                        "challenge"
+                    }
+                };
+                QualityCheckView {
+                    name: check.name,
+                    status,
+                    http_status: check.http_status,
+                    latency_ms: check.latency_ms,
+                    message: check.message,
+                }
+            })
+            .collect();
+        let total = passed + warnings + failed + challenges;
+        let score = (passed * 100 + warnings * 50)
+            .checked_div(total)
+            .unwrap_or(0);
+        let grade = match score {
+            90..=100 => "A",
+            75..=89 => "B",
+            60..=74 => "C",
+            _ => "D",
+        };
+        Self {
+            tested_at: report.tested_at.to_rfc3339(),
+            duration_ms: report.duration_ms,
+            exit_ip: report.basic.exit_ip.map(|ip| ip.to_string()),
+            basic_latency_ms: report.basic.latency_ms,
+            score,
+            grade,
+            passed,
+            warnings,
+            failed,
+            challenges,
+            checks,
+        }
+    }
+}
+
+async fn quality_test<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<IdRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let report = state
+        .admin_services()
+        .proxies()
+        .quality_test(
+            &request.id,
+            revision(request.revision)?,
+            &auth.context().mutation_context(),
+        )
+        .await
+        .map_err(map_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(QualityReportView::from(report)),
     ))
 }

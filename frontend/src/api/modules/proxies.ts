@@ -104,3 +104,34 @@ export function testProxy(data: { id: string, revision: number }) {
     timeout: 25000,
   })
 }
+
+export interface ProxyQualityCheck {
+  name: string
+  status: 'passed' | 'warning' | 'failed' | 'challenge'
+  httpStatus: number | null
+  latencyMs: number
+  message: string
+}
+
+export interface ProxyQualityReport {
+  testedAt: string
+  durationMs: number
+  exitIp: string | null
+  basicLatencyMs: number
+  score: number
+  grade: string
+  passed: number
+  warnings: number
+  failed: number
+  challenges: number
+  checks: ProxyQualityCheck[]
+}
+
+export function testProxyQuality(data: { id: string, revision: number }) {
+  return request<ProxyQualityReport>({
+    url: '/api/admin/proxies/quality-test',
+    method: 'POST',
+    data,
+    timeout: 40000,
+  })
+}

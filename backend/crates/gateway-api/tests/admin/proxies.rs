@@ -159,6 +159,23 @@ pub(super) struct SuccessfulProbe;
 
 #[async_trait]
 impl ProxyProbe for SuccessfulProbe {
+    async fn quality(
+        &self,
+        proxy: &OutboundProxy,
+    ) -> gateway_admin::model::proxies::ProxyQualityReport {
+        gateway_admin::model::proxies::ProxyQualityReport {
+            tested_at: chrono::Utc::now(),
+            duration_ms: 1,
+            basic: self.test(proxy).await,
+            checks: vec![
+                ProxyQualityCheck::http("HTTPS", 401, false, false, 10),
+                ProxyQualityCheck::http("WebSocket", 401, false, true, 10),
+                ProxyQualityCheck::http("challenge", 403, true, false, 10),
+                ProxyQualityCheck::http("failed", 503, false, false, 10),
+            ],
+        }
+    }
+
     async fn test(&self, proxy: &OutboundProxy) -> ProxyTestResult {
         assert_eq!(
             proxy.expose_url(),
@@ -355,7 +372,14 @@ async fn proxy_routes_require_auth_and_reject_invalid_input() {
         .0,
         StatusCode::NOT_FOUND
     );
-    for action in ["create", "update", "delete", "test", "accounts/remove"] {
+    for action in [
+        "create",
+        "update",
+        "delete",
+        "test",
+        "quality-test",
+        "accounts/remove",
+    ] {
         assert_eq!(
             request(
                 &fixture,
@@ -449,4 +473,74 @@ async fn proxy_account_removal_validates_binding_and_input() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(result["message"], "账号的代理绑定已变化，请刷新后重试");
+}
+
+#[tokio::test]
+async fn quality_route_reports_honest_scores_and_checks_proxy_revision() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let (status, _) = request(&fixture, "/api/admin/proxies/create", Some(json!({"name":"Quality", "proxyUrl":"http://test-user:private-password@proxy.example:8080"})), true).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = json!({"id":"proxy_test", "revision":1});
+    let (status, result) = request(
+        &fixture,
+        "/api/admin/proxies/quality-test",
+        Some(body),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["data"]["score"], 37);
+    assert_eq!(result["data"]["grade"], "D");
+    for key in ["passed", "warnings", "failed", "challenges"] {
+        assert_eq!(result["data"][key], 1);
+    }
+    assert_eq!(result["data"]["checks"][1]["status"], "warning");
+    for (body, expected) in [
+        (
+            json!({"id":"proxy_test", "revision":2}),
+            StatusCode::CONFLICT,
+        ),
+        (
+            json!({"id":"proxy_test", "revision":0}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"id":"proxy_test", "revision":1, "url":"http://127.0.0.1"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        assert_eq!(
+            request(
+                &fixture,
+                "/api/admin/proxies/quality-test",
+                Some(body),
+                true
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+    let (_, listed) = request(&fixture, "/api/admin/proxies", None, true).await;
+    assert_eq!(listed["data"]["items"][0]["lastTest"]["success"], true);
+}
+
+#[tokio::test]
+async fn proxy_quality_route_requires_administrator_role() {
+    let fixture = AdminTestFixture::new().await;
+    fixture
+        .auth
+        .insert_user_session("valid-session", "ordinary");
+    assert_eq!(
+        request(
+            &fixture,
+            "/api/admin/proxies/quality-test",
+            Some(json!({"id":"proxy_test", "revision":1})),
+            true
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
 }

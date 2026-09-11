@@ -138,12 +138,23 @@ pub(super) fn websocket_connection_metadata(
 async fn connect_websocket(
     connection: &CodexWebSocketConnection,
 ) -> Result<(RawWsStream, WsResponse<Option<Vec<u8>>>), CodexWebSocketExchangeError> {
+    match connect_raw_websocket(connection).await {
+        Err(CodexWebSocketExchangeError::Connect(tungstenite::Error::Http(response))) => {
+            Err(websocket_opening_error(response.as_ref()))
+        }
+        result => result,
+    }
+}
+
+async fn connect_raw_websocket(
+    connection: &CodexWebSocketConnection,
+) -> Result<(RawWsStream, WsResponse<Option<Vec<u8>>>), CodexWebSocketExchangeError> {
     let request = websocket_handshake_request(connection)?;
     let connector = tls::maybe_build_rustls_client_config_with_custom_ca()
-        .map_err(|error| {
-            CodexWebSocketExchangeError::Connect(tungstenite::Error::Io(std::io::Error::other(
-                error,
-            )))
+        .map_err(|_| {
+            CodexWebSocketExchangeError::Connect(super::error::egress_error(
+                "tls_configuration_failed",
+            ))
         })?
         .map(Connector::Rustls);
     let result = timeout(WEBSOCKET_CONNECT_TIMEOUT, async {
@@ -185,7 +196,6 @@ async fn connect_websocket(
     })?;
     match result {
         Ok((websocket, response)) => Ok((websocket, response)),
-        Err(tungstenite::Error::Http(response)) => Err(websocket_opening_error(response.as_ref())),
         Err(error) => Err(CodexWebSocketExchangeError::Connect(error)),
     }
 }
@@ -221,34 +231,61 @@ async fn dial_account(
         Some(url::Host::Ipv6(ip)) => ip.to_string(),
         _ => config.host.clone(),
     };
-    let tcp = connect_tcp(&proxy_host, config.port).await?;
-    let stream = if tls_proxy {
-        let tls = tls::account_proxy_tls_config().map_err(|_| invalid())?;
-        let name = rustls_pki_types::ServerName::try_from(proxy_host).map_err(|_| invalid())?;
-        MaybeTlsStream::Rustls(
-            tokio_rustls::TlsConnector::from(tls)
-                .connect(name, tcp)
-                .await?,
-        )
-    } else {
-        MaybeTlsStream::Plain(tcp)
-    };
-    // The pinned tungstenite fork sends domains remotely for both SOCKS schemes.
-    let target = if proxy_url.scheme() == "socks5" {
-        lookup_host((dns_host.as_str(), port))
-            .await?
-            .next()
-            .ok_or_else(invalid)?
-            .ip()
-            .to_string()
+    // The pinned fork sends domains remotely for both SOCKS schemes. Resolve socks5 locally,
+    // and try the remaining addresses when the proxy explicitly rejects a target address.
+    let targets = if proxy_url.scheme() == "socks5" {
+        let addresses = lookup_host((dns_host.as_str(), port))
+            .await
+            .map_err(|_| super::error::egress_error("proxy_target_dns_failed"))?;
+        let mut targets = Vec::new();
+        for address in addresses {
+            let target = address.ip().to_string();
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
     } else if proxy_url.scheme() == "socks5h" {
-        dns_host
+        vec![dns_host]
     } else {
-        host.to_owned()
+        vec![host.to_owned()]
     };
-    tokio_tungstenite::proxy::connect_via_proxy(stream, &config, &target, port)
+    let mut last_error = super::error::egress_error("proxy_target_dns_failed");
+    for target in targets {
+        let stream = proxy_stream(&proxy_host, config.port, tls_proxy).await?;
+        match tokio_tungstenite::proxy::connect_via_proxy(stream, &config, &target, port).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => {
+                let retry_address = matches!(&error, tungstenite::Error::Url(tungstenite::error::UrlError::ProxyConnect(message))
+                    if matches!(message.as_str(), "SOCKS5: connection failed with code 3" | "SOCKS5: connection failed with code 4" | "SOCKS5: connection failed with code 5" | "SOCKS5: connection failed with code 8"));
+                last_error = super::error::safe_proxy_error(error);
+                if !retry_address {
+                    return Err(last_error);
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn proxy_stream(
+    host: &str,
+    port: u16,
+    tls_proxy: bool,
+) -> Result<MaybeTlsStream<tokio::net::TcpStream>, tungstenite::Error> {
+    let tcp = connect_tcp(host, port).await?;
+    if !tls_proxy {
+        return Ok(MaybeTlsStream::Plain(tcp));
+    }
+    let config = tls::account_proxy_tls_config()
+        .map_err(|_| super::error::egress_error("proxy_tls_failed"))?;
+    let name = rustls_pki_types::ServerName::try_from(host.to_owned())
+        .map_err(|_| super::error::egress_error("proxy_tls_failed"))?;
+    let stream = tokio_rustls::TlsConnector::from(config)
+        .connect(name, tcp)
         .await
-        .map_err(|_| invalid())
+        .map_err(|_| super::error::egress_error("proxy_tls_failed"))?;
+    Ok(MaybeTlsStream::Rustls(stream))
 }
 
 async fn connect_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream, tungstenite::Error> {
@@ -268,8 +305,19 @@ async fn connect_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream, tun
         .call(uri)
         .await
         .map(|stream| stream.into_inner())
-        .map_err(|_| {
-            tungstenite::Error::Io(std::io::Error::other("account WebSocket connection failed"))
+        .map_err(|error| {
+            use std::error::Error;
+            let mut source = error.source();
+            while let Some(cause) = source {
+                if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                    return tungstenite::Error::Io(std::io::Error::new(
+                        io.kind(),
+                        "account WebSocket TCP connection failed",
+                    ));
+                }
+                source = cause.source();
+            }
+            super::error::egress_error("egress_tcp_connect_failed")
         })
 }
 
@@ -346,4 +394,86 @@ fn websocket_host_header(endpoint: &str) -> Option<String> {
         Some(port) => format!("{host}:{port}"),
         None => host.to_string(),
     })
+}
+
+/// 使用真实账号 WebSocket 拨号、SOCKS DNS 和 TLS 路径，仅执行无凭据握手。
+pub struct CodexProxyWebSocketProbe {
+    base_url: String,
+}
+
+impl Default for CodexProxyWebSocketProbe {
+    fn default() -> Self {
+        Self::new("https://chatgpt.com/backend-api")
+    }
+}
+
+impl CodexProxyWebSocketProbe {
+    /// URL 仅由受信任的组合根或测试注入，不接受管理 API 输入。
+    #[must_use]
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl gateway_admin::ports::proxy::ProxyWebSocketProbe for CodexProxyWebSocketProbe {
+    async fn probe(
+        &self,
+        proxy: &gateway_core::account::OutboundProxy,
+    ) -> gateway_admin::model::proxies::ProxyQualityCheck {
+        use gateway_admin::model::proxies::{ProxyQualityCheck, ProxyQualityStatus};
+        let started = std::time::Instant::now();
+        let mut connection = CodexWebSocketConnection::responses(
+            &self.base_url,
+            &tungstenite::handshake::client::generate_key(),
+            Vec::new(),
+        );
+        connection.outbound_proxy = Some(proxy.clone());
+        let result = connect_raw_websocket(&connection).await;
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match result {
+            Ok((websocket, response)) => {
+                // Drop closes this dedicated socket; no pool or model payload is involved.
+                drop(websocket);
+                ProxyQualityCheck::http(
+                    "Codex WebSocket",
+                    response.status().as_u16(),
+                    false,
+                    true,
+                    latency_ms,
+                )
+            }
+            Err(CodexWebSocketExchangeError::Connect(tungstenite::Error::Http(response))) => {
+                ProxyQualityCheck::http(
+                    "Codex WebSocket",
+                    response.status().as_u16(),
+                    response
+                        .headers()
+                        .get("cf-mitigated")
+                        .is_some_and(|value| value == "challenge"),
+                    true,
+                    latency_ms,
+                )
+            }
+            Err(error) => {
+                let reason = if matches!(error, CodexWebSocketExchangeError::ConnectTimeout { .. })
+                {
+                    "connect_timeout"
+                } else {
+                    error
+                        .transport_failure_reason()
+                        .unwrap_or("handshake_failed")
+                };
+                ProxyQualityCheck {
+                    name: "Codex WebSocket".to_owned(),
+                    status: ProxyQualityStatus::Failed,
+                    http_status: None,
+                    latency_ms,
+                    message: format!("WebSocket 建连失败（{reason}），业务请求未发送"),
+                }
+            }
+        }
+    }
 }

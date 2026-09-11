@@ -76,3 +76,82 @@ async fn invalid_certificate_configuration_should_not_fall_back_or_expose_detail
     assert!(!result.success);
     assert!(!result.message.contains("private-certificate-path"));
 }
+
+#[tokio::test]
+async fn quality_report_distinguishes_reachability_restrictions_and_challenges() {
+    use gateway_admin::model::proxies::ProxyQualityStatus as Status;
+    use wiremock::matchers::path;
+    let proxy_server = MockServer::start().await;
+    Mock::given(path("/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ip":"203.0.113.8"})))
+        .expect(1)
+        .mount(&proxy_server)
+        .await;
+    let cases = [
+        (200, false, Status::Passed),
+        (401, false, Status::Passed),
+        (405, false, Status::Passed),
+        (403, false, Status::Warning),
+        (403, true, Status::Challenge),
+        (429, false, Status::Warning),
+        (302, false, Status::Warning),
+        (407, false, Status::Failed),
+        (503, false, Status::Failed),
+    ];
+    let mut targets = Vec::new();
+    for (index, (code, challenge, _)) in cases.iter().enumerate() {
+        let path_value = format!("/target-{index}");
+        let mut response = ResponseTemplate::new(*code)
+            .insert_header("Location", "http://unresolvable.invalid/ip");
+        if *challenge {
+            response = response.insert_header("cf-mitigated", "challenge");
+        }
+        Mock::given(path(path_value.clone()))
+            .respond_with(response)
+            .expect(1)
+            .mount(&proxy_server)
+            .await;
+        targets.push((
+            format!("target-{index}"),
+            format!("http://unresolvable.invalid{path_value}"),
+        ));
+    }
+    let report = HttpProxyProbe::new("http://unresolvable.invalid/ip")
+        .with_quality_targets(targets)
+        .quality(&OutboundProxy::parse(&proxy_server.uri()).unwrap())
+        .await;
+    assert_eq!(report.basic.exit_ip.unwrap().to_string(), "203.0.113.8");
+    assert_eq!(report.checks.len(), cases.len() + 2);
+    for (check, (code, _, expected)) in report.checks.iter().skip(1).zip(cases) {
+        assert_eq!(check.status, expected);
+        assert_eq!(check.http_status, Some(code));
+    }
+    assert_eq!(report.checks.last().unwrap().status, Status::Warning);
+}
+
+#[tokio::test]
+async fn quality_target_does_not_bypass_unavailable_proxy_or_leak_secrets() {
+    let target = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&target)
+        .await;
+    let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = OutboundProxy::parse(&format!(
+        "http://private-user:private-password@{}",
+        unused.local_addr().unwrap()
+    ))
+    .unwrap();
+    drop(unused);
+    let report = HttpProxyProbe::new(target.uri())
+        .with_quality_targets(vec![("local".to_owned(), target.uri())])
+        .quality(&proxy)
+        .await;
+    assert!(!report.basic.success);
+    assert_eq!(
+        report.checks[1].status,
+        gateway_admin::model::proxies::ProxyQualityStatus::Failed
+    );
+    assert!(!format!("{report:?}").contains("private-"));
+}

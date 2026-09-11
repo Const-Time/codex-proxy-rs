@@ -24,7 +24,7 @@ pub use self::{
         CodexWebSocketRateLimitUpdates, CodexWebSocketSseStream, CodexWebSocketStreamingExchange,
         CodexWebSocketTurnStateUpdate,
     },
-    handshake::responses_websocket_endpoint,
+    handshake::{CodexProxyWebSocketProbe, responses_websocket_endpoint},
     model::{
         CodexWebSocketConnection, CodexWebSocketRequest, PreviousResponseUnavailableReason,
         WebSocketContinuationRequirement,
