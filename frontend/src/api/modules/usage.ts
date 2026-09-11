@@ -448,7 +448,19 @@ export interface UsageDiagnosticsResponse {
 }
 
 // 请求参数类型：仅定义 API 边界的形状，调用方不依赖显式声明。
+export interface UsageRecordFilters {
+  groupId: string
+  accountId: string
+  userId: string
+  model: string
+  clientTransport: string
+}
+
 interface UsageRangeQuery {
+  groupId?: string
+  accountId?: string
+  userId?: string
+  clientTransport?: string
   startTime: string
   endTime: string
   provider?: string

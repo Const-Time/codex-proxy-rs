@@ -901,6 +901,9 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
         .list_usage_records(admin_observability::UsageQuery {
             range,
             filter: admin_observability::UsageFilter {
+                user_id: None,
+                group_id: Some("grp_history".into()),
+                client_transport: Some("http_sse".into()),
                 owner_user_id: None,
 
                 client_api_key_ref: Some("key_observe".to_owned()),
@@ -1734,4 +1737,113 @@ async fn personal_usage_is_scoped_for_lists_details_totals_and_trends() {
         .unwrap();
     assert_eq!(forged.total, 0);
     db.close().await;
+}
+
+#[tokio::test]
+async fn request_detail_filters_combine_snapshots_owners_and_client_transport() {
+    let Some(db) = TestDatabase::create("request_detail_filters").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    sqlx::raw_sql("insert into users(id,username,password_hash,created_at,updated_at) values ('alice','alice','hash',now(),now()),('bob','bob','hash',now(),now());
+        update model_requests set user_id = 'alice', upstream_transport = 'websocket' where id in ('req_observe_success','req_observe_failed');
+        update model_requests set routing_scope = 'groups', routing_group_refs = array['grp_history'], routing_group_names_snapshot = jsonb_build_array('Historical group') where id = 'req_observe_failed';")
+        .execute(&db.pool).await.unwrap();
+    let repo = observability_repository(&db.pool);
+    let range =
+        ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1)).unwrap();
+    let base = UsageRecordFilter {
+        user_id: Some("alice".into()),
+        group_id: Some("grp_history".into()),
+        provider_account_ref: Some("acct_observe".into()),
+        model: Some("public-model".into()),
+        client_transport: Some("http_sse".into()),
+        ..Default::default()
+    };
+    let page = repo
+        .list_usage_records(UsageRecordQuery {
+            range,
+            filter: base.clone(),
+            current_page: 1,
+            page_size: ObservabilityPageSize::new(1).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].id, "req_observe_success");
+    for filter in [
+        UsageRecordFilter {
+            group_id: Some("grp_current".into()),
+            ..base.clone()
+        },
+        UsageRecordFilter {
+            user_id: Some("bob".into()),
+            ..base.clone()
+        },
+        UsageRecordFilter {
+            client_transport: Some("websocket".into()),
+            ..base.clone()
+        },
+        UsageRecordFilter {
+            owner_user_id: Some("bob".into()),
+            ..base.clone()
+        },
+    ] {
+        let page = repo
+            .list_usage_records(UsageRecordQuery {
+                range,
+                filter,
+                current_page: 1,
+                page_size: ObservabilityPageSize::new(10).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
+    }
+    let base = OpsErrorFilter {
+        user_id: Some("alice".into()),
+        group_id: Some("grp_history".into()),
+        provider_account_ref: Some("acct_observe".into()),
+        model: Some("public-model".into()),
+        client_transport: Some("http_sse".into()),
+        ..Default::default()
+    };
+    for (filter, expected) in [
+        (base.clone(), 2),
+        (
+            OpsErrorFilter {
+                group_id: Some("grp_current".into()),
+                ..base.clone()
+            },
+            0,
+        ),
+        (
+            OpsErrorFilter {
+                user_id: Some("bob".into()),
+                ..base.clone()
+            },
+            0,
+        ),
+        (
+            OpsErrorFilter {
+                client_transport: Some("websocket".into()),
+                ..base.clone()
+            },
+            0,
+        ),
+    ] {
+        let page = repo
+            .list_ops_errors(OpsErrorQuery {
+                range,
+                filter,
+                current_page: 1,
+                page_size: ObservabilityPageSize::new(1).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, expected);
+        assert_eq!(page.items.len(), usize::from(expected > 0));
+    }
 }

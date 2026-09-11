@@ -11,6 +11,21 @@ pub(crate) fn push_usage_filter(
     filter: &UsageRecordFilter,
     alias: &str,
 ) {
+    for (column, value) in [
+        ("user_id", &filter.user_id),
+        ("client_transport", &filter.client_transport),
+    ] {
+        if let Some(value) = value {
+            query
+                .push(format!(" and {alias}.{column} = "))
+                .push_bind(value.clone());
+        }
+    }
+    if let Some(group) = &filter.group_id {
+        query
+            .push(format!(" and {alias}.routing_group_refs @> "))
+            .push_bind(vec![group.clone()]);
+    }
     if let Some(owner) = &filter.owner_user_id {
         query
             .push(format!(" and {alias}.user_id = "))

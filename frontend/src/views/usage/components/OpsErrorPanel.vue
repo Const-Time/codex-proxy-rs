@@ -3,7 +3,7 @@ import type { UsageTimeRangeParams } from '../composables/useUsageTimeRange'
 import type { OpsError } from '@/api'
 
 import { Eye, RefreshCw, Search } from '@lucide/vue'
-import { shallowRef, toRef } from 'vue'
+import { computed, shallowRef, toRef } from 'vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
@@ -18,6 +18,8 @@ import UsageClientIpCell from './UsageClientIpCell.vue'
 
 const props = defineProps<{
   timeRangeParams: UsageTimeRangeParams
+  recordFilters?: Record<string, string | undefined>
+  provider?: string
 }>()
 
 const {
@@ -29,7 +31,7 @@ const {
   handlePageChange,
   handlePageSizeChange,
   refresh,
-} = useOpsErrorsTable(toRef(props, 'timeRangeParams'))
+} = useOpsErrorsTable(toRef(props, 'timeRangeParams'), computed(() => ({ ...props.recordFilters, provider: props.provider || undefined })))
 
 const selectedRecord = shallowRef<OpsError | null>(null)
 const detailOpen = shallowRef(false)

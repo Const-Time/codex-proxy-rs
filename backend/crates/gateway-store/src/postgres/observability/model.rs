@@ -59,6 +59,9 @@ pub(crate) fn observability_page_offset(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageRecordFilter {
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+    pub client_transport: Option<String>,
     /// Trusted scope supplied by authentication, never by query parameters.
     pub owner_user_id: Option<String>,
     pub client_api_key_ref: Option<String>,
@@ -79,6 +82,9 @@ pub struct UsageRecordFilter {
 impl UsageRecordFilter {
     pub fn validate(&self) -> StoreResult<()> {
         for (value, field) in [
+            (self.user_id.as_deref(), "user filter"),
+            (self.group_id.as_deref(), "group filter"),
+            (self.client_transport.as_deref(), "client transport filter"),
             (self.client_api_key_ref.as_deref(), "client API key filter"),
             (self.request_id.as_deref(), "request ID filter"),
             (
@@ -124,6 +130,9 @@ pub struct UsageRecordQuery {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpsErrorFilter {
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+    pub client_transport: Option<String>,
     pub client_api_key_ref: Option<String>,
     pub request_id: Option<String>,
     pub provider_account_ref: Option<String>,
@@ -141,6 +150,9 @@ pub struct OpsErrorFilter {
 impl OpsErrorFilter {
     pub fn validate(&self) -> StoreResult<()> {
         for (value, field) in [
+            (self.user_id.as_deref(), "user filter"),
+            (self.group_id.as_deref(), "group filter"),
+            (self.client_transport.as_deref(), "client transport filter"),
             (self.client_api_key_ref.as_deref(), "client API key filter"),
             (self.request_id.as_deref(), "request ID filter"),
             (

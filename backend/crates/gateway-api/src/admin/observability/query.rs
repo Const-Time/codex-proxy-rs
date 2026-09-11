@@ -27,6 +27,9 @@ impl DashboardQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageQuery {
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+    pub client_transport: Option<String>,
     pub current_page: Option<u32>,
     pub page_size: Option<u16>,
     pub kind: Option<String>,
@@ -100,6 +103,9 @@ impl DiagnosticsQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpsQuery {
+    pub user_id: Option<String>,
+    pub group_id: Option<String>,
+    pub client_transport: Option<String>,
     pub current_page: Option<u32>,
     pub page_size: Option<u16>,
     pub kind: Option<String>,
@@ -304,6 +310,9 @@ pub(crate) fn usage_filter(query: &UsageQuery) -> Result<domain::UsageFilter, Wi
         })
     });
     Ok(domain::UsageFilter {
+        user_id: filter_text(query.user_id.clone(), "userId")?,
+        group_id: filter_text(query.group_id.clone(), "groupId")?,
+        client_transport: client_transport(query.client_transport.clone())?,
         owner_user_id: None,
         client_api_key_ref: non_empty(query.client_api_key_id.clone()),
         request_id: non_empty(query.request_id.clone()),
@@ -346,6 +355,9 @@ pub(crate) fn ops_command(query: &OpsQuery) -> Result<domain::OpsErrorQuery, Wir
     Ok(domain::OpsErrorQuery {
         range: usage_range(query.start_time.as_deref(), query.end_time.as_deref())?,
         filter: domain::OpsErrorFilter {
+            user_id: filter_text(query.user_id.clone(), "userId")?,
+            group_id: filter_text(query.group_id.clone(), "groupId")?,
+            client_transport: client_transport(query.client_transport.clone())?,
             client_api_key_ref: non_empty(query.client_api_key_id.clone()),
             request_id: non_empty(query.request_id.clone()),
             provider_kind: non_empty(query.provider.clone()),
@@ -368,4 +380,29 @@ pub(crate) fn non_empty(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn filter_text(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<Option<String>, WireValidationError> {
+    let value = non_empty(value);
+    if value
+        .as_ref()
+        .is_some_and(|text| text.len() > 256 || text.chars().any(char::is_control))
+    {
+        return Err(WireValidationError::new(field));
+    }
+    Ok(value)
+}
+
+fn client_transport(value: Option<String>) -> Result<Option<String>, WireValidationError> {
+    let value = non_empty(value);
+    if value
+        .as_ref()
+        .is_some_and(|value| !matches!(value.as_str(), "http_json" | "http_sse" | "websocket"))
+    {
+        return Err(WireValidationError::new("clientTransport"));
+    }
+    Ok(value)
 }
