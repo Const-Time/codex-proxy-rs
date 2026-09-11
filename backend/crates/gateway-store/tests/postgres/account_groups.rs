@@ -23,6 +23,142 @@ const MIXED_GROUP: &str = "grp_00000000000000000000000000000001";
 const EMPTY_GROUP: &str = "grp_00000000000000000000000000000002";
 
 #[tokio::test]
+async fn group_deletion_reports_budget_references_without_losing_history() {
+    let Some(database) = TestDatabase::create("group_delete_budgets").await else {
+        return;
+    };
+    let groups = PgAccountGroupRepository::new(database.pool.clone());
+    for (id, reference_sql) in [
+        (
+            MIXED_GROUP,
+            "insert into user_group_budget_windows(user_id, account_group_id, daily_start, daily_end, weekly_start, weekly_end) values ('test-owner', $1, now(), now() + interval '1 day', now(), now() + interval '7 days')",
+        ),
+        (
+            EMPTY_GROUP,
+            "insert into user_group_charge_events(request_id, user_id, account_group_id, client_api_key_ref, amount_usd, completed_at) values ('deleted-key-charge', 'test-owner', $1, 'deleted-key', 0, now())",
+        ),
+    ] {
+        groups
+            .create_account_group(
+                NewAccountGroup {
+                    id: group_id(id),
+                    name: id.to_owned(),
+                    description: None,
+                    color: group_color("#2563EBFF"),
+                    budget: Default::default(),
+                },
+                &context("create-budget-group"),
+            )
+            .await
+            .expect("create group");
+        sqlx::query(reference_sql)
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .expect("seed retained reference");
+        let revision = current_revision(&database.pool).await;
+        let audits = audit_count(&database.pool).await;
+        let error = groups
+            .delete_account_group(
+                DeleteAccountGroup { id: group_id(id) },
+                &context("delete-budget-group"),
+            )
+            .await
+            .expect_err("retained budget references must prevent deletion");
+        assert_eq!(error.kind(), AdminStoreErrorKind::Conflict);
+        assert_eq!(current_revision(&database.pool).await, revision);
+        assert_eq!(audit_count(&database.pool).await, audits);
+        groups
+            .set_account_group_enabled(
+                gateway_admin::model::account_groups::SetAccountGroupEnabled {
+                    id: group_id(id),
+                    enabled: false,
+                },
+                &context("disable-budget-group"),
+            )
+            .await
+            .expect("referenced group can still be disabled");
+    }
+    for table in ["user_group_budget_windows", "user_group_charge_events"] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
+                .fetch_one(&database.pool)
+                .await
+                .expect("retained reference count");
+        assert_eq!(count, 1);
+    }
+    database.close().await;
+}
+
+#[tokio::test]
+async fn unreferenced_group_deletion_removes_memberships_but_preserves_accounts() {
+    let Some(database) = TestDatabase::create("group_delete_empty").await else {
+        return;
+    };
+    let groups = PgAccountGroupRepository::new(database.pool.clone());
+    groups
+        .create_account_group(
+            NewAccountGroup {
+                id: group_id(EMPTY_GROUP),
+                name: "Unused group".into(),
+                description: None,
+                color: group_color("#2563EBFF"),
+                budget: Default::default(),
+            },
+            &context("create-unused-group"),
+        )
+        .await
+        .expect("create group");
+    seed_account(
+        &database.pool,
+        "acct_group_delete",
+        "openai",
+        "Retained account",
+    )
+    .await;
+    assign_accounts(&database.pool, EMPTY_GROUP, &["acct_group_delete"]).await;
+    sqlx::query(
+        "insert into user_account_groups(user_id, account_group_id) values ('test-owner', $1)",
+    )
+    .bind(EMPTY_GROUP)
+    .execute(&database.pool)
+    .await
+    .expect("grant group");
+    let revision = current_revision(&database.pool).await;
+    let audits = audit_count(&database.pool).await;
+    let result = groups
+        .delete_account_group(
+            DeleteAccountGroup {
+                id: group_id(EMPTY_GROUP),
+            },
+            &context("delete-unused-group"),
+        )
+        .await
+        .expect("delete unreferenced group");
+    assert!(result.record.is_none());
+    assert_eq!(current_revision(&database.pool).await, revision + 1);
+    assert_eq!(audit_count(&database.pool).await, audits + 1);
+    for table in [
+        "account_groups",
+        "user_account_groups",
+        "account_group_accounts",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
+                .fetch_one(&database.pool)
+                .await
+                .expect("membership count");
+        assert_eq!(count, 0);
+    }
+    let accounts: i64 = sqlx::query_scalar("select count(*) from provider_accounts")
+        .fetch_one(&database.pool)
+        .await
+        .expect("account count");
+    assert_eq!(accounts, 1);
+    database.close().await;
+}
+
+#[tokio::test]
 async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multiplication() {
     let Some(database) = TestDatabase::create("account_group_aggregate").await else {
         return;

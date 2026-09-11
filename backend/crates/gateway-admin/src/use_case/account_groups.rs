@@ -24,7 +24,7 @@ use crate::{
             UpdateAccountGroup,
         },
     },
-    ports::store::{AccountGroupStore, AccountRuntimeStore},
+    ports::store::{AccountGroupStore, AccountRuntimeStore, AdminStoreErrorKind},
 };
 
 use super::{map_store_error, publish_committed};
@@ -177,8 +177,15 @@ impl AccountGroupService for DefaultAccountGroupService {
         context: &MutationContext,
         command: DeleteAccountGroup,
     ) -> Result<AccountGroupMutation, AdminError> {
-        self.publish(self.store.delete_account_group(command, context).await)
-            .await
+        let result = self.store.delete_account_group(command, context).await;
+        if let Err(error) = &result
+            && error.kind() == AdminStoreErrorKind::Conflict
+        {
+            return Err(AdminError::conflict(
+                "该分组仍被密钥、额度或计费记录引用，无法删除。请先调整密钥分组；已有额度或计费记录的分组请改为禁用。",
+            ));
+        }
+        self.publish(result).await
     }
 }
 

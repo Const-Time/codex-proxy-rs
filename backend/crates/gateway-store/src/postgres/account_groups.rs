@@ -361,12 +361,26 @@ impl AccountGroupStore for PgAccountGroupRepository {
                          where g.id = $1
                            and not exists (
                              select 1 from client_api_key_groups k where k.account_group_id = g.id
+                           )
+                           and not exists (
+                             select 1 from user_group_budget_windows w where w.account_group_id = g.id
+                           )
+                           and not exists (
+                             select 1 from user_group_charge_events e where e.account_group_id = g.id
                            )",
                     )
                     .bind(command.id.as_str())
                     .execute(&mut **transaction)
                     .await
-                    .map_err(|_| unavailable("delete account group"))?;
+                    .map_err(|error| {
+                        // Concurrent references can appear after the statement snapshot.
+                        // Keep the foreign-key guard and report a conflict, not an outage.
+                        if error.as_database_error().is_some_and(|error| error.is_foreign_key_violation()) {
+                            conflict(command.id.as_str())
+                        } else {
+                            unavailable("delete account group")
+                        }
+                    })?;
                     if result.rows_affected() == 1 {
                         return Ok(());
                     }
