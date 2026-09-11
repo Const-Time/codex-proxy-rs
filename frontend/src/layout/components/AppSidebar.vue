@@ -62,8 +62,8 @@ const adminNavItems = [
   { label: '用户管理', icon: Users, path: '/users' },
   { label: '分组管理', icon: FolderTree, path: '/account-groups' },
   { label: '账号管理', icon: Users, path: '/accounts' },
-  { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
   { label: '代理管理', icon: Network, path: '/proxies' },
+  { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
   { label: '系统设置', icon: Settings, path: '/settings' },
 ]
 
