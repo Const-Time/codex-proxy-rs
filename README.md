@@ -7,9 +7,9 @@
 
 面向 Codex 的自托管多账号 AI 网关。
 
-[![CI](https://github.com/zyycn/codex-proxy-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/zyycn/codex-proxy-rs/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/zyycn/codex-proxy-rs?display_name=tag&sort=semver&style=flat-square)](https://github.com/zyycn/codex-proxy-rs/releases)
-[![GHCR](https://img.shields.io/badge/GHCR-codex--proxy--rs-2496ED?logo=docker&logoColor=white&style=flat-square)](https://github.com/zyycn/codex-proxy-rs/pkgs/container/codex-proxy-rs)
+[![CI](https://github.com/Const-Time/codex-proxy-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Const-Time/codex-proxy-rs/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Const-Time/codex-proxy-rs?display_name=tag&sort=semver&style=flat-square)](https://github.com/Const-Time/codex-proxy-rs/releases)
+[![GHCR](https://img.shields.io/badge/GHCR-codex--proxy--rs-2496ED?logo=docker&logoColor=white&style=flat-square)](https://github.com/Const-Time/codex-proxy-rs/pkgs/container/codex-proxy-rs)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
 
 [功能](#功能) · [快速开始](#快速开始) · [客户端接入](#客户端接入) · [文档](#文档) · [社区](#社区) · [许可证](#许可证)
@@ -35,7 +35,7 @@
 
 ## 快速开始
 
-使用 Docker Compose 部署发布镜像 `ghcr.io/zyycn/codex-proxy-rs:latest`，同时启动 PostgreSQL 和 Redis。
+使用 Docker Compose 部署发布镜像 `ghcr.io/const-time/codex-proxy-rs:latest`，同时启动 PostgreSQL 和 Redis。
 以下命令适用于 Linux amd64/arm64，需要 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL。已有部署请先看
 [升级说明](deploy/README.md#镜像升级与源码构建)，不要覆盖原配置。
 
@@ -45,9 +45,9 @@
 mkdir -p codex-proxy-rs/deploy
 cd codex-proxy-rs
 
-curl -fsSL https://raw.githubusercontent.com/zyycn/codex-proxy-rs/main/deploy/compose.yaml \
+curl -fsSL https://raw.githubusercontent.com/Const-Time/codex-proxy-rs/main/deploy/compose.yaml \
   -o deploy/compose.yaml
-curl -fsSL https://raw.githubusercontent.com/zyycn/codex-proxy-rs/main/deploy/config.example.yaml \
+curl -fsSL https://raw.githubusercontent.com/Const-Time/codex-proxy-rs/main/deploy/config.example.yaml \
   -o deploy/config.example.yaml
 
 mkdir -p .runtime/data .runtime/logs

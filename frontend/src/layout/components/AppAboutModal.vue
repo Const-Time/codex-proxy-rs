@@ -12,7 +12,7 @@ const open = defineModel<boolean>({ default: false })
 const { version } = storeToRefs(useSystemUpdateStore())
 
 const author = 'Zyy'
-const githubUrl = 'https://github.com/zyycn/codex-proxy-rs'
+const githubUrl = 'https://github.com/Const-Time/codex-proxy-rs'
 
 function normalizeBuildValue(value: string | undefined) {
   const normalized = value?.trim()

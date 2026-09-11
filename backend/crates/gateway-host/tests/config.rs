@@ -16,7 +16,7 @@ fn system_update_defaults_should_use_host_build_metadata_and_official_repository
         (
             env!("CPR_VERSION"),
             env!("CPR_BUILD_TYPE"),
-            Some("zyycn/codex-proxy-rs"),
+            Some("Const-Time/codex-proxy-rs"),
         )
     );
 }
