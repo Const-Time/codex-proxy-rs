@@ -35,11 +35,11 @@ export const accountColumns = defineTableColumns<AccountRow>([
     align: 'center',
     format: value => accountProviderLabel(typeof value === 'string' ? value : null),
   },
+  { key: 'capacity', label: '容量', kind: 'custom', size: 'md' },
   { key: 'status', label: '状态', kind: 'status', align: 'left', sortable: true },
   { key: 'planType', label: '套餐', kind: 'status', sortable: true },
   { key: 'usage', label: '用量', kind: 'custom', size: '2xl', sortable: true },
   { key: 'groups', label: '账号分组', kind: 'status' },
-  { key: 'capacity', label: '容量', kind: 'custom', size: 'md' },
   {
     key: 'lastUsedAt',
     label: '最后使用',
