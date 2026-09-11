@@ -1084,3 +1084,31 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         "$0.007"
     );
 }
+
+#[tokio::test]
+async fn request_filter_routes_accept_new_dimensions_and_reject_invalid_values() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let router =
+        gateway_api::admin::observability::router::<AdminTestState>().with_state(fixture.state());
+    for path in ["/api/admin/usage/records", "/api/admin/operations/errors"] {
+        for (query, status) in [
+            ("groupId=grp_history&userId=alice&accountId=acct_history&model=public-model&clientTransport=http_sse".to_owned(), StatusCode::OK),
+            ("clientTransport=websocket".to_owned(), StatusCode::OK),
+            ("clientTransport=upstream".to_owned(), StatusCode::BAD_REQUEST),
+            ("groupId=%00".to_owned(), StatusCode::BAD_REQUEST),
+            (format!("userId={}", "a".repeat(257)), StatusCode::BAD_REQUEST),
+        ] {
+            let response = router.clone().oneshot(Request::builder().uri(format!("{path}?{query}"))
+                .header(header::COOKIE, "cpr_admin_session=valid-session").header("x-request-id", "req_filter_test")
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), status, "{path}: {query}");
+        }
+    }
+}

@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import type { UsageRecordFilters } from '@/api'
 import { Eye } from '@lucide/vue'
-import { shallowRef, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
@@ -13,6 +14,7 @@ import OpsErrorPanel from './components/OpsErrorPanel.vue'
 import UsageFilters from './components/UsageFilters.vue'
 import UsageInsightsGrid from './components/UsageInsightsGrid.vue'
 import UsageRecordDetailModal from './components/UsageRecordDetailModal.vue'
+import UsageRecordFiltersBar from './components/UsageRecordFiltersBar.vue'
 import UsageRecordsTable from './components/UsageRecordsTable.vue'
 import UsageSummaryCards from './components/UsageSummaryCards.vue'
 import { useUsageRecordDetail } from './composables/useUsageRecordDetail'
@@ -20,6 +22,8 @@ import { useUsageRecordsTable } from './composables/useUsageRecordsTable'
 import { useUsageTimeRange } from './composables/useUsageTimeRange'
 import { usageRecordColumns, usageTimeRangeOptions } from './constants'
 
+const recordFilters = ref<UsageRecordFilters>({ groupId: '', accountId: '', userId: '', model: '', clientTransport: '' })
+const recordFilterParams = computed(() => Object.fromEntries(Object.entries(recordFilters.value).map(([key, value]) => [key, value.trim() || undefined])))
 const recordView = shallowRef('success')
 const recordViewOptions = [
   { label: '成功记录', value: 'success' },
@@ -47,6 +51,7 @@ const {
 } = useUsageRecordsTable({
   timeRangeParams,
   latestTimeRangeParams,
+  recordFilters: recordFilterParams,
 })
 
 const { showDetailModal, selectedUsageRecord, handleViewDetail } = useUsageRecordDetail()
@@ -99,6 +104,7 @@ watch(timeRange, () => {
       </template>
 
       <template #body>
+        <UsageRecordFiltersBar v-model="recordFilters" class="mb-4" />
         <div
           v-show="recordView === 'success'"
           class="grid min-h-130 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-3"
@@ -141,7 +147,7 @@ watch(timeRange, () => {
         </div>
 
         <div v-show="recordView === 'errors'" class="min-h-130 min-w-0 flex-1">
-          <OpsErrorPanel :time-range-params="timeRangeParams" />
+          <OpsErrorPanel :time-range-params="timeRangeParams" :record-filters="recordFilterParams" :provider="providerQuery" />
         </div>
       </template>
     </BaseCard>

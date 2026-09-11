@@ -8,7 +8,7 @@ import { toast } from '@/components/base/BaseToast'
 import { useStablePagedQuery } from '@/composables/useStablePagedQuery'
 import { errorMessage, withMinimumDuration } from '@/utils/async'
 
-export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>) {
+export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>, filters?: Readonly<Ref<Record<string, string | undefined>>>) {
   const refreshing = shallowRef(false)
   const searchQuery = shallowRef('')
   const query = useStablePagedQuery({
@@ -18,6 +18,7 @@ export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangePa
       pageSize,
       search: searchQuery.value.trim() || undefined,
       ...timeRangeParams.value,
+      ...filters?.value,
     }),
     onError: error => toast.error(errorMessage(error, '加载错误明细失败')),
   })
@@ -52,11 +53,11 @@ export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangePa
   }
 
   watchDebounced(
-    searchQuery,
+    () => [searchQuery.value, filters?.value],
     () => {
       void query.reloadFromStart()
     },
-    { debounce: 250 },
+    { debounce: 250, deep: true },
   )
 
   watch(timeRangeParams, () => {

@@ -10,6 +10,9 @@ pub(crate) fn store_range(
 
 pub(crate) fn store_usage_filter(filter: admin_observability::UsageFilter) -> UsageRecordFilter {
     UsageRecordFilter {
+        user_id: filter.user_id,
+        group_id: filter.group_id,
+        client_transport: filter.client_transport,
         owner_user_id: filter.owner_user_id,
         client_api_key_ref: filter.client_api_key_ref,
         request_id: filter.request_id,
@@ -47,6 +50,9 @@ pub(crate) fn store_ops_error_filter(
     filter: admin_observability::OpsErrorFilter,
 ) -> OpsErrorFilter {
     OpsErrorFilter {
+        user_id: filter.user_id,
+        group_id: filter.group_id,
+        client_transport: filter.client_transport,
         client_api_key_ref: filter.client_api_key_ref,
         request_id: filter.request_id,
         provider_account_ref: filter.provider_account_ref,

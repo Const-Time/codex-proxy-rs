@@ -736,3 +736,11 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 在线更新仅在当前部署模式、Release 资产和进程重启能力都满足要求时可用，且只在同一 major 版本内
 提供：跨大版本目标会以 `40901` 冲突拒绝，需按发布说明重新部署。
 实例升级和仓库发版见 [部署文档](../deploy/README.md#镜像升级与源码构建)。
+
+### 请求明细组合筛选
+
+`GET /api/admin/usage/records` 和 `GET /api/admin/operations/errors` 支持组合使用 `groupId`、`accountId`、`userId`、`model`、`clientTransport`，并与时间范围、平台和原有搜索条件取交集。分页总数应用同一组条件。
+
+分组匹配请求保存的 `routing_group_refs`，用户匹配请求的 `user_id`；账号当前分组变化不会改写历史筛选结果。模型精确匹配请求模型或上游模型。`clientTransport` 只匹配客户端接入方式，允许 `http_json`、`http_sse`、`websocket`；原有 `transport` 参数语义保持不变。无请求关联的运维事件在设置分组、用户或接入类型条件时不匹配。
+
+普通用户查询仍叠加会话用户范围，传入 `userId` 不能扩大可见范围；错误排查仍仅限管理员。页面中的新增筛选只作用于请求明细，成功记录与错误排查共享条件，修改条件时回到第一页。

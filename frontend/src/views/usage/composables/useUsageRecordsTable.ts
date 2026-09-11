@@ -17,6 +17,7 @@ import { errorMessage, withMinimumDuration } from '@/utils/async'
 interface UseUsageRecordsTableOptions {
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>
   latestTimeRangeParams: () => UsageTimeRangeParams
+  recordFilters?: Readonly<Ref<Record<string, string | undefined>>>
 }
 
 type UsageLoadScope = 'all' | 'table'
@@ -52,6 +53,8 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     ...(providerQuery.value ? { provider: providerQuery.value } : {}),
   })
   const filterParams = () => ({
+    ...options.recordFilters?.value,
+    provider: providerQuery.value || undefined,
     search: usageSearchParam(searchQuery.value),
   })
   const usagePagination = computed(() => ({
@@ -208,12 +211,12 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   })
 
   watchDebounced(
-    searchQuery,
+    () => [searchQuery.value, options.recordFilters?.value],
     () => {
       resetPagination()
       void loadUsageRecords({ scope: 'table' })
     },
-    { debounce: 250 },
+    { debounce: 250, deep: true },
   )
 
   onScopeDispose(() => {

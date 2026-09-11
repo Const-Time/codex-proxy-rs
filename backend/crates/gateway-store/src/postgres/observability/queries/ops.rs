@@ -131,6 +131,7 @@ fn push_request_error_predicates(
     // 列表和总数共用此条件，避免流式响应中的错误因 outcome 被漏掉。
     statement.push(" and mr.error_kind is not null and mr.error_kind <> 'cancelled'");
     push_range(statement, "mr.completed_at", range);
+    push_request_scope(statement, filter);
     for (column, value) in [
         ("mr.client_api_key_ref", &filter.client_api_key_ref),
         ("mr.id", &filter.request_id),
@@ -143,7 +144,7 @@ fn push_request_error_predicates(
         push_text_equality(statement, column, value);
     }
     push_response_id_filter(statement, "mr.client_response_id", filter);
-    push_text_equality(statement, "mr.upstream_model_id", &filter.model);
+    push_model_filter(statement, "mr.upstream_model_id", filter);
     if let Some(index) = filter.attempt_index {
         statement.push(" and nullif(mr.attempt_count, 0) = ");
         statement.push_bind(i32::try_from(index).unwrap_or(i32::MAX));
@@ -173,6 +174,7 @@ fn push_ops_event_predicates(
     filter: &OpsErrorFilter,
 ) {
     push_range(statement, "oe.created_at", range);
+    push_request_scope(statement, filter);
     for (column, value) in [
         ("mr.client_api_key_ref", &filter.client_api_key_ref),
         ("oe.model_request_id", &filter.request_id),
@@ -189,7 +191,7 @@ fn push_ops_event_predicates(
         statement.push(" and false");
     }
     push_response_id_filter(statement, "mr.client_response_id", filter);
-    push_text_equality(statement, "oe.upstream_model_id", &filter.model);
+    push_model_filter(statement, "oe.upstream_model_id", filter);
     if let Some(index) = filter.attempt_index {
         statement.push(" and oe.attempt_index = ");
         statement.push_bind(i32::try_from(index).unwrap_or(i32::MAX));
@@ -255,4 +257,30 @@ fn push_prefix_search(statement: &mut QueryBuilder<Postgres>, columns: &[&str], 
         statement.push(" escape '\\'");
     }
     statement.push(")");
+}
+
+fn push_request_scope(statement: &mut QueryBuilder<Postgres>, filter: &OpsErrorFilter) {
+    push_text_equality(statement, "mr.user_id", &filter.user_id);
+    push_text_equality(statement, "mr.client_transport", &filter.client_transport);
+    if let Some(group) = &filter.group_id {
+        statement
+            .push(" and mr.routing_group_refs @> ")
+            .push_bind(vec![group.clone()]);
+    }
+}
+
+fn push_model_filter(
+    statement: &mut QueryBuilder<Postgres>,
+    upstream_column: &str,
+    filter: &OpsErrorFilter,
+) {
+    if let Some(model) = &filter.model {
+        statement
+            .push(" and (mr.requested_model_id = ")
+            .push_bind(model.clone());
+        statement
+            .push(format!(" or {upstream_column} = "))
+            .push_bind(model.clone())
+            .push(")");
+    }
 }
