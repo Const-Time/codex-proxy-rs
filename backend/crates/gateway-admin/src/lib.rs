@@ -281,6 +281,7 @@ pub async fn initialize(
     let accounts = Arc::new(DefaultAccountsService::new(
         store.accounts(),
         store.account_runtime(),
+        store.settings(),
         registry.clone(),
         snapshot.clone(),
         probe.clone(),

@@ -128,6 +128,8 @@ export interface Account {
   errorMessage: string | null
   enabled: boolean
   concurrencyLimit: number | null
+  usedSlots: number | null
+  totalSlots: number
   weight: number
   accessTokenExpiresAt: string | null
   accessTokenExpiresAtDisplay: string | null

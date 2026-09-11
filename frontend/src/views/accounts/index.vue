@@ -270,6 +270,12 @@ const {
               </div>
             </template>
 
+            <template #capacity="{ row }">
+              <span class="whitespace-nowrap font-mono text-cp-sm" title="当前占用 / 并发总容量">
+                {{ row.usedSlots ?? '未知' }} / {{ row.totalSlots }}
+              </span>
+            </template>
+
             <template #lastUsedAt="{ row }">
               <LastUsedAtCell :value="row.usage.lastUsedAt" />
             </template>

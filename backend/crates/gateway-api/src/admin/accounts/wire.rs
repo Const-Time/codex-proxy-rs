@@ -259,6 +259,8 @@ pub struct AccountView {
     pub error_message: Option<String>,
     pub enabled: bool,
     pub concurrency_limit: Option<u32>,
+    pub used_slots: Option<u64>,
+    pub total_slots: u32,
     pub weight: u16,
     pub access_token_expires_at: Option<String>,
     pub access_token_expires_at_display: Option<String>,
