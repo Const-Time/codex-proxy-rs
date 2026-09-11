@@ -1,5 +1,7 @@
 //! 网关唯一组合根：加载包级配置并连接各 Bundle。
 
+use std::sync::Arc;
+
 use gateway_core::engine::provider::{ProviderRegistry, RegistryError};
 use gateway_host::{ConfigError, HostConfig, LoadableConfig};
 use serde::Deserialize;
@@ -80,7 +82,12 @@ pub async fn run() -> Result<(), BootstrapError> {
         core.snapshot_control(),
         (
             core.account_probe(),
-            host.proxy_probe(provider_openai::build_reqwest_client_with_custom_ca),
+            host.proxy_probe(
+                provider_openai::build_reqwest_client_with_custom_ca,
+                Arc::new(
+                    provider_openai::transport::websocket::CodexProxyWebSocketProbe::default(),
+                ),
+            ),
         ),
         host.client_distribution_resolver(),
         host.system_operations(),

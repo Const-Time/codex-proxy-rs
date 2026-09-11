@@ -103,3 +103,75 @@ pub struct ProxyMutation {
     pub config_revision: Revision,
     pub record: ProxyRecord,
 }
+
+/// 探测状态只描述当前网络路径，不代表账号授权或 IP 信誉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyQualityStatus {
+    Passed,
+    Warning,
+    Failed,
+    Challenge,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyQualityCheck {
+    pub name: String,
+    pub status: ProxyQualityStatus,
+    pub http_status: Option<u16>,
+    pub latency_ms: u64,
+    pub message: String,
+}
+
+impl ProxyQualityCheck {
+    /// HTTP 401/405 能证明目标可达，不能证明模型调用成功。
+    pub fn http(
+        name: &str,
+        status: u16,
+        challenge: bool,
+        websocket: bool,
+        latency_ms: u64,
+    ) -> Self {
+        let (state, message) = if challenge {
+            (ProxyQualityStatus::Challenge, "目标返回人机验证挑战")
+        } else if websocket && status == 101 {
+            (
+                ProxyQualityStatus::Passed,
+                "WebSocket 握手成功，未发送模型请求",
+            )
+        } else if status == 407 {
+            (ProxyQualityStatus::Failed, "代理认证失败")
+        } else if websocket {
+            (
+                ProxyQualityStatus::Warning,
+                "目标已响应，但未完成 WebSocket 升级；需结合账号测试确认",
+            )
+        } else if (200..300).contains(&status) || matches!(status, 401 | 405) {
+            (
+                ProxyQualityStatus::Passed,
+                "目标可达；不代表账号授权或模型调用成功",
+            )
+        } else if status >= 500 {
+            (ProxyQualityStatus::Failed, "目标服务返回错误")
+        } else {
+            (
+                ProxyQualityStatus::Warning,
+                "目标已响应，但存在访问限制或重定向",
+            )
+        };
+        Self {
+            name: name.to_owned(),
+            status: state,
+            http_status: Some(status),
+            latency_ms,
+            message: message.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyQualityReport {
+    pub tested_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub basic: ProxyTestResult,
+    pub checks: Vec<ProxyQualityCheck>,
+}

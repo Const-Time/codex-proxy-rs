@@ -163,6 +163,10 @@ async fn unavailable_proxy_fails_without_direct_fallback() {
 }
 
 async fn socks_exit(stream: &mut TcpStream) -> (u8, String, u16) {
+    socks_exit_reply(stream, 0).await
+}
+
+async fn socks_exit_reply(stream: &mut TcpStream, reply: u8) -> (u8, String, u16) {
     assert_eq!(stream.read_u8().await.unwrap(), 5);
     let count = stream.read_u8().await.unwrap();
     let mut methods = vec![0; usize::from(count)];
@@ -203,7 +207,7 @@ async fn socks_exit(stream: &mut TcpStream) -> (u8, String, u16) {
     };
     let port = stream.read_u16().await.unwrap();
     stream
-        .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+        .write_all(&[5, reply, 0, 1, 127, 0, 0, 1, 0, 80])
         .await
         .unwrap();
     (header[3], host, port)
@@ -333,4 +337,179 @@ async fn https_account_proxy_starts_tls_and_rejection_never_falls_back_to_direct
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn proxy_quality_websocket_distinguishes_upgrade_auth_and_challenge_without_payload() {
+    use gateway_admin::{
+        model::proxies::ProxyQualityStatus as Status, ports::proxy::ProxyWebSocketProbe,
+    };
+    use provider_openai::transport::websocket::CodexProxyWebSocketProbe;
+    for (status, challenge, expected) in [
+        (101, false, Status::Passed),
+        (401, false, Status::Warning),
+        (403, false, Status::Warning),
+        (403, true, Status::Challenge),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = OutboundProxy::parse(&format!(
+            "socks5h://user%40exit:pass%3Aword@{}",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (address_type, host, port) = socks_exit(&mut stream).await;
+            assert_eq!(
+                (address_type, host.as_str(), port),
+                (3, "upstream.invalid", 80)
+            );
+            if status == 101 {
+                let mut websocket = accept_codex_test_websocket(stream).await;
+                let message = timeout(Duration::from_secs(3), websocket.next())
+                    .await
+                    .unwrap();
+                assert!(!matches!(
+                    message,
+                    Some(Ok(Message::Text(_) | Message::Binary(_)))
+                ));
+            } else {
+                let opening = read_http_request(&mut stream).await;
+                assert!(opening.starts_with("GET /codex/responses HTTP/1.1"));
+                assert!(!opening.to_lowercase().contains("authorization:"));
+                let headers = if challenge {
+                    "cf-mitigated: challenge\r\n"
+                } else {
+                    ""
+                };
+                stream.write_all(format!("HTTP/1.1 {status} Error\r\n{headers}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            }
+        });
+        let check = timeout(
+            Duration::from_secs(5),
+            CodexProxyWebSocketProbe::new("http://upstream.invalid").probe(&proxy),
+        )
+        .await
+        .unwrap();
+        assert_eq!(check.status, expected);
+        assert_eq!(check.http_status, Some(status));
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn proxy_quality_socks_auth_rejection_is_specific_and_redacted() {
+    use gateway_admin::{model::proxies::ProxyQualityStatus, ports::proxy::ProxyWebSocketProbe};
+    use provider_openai::transport::websocket::CodexProxyWebSocketProbe;
+    for reply in [255, 2] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = OutboundProxy::parse(&format!(
+            "socks5h://private-user:private-password@{}",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(stream.read_u8().await.unwrap(), 5);
+            let count = stream.read_u8().await.unwrap();
+            let mut methods = vec![0; count as usize];
+            stream.read_exact(&mut methods).await.unwrap();
+            stream.write_all(&[5, reply]).await.unwrap();
+            if reply == 2 {
+                assert_eq!(stream.read_u8().await.unwrap(), 1);
+                for _ in 0..2 {
+                    let count = stream.read_u8().await.unwrap();
+                    let mut value = vec![0; count as usize];
+                    stream.read_exact(&mut value).await.unwrap();
+                }
+                stream.write_all(&[1, 1]).await.unwrap();
+            }
+        });
+        let check = timeout(
+            Duration::from_secs(5),
+            CodexProxyWebSocketProbe::default().probe(&proxy),
+        )
+        .await
+        .unwrap();
+        assert_eq!(check.status, ProxyQualityStatus::Failed);
+        assert!(
+            check.message.contains("proxy_authentication_failed"),
+            "{check:?}"
+        );
+        assert!(!format!("{check:?}").contains("private-"));
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn proxy_quality_wss_negotiates_tls_after_socks_tunnel() {
+    use gateway_admin::{model::proxies::ProxyQualityStatus, ports::proxy::ProxyWebSocketProbe};
+    use provider_openai::transport::websocket::CodexProxyWebSocketProbe;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = OutboundProxy::parse(&format!(
+        "socks5h://user%40exit:pass%3Aword@{}",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (_, host, port) = socks_exit(&mut stream).await;
+        assert_eq!((host.as_str(), port), ("chatgpt.com", 443));
+        let mut header = [0; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(&header[..2], &[22, 3]);
+        let mut hello = vec![0; usize::from(u16::from_be_bytes([header[3], header[4]]))];
+        stream.read_exact(&mut hello).await.unwrap();
+        stream.write_all(&[21, 3, 3, 0, 2, 2, 40]).await.unwrap();
+    });
+    let check = timeout(
+        Duration::from_secs(5),
+        CodexProxyWebSocketProbe::default().probe(&proxy),
+    )
+    .await
+    .unwrap();
+    assert_eq!(check.status, ProxyQualityStatus::Failed);
+    assert!(check.http_status.is_none());
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn proxy_quality_socks_local_dns_retries_rejected_address_through_same_proxy() {
+    use gateway_admin::{model::proxies::ProxyQualityStatus, ports::proxy::ProxyWebSocketProbe};
+    use provider_openai::transport::websocket::CodexProxyWebSocketProbe;
+    let addresses: std::collections::HashSet<_> = tokio::net::lookup_host(("localhost", 80))
+        .await
+        .unwrap()
+        .map(|address| address.ip())
+        .collect();
+    if addresses.len() < 2 {
+        return;
+    } // Single-stack hosts have no alternate address to exercise.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = OutboundProxy::parse(&format!(
+        "socks5://user%40exit:pass%3Aword@{}",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let task = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let (_, first_host, _) = socks_exit_reply(&mut first, 8).await;
+        drop(first);
+        let (mut second, _) = listener.accept().await.unwrap();
+        let (_, second_host, _) = socks_exit(&mut second).await;
+        assert_ne!(first_host, second_host);
+        let mut websocket = accept_codex_test_websocket(second).await;
+        let _ = websocket.next().await;
+    });
+    let check = timeout(
+        Duration::from_secs(5),
+        CodexProxyWebSocketProbe::new("http://localhost").probe(&proxy),
+    )
+    .await
+    .unwrap();
+    assert_eq!(check.status, ProxyQualityStatus::Passed, "{check:?}");
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
 }

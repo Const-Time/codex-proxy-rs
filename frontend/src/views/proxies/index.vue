@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { OutboundProxyRecord } from '@/api'
-import { LockKeyhole, Pencil, Plus, RefreshCw, Search, Trash2, Users, Wifi } from '@lucide/vue'
+import { Activity, LockKeyhole, Pencil, Plus, RefreshCw, Search, Trash2, Users, Wifi } from '@lucide/vue'
 import { watchDebounced } from '@vueuse/core'
 import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { createProxy, deleteProxy, getProxies, testProxy, updateProxy } from '@/api'
@@ -20,6 +20,7 @@ import { errorMessage } from '@/utils/async'
 import { formatDateTime } from '@/utils/date'
 import ProxyAccountsModal from './components/ProxyAccountsModal.vue'
 import ProxyFormModal from './components/ProxyFormModal.vue'
+import ProxyQualityModal from './components/ProxyQualityModal.vue'
 
 const search = shallowRef('')
 const query = usePagedQuery({
@@ -47,6 +48,8 @@ const { loading: deleting } = deleteAction
 const showDelete = shallowRef(false)
 const pendingDelete = shallowRef<OutboundProxyRecord | null>(null)
 const testingIds = ref(new Set<string>())
+const showQuality = shallowRef(false)
+const qualityProxy = shallowRef<OutboundProxyRecord | null>(null)
 const showAccounts = shallowRef(false)
 const inspected = shallowRef<OutboundProxyRecord | null>(null)
 
@@ -143,7 +146,7 @@ onMounted(() => void query.execute())
     <BasePageHeader
       class="h-17"
       title="代理管理"
-      description="管理账号使用的代理，测试连接并查看出口 IP"
+      description="管理账号代理，检测出口和各平台连接质量"
     />
     <BaseCard class="mt-5 flex h-[calc(100dvh-136px)] min-h-125 flex-col">
       <template #header>
@@ -203,6 +206,9 @@ onMounted(() => void query.execute())
                 <BaseIconButton size="sm" label="测试代理" :loading="testingIds.has(row.id)" :disabled="testingIds.has(row.id)" @click="checkProxy(row)">
                   <Wifi class="size-3.5 text-cp-link" />
                 </BaseIconButton>
+                <BaseIconButton size="sm" label="代理质量检测" :disabled="testingIds.has(row.id)" @click="qualityProxy = row; showQuality = true">
+                  <Activity class="size-3.5 text-cp-link" />
+                </BaseIconButton>
                 <BaseIconButton size="sm" label="编辑代理" :disabled="testingIds.has(row.id)" @click="openForm(row)">
                   <Pencil class="size-3.5 text-cp-link" />
                 </BaseIconButton>
@@ -230,6 +236,7 @@ onMounted(() => void query.execute())
         确定删除“{{ pendingDelete?.name }}”吗？
       </p>
     </BaseConfirmModal>
+    <ProxyQualityModal v-model="showQuality" :proxy="qualityProxy" @tested="query.execute({ silent: true })" />
     <ProxyAccountsModal v-model="showAccounts" :proxy="inspected" @removed="query.execute({ silent: true })" />
   </div>
 </template>

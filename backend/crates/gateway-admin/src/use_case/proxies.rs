@@ -48,6 +48,12 @@ pub trait ProxiesService: Send + Sync {
         revision: Revision,
         context: &MutationContext,
     ) -> Result<Revision, AdminError>;
+    async fn quality_test(
+        &self,
+        id: &str,
+        revision: Revision,
+        context: &MutationContext,
+    ) -> Result<ProxyQualityReport, AdminError>;
     async fn test(
         &self,
         id: &str,
@@ -212,6 +218,31 @@ impl ProxiesService for DefaultProxiesService {
             .map_err(|error| map_store_error(error, "proxy"))?;
         publish_committed(self.snapshot.as_ref(), result).await?;
         Ok(result)
+    }
+
+    async fn quality_test(
+        &self,
+        id: &str,
+        revision: Revision,
+        context: &MutationContext,
+    ) -> Result<ProxyQualityReport, AdminError> {
+        let _permit = self.test_slots.try_acquire().map_err(|_| {
+            AdminError::new(AdminErrorKind::RateLimited, "代理测试繁忙，请稍后重试")
+        })?;
+        let record = self
+            .store
+            .get(id)
+            .await
+            .map_err(|error| map_store_error(error, "proxy"))?;
+        if record.revision != revision {
+            return Err(AdminError::conflict("代理已被修改，请刷新后重新测试"));
+        }
+        let report = self.probe.quality(&record.proxy).await;
+        self.store
+            .record_test(id, revision, report.basic.clone(), context)
+            .await
+            .map_err(|error| map_store_error(error, "proxy"))?;
+        Ok(report)
     }
 
     async fn test(

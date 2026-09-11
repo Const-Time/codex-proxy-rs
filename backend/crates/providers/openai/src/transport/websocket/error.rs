@@ -247,6 +247,24 @@ impl CodexWebSocketExchangeError {
                 tungstenite::Error::Protocol(
                     tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
                 ) => "reset_without_closing_handshake",
+                tungstenite::Error::Io(error)
+                    if error
+                        .get_ref()
+                        .and_then(|cause| cause.downcast_ref::<SafeEgressError>())
+                        .is_some() =>
+                {
+                    error
+                        .get_ref()
+                        .and_then(|cause| cause.downcast_ref::<SafeEgressError>())
+                        .map_or("io_error", |cause| cause.0)
+                }
+                tungstenite::Error::Io(error)
+                    if error
+                        .get_ref()
+                        .is_some_and(|cause| cause.is::<rustls::Error>()) =>
+                {
+                    "tls_error"
+                }
                 tungstenite::Error::Io(error) => match error.kind() {
                     std::io::ErrorKind::ConnectionRefused => "connection_refused",
                     std::io::ErrorKind::NetworkUnreachable => "network_unreachable",
@@ -363,4 +381,48 @@ impl CodexWebSocketExchangeError {
             send_phase,
         }))
     }
+}
+
+/// 只保存允许公开的阶段码，丢弃库错误中的代理地址和认证内容。
+#[derive(Debug, Error)]
+#[error("{0}")]
+struct SafeEgressError(&'static str);
+
+pub(super) fn egress_error(code: &'static str) -> tungstenite::Error {
+    tungstenite::Error::Io(std::io::Error::other(SafeEgressError(code)))
+}
+
+pub(super) fn safe_proxy_error(error: tungstenite::Error) -> tungstenite::Error {
+    if let tungstenite::Error::Io(error) = &error {
+        return tungstenite::Error::Io(std::io::Error::new(
+            error.kind(),
+            "proxy tunnel I/O failed",
+        ));
+    }
+    let code = if let tungstenite::Error::Url(tungstenite::error::UrlError::ProxyConnect(message)) =
+        &error
+    {
+        if message.contains("authentication failed")
+            || message.contains("no acceptable authentication")
+            || message.contains("proxy requested auth, but none provided")
+            || message.contains("status 407")
+        {
+            "proxy_authentication_failed"
+        } else if message.contains("connection failed with code 2") {
+            "proxy_connection_not_allowed"
+        } else if message.contains("connection failed with code 3") {
+            "proxy_network_unreachable"
+        } else if message.contains("connection failed with code 4") {
+            "proxy_host_unreachable"
+        } else if message.contains("connection failed with code 5") {
+            "proxy_connection_refused"
+        } else if message.contains("connection failed with code 8") {
+            "proxy_address_type_unsupported"
+        } else {
+            "proxy_tunnel_handshake_failed"
+        }
+    } else {
+        "proxy_tunnel_handshake_failed"
+    };
+    egress_error(code)
 }

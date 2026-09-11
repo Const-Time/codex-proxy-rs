@@ -7,12 +7,18 @@ use std::{
 };
 
 use async_trait::async_trait;
-use gateway_admin::{model::proxies::ProxyTestResult, ports::proxy::ProxyProbe};
+use futures::{StreamExt, stream};
+use gateway_admin::{
+    model::proxies::{ProxyQualityCheck, ProxyQualityReport, ProxyQualityStatus, ProxyTestResult},
+    ports::proxy::{ProxyProbe, ProxyWebSocketProbe},
+};
 use gateway_core::account::OutboundProxy;
 use serde::Deserialize;
 
 pub struct HttpProxyProbe {
     endpoint: String,
+    targets: Vec<(String, String)>,
+    websocket: Option<Arc<dyn ProxyWebSocketProbe>>,
     build_client: Arc<ProxyClientBuilder>,
 }
 
@@ -30,6 +36,23 @@ impl HttpProxyProbe {
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
+            targets: [
+                ("OpenAI API", "https://api.openai.com/v1/models"),
+                ("Anthropic", "https://api.anthropic.com/v1/messages"),
+                (
+                    "Gemini",
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                ),
+                ("Grok", "https://api.x.ai/v1/models"),
+                (
+                    "Codex HTTPS",
+                    "https://chatgpt.com/backend-api/codex/responses",
+                ),
+            ]
+            .into_iter()
+            .map(|(name, url)| (name.to_owned(), url.to_owned()))
+            .collect(),
+            websocket: None,
             build_client: Arc::new(|builder| builder.build().map_err(|_| "无法创建代理连接")),
         }
     }
@@ -46,15 +69,72 @@ impl HttpProxyProbe {
         self
     }
 
-    async fn exit_ip(&self, proxy: &OutboundProxy) -> Result<IpAddr, &'static str> {
+    #[must_use]
+    pub fn with_websocket_probe(mut self, probe: Arc<dyn ProxyWebSocketProbe>) -> Self {
+        self.websocket = Some(probe);
+        self
+    }
+
+    /// 供受信任的组合根及离线测试设置目标；管理 API 不接受 URL。
+    #[must_use]
+    pub fn with_quality_targets(mut self, targets: Vec<(String, String)>) -> Self {
+        self.targets = targets;
+        self
+    }
+
+    fn client(&self, proxy: &OutboundProxy) -> Result<reqwest::Client, &'static str> {
         let proxy = reqwest::Proxy::all(proxy.expose_url()).map_err(|_| "代理地址不合法")?;
-        let builder = reqwest::Client::builder()
-            .no_proxy()
-            .proxy(proxy)
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(12))
-            .redirect(reqwest::redirect::Policy::none());
-        let client = (self.build_client)(builder)?;
+        (self.build_client)(
+            reqwest::Client::builder()
+                .no_proxy()
+                .proxy(proxy)
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(12))
+                .redirect(reqwest::redirect::Policy::none()),
+        )
+    }
+
+    async fn check_target(
+        &self,
+        proxy: &OutboundProxy,
+        name: &str,
+        url: &str,
+    ) -> ProxyQualityCheck {
+        let started = Instant::now();
+        let result = async {
+            self.client(proxy)?.get(url).send().await.map_err(|error| {
+                if error.is_timeout() {
+                    "连接超时"
+                } else {
+                    "连接失败，请检查代理认证、DNS、TCP 和 TLS"
+                }
+            })
+        }
+        .await;
+        let latency_ms = elapsed_ms(started);
+        match result {
+            Ok(response) => ProxyQualityCheck::http(
+                name,
+                response.status().as_u16(),
+                response
+                    .headers()
+                    .get("cf-mitigated")
+                    .is_some_and(|value| value == "challenge"),
+                false,
+                latency_ms,
+            ),
+            Err(message) => ProxyQualityCheck {
+                name: name.to_owned(),
+                status: ProxyQualityStatus::Failed,
+                http_status: None,
+                latency_ms,
+                message: message.to_owned(),
+            },
+        }
+    }
+
+    async fn exit_ip(&self, proxy: &OutboundProxy) -> Result<IpAddr, &'static str> {
+        let client = self.client(proxy)?;
         let mut response = client.get(&self.endpoint).send().await.map_err(|error| {
             if error.is_timeout() {
                 "代理连接超时"
@@ -91,6 +171,60 @@ impl HttpProxyProbe {
 
 #[async_trait]
 impl ProxyProbe for HttpProxyProbe {
+    async fn quality(&self, proxy: &OutboundProxy) -> ProxyQualityReport {
+        let started = Instant::now();
+        let tested_at = chrono::Utc::now();
+        let targets = stream::iter(self.targets.clone())
+            .map(|(name, url)| async move { self.check_target(proxy, &name, &url).await })
+            .buffered(3)
+            .collect::<Vec<_>>();
+        let websocket = async {
+            if let Some(probe) = &self.websocket {
+                match tokio::time::timeout(Duration::from_secs(16), probe.probe(proxy)).await {
+                    Ok(check) => return check,
+                    Err(_) => {
+                        return ProxyQualityCheck {
+                            name: "Codex WebSocket".to_owned(),
+                            status: ProxyQualityStatus::Failed,
+                            http_status: None,
+                            latency_ms: 16000,
+                            message: "WebSocket 建连超时".to_owned(),
+                        };
+                    }
+                }
+            }
+            ProxyQualityCheck {
+                name: "Codex WebSocket".to_owned(),
+                status: ProxyQualityStatus::Warning,
+                http_status: None,
+                latency_ms: 0,
+                message: "未配置 WebSocket 探测能力".to_owned(),
+            }
+        };
+        let (basic, mut checks, websocket) = tokio::join!(self.test(proxy), targets, websocket);
+        checks.insert(
+            0,
+            ProxyQualityCheck {
+                name: "基础连通性".to_owned(),
+                status: if basic.success {
+                    ProxyQualityStatus::Passed
+                } else {
+                    ProxyQualityStatus::Failed
+                },
+                http_status: None,
+                latency_ms: basic.latency_ms,
+                message: basic.message.clone(),
+            },
+        );
+        checks.push(websocket);
+        ProxyQualityReport {
+            tested_at,
+            duration_ms: elapsed_ms(started),
+            basic,
+            checks,
+        }
+    }
+
     async fn test(&self, proxy: &OutboundProxy) -> ProxyTestResult {
         let started = Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(15), self.exit_ip(proxy)).await;
@@ -102,4 +236,8 @@ impl ProxyProbe for HttpProxyProbe {
             message: result.map_or_else(str::to_owned, |_| "连接成功".to_owned()),
         }
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }

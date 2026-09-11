@@ -89,8 +89,13 @@ impl HostBundle {
         + Send
         + Sync
         + 'static,
+        websocket: Arc<dyn gateway_admin::ports::proxy::ProxyWebSocketProbe>,
     ) -> Arc<dyn gateway_admin::ports::proxy::ProxyProbe> {
-        Arc::new(proxy_probe::HttpProxyProbe::default().with_client_builder(build_client))
+        Arc::new(
+            proxy_probe::HttpProxyProbe::default()
+                .with_client_builder(build_client)
+                .with_websocket_probe(websocket),
+        )
     }
 
     #[must_use]

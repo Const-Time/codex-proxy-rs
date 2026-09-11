@@ -243,12 +243,24 @@ All endpoints require admin authentication and redact proxy credentials from res
 | `POST` | `/api/admin/proxies/create` | `{ name, proxyUrl }` | `201 { record, configRevision }` |
 | `POST` | `/api/admin/proxies/update` | `{ id, revision, name, proxyUrl? }` | `{ record, configRevision }` |
 | `POST` | `/api/admin/proxies/test` | `{ id, revision }` | 最新代理记录 / Proxy record with test result |
+| `POST` | `/api/admin/proxies/quality-test` | `{ id, revision }` | 分项质量报告（当前结果，不写入历史） |
 | `POST` | `/api/admin/proxies/delete` | `{ id, revision }` | `{ configRevision }` |
 
 `record` 包含 `id`、`name`、`endpoint`、`hasAuthentication`、`revision`、`accountCount`、
 `lastTestAt`、`lastTest: { success, latencyMs, exitIp, message }`、`createdAt`、`updatedAt`。
 未测试时 `lastTestAt` / `lastTest` 为 `null`。连通性失败返回 HTTP 200 和 `lastTest.success=false`；
 记录版本过期、重复 URL、删除已绑定的代理返回 409，并发测试满载返回 429。
+
+质量检测与普通出口测试共享每进程 4 个并发名额，并在检测前后校验代理版本。报告包含
+`testedAt`、`durationMs`、`exitIp`、`basicLatencyMs`、`score`、`grade`、`passed`、`warnings`、`failed`、`challenges`
+及 `checks: [{ name, status, httpStatus, latencyMs, message }]`。状态为 `passed / warning / failed / challenge`。
+检测基础出口、OpenAI API、Anthropic、Gemini、Grok、Codex HTTPS 和 Codex WebSocket；目标固定，不接受请求指定 URL。
+HTTPS 分项最多同时执行 3 项，每项连接超时 5 秒、总超时 12 秒，不跟随重定向；整个报告通常在 24 秒内完成。
+WebSocket 使用数据面的 SOCKS/CONNECT/TLS 拨号路径，单独建连、不进入连接池、不携带账号凭据、不发送模型载荷。
+HTTP 401/405 仅表示 HTTPS 目标可达；WebSocket 只有 101 算握手成功，其余 HTTP 响应显示告警；
+明确的 `cf-mitigated: challenge` 单列为挑战，普通 403 不推断为挑战。分数为各项通过 100、告警 50、
+失败或挑战 0 的平均值（取整），A ≥ 90、B ≥ 75、C ≥ 60、其余 D，仅反映当次网络可达性，不代表 IP 信誉或账号可用性。
+分项报告不保存历史；基础出口结果写入列表的 `lastTest` 并记录审计，以便随后绑定账号。出口查询失败时 `exitIp=null`。
 
 代理列表只返回关联账号数量。关联账号按需查询，每项包含 `id`、`name`、`email`、`provider`、`enabled`、
 `authenticationKind`、`planType`、`planTypeDisplay` 和 `groups: [{ id, name, color, enabled }]`，

@@ -6,7 +6,8 @@ use crate::model::{
     MutationContext, Revision,
     proxies::{
         ImportProxyBinding, NewProxy, ProxyAccountListQuery, ProxyAccountPage, ProxyListQuery,
-        ProxyMutation, ProxyPage, ProxyRecord, ProxyTestResult, UpdateProxy,
+        ProxyMutation, ProxyPage, ProxyQualityCheck, ProxyQualityReport, ProxyRecord,
+        ProxyTestResult, UpdateProxy,
     },
 };
 
@@ -63,4 +64,11 @@ pub struct ProxyImportReservation {
 #[async_trait]
 pub trait ProxyProbe: Send + Sync {
     async fn test(&self, proxy: &OutboundProxy) -> ProxyTestResult;
+    async fn quality(&self, proxy: &OutboundProxy) -> ProxyQualityReport;
+}
+
+/// 由 Provider 注入真实数据面握手路径；不发送账号凭据或模型载荷。
+#[async_trait]
+pub trait ProxyWebSocketProbe: Send + Sync {
+    async fn probe(&self, proxy: &OutboundProxy) -> ProxyQualityCheck;
 }

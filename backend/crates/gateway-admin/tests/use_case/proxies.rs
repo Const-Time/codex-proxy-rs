@@ -100,6 +100,18 @@ impl ProxyStore for TestProxies {
 
 #[async_trait]
 impl ProxyProbe for TestProxies {
+    async fn quality(
+        &self,
+        proxy: &OutboundProxy,
+    ) -> gateway_admin::model::proxies::ProxyQualityReport {
+        gateway_admin::model::proxies::ProxyQualityReport {
+            tested_at: chrono::Utc::now(),
+            duration_ms: 1,
+            basic: self.test(proxy).await,
+            checks: vec![],
+        }
+    }
+
     async fn test(&self, _: &OutboundProxy) -> ProxyTestResult {
         panic!("unexpected proxy probe")
     }
