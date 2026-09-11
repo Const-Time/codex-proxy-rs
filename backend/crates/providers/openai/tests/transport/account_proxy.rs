@@ -398,6 +398,43 @@ async fn proxy_quality_websocket_distinguishes_upgrade_auth_and_challenge_withou
 }
 
 #[tokio::test]
+async fn socks_quality_coalesces_greeting_for_packet_sensitive_proxies() {
+    use gateway_admin::{model::proxies::ProxyQualityStatus, ports::proxy::ProxyWebSocketProbe};
+    use provider_openai::transport::websocket::CodexProxyWebSocketProbe;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = OutboundProxy::parse(&format!(
+        "socks5h://user%40exit:pass%3Aword@{}",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // Reproduce proxies that reject a greeting header arriving without methods.
+        let mut first_packet = [0; 4];
+        let count = stream.peek(&mut first_packet).await.unwrap();
+        assert_eq!(&first_packet[..count], &[5, 2, 0, 2]);
+        socks_exit(&mut stream).await;
+        let request = read_http_request(&mut stream).await;
+        assert!(request.contains("Upgrade: websocket") || request.contains("upgrade: websocket"));
+        stream
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    });
+    let result = timeout(
+        Duration::from_secs(5),
+        CodexProxyWebSocketProbe::new("http://upstream.invalid").probe(&proxy),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, ProxyQualityStatus::Warning);
+    assert_eq!(result.http_status, Some(401));
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn proxy_quality_socks_auth_rejection_is_specific_and_redacted() {
     use gateway_admin::{model::proxies::ProxyQualityStatus, ports::proxy::ProxyWebSocketProbe};
     use provider_openai::transport::websocket::CodexProxyWebSocketProbe;

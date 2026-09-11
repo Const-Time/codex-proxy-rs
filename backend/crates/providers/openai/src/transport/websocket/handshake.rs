@@ -253,8 +253,14 @@ async fn dial_account(
     let mut last_error = super::error::egress_error("proxy_target_dns_failed");
     for target in targets {
         let stream = proxy_stream(&proxy_host, config.port, tls_proxy).await?;
+        // The pinned proxy implementation writes the SOCKS greeting header and
+        // methods separately, then flushes. Coalesce those writes for proxies
+        // that incorrectly treat the first TCP fragment as the entire greeting.
+        // BufWriter forwards reads without buffering; each handshake phase is
+        // flushed by connect_via_proxy before its reply is read.
+        let stream = tokio::io::BufWriter::new(stream);
         match tokio_tungstenite::proxy::connect_via_proxy(stream, &config, &target, port).await {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => return Ok(stream.into_inner()),
             Err(error) => {
                 let retry_address = matches!(&error, tungstenite::Error::Url(tungstenite::error::UrlError::ProxyConnect(message))
                     if matches!(message.as_str(), "SOCKS5: connection failed with code 3" | "SOCKS5: connection failed with code 4" | "SOCKS5: connection failed with code 5" | "SOCKS5: connection failed with code 8"));
