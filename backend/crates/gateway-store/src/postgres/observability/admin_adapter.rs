@@ -216,11 +216,15 @@ impl ObservabilityRepository for PgObservabilityRepository {
             .await
     }
 
-    async fn usage_record_detail(&self, request_id: &str) -> StoreResult<UsageRecordDetail> {
+    async fn usage_record_detail(
+        &self,
+        request_id: &str,
+        owner: Option<&str>,
+    ) -> StoreResult<UsageRecordDetail> {
         self.query_budget
             .run(
                 "load usage record detail",
-                usage_record_detail(&self.pool, request_id),
+                usage_record_detail(&self.pool, request_id, owner),
             )
             .await
     }
@@ -418,10 +422,11 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
     async fn usage_record_detail(
         &self,
         request_id: &str,
+        owner: Option<&str>,
     ) -> AdminStoreResult<admin_observability::UsageDetail> {
         let detail = self
             .repository
-            .usage_record_detail(request_id)
+            .usage_record_detail(request_id, owner)
             .await
             .map_err(observability_error)?;
         admin_usage_detail(detail)

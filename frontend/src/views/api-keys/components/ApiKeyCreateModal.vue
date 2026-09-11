@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import type { ApiKeyFormValue } from '../composables/useApiKeyMutations'
-import type { AccountGroup } from '@/api'
-import { Copy, DollarSign, KeyRound, Upload } from '@lucide/vue'
+import type { UserGroup } from '@/api/modules/users'
+import { Copy, KeyRound, Upload } from '@lucide/vue'
 import { computed } from 'vue'
 
-import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseForm from '@/components/base/BaseForm/index.vue'
@@ -13,7 +12,7 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 
 const props = defineProps<{
-  groups: AccountGroup[]
+  groups: UserGroup[]
   groupLoading: boolean
   editing: boolean
   createdKey: string
@@ -28,6 +27,10 @@ const open = defineModel<boolean>({ default: false })
 const createdOpen = defineModel<boolean>('createdOpen', { default: false })
 const form = defineModel<ApiKeyFormValue>('form', { required: true })
 const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key')
+const selectedGroupId = computed({ get: () => form.value.groupIds[0] ?? '', set: (id: string) => {
+  form.value.groupIds = id ? [id] : []
+} })
+const selectedGroup = computed(() => props.groups.find(group => group.id === selectedGroupId.value))
 </script>
 
 <template>
@@ -61,48 +64,22 @@ const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key'
         />
       </BaseFormItem>
 
-      <BaseFormItem label="分组">
-        <AccountGroupCheckboxGrid
-          v-model="form.groupIds"
-          :groups="groups"
-          :loading="groupLoading"
-          :disabled="saving"
-        />
+      <BaseFormItem label="分组" required>
+        <select v-model="selectedGroupId" aria-label="分组" :disabled="saving || groupLoading" class="w-full rounded-cp border border-cp-border bg-cp-bg px-3 py-2 text-cp-text">
+          <option value="">
+            请选择一个授权分组
+          </option>
+          <option v-for="group in groups" :key="group.id" :value="group.id" :disabled="!group.enabled">
+            {{ group.name }}{{ group.enabled ? '' : '（已禁用）' }}
+          </option>
+        </select>
+        <p v-if="!groupLoading && groups.length === 0" class="text-cp-sm text-cp-text-secondary">
+          暂无可用分组，请联系管理员分配。
+        </p>
+        <p v-if="selectedGroup" class="text-cp-sm text-cp-text-secondary">
+          日限额：{{ selectedGroup.dailyLimitUsd }} USD，周限额：{{ selectedGroup.weeklyLimitUsd }} USD（0 表示不限）。同一分组内的所有个人密钥共用额度。
+        </p>
       </BaseFormItem>
-
-      <div class="grid gap-6 sm:grid-cols-2">
-        <BaseFormItem label="日限额">
-          <BaseInput
-            v-model="form.dailyLimitUsd"
-            type="number"
-            min="0"
-            step="any"
-            aria-label="日限额（美元）"
-            placeholder="不限制"
-            :disabled="saving"
-          >
-            <template #prefix>
-              <DollarSign class="size-4" aria-hidden="true" />
-            </template>
-          </BaseInput>
-        </BaseFormItem>
-        <BaseFormItem label="周限额">
-          <BaseInput
-            v-model="form.weeklyLimitUsd"
-            type="number"
-            min="0"
-            step="any"
-            aria-label="周限额（美元）"
-            placeholder="不限制"
-            :disabled="saving"
-          >
-            <template #prefix>
-              <DollarSign class="size-4" aria-hidden="true" />
-            </template>
-          </BaseInput>
-        </BaseFormItem>
-      </div>
-
       <div class="grid gap-6 sm:grid-cols-2">
         <BaseFormItem label="最大并发">
           <BaseInput

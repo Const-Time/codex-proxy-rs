@@ -87,7 +87,7 @@ async fn update_route_should_replace_group_fields() {
             "id": PRIMARY_GROUP_ID,
             "name": "Renamed routing",
             "description": null,
-            "color": "#F43F5ECC"
+            "color": "#F43F5ECC", "dailyLimitUsd": "0.1234567891", "weeklyLimitUsd": "10"
         })),
         true,
     )

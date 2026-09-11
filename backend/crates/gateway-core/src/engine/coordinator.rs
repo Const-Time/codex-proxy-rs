@@ -167,6 +167,7 @@ where
             request_id,
             client_api_key_ref,
             observation: ResponseObservation::new(timing_started_at),
+            budget_scope: request.budget_scope.clone(),
             budget_prior_attempts_usd: Decimal::ZERO,
             budget_attempt_already_counted: false,
             trace,
@@ -257,6 +258,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     request_id: ModelRequestId,
     client_api_key_ref: crate::policy::ClientApiKeyId,
     observation: ResponseObservation,
+    budget_scope: Option<super::budget::ClientBudgetScope>,
     budget_prior_attempts_usd: Decimal,
     budget_attempt_already_counted: bool,
     trace: TraceContext,
@@ -490,6 +492,7 @@ where
             .checked_add(self.budget_attempt_usd())
             .unwrap_or(Decimal::MAX);
         super::budget::ClientBudgetCharge {
+            scope: self.budget_scope.clone(),
             key_id: self.client_api_key_ref.clone(),
             request_id: self.request_id.clone(),
             amount_usd,

@@ -115,7 +115,7 @@ async fn observability_preserves_and_filters_opaque_response_ids() {
     assert_eq!(records.total, 1);
     assert_eq!(records.items[0].id, "req_observe_success");
     let detail = repository
-        .usage_record_detail("req_observe_success")
+        .usage_record_detail("req_observe_success", None)
         .await
         .expect("usage detail with opaque response IDs");
     assert_eq!(
@@ -188,7 +188,7 @@ async fn usage_search_should_match_literal_prefix_instead_of_substring() {
 }
 
 #[tokio::test]
-async fn usage_search_should_match_client_api_key_prefix() {
+async fn usage_search_must_not_reveal_client_api_key_through_prefix_matching() {
     let Some(database) = TestDatabase::create("usage_client_api_key_search").await else {
         return;
     };
@@ -198,8 +198,12 @@ async fn usage_search_should_match_client_api_key_prefix() {
         .expect("seed observability facts");
     let plaintext_key = format!("sk_{}", "K".repeat(43));
     sqlx::query(
-        "insert into client_api_keys (id, name, key, enabled, created_at, updated_at)
-         values ('key_observe', 'usage search', $1, true, $2, $2)",
+        "with fixture_group as (
+           insert into account_groups(id, name, color, created_at, updated_at) values ('grp_ffffffffffffffffffffffffffffffff','Fixture group','#64748BFF',now(),now()) on conflict do nothing
+         ), fixture_key as (
+           insert into client_api_keys (owner_user_id, id, name, key, enabled, created_at, updated_at) values ('test-owner', 'key_observe', 'usage search', $1, true, $2, $2) returning id
+         ) insert into client_api_key_groups(client_api_key_id, account_group_id, created_at)
+           select id, 'grp_ffffffffffffffffffffffffffffffff', now() from fixture_key",
     )
     .bind(&plaintext_key)
     .bind(now)
@@ -223,8 +227,8 @@ async fn usage_search_should_match_client_api_key_prefix() {
             .await
             .expect("search usage by client API key");
 
-        assert_eq!(page.total, 1);
-        assert_eq!(page.items[0].id, "req_observe_success");
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
     }
     database.close().await;
 }
@@ -897,6 +901,8 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
         .list_usage_records(admin_observability::UsageQuery {
             range,
             filter: admin_observability::UsageFilter {
+                owner_user_id: None,
+
                 client_api_key_ref: Some("key_observe".to_owned()),
                 request_id: Some("req_observe_success".to_owned()),
                 provider_account_ref: Some("acct_observe".to_owned()),
@@ -939,7 +945,7 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
     assert!(other_outcome.items.is_empty());
 
     let detail = store
-        .usage_record_detail("req_observe_success")
+        .usage_record_detail("req_observe_success", None)
         .await
         .expect("admin usage detail");
     assert_eq!(
@@ -964,13 +970,13 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
     );
     assert!(
         store
-            .usage_record_detail("req_observe_failed")
+            .usage_record_detail("req_observe_failed", None)
             .await
             .is_ok()
     );
     assert!(
         store
-            .usage_record_detail("req_observe_uncommitted")
+            .usage_record_detail("req_observe_uncommitted", None)
             .await
             .is_ok()
     );
@@ -1340,7 +1346,7 @@ async fn observability_queries_preserve_request_account_cost_and_diagnostic_fact
     );
 
     let successful_detail = repository
-        .usage_record_detail("req_observe_success")
+        .usage_record_detail("req_observe_success", None)
         .await
         .expect("successful usage detail");
     assert_eq!(
@@ -1354,7 +1360,7 @@ async fn observability_queries_preserve_request_account_cost_and_diagnostic_fact
 
     assert!(
         repository
-            .usage_record_detail("req_observe_failed")
+            .usage_record_detail("req_observe_failed", None)
             .await
             .is_ok()
     );
@@ -1650,4 +1656,82 @@ async fn seed_calculated_billing_facts(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn personal_usage_is_scoped_for_lists_details_totals_and_trends() {
+    let Some(db) = TestDatabase::create("personal_usage").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    seed_calculated_billing_facts(&db.pool, now).await.unwrap();
+    sqlx::raw_sql("insert into users(id, username, password_hash, created_at, updated_at) values ('alice','alice','hash',now(),now()), ('bob','bob','hash',now(),now());
+        update model_requests set user_id = 'alice' where id = 'req_observe_success';
+        update model_requests set user_id = 'bob' where id = 'req_observe_calculated';")
+        .execute(&db.pool).await.unwrap();
+    let repo = observability_repository(&db.pool);
+    let range =
+        ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1)).unwrap();
+    for (owner, expected) in [
+        ("alice", "req_observe_success"),
+        ("bob", "req_observe_calculated"),
+        ("test-owner", ""),
+    ] {
+        let filter = UsageRecordFilter {
+            owner_user_id: Some(owner.into()),
+            ..Default::default()
+        };
+        let count = u64::from(!expected.is_empty());
+        let page = repo
+            .list_usage_records(UsageRecordQuery {
+                range,
+                filter: filter.clone(),
+                current_page: 1,
+                page_size: ObservabilityPageSize::new(10).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, count);
+        if count == 1 {
+            assert_eq!(page.items[0].id, expected);
+        }
+        let totals = repo.usage_summary(range, filter.clone()).await.unwrap();
+        assert_eq!(totals.requests.request_count, count);
+        let trend = repo.usage_trend(range, filter).await.unwrap();
+        assert_eq!(
+            trend.iter().map(|p| p.metrics.request_count).sum::<u64>(),
+            count
+        );
+    }
+    assert!(
+        repo.usage_record_detail("req_observe_success", Some("alice"))
+            .await
+            .is_ok()
+    );
+    assert!(
+        repo.usage_record_detail("req_observe_success", Some("bob"))
+            .await
+            .is_err()
+    );
+    assert!(
+        repo.usage_record_detail("req_observe_success", None)
+            .await
+            .is_ok()
+    );
+    let forged = repo
+        .list_usage_records(UsageRecordQuery {
+            range,
+            filter: UsageRecordFilter {
+                owner_user_id: Some("bob".into()),
+                request_id: Some("req_observe_success".into()),
+                ..Default::default()
+            },
+            current_page: 1,
+            page_size: ObservabilityPageSize::new(10).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(forged.total, 0);
+    db.close().await;
 }

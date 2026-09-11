@@ -21,6 +21,8 @@ import { formatDateTime } from '@/utils/date'
 import { DEFAULT_ACCOUNT_GROUP_COLOR } from '../constants'
 
 export interface AccountGroupFormValue {
+  dailyLimitUsd: string
+  weeklyLimitUsd: string
   name: string
   description: string
   color: string
@@ -109,6 +111,8 @@ export function useAccountGroups() {
   function openEdit(group: AccountGroup) {
     editingGroup.value = group
     form.value = {
+      dailyLimitUsd: group.dailyLimitUsd,
+      weeklyLimitUsd: group.weeklyLimitUsd,
       name: group.name,
       description: group.description ?? '',
       color: group.color,
@@ -124,6 +128,12 @@ export function useAccountGroups() {
       toast.warning('请输入分组名称')
       return
     }
+    const dailyLimitUsd = form.value.dailyLimitUsd.trim() || '0'
+    const weeklyLimitUsd = form.value.weeklyLimitUsd.trim() || '0'
+    if (![dailyLimitUsd, weeklyLimitUsd].every(value => /^\d{1,10}(?:\.\d{1,10})?$/.test(value))) {
+      toast.warning('限额须为非负金额，最多 10 位小数')
+      return
+    }
     const color = normalizeRgbaHexColor(form.value.color)
     if (!color) {
       toast.warning('请选择有效的分组颜色')
@@ -134,10 +144,12 @@ export function useAccountGroups() {
       const updating = Boolean(editingGroup.value)
       const description = form.value.description.trim() || null
       if (editingGroup.value) {
-        await updateAccountGroup({ id: editingGroup.value.id, name, description, color })
+        await updateAccountGroup({ id: editingGroup.value.id, name, description, color, dailyLimitUsd, weeklyLimitUsd })
       }
       else {
         await createAccountGroup({
+          dailyLimitUsd,
+          weeklyLimitUsd,
           name,
           description,
           color,
@@ -314,5 +326,5 @@ export function useAccountGroups() {
 }
 
 function emptyForm(): AccountGroupFormValue {
-  return { name: '', description: '', color: DEFAULT_ACCOUNT_GROUP_COLOR }
+  return { dailyLimitUsd: '0', weeklyLimitUsd: '0', name: '', description: '', color: DEFAULT_ACCOUNT_GROUP_COLOR }
 }

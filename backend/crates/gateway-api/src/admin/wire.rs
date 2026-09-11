@@ -333,6 +333,9 @@ pub(crate) fn map_admin_service_error(error: gateway_admin::model::AdminError) -
 
     match error.kind() {
         AdminErrorKind::Invalid => AdminError::bad_request(error.message()),
+        AdminErrorKind::Forbidden => {
+            AdminError::invalid_request(StatusCode::FORBIDDEN, "无权执行此操作")
+        }
         AdminErrorKind::Unauthorized => AdminError::admin_session_required(),
         AdminErrorKind::NotFound => AdminError::not_found(error.message()),
         AdminErrorKind::Conflict => AdminError::conflict(error.message()),

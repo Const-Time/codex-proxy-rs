@@ -52,6 +52,17 @@ const description = computed(() => props.group
           :disabled="saving"
         />
       </BaseFormItem>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <BaseFormItem label="每用户日限额（USD）">
+          <BaseInput v-model="form.dailyLimitUsd" type="number" min="0" step="any" aria-label="每用户日限额" :disabled="saving" />
+        </BaseFormItem>
+        <BaseFormItem label="每用户周限额（USD）">
+          <BaseInput v-model="form.weeklyLimitUsd" type="number" min="0" step="any" aria-label="每用户周限额" :disabled="saving" />
+        </BaseFormItem>
+      </div>
+      <p class="m-0 text-cp-sm text-cp-text-secondary">
+        0 表示不限。每位用户在本组的所有密钥共享额度；用户之间独立计算。
+      </p>
       <BaseFormItem label="描述（可选）">
         <BaseTextarea
           v-model="form.description"

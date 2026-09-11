@@ -304,6 +304,7 @@ pub(crate) fn usage_filter(query: &UsageQuery) -> Result<domain::UsageFilter, Wi
         })
     });
     Ok(domain::UsageFilter {
+        owner_user_id: None,
         client_api_key_ref: non_empty(query.client_api_key_id.clone()),
         request_id: non_empty(query.request_id.clone()),
         provider_account_ref: non_empty(query.account_id.clone()),

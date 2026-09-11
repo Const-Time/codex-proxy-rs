@@ -518,6 +518,7 @@ impl AttemptContext {
 /// 创建唯一 `model_requests` 行所需的入口事实。
 #[derive(Debug, Clone)]
 pub struct NewModelRequest {
+    pub budget_scope: Option<budget::ClientBudgetScope>,
     pub id: ModelRequestId,
     pub client_api_key_id: Option<ClientApiKeyId>,
     pub client_api_key_ref: ClientApiKeyId,

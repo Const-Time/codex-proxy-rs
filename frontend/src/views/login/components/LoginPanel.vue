@@ -62,7 +62,7 @@ function togglePasswordVisible(): void {
             Codex Proxy RS
           </strong>
           <span class="font-mono text-[10px] leading-[1.2] font-normal text-(--cp-login-brand-caption-color)">
-            ADMIN REALM
+            USER ACCESS
           </span>
         </span>
       </div>
@@ -100,12 +100,12 @@ function togglePasswordVisible(): void {
       </div>
 
       <div class="grid min-w-0 gap-2">
-        <span class="text-cp leading-[1.1] font-bold text-(--cp-login-label-color)">管理员账号</span>
+        <span class="text-cp leading-[1.1] font-bold text-(--cp-login-label-color)">用户名</span>
         <BaseInput
           v-model="username"
           name="username"
-          aria-label="管理员账号"
-          placeholder="输入会话账号"
+          aria-label="用户名"
+          placeholder="输入用户名"
           autocomplete="username"
         >
           <template #prefix>
@@ -115,12 +115,12 @@ function togglePasswordVisible(): void {
       </div>
 
       <div class="grid min-w-0 gap-2">
-        <span class="text-cp leading-[1.1] font-bold text-(--cp-login-label-color)">访问密钥</span>
+        <span class="text-cp leading-[1.1] font-bold text-(--cp-login-label-color)">密码</span>
         <BaseInput
           v-model="password"
           name="password"
-          aria-label="访问密钥"
-          placeholder="输入会话密钥"
+          aria-label="密码"
+          placeholder="输入密码"
           :type="passwordType"
           autocomplete="current-password"
         >

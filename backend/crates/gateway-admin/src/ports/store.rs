@@ -197,6 +197,37 @@ pub trait AccountRuntimeStore: Send + Sync {
 /// 管理员密码、会话和安全审计。
 #[async_trait]
 pub trait AuthStore: Send + Sync {
+    async fn user_groups(&self, id: &str) -> AdminStoreResult<Vec<crate::model::users::UserGroup>>;
+    async fn find_user(
+        &self,
+        username: &str,
+    ) -> AdminStoreResult<Option<crate::model::users::UserRecord>>;
+    async fn load_user(
+        &self,
+        id: &str,
+    ) -> AdminStoreResult<Option<crate::model::users::UserRecord>>;
+    async fn list_users(&self) -> AdminStoreResult<Vec<crate::model::users::UserRecord>>;
+    async fn create_user(
+        &self,
+        id: &str,
+        username: &str,
+        password_hash: &str,
+        group_ids: &[String],
+        context: &MutationContext,
+    ) -> AdminStoreResult<crate::model::users::UserRecord>;
+    async fn update_user(
+        &self,
+        command: crate::model::users::UpdateUser,
+        context: &MutationContext,
+    ) -> AdminStoreResult<(Revision, crate::model::users::UserRecord)>;
+    async fn change_password(
+        &self,
+        id: &str,
+        expected_version: i64,
+        password_hash: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<()>;
+
     async fn load_password_hash(&self, admin_user_id: &str) -> AdminStoreResult<Option<String>>;
 
     async fn create_password_hash_if_absent(
@@ -220,10 +251,15 @@ pub trait AuthStore: Send + Sync {
 /// Client API Key 管理写入。
 #[async_trait]
 pub trait ClientKeyStore: Send + Sync {
-    async fn list_client_keys(&self, query: ClientKeyListQuery) -> AdminStoreResult<ClientKeyPage>;
+    async fn list_client_keys(
+        &self,
+        owner: &str,
+        query: ClientKeyListQuery,
+    ) -> AdminStoreResult<ClientKeyPage>;
 
     async fn reveal_client_key(
         &self,
+        owner: &str,
         id: &gateway_core::policy::ClientApiKeyId,
     ) -> AdminStoreResult<Option<ClientKeySecret>>;
 
@@ -333,7 +369,11 @@ pub trait ObservabilityStore: Send + Sync {
 
     async fn list_usage_records(&self, query: UsageQuery) -> AdminStoreResult<UsagePage>;
 
-    async fn usage_record_detail(&self, request_id: &str) -> AdminStoreResult<UsageDetail>;
+    async fn usage_record_detail(
+        &self,
+        request_id: &str,
+        owner: Option<&str>,
+    ) -> AdminStoreResult<UsageDetail>;
 
     async fn usage_summary(
         &self,

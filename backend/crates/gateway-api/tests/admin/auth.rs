@@ -37,7 +37,7 @@ fn auth_responses_should_keep_stable_wire_shapes() {
     );
     assert_eq!(
         serde_json::to_value(AdminSessionStatusData::new(true)).expect("serialize status"),
-        json!({ "authenticated": true })
+        json!({ "authenticated": true, "user": null })
     );
     assert_eq!(
         serde_json::to_value(AdminLogoutData::new()).expect("serialize logout"),

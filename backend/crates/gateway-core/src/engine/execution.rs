@@ -522,12 +522,26 @@ impl DefaultExecutionService {
             client_api_key_id: client.policy.key_id().clone(),
             model_request_id: request_id.clone(),
         };
-        if let Some(budget) = &self.budget
-            && let Err(error) = budget.admit(client.policy.key_id().clone()).await
-        {
-            admission.release().await;
-            return Err(error);
-        }
+        let routing = client.policy.account_scope().routing_snapshot();
+        let expected_group = if routing.groups_snapshot().len() == 1 {
+            Some(routing.groups_snapshot()[0].id().clone())
+        } else {
+            None
+        };
+        let budget_scope = if let Some(budget) = &self.budget {
+            match budget
+                .admit(client.policy.key_id().clone(), expected_group)
+                .await
+            {
+                Ok(scope) => Some(scope),
+                Err(error) => {
+                    admission.release().await;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let observation = plan
             .candidates()
             .first()
@@ -539,6 +553,7 @@ impl DefaultExecutionService {
                 )
             });
         let new_request = NewModelRequest {
+            budget_scope: budget_scope.clone(),
             id: request_id.clone(),
             client_api_key_id: Some(client.policy.key_id().clone()),
             client_api_key_ref: client.policy.key_id().clone(),
@@ -580,6 +595,7 @@ impl DefaultExecutionService {
                     settle_budget(
                         budget.as_ref(),
                         ClientBudgetCharge {
+                            scope: budget_scope.clone(),
                             key_id: client.policy.key_id().clone(),
                             request_id: request_id.clone(),
                             amount_usd: crate::metering::Decimal::ZERO,
@@ -696,6 +712,7 @@ impl DefaultExecutionService {
             .map_err(|_| GatewayError::new(GatewayErrorKind::Internal, "invalid admin actor"))?;
         let new_request = NewModelRequest {
             id: request_id,
+            budget_scope: None,
             client_api_key_id: None,
             client_api_key_ref: actor,
             config_revision: plan.config_revision(),

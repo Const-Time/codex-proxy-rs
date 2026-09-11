@@ -227,10 +227,15 @@ impl MemoryAuthStore {
     }
 
     pub fn insert_session(&self, session_id: &str) {
+        self.insert_user_session(session_id, "admin_1");
+    }
+
+    pub fn insert_user_session(&self, session_id: &str, user_id: &str) {
         self.sessions.lock().expect("sessions").insert(
             session_id.to_owned(),
             AdminSession {
-                admin_user_id: "admin_1".to_owned(),
+                auth_version: 1,
+                admin_user_id: user_id.to_owned(),
                 expires_at: Utc::now() + Duration::hours(1),
             },
         );
@@ -255,6 +260,72 @@ impl MemoryAuthStore {
 
 #[async_trait]
 impl AuthStore for MemoryAuthStore {
+    async fn find_user(
+        &self,
+        username: &str,
+    ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
+        self.load_user(username).await
+    }
+    async fn load_user(
+        &self,
+        id: &str,
+    ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
+        Ok((["admin_1", "ordinary"].contains(&id)).then(|| {
+            gateway_admin::model::users::UserRecord {
+                id: id.to_owned(),
+                username: id.to_owned(),
+                role: if id == "ordinary" {
+                    gateway_admin::model::users::UserRole::User
+                } else {
+                    gateway_admin::model::users::UserRole::Admin
+                },
+                enabled: true,
+                auth_version: 1,
+                group_ids: vec![],
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }))
+    }
+    async fn user_groups(
+        &self,
+        _: &str,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserGroup>> {
+        Ok(vec![])
+    }
+    async fn list_users(&self) -> AdminStoreResult<Vec<gateway_admin::model::users::UserRecord>> {
+        Ok(vec![])
+    }
+    async fn create_user(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[String],
+        _: &gateway_admin::model::MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::users::UserRecord> {
+        panic!("unexpected user creation in this fixture")
+    }
+    async fn update_user(
+        &self,
+        _: gateway_admin::model::users::UpdateUser,
+        _: &gateway_admin::model::MutationContext,
+    ) -> AdminStoreResult<(
+        gateway_admin::model::Revision,
+        gateway_admin::model::users::UserRecord,
+    )> {
+        panic!("unexpected user mutation in this fixture")
+    }
+    async fn change_password(
+        &self,
+        _: &str,
+        _: i64,
+        _: &str,
+        _: &gateway_admin::model::MutationContext,
+    ) -> AdminStoreResult<()> {
+        panic!("unexpected password mutation in this fixture")
+    }
+
     async fn load_password_hash(&self, _: &str) -> AdminStoreResult<Option<String>> {
         Ok(self.password_hash.lock().expect("password hash").clone())
     }
@@ -412,6 +483,7 @@ impl MemoryAccountGroupStore {
             (
                 primary_id.clone(),
                 AccountGroupRecord {
+                    budget: Default::default(),
                     id: primary_id,
                     name: "Alpha routing".to_owned(),
                     description: Some("Primary traffic".to_owned()),
@@ -433,6 +505,7 @@ impl MemoryAccountGroupStore {
             (
                 secondary_id.clone(),
                 AccountGroupRecord {
+                    budget: Default::default(),
                     id: secondary_id,
                     name: "Beta routing".to_owned(),
                     description: None,
@@ -548,6 +621,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         let mut state = self.state.lock().expect("account groups");
         let now = Utc::now();
         let record = AccountGroupRecord {
+            budget: command.budget,
             id: command.id.clone(),
             name: command.name,
             description: command.description,
@@ -576,6 +650,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
             .groups
             .get_mut(&command.id)
             .ok_or_else(|| not_found("account group"))?;
+        record.budget = command.budget;
         record.name = command.name;
         record.description = command.description;
         record.color = command.color;
@@ -630,7 +705,11 @@ fn mutation(
 
 #[async_trait]
 impl ClientKeyStore for MemoryClientKeyStore {
-    async fn list_client_keys(&self, _: ClientKeyListQuery) -> AdminStoreResult<ClientKeyPage> {
+    async fn list_client_keys(
+        &self,
+        _owner: &str,
+        _: ClientKeyListQuery,
+    ) -> AdminStoreResult<ClientKeyPage> {
         Ok(ClientKeyPage {
             config_revision: Revision::new(1).expect("revision"),
             items: Vec::new(),
@@ -641,6 +720,7 @@ impl ClientKeyStore for MemoryClientKeyStore {
 
     async fn reveal_client_key(
         &self,
+        _owner: &str,
         id: &ClientApiKeyId,
     ) -> AdminStoreResult<Option<ClientKeySecret>> {
         let now = Utc::now();
@@ -902,7 +982,11 @@ impl ObservabilityStore for UnusedStore {
         })
     }
 
-    async fn usage_record_detail(&self, _: &str) -> AdminStoreResult<UsageDetail> {
+    async fn usage_record_detail(
+        &self,
+        _: &str,
+        _owner: Option<&str>,
+    ) -> AdminStoreResult<UsageDetail> {
         self.usage_detail
             .lock()
             .expect("usage detail")

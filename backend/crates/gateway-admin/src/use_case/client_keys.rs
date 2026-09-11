@@ -26,8 +26,13 @@ use super::{map_store_error, publish_committed};
 /// API 消费的 Client Key 管理服务。
 #[async_trait]
 pub trait ClientKeyService: Send + Sync {
-    async fn list(&self, query: ClientKeyListQuery) -> Result<ClientKeyPage, AdminError>;
-    async fn reveal(&self, id: &ClientApiKeyId) -> Result<ClientKeySecret, AdminError>;
+    async fn list(
+        &self,
+        owner: &str,
+        query: ClientKeyListQuery,
+    ) -> Result<ClientKeyPage, AdminError>;
+    async fn reveal(&self, owner: &str, id: &ClientApiKeyId)
+    -> Result<ClientKeySecret, AdminError>;
     async fn create(
         &self,
         context: &MutationContext,
@@ -64,17 +69,25 @@ impl DefaultClientKeyService {
 
 #[async_trait]
 impl ClientKeyService for DefaultClientKeyService {
-    async fn list(&self, query: ClientKeyListQuery) -> Result<ClientKeyPage, AdminError> {
+    async fn list(
+        &self,
+        owner: &str,
+        query: ClientKeyListQuery,
+    ) -> Result<ClientKeyPage, AdminError> {
         validate_cursor(&query)?;
         self.store
-            .list_client_keys(query)
+            .list_client_keys(owner, query)
             .await
             .map_err(|error| map_store_error(error, "client API key"))
     }
 
-    async fn reveal(&self, id: &ClientApiKeyId) -> Result<ClientKeySecret, AdminError> {
+    async fn reveal(
+        &self,
+        owner: &str,
+        id: &ClientApiKeyId,
+    ) -> Result<ClientKeySecret, AdminError> {
         self.store
-            .reveal_client_key(id)
+            .reveal_client_key(owner, id)
             .await
             .map_err(|error| map_store_error(error, "client API key"))?
             .ok_or_else(|| AdminError::not_found("Client API Key 不存在"))
@@ -99,7 +112,6 @@ impl ClientKeyService for DefaultClientKeyService {
                     label: command.label,
                     group_ids: command.group_ids,
                     limits: command.limits,
-                    budget: command.budget,
                     plaintext: plaintext.clone(),
                 },
                 context,

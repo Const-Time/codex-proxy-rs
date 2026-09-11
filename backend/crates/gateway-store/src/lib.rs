@@ -30,6 +30,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 mod admin_adapter;
+mod users_adapter;
+pub use admin_adapter::UserAuthStore;
 mod bundle;
 mod config;
 mod value;

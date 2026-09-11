@@ -29,6 +29,7 @@ mod runtime_settings;
 mod schema_integrity;
 mod snapshot;
 mod snapshots;
+mod users;
 
 static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
@@ -57,6 +58,10 @@ pub(super) fn admin_account_store(pool: &PgPool) -> PgAdminAccountStore {
 
 impl TestDatabase {
     pub(super) async fn create(label: &str) -> Option<Self> {
+        Self::create_at_version(label, i64::MAX).await
+    }
+
+    pub(super) async fn create_at_version(label: &str, version: i64) -> Option<Self> {
         let database_url = crate::support::test_env("CPR_TEST_DATABASE_URL")?;
         let schema = format!("cpr_store_{label}_{}", Uuid::new_v4().simple());
         let admin = PgPoolOptions::new()
@@ -84,10 +89,20 @@ impl TestDatabase {
             .connect(&database_url)
             .await
             .expect("connect isolated test schema");
-        TEST_MIGRATOR
-            .run(&pool)
-            .await
-            .expect("apply test migrations");
+        sqlx::migrate::Migrator::with_migrations(
+            TEST_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= version)
+                .cloned()
+                .collect(),
+        )
+        .run(&pool)
+        .await
+        .expect("apply test migrations");
+        if version >= 6 {
+            sqlx::query("insert into users(id, username, password_hash, role, created_at, updated_at) values ('test-owner','test-owner','fixture-hash','admin',now(),now())")
+                .execute(&pool).await.expect("seed fixture key owner");
+        }
         Some(Self {
             admin,
             pool,
@@ -227,18 +242,19 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "account_group_accounts",
             "account_groups",
             "admin_audit_events",
-            "admin_users",
             "backup_records",
             "backup_settings",
             "client_api_key_groups",
             "client_api_keys",
-            "client_key_budget_windows",
-            "client_key_charge_events",
             "model_requests",
             "ops_events",
             "outbound_proxies",
             "provider_accounts",
             "runtime_settings",
+            "user_account_groups",
+            "user_group_budget_windows",
+            "user_group_charge_events",
+            "users",
         ]
     );
     assert_eq!(session_settings, ("codex-proxy-rs".to_owned(), 30, 5, 30));

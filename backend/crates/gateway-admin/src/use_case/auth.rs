@@ -21,10 +21,40 @@ use crate::{
 };
 
 use super::map_store_error;
+use crate::model::{
+    AdminErrorKind, MutationContext,
+    users::{CreateUser, UpdateUser, UserRecord, UserRole},
+};
 
 /// API 鉴权与管理员登录消费的统一服务。
 #[async_trait]
 pub trait AuthService: Send + Sync {
+    async fn user_groups(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::model::users::UserGroup>, AdminError>;
+    async fn current_user(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Option<UserRecord>, AdminError>;
+    async fn list_users(&self) -> Result<Vec<UserRecord>, AdminError>;
+    async fn create_user(
+        &self,
+        command: CreateUser,
+        context: &MutationContext,
+    ) -> Result<UserRecord, AdminError>;
+    async fn update_user(
+        &self,
+        command: UpdateUser,
+        context: &MutationContext,
+    ) -> Result<UserRecord, AdminError>;
+    async fn change_password(
+        &self,
+        user: &UserRecord,
+        current_password: &str,
+        new_password: &str,
+        context: &MutationContext,
+    ) -> Result<(), AdminError>;
     async fn ensure_default_admin(&self, password: &str) -> Result<bool, AdminError>;
     async fn resolve_admin_user_id(
         &self,
@@ -40,11 +70,12 @@ pub trait AuthService: Send + Sync {
 /// `Utc::now() + session_ttl` 永不越界。
 const MAX_SESSION_TTL_MINUTES: i64 = 366 * 24 * 60;
 
-/// 单管理员认证策略的最终实现。
+/// User authentication with a bootstrap administrator.
 pub(crate) struct DefaultAuthService {
     default_admin_user_id: String,
     session_ttl: Duration,
     store: Arc<dyn AuthStore>,
+    snapshot: Arc<dyn gateway_core::runtime::SnapshotControl>,
 }
 
 impl DefaultAuthService {
@@ -53,6 +84,7 @@ impl DefaultAuthService {
         default_admin_user_id: impl Into<String>,
         session_ttl_minutes: u64,
         store: Arc<dyn AuthStore>,
+        snapshot: Arc<dyn gateway_core::runtime::SnapshotControl>,
     ) -> Self {
         let minutes = i64::try_from(session_ttl_minutes)
             .unwrap_or(MAX_SESSION_TTL_MINUTES)
@@ -61,6 +93,7 @@ impl DefaultAuthService {
             default_admin_user_id: default_admin_user_id.into(),
             session_ttl: Duration::minutes(minutes),
             store,
+            snapshot,
         }
     }
 
@@ -83,6 +116,117 @@ impl DefaultAuthService {
 
 #[async_trait]
 impl AuthService for DefaultAuthService {
+    async fn user_groups(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::model::users::UserGroup>, AdminError> {
+        self.store
+            .user_groups(id)
+            .await
+            .map_err(|e| map_store_error(e, "user groups"))
+    }
+    async fn current_user(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Option<UserRecord>, AdminError> {
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        let Some(session) = self
+            .store
+            .load_session(session_id)
+            .await
+            .map_err(|e| map_store_error(e, "user session"))?
+        else {
+            return Ok(None);
+        };
+        if session.expires_at <= Utc::now() {
+            return Ok(None);
+        }
+        Ok(self
+            .store
+            .load_user(&session.admin_user_id)
+            .await
+            .map_err(|e| map_store_error(e, "user"))?
+            .filter(|user| user.enabled && user.auth_version == session.auth_version))
+    }
+
+    async fn list_users(&self) -> Result<Vec<UserRecord>, AdminError> {
+        self.store
+            .list_users()
+            .await
+            .map_err(|e| map_store_error(e, "user"))
+    }
+
+    async fn create_user(
+        &self,
+        command: CreateUser,
+        context: &MutationContext,
+    ) -> Result<UserRecord, AdminError> {
+        validate_password(&command.password)?;
+        let username = command.username.trim();
+        if username.is_empty() || username.len() > 128 || username.chars().any(char::is_control) {
+            return Err(AdminError::invalid(
+                "用户名须为 1 至 128 字节，且不能含控制字符",
+            ));
+        }
+        validate_grants(&command.group_ids)?;
+        let hash = hash_admin_password(&command.password)?;
+        self.store
+            .create_user(
+                &format!("user_{}", Uuid::now_v7().simple()),
+                username,
+                &hash,
+                &command.group_ids,
+                context,
+            )
+            .await
+            .map_err(|e| map_store_error(e, "user"))
+    }
+
+    async fn update_user(
+        &self,
+        command: UpdateUser,
+        context: &MutationContext,
+    ) -> Result<UserRecord, AdminError> {
+        validate_grants(&command.group_ids)?;
+        let (revision, user) = self
+            .store
+            .update_user(command, context)
+            .await
+            .map_err(|e| map_store_error(e, "user"))?;
+        super::publish_committed(self.snapshot.as_ref(), revision).await?;
+        Ok(user)
+    }
+
+    async fn change_password(
+        &self,
+        user: &UserRecord,
+        current_password: &str,
+        new_password: &str,
+        context: &MutationContext,
+    ) -> Result<(), AdminError> {
+        validate_password(new_password)?;
+        let hash = self
+            .store
+            .load_password_hash(&user.id)
+            .await
+            .map_err(|e| map_store_error(e, "user"))?
+            .ok_or_else(|| AdminError::not_found("用户不存在"))?;
+        if !verify_admin_password(current_password, &hash)? {
+            return Err(AdminError::invalid("当前密码不正确"));
+        }
+        self.store
+            .change_password(
+                &user.id,
+                user.auth_version,
+                &hash_admin_password(new_password)?,
+                context,
+            )
+            .await
+            .map_err(|e| map_store_error(e, "user"))
+    }
+
     async fn ensure_default_admin(&self, password: &str) -> Result<bool, AdminError> {
         let hash = hash_admin_password(password)?;
         self.store
@@ -95,18 +239,11 @@ impl AuthService for DefaultAuthService {
         &self,
         session_id: Option<&str>,
     ) -> Result<Option<String>, AdminError> {
-        let Some(session_id) = session_id else {
-            return Ok(None);
-        };
-        self.store
-            .load_session(session_id)
-            .await
-            .map(|session| {
-                session
-                    .filter(|session| session.expires_at > Utc::now())
-                    .map(|session| session.admin_user_id)
-            })
-            .map_err(|error| map_store_error(error, "administrator session"))
+        let user = self.current_user(session_id).await?;
+        if user.as_ref().is_some_and(|u| u.role != UserRole::Admin) {
+            return Err(AdminError::new(AdminErrorKind::Forbidden, "需要管理员权限"));
+        }
+        Ok(user.map(|u| u.id))
     }
 
     async fn verify_admin_api_key(&self, key: &str) -> Result<bool, AdminError> {
@@ -125,17 +262,21 @@ impl AuthService for DefaultAuthService {
     }
 
     async fn login(&self, command: LoginCommand) -> Result<LoginResult, LoginError> {
-        if command
+        let username = command
             .username
             .as_deref()
             .unwrap_or(&self.default_admin_user_id)
-            != self.default_admin_user_id
-        {
-            return Err(LoginError::InvalidCredentials);
-        }
+            .trim();
+        let user = self
+            .store
+            .find_user(username)
+            .await
+            .map_err(|_| LoginError::Unavailable)?
+            .filter(|user| user.enabled)
+            .ok_or(LoginError::InvalidCredentials)?;
         let hash = self
             .store
-            .load_password_hash(&self.default_admin_user_id)
+            .load_password_hash(&user.id)
             .await
             .map_err(|_| LoginError::Unavailable)?
             .ok_or(LoginError::InvalidCredentials)?;
@@ -149,18 +290,18 @@ impl AuthService for DefaultAuthService {
             .store_session(
                 &session_id,
                 &AdminSession {
-                    admin_user_id: self.default_admin_user_id.clone(),
+                    admin_user_id: user.id.clone(),
+                    auth_version: user.auth_version,
                     expires_at,
                 },
             )
             .await
             .map_err(|_| LoginError::Unavailable)?;
-        if self
-            .store
-            .append_audit_event(self.auth_audit("admin.login", Utc::now()))
-            .await
-            .is_err()
-        {
+        let mut audit = self.auth_audit("user.login", Utc::now());
+        audit.actor_admin_user_id = Some(user.id.clone());
+        audit.actor_ref = crate::model::auth::admin_session_actor_ref(&user.id);
+        audit.entity_ref = user.id;
+        if self.store.append_audit_event(audit).await.is_err() {
             let _ = self.store.delete_session(&session_id).await;
             return Err(LoginError::Unavailable);
         }
@@ -171,7 +312,7 @@ impl AuthService for DefaultAuthService {
     }
 
     async fn validate_session(&self, session_id: Option<&str>) -> Result<bool, AdminError> {
-        Ok(self.resolve_admin_user_id(session_id).await?.is_some())
+        Ok(self.current_user(session_id).await?.is_some())
     }
 
     async fn logout(&self, session_id: &str) -> Result<(), AdminError> {
@@ -219,4 +360,25 @@ fn valid_admin_api_key_shape(value: &str) -> bool {
     value.len() == 70
         && value.starts_with("admin-")
         && value[6..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_password(password: &str) -> Result<(), AdminError> {
+    if !(12..=1024).contains(&password.len()) {
+        return Err(AdminError::invalid("密码须为 12 至 1024 字节"));
+    }
+    Ok(())
+}
+
+fn validate_grants(groups: &[String]) -> Result<(), AdminError> {
+    if groups.len() > 200
+        || groups.iter().any(|id| id.is_empty() || id.len() > 128)
+        || groups
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != groups.len()
+    {
+        return Err(AdminError::invalid("授权分组不合法或重复"));
+    }
+    Ok(())
 }

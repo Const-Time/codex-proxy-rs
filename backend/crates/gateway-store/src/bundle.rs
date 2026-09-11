@@ -108,7 +108,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
             Arc::new(postgres::PgAccountGroupRepository::new(pool.clone())),
             Arc::new(postgres::PgProxyRepository::new(pool.clone())),
         ),
-        Arc::new(AdminAuthStoreAdapter {
+        Arc::new(UserAuthStore {
             security: postgres::PgAdminSecurityAuditRepository::new(pool.clone()),
             settings: postgres::PgRuntimeSettingsRepository::new(pool.clone()),
             state: redis::RedisAdminAuthStateRepository::new(

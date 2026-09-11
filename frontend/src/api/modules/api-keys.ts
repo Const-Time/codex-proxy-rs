@@ -61,8 +61,6 @@ export interface ApiKeyWriteParam {
   groupIds: string[]
   maxConcurrency: number
   requestsPerMinute: number
-  dailyLimitUsd: string
-  weeklyLimitUsd: string
 }
 
 interface ApiKeyUpdateParam extends ApiKeyWriteParam {

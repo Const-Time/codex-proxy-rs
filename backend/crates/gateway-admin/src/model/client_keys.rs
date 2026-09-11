@@ -5,7 +5,7 @@ use std::{fmt, num::NonZeroU16};
 use chrono::{DateTime, Utc};
 
 use gateway_core::{
-    engine::budget::{ClientBudgetLimits, ClientBudgetStatus},
+    engine::budget::ClientBudgetStatus,
     policy::{ClientApiKeyId, RateLimits},
     routing::{AccountGroupId, ProviderKind},
 };
@@ -148,7 +148,6 @@ pub struct CreateClientKey {
     pub label: Option<String>,
     pub group_ids: Vec<AccountGroupId>,
     pub limits: RateLimits,
-    pub budget: ClientBudgetLimits,
 }
 
 /// 管理用例生成 ID 与明文后的持久化命令。
@@ -159,7 +158,6 @@ pub struct NewClientKey {
     pub label: Option<String>,
     pub group_ids: Vec<AccountGroupId>,
     pub limits: RateLimits,
-    pub budget: ClientBudgetLimits,
     pub plaintext: String,
 }
 
@@ -183,8 +181,6 @@ pub struct UpdateClientKey {
     pub label: Option<String>,
     pub group_ids: Vec<AccountGroupId>,
     pub limits: RateLimits,
-    pub daily_limit_usd: Option<gateway_core::metering::Decimal>,
-    pub weekly_limit_usd: Option<gateway_core::metering::Decimal>,
 }
 
 /// 修改 Client Key 启用状态。

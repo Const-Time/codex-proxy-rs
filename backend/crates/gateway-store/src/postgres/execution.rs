@@ -82,6 +82,7 @@ impl CostSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewModelRequest {
+    pub user_id: Option<String>,
     pub id: String,
     pub client_api_key_id: Option<String>,
     pub client_api_key_ref: String,
@@ -446,11 +447,11 @@ impl ModelRequestRepository for PgExecutionStore {
                reasoning_preset, request_kind, subagent_kind, compact,
                image_generation_requested, admission_decision_ms, started_at, deadline_at,
                continuation_affinity_hash, continuation_previous_response_id_hash,
-               continuation_requested
+               continuation_requested, user_id
              ) values (
                $1, $2, $3, $4, $5, $6, $7, $8,
                $9, $10, $11, $12, $13::inet, $14, $15,
-               $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+               $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
              )",
         )
         .bind(request.id)
@@ -482,6 +483,7 @@ impl ModelRequestRepository for PgExecutionStore {
         .bind(request.continuation.affinity_hash)
         .bind(request.continuation.previous_response_id_hash)
         .bind(request.continuation.requested)
+        .bind(request.user_id)
         .execute(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("insert model request"))?;
@@ -513,14 +515,14 @@ impl ModelRequestRepository for PgExecutionStore {
                attempt_count, upstream_send_state, account_selection_wait_ms,
                capacity_used_slots, capacity_total_slots
                , continuation_affinity_hash, continuation_previous_response_id_hash,
-               continuation_requested
+               continuation_requested, user_id
              ) select
                $1, $2, $3, $4, $5, $6, $7, $8,
                $9, $10, $11, $12, $13::inet, $14, $15,
                $16, $17, $18, $19, $20, $21, $22, $23,
                $24, $25, $26,
                account.name, account.email, account.authentication_kind,
-               $27, $28, $29, 1, 'not_sent', $30, $31, $32, $33, $34, $35
+               $27, $28, $29, 1, 'not_sent', $30, $31, $32, $33, $34, $35, $36
              from (values (true)) as seed(present)
              left join provider_accounts account on account.id = $25",
         )
@@ -571,6 +573,7 @@ impl ModelRequestRepository for PgExecutionStore {
         .bind(request.continuation.affinity_hash)
         .bind(request.continuation.previous_response_id_hash)
         .bind(request.continuation.requested)
+        .bind(request.user_id)
         .execute(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("insert model request with first attempt"))?;
@@ -1344,6 +1347,7 @@ fn new_model_request_row(request: CoreNewModelRequest) -> NewModelRequest {
     let (routing_scope, routing_group_refs, routing_group_names_snapshot) =
         routing_snapshot_row(&request.routing);
     NewModelRequest {
+        user_id: request.budget_scope.map(|scope| scope.user_id),
         id: request.id.as_str().to_owned(),
         client_api_key_id: request
             .client_api_key_id

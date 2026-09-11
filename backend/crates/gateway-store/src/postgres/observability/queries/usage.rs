@@ -11,6 +11,11 @@ pub(crate) fn push_usage_filter(
     filter: &UsageRecordFilter,
     alias: &str,
 ) {
+    if let Some(owner) = &filter.owner_user_id {
+        query
+            .push(format!(" and {alias}.user_id = "))
+            .push_bind(owner.clone());
+    }
     if let Some(value) = &filter.client_api_key_ref {
         query.push(format!(" and {alias}.client_api_key_ref = "));
         query.push_bind(value.clone());
@@ -92,18 +97,7 @@ pub(crate) fn push_usage_filter(
             query.push(format!(" escape '\\' or {alias}.{column} like "));
             query.push_bind(pattern.clone());
         }
-        if value.starts_with("sk_") {
-            query.push(format!(
-                " escape '\\' or exists (
-                   select 1 from client_api_keys searched_client_key
-                    where searched_client_key.id = {alias}.client_api_key_ref
-                      and searched_client_key.key like "
-            ));
-            query.push_bind(pattern);
-            query.push(" escape '\\')");
-        } else {
-            query.push(" escape '\\'");
-        }
+        query.push(" escape '\\'");
         query.push(")");
     }
 }
@@ -235,12 +229,18 @@ pub(crate) async fn count_usage_records(
 pub(crate) async fn usage_record_detail(
     pool: &PgPool,
     request_id: &str,
+    owner: Option<&str>,
 ) -> StoreResult<UsageRecordDetail> {
     require_nonempty("model request", "id", request_id)?;
     validate_text(request_id, MAX_FILTER_BYTES, "request ID")?;
     let mut statement = QueryBuilder::<Postgres>::new(USAGE_RECORD_DETAIL_SELECT);
     statement.push(" where mr.id = ");
     statement.push_bind(request_id.to_owned());
+    if let Some(owner) = owner {
+        statement
+            .push(" and mr.user_id = ")
+            .push_bind(owner.to_owned());
+    }
     let row = statement
         .build()
         .fetch_optional(pool)

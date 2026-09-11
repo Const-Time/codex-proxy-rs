@@ -248,6 +248,68 @@ struct BootstrapAuthStore {
 
 #[async_trait]
 impl AuthStore for BootstrapAuthStore {
+    async fn find_user(
+        &self,
+        username: &str,
+    ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
+        self.load_user(username).await
+    }
+    async fn load_user(
+        &self,
+        id: &str,
+    ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
+        Ok(
+            (id == "admin").then(|| gateway_admin::model::users::UserRecord {
+                id: id.to_owned(),
+                username: id.to_owned(),
+                role: gateway_admin::model::users::UserRole::Admin,
+                enabled: true,
+                auth_version: 1,
+                group_ids: vec![],
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }),
+        )
+    }
+    async fn user_groups(
+        &self,
+        _: &str,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserGroup>> {
+        Ok(vec![])
+    }
+    async fn list_users(&self) -> AdminStoreResult<Vec<gateway_admin::model::users::UserRecord>> {
+        Ok(vec![])
+    }
+    async fn create_user(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[String],
+        _: &gateway_admin::model::MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::users::UserRecord> {
+        panic!("unexpected user creation in this fixture")
+    }
+    async fn update_user(
+        &self,
+        _: gateway_admin::model::users::UpdateUser,
+        _: &gateway_admin::model::MutationContext,
+    ) -> AdminStoreResult<(
+        gateway_admin::model::Revision,
+        gateway_admin::model::users::UserRecord,
+    )> {
+        panic!("unexpected user mutation in this fixture")
+    }
+    async fn change_password(
+        &self,
+        _: &str,
+        _: i64,
+        _: &str,
+        _: &gateway_admin::model::MutationContext,
+    ) -> AdminStoreResult<()> {
+        panic!("unexpected password mutation in this fixture")
+    }
+
     async fn load_password_hash(&self, _: &str) -> AdminStoreResult<Option<String>> {
         Ok(self.password_hash.lock().expect("password hash").clone())
     }
@@ -482,12 +544,17 @@ impl AccountRuntimeStore for UnavailableStore {
 
 #[async_trait]
 impl ClientKeyStore for UnavailableStore {
-    async fn list_client_keys(&self, _: ClientKeyListQuery) -> AdminStoreResult<ClientKeyPage> {
+    async fn list_client_keys(
+        &self,
+        _owner: &str,
+        _: ClientKeyListQuery,
+    ) -> AdminStoreResult<ClientKeyPage> {
         Err(unavailable("client key list"))
     }
 
     async fn reveal_client_key(
         &self,
+        _owner: &str,
         _: &ClientApiKeyId,
     ) -> AdminStoreResult<Option<ClientKeySecret>> {
         Err(unavailable("client key"))
@@ -562,7 +629,11 @@ impl ObservabilityStore for UnavailableStore {
         Err(unavailable("usage records"))
     }
 
-    async fn usage_record_detail(&self, _: &str) -> AdminStoreResult<UsageDetail> {
+    async fn usage_record_detail(
+        &self,
+        _: &str,
+        _owner: Option<&str>,
+    ) -> AdminStoreResult<UsageDetail> {
         Err(unavailable("usage detail"))
     }
 

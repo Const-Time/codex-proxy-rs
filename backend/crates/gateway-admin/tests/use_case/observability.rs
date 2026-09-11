@@ -725,7 +725,11 @@ impl ObservabilityStore for FixtureObservabilityStore {
         })
     }
 
-    async fn usage_record_detail(&self, _: &str) -> AdminStoreResult<UsageDetail> {
+    async fn usage_record_detail(
+        &self,
+        _: &str,
+        _owner: Option<&str>,
+    ) -> AdminStoreResult<UsageDetail> {
         Err(super::unavailable("usage detail"))
     }
 

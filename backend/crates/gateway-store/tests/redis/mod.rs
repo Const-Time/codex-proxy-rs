@@ -21,6 +21,7 @@ use uuid::Uuid;
 #[test]
 fn admin_auth_state_rejects_invalid_ttl_boundaries() {
     let session = AdminSessionRecord {
+        auth_version: 1,
         admin_user_id: "admin".to_owned(),
         expires_at: Utc::now() - chrono::Duration::seconds(1),
     };
@@ -45,6 +46,7 @@ async fn admin_auth_state_keeps_fixed_ttl_and_opaque_keys() {
     let password = "must-never-enter-redis";
     let admin_api_key = "admin-must-never-enter-redis";
     let session = AdminSessionRecord {
+        auth_version: 1,
         admin_user_id: "default-admin".to_owned(),
         expires_at: Utc::now() + chrono::Duration::seconds(60),
     };

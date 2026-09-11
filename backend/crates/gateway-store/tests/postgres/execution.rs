@@ -24,6 +24,8 @@ fn postgres_execution_adapter_implements_core_port() {
 fn model_request_rejects_mismatched_client_key_live_id() {
     let started_at = Utc::now();
     let request = NewModelRequest {
+        user_id: None,
+
         admission_decision_ms: None,
         id: "request-1".to_owned(),
         client_api_key_id: Some("key-live".to_owned()),
@@ -76,6 +78,8 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
     .await
     .expect("seed provider account");
     let request = NewModelRequest {
+        user_id: None,
+
         admission_decision_ms: None,
         id: "req_merged".to_owned(),
         client_api_key_id: None,
@@ -191,6 +195,8 @@ async fn model_request_persists_group_routing_snapshot_without_live_group_foreig
     let started_at = Utc::now();
     repository
         .insert_model_request(NewModelRequest {
+            user_id: None,
+
             admission_decision_ms: None,
             id: "req_group_history".to_owned(),
             client_api_key_id: None,
@@ -808,7 +814,7 @@ async fn successful_http_downgrade_should_mark_pending_websocket_failures_recove
     }
     let repository = super::observability_repository(&database.pool);
     let failed_detail = repository
-        .usage_record_detail("req_websocket_failed_first")
+        .usage_record_detail("req_websocket_failed_first", None)
         .await
         .unwrap();
     assert_eq!(
@@ -820,7 +826,7 @@ async fn successful_http_downgrade_should_mark_pending_websocket_failures_recove
         "recovered_by"
     );
     let recovered_detail = repository
-        .usage_record_detail("req_http_fallback_succeeded")
+        .usage_record_detail("req_http_fallback_succeeded", None)
         .await
         .unwrap();
     assert_eq!(recovered_detail.related_requests.len(), 2);
@@ -1143,7 +1149,7 @@ async fn diagnostic_trace_is_finalized_atomically_and_available_for_failed_reque
     );
     let repository = super::observability_repository(&database.pool);
     let detail = repository
-        .usage_record_detail("req_diagnostic_failed")
+        .usage_record_detail("req_diagnostic_failed", None)
         .await
         .unwrap();
     assert_eq!(detail.trace, Some(trace));

@@ -79,6 +79,7 @@ pub struct AccountGroupListQuery {
 /// Complete account group summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountGroupRecord {
+    pub budget: gateway_core::engine::budget::ClientBudgetLimits,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,
@@ -107,6 +108,7 @@ pub struct AccountGroupPage {
 /// Create an account group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateAccountGroup {
+    pub budget: gateway_core::engine::budget::ClientBudgetLimits,
     pub name: String,
     pub description: Option<String>,
     pub color: AccountGroupColor,
@@ -115,6 +117,7 @@ pub struct CreateAccountGroup {
 /// Store-ready create command with a generated stable ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAccountGroup {
+    pub budget: gateway_core::engine::budget::ClientBudgetLimits,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,
@@ -124,6 +127,7 @@ pub struct NewAccountGroup {
 /// Update an account group's descriptive fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAccountGroup {
+    pub budget: gateway_core::engine::budget::ClientBudgetLimits,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,

@@ -273,6 +273,7 @@ pub async fn initialize(
         config.default_username,
         config.session_ttl_minutes,
         store.auth(),
+        snapshot.clone(),
     ));
     auth.ensure_default_admin(config.default_password.expose())
         .await?;
