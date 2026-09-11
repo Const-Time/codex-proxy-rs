@@ -1,6 +1,10 @@
 name: Verify container
 description: Scan and validate a built image with the deployment Compose configuration
 inputs:
+  private-code-scanning:
+    description: Upload SARIF for a private repository with Code Security enabled
+    required: false
+    default: 'false'
   image:
     description: Local image tag or immutable registry digest to validate
     required: true
@@ -58,7 +62,7 @@ runs:
     - name: Upload Trivy SARIF
       if: >-
         ${{ always() && hashFiles('trivy-results.sarif') != '' &&
-            (!github.event.repository.private || vars.ENABLE_PRIVATE_CODE_SCANNING == 'true') &&
+            (!github.event.repository.private || inputs.private-code-scanning == 'true') &&
             (github.event_name != 'pull_request' ||
              github.event.pull_request.head.repo.full_name == github.repository) }}
       uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
