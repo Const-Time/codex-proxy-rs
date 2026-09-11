@@ -183,7 +183,7 @@ impl AccountGroupService for DefaultAccountGroupService {
             && error.kind() == AdminStoreErrorKind::Conflict
         {
             return Err(AdminError::conflict(
-                "该分组仍被密钥、额度或计费记录引用，无法删除。请先调整密钥分组；已有额度或计费记录的分组请改为禁用。",
+                "该分组仍被密钥引用，无法删除。请先删除密钥或调整其分组；历史额度和消费记录会保留。",
             ));
         }
         self.publish(result).await

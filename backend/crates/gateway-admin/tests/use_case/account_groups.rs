@@ -64,8 +64,8 @@ async fn group_delete_conflict_explains_references_without_masking_other_errors(
         assert_eq!(error.kind(), expected_kind);
         assert!(!error.message().contains("private database context"));
         if expected_kind == AdminErrorKind::Conflict {
-            assert!(error.message().contains("密钥、额度或计费记录"));
-            assert!(error.message().contains("禁用"));
+            assert!(error.message().contains("仍被密钥引用"));
+            assert!(error.message().contains("历史额度和消费记录会保留"));
         } else {
             assert!(!error.message().contains("禁用"));
         }
