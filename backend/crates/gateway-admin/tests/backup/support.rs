@@ -627,6 +627,7 @@ impl AuthStore for FakeAuthStore {
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
         Ok(
             (id == "admin").then(|| gateway_admin::model::users::UserRecord {
+                limits: gateway_core::policy::RateLimits::unlimited(),
                 id: id.to_owned(),
                 username: id.to_owned(),
                 role: gateway_admin::model::users::UserRole::Admin,
@@ -653,6 +654,7 @@ impl AuthStore for FakeAuthStore {
         _: &str,
         _: &str,
         _: &[String],
+        _: gateway_core::policy::RateLimits,
         _: &gateway_admin::model::MutationContext,
     ) -> AdminStoreResult<gateway_admin::model::users::UserRecord> {
         panic!("unexpected user creation in this fixture")

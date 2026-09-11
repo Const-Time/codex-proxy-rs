@@ -272,6 +272,7 @@ impl AuthStore for MemoryAuthStore {
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
         Ok((["admin_1", "ordinary"].contains(&id)).then(|| {
             gateway_admin::model::users::UserRecord {
+                limits: gateway_core::policy::RateLimits::unlimited(),
                 id: id.to_owned(),
                 username: id.to_owned(),
                 role: if id == "ordinary" {
@@ -302,6 +303,7 @@ impl AuthStore for MemoryAuthStore {
         _: &str,
         _: &str,
         _: &[String],
+        _: gateway_core::policy::RateLimits,
         _: &gateway_admin::model::MutationContext,
     ) -> AdminStoreResult<gateway_admin::model::users::UserRecord> {
         panic!("unexpected user creation in this fixture")

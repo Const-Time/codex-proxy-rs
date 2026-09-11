@@ -15,6 +15,7 @@ import {
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useCopyText } from '@/composables/useCopyText'
 import { useIdSet } from '@/composables/useIdSet'
+import { useAuthStore } from '@/stores/modules/auth'
 import { errorMessage } from '@/utils/async'
 
 type ApiKeyRow = Awaited<ReturnType<typeof getApiKeys>>['items'][number]
@@ -32,6 +33,7 @@ export function useApiKeyMutations(options: {
   reload: () => Promise<unknown>
 }) {
   const copyText = useCopyText()
+  const authStore = useAuthStore()
   const showFormModal = shallowRef(false)
   const showDeleteModal = shallowRef(false)
   const showSingleDeleteModal = shallowRef(false)
@@ -86,8 +88,8 @@ export function useApiKeyMutations(options: {
           name: form.value.name.trim(),
           label: form.value.label.trim() || null,
           groupIds: [...new Set(form.value.groupIds)],
-          maxConcurrency: parseLimit(form.value.maxConcurrency),
-          requestsPerMinute: parseLimit(form.value.requestsPerMinute),
+          maxConcurrency: authStore.isAdmin ? parseLimit(form.value.maxConcurrency) : 0,
+          requestsPerMinute: authStore.isAdmin ? parseLimit(form.value.requestsPerMinute) : 0,
         }
         const current = editingKey.value
         if (current) {

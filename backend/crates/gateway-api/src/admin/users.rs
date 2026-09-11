@@ -22,6 +22,8 @@ pub struct UserView {
     role: &'static str,
     enabled: bool,
     group_ids: Vec<String>,
+    max_concurrency: u64,
+    requests_per_minute: u64,
     created_at: String,
     updated_at: String,
 }
@@ -33,6 +35,8 @@ impl From<UserRecord> for UserView {
             username: user.username,
             role: user.role.as_str(),
             enabled: user.enabled,
+            max_concurrency: user.limits.max_concurrency,
+            requests_per_minute: user.limits.requests_per_minute,
             group_ids: user.group_ids,
             created_at: user.created_at.to_rfc3339(),
             updated_at: user.updated_at.to_rfc3339(),
@@ -43,6 +47,10 @@ impl From<UserRecord> for UserView {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateUserRequest {
+    #[serde(default)]
+    max_concurrency: u64,
+    #[serde(default)]
+    requests_per_minute: u64,
     username: String,
     password: String,
     #[serde(default)]
@@ -52,6 +60,10 @@ struct CreateUserRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateUserRequest {
+    #[serde(default)]
+    max_concurrency: u64,
+    #[serde(default)]
+    requests_per_minute: u64,
     id: String,
     enabled: bool,
     group_ids: Vec<String>,
@@ -152,6 +164,10 @@ where
                 username: body.username,
                 password: body.password,
                 group_ids: body.group_ids,
+                limits: gateway_core::policy::RateLimits {
+                    max_concurrency: body.max_concurrency,
+                    requests_per_minute: body.requests_per_minute,
+                },
             },
             &auth.context().mutation_context(),
         )
@@ -179,6 +195,10 @@ where
                 id: body.id,
                 enabled: body.enabled,
                 group_ids: body.group_ids,
+                limits: gateway_core::policy::RateLimits {
+                    max_concurrency: body.max_concurrency,
+                    requests_per_minute: body.requests_per_minute,
+                },
             },
             &auth.context().mutation_context(),
         )

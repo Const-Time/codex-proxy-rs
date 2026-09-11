@@ -517,11 +517,39 @@ impl DefaultExecutionService {
             }
         }
         let admission_decision_ms = duration_ms(admission_started_at.elapsed());
-        let admission = AdmissionLease {
+        let mut admission = AdmissionLease {
             port: Arc::clone(&self.admissions),
-            client_api_key_id: client.policy.key_id().clone(),
+            scopes: vec![client.policy.key_id().clone()],
             model_request_id: request_id.clone(),
         };
+        if let Some((scope, limits)) = client.policy.user_admission() {
+            let decision = self
+                .admissions
+                .admit(ClientAdmissionRequest {
+                    model_request_id: request_id.clone(),
+                    client_api_key_id: scope.clone(),
+                    lease_ttl: MODEL_REQUEST_DEADLINE,
+                    limits: *limits,
+                })
+                .await;
+            match decision {
+                Ok(ClientAdmissionDecision::Granted) => admission.scopes.push(scope.clone()),
+                Ok(ClientAdmissionDecision::Rejected(_)) => {
+                    admission.release().await;
+                    return Err(GatewayError::new(
+                        GatewayErrorKind::RateLimited,
+                        "request exceeds user limits",
+                    ));
+                }
+                Err(_) => {
+                    admission.release().await;
+                    return Err(GatewayError::new(
+                        GatewayErrorKind::NoAvailableProvider,
+                        "user admission is temporarily unavailable",
+                    ));
+                }
+            }
+        }
         let routing = client.policy.account_scope().routing_snapshot();
         let expected_group = if routing.groups_snapshot().len() == 1 {
             Some(routing.groups_snapshot()[0].id().clone())
@@ -972,7 +1000,7 @@ impl AccountProbe for DefaultExecutionService {
 
 struct AdmissionLease {
     port: Arc<dyn ClientAdmissionPort>,
-    client_api_key_id: ClientApiKeyId,
+    scopes: Vec<ClientApiKeyId>,
     model_request_id: ModelRequestId,
 }
 
@@ -984,12 +1012,10 @@ async fn settle_budget(port: &dyn ClientBudgetPort, charge: ClientBudgetCharge) 
 
 impl AdmissionLease {
     async fn release(self) {
-        if let Err(error) = self
-            .port
-            .release(&self.client_api_key_id, &self.model_request_id)
-            .await
-        {
-            tracing::warn!(%error, "Client admission 释放失败，依赖租约 TTL 收敛");
+        for scope in &self.scopes {
+            if let Err(error) = self.port.release(scope, &self.model_request_id).await {
+                tracing::warn!(%error, "Client admission 释放失败，依赖租约 TTL 收敛");
+            }
         }
     }
 }

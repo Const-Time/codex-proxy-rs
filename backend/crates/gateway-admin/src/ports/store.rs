@@ -213,6 +213,7 @@ pub trait AuthStore: Send + Sync {
         username: &str,
         password_hash: &str,
         group_ids: &[String],
+        limits: gateway_core::policy::RateLimits,
         context: &MutationContext,
     ) -> AdminStoreResult<crate::model::users::UserRecord>;
     async fn update_user(

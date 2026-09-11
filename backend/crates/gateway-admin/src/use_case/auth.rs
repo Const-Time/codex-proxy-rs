@@ -26,6 +26,15 @@ use crate::model::{
     users::{CreateUser, UpdateUser, UserRecord, UserRole},
 };
 
+fn validate_user_limits(limits: gateway_core::policy::RateLimits) -> Result<(), AdminError> {
+    if limits.max_concurrency > 9_007_199_254_740_991
+        || limits.requests_per_minute > 9_007_199_254_740_991
+    {
+        return Err(AdminError::invalid("并发和 RPM 必须为安全范围内的非负整数"));
+    }
+    Ok(())
+}
+
 /// API 鉴权与管理员登录消费的统一服务。
 #[async_trait]
 pub trait AuthService: Send + Sync {
@@ -164,6 +173,7 @@ impl AuthService for DefaultAuthService {
         context: &MutationContext,
     ) -> Result<UserRecord, AdminError> {
         validate_password(&command.password)?;
+        validate_user_limits(command.limits)?;
         let username = command.username.trim();
         if username.is_empty() || username.len() > 128 || username.chars().any(char::is_control) {
             return Err(AdminError::invalid(
@@ -178,6 +188,7 @@ impl AuthService for DefaultAuthService {
                 username,
                 &hash,
                 &command.group_ids,
+                command.limits,
                 context,
             )
             .await
@@ -190,6 +201,7 @@ impl AuthService for DefaultAuthService {
         context: &MutationContext,
     ) -> Result<UserRecord, AdminError> {
         validate_grants(&command.group_ids)?;
+        validate_user_limits(command.limits)?;
         let (revision, user) = self
             .store
             .update_user(command, context)

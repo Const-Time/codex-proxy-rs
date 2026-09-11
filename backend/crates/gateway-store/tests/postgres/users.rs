@@ -73,7 +73,14 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     seed_group(&db).await;
     for user in ["alice", "bob"] {
         let created = auth
-            .create_user(user, user, "user-hash", &[GROUP.into()], &context("admin"))
+            .create_user(
+                user,
+                user,
+                "user-hash",
+                &[GROUP.into()],
+                gateway_core::policy::RateLimits::unlimited(),
+                &context("admin"),
+            )
             .await
             .unwrap();
         assert_eq!(created.role, UserRole::User);
@@ -81,16 +88,30 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     }
     assert_eq!(auth.find_user("ALICE").await.unwrap().unwrap().id, "alice");
     assert_eq!(
-        auth.create_user("duplicate", "Alice", "hash", &[], &context("admin"))
-            .await
-            .unwrap_err()
-            .kind(),
+        auth.create_user(
+            "duplicate",
+            "Alice",
+            "hash",
+            &[],
+            gateway_core::policy::RateLimits::unlimited(),
+            &context("admin")
+        )
+        .await
+        .unwrap_err()
+        .kind(),
         AdminStoreErrorKind::Conflict
     );
     assert!(
-        auth.create_user("intruder", "intruder", "hash", &[], &context("alice"))
-            .await
-            .is_err()
+        auth.create_user(
+            "intruder",
+            "intruder",
+            "hash",
+            &[],
+            gateway_core::policy::RateLimits::unlimited(),
+            &context("alice")
+        )
+        .await
+        .is_err()
     );
     let keys = PgAdminClientKeyStore::new(db.pool.clone());
     keys.create_client_key(key("alice-key"), &context("alice"))
@@ -151,6 +172,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     );
     auth.update_user(
         UpdateUser {
+            limits: gateway_core::policy::RateLimits::unlimited(),
             id: "alice".into(),
             enabled: true,
             group_ids: vec![],
@@ -181,7 +203,14 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
         .await
         .unwrap();
     let user = auth
-        .create_user("alice", "alice", "old-hash", &[], &context("admin"))
+        .create_user(
+            "alice",
+            "alice",
+            "old-hash",
+            &[],
+            gateway_core::policy::RateLimits::unlimited(),
+            &context("admin"),
+        )
         .await
         .unwrap();
     assert!(
@@ -205,6 +234,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     let (_, disabled) = auth
         .update_user(
             UpdateUser {
+                limits: gateway_core::policy::RateLimits::unlimited(),
                 id: "alice".into(),
                 enabled: false,
                 group_ids: vec![],
@@ -218,6 +248,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     assert!(
         auth.update_user(
             UpdateUser {
+                limits: gateway_core::policy::RateLimits::unlimited(),
                 id: "admin".into(),
                 enabled: false,
                 group_ids: vec![]

@@ -10,6 +10,7 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
 import { usePageSelection } from '@/composables/usePageSelection'
 import { useUserGroupCatalog } from '@/composables/useUserGroupCatalog'
+import { useAuthStore } from '@/stores/modules/auth'
 import ApiKeyActions from './components/ApiKeyActions.vue'
 import ApiKeyBudgetCell from './components/ApiKeyBudgetCell.vue'
 import ApiKeyCreateModal from './components/ApiKeyCreateModal.vue'
@@ -25,6 +26,11 @@ import { useApiKeyUse } from './composables/useApiKeyUse'
 import { apiKeyColumns } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
+const authStore = useAuthStore()
+function effectiveLimit(keyLimit: number, field: 'maxConcurrency' | 'requestsPerMinute') {
+  const userLimit = authStore.user?.[field] ?? 0
+  return keyLimit && userLimit ? Math.min(keyLimit, userLimit) : keyLimit || userLimit || '∞'
+}
 const {
   loading,
   apiKeys,
@@ -163,14 +169,14 @@ watch(
                 <dt class="text-cp-text-tertiary">
                   并发
                 </dt>
-                <dd class="m-0 truncate text-cp-text" :title="String(row.maxConcurrency || '∞')">
-                  {{ row.maxConcurrency || '∞' }}
+                <dd class="m-0 truncate text-cp-text" title="用户总并发由所有密钥共享">
+                  {{ effectiveLimit(row.maxConcurrency, 'maxConcurrency') }}
                 </dd>
                 <dt class="text-cp-text-tertiary">
                   RPM
                 </dt>
-                <dd class="m-0 truncate text-cp-text" :title="String(row.requestsPerMinute || '∞')">
-                  {{ row.requestsPerMinute || '∞' }}
+                <dd class="m-0 truncate text-cp-text" title="用户总 RPM 由所有密钥共享">
+                  {{ effectiveLimit(row.requestsPerMinute, 'requestsPerMinute') }}
                 </dd>
               </dl>
             </template>

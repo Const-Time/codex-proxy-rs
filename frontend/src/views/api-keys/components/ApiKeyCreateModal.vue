@@ -10,6 +10,7 @@ import BaseForm from '@/components/base/BaseForm/index.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
+import { useAuthStore } from '@/stores/modules/auth'
 
 const props = defineProps<{
   groups: UserGroup[]
@@ -18,11 +19,15 @@ const props = defineProps<{
   createdKey: string
   saving: boolean
 }>()
+
 const emit = defineEmits<{
   save: []
   copy: [text: string]
   importCcs: []
 }>()
+
+const authStore = useAuthStore()
+
 const open = defineModel<boolean>({ default: false })
 const createdOpen = defineModel<boolean>('createdOpen', { default: false })
 const form = defineModel<ApiKeyFormValue>('form', { required: true })
@@ -80,7 +85,7 @@ const selectedGroup = computed(() => props.groups.find(group => group.id === sel
           日限额：{{ selectedGroup.dailyLimitUsd }} USD，周限额：{{ selectedGroup.weeklyLimitUsd }} USD（0 表示不限）。同一分组内的所有个人密钥共用额度。
         </p>
       </BaseFormItem>
-      <div class="grid gap-6 sm:grid-cols-2">
+      <div v-if="authStore.isAdmin" class="grid gap-6 sm:grid-cols-2">
         <BaseFormItem label="最大并发">
           <BaseInput
             v-model="form.maxConcurrency"
@@ -104,6 +109,9 @@ const selectedGroup = computed(() => props.groups.find(group => group.id === sel
           />
         </BaseFormItem>
       </div>
+      <p v-if="!authStore.isAdmin" class="text-cp-sm text-cp-text-secondary">
+        并发和 RPM 由管理员统一设置，同一用户的所有密钥共用限制。
+      </p>
     </BaseForm>
 
     <template #footer>

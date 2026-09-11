@@ -59,6 +59,7 @@ impl SnapshotSettingsFacts {
 /// Store 读取到的一个启用 Client API Key 策略事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotClientPolicyFacts {
+    user_admission: Option<(ClientApiKeyId, RateLimits)>,
     key_id: ClientApiKeyId,
     plaintext_key: PlaintextClientApiKey,
     group_ids: Vec<AccountGroupId>,
@@ -66,6 +67,11 @@ pub struct SnapshotClientPolicyFacts {
 }
 
 impl SnapshotClientPolicyFacts {
+    #[must_use]
+    pub fn with_user_admission(mut self, scope: Option<(ClientApiKeyId, RateLimits)>) -> Self {
+        self.user_admission = scope;
+        self
+    }
     #[must_use]
     pub fn new(
         key_id: ClientApiKeyId,
@@ -78,6 +84,7 @@ impl SnapshotClientPolicyFacts {
             plaintext_key,
             group_ids,
             limits,
+            user_admission: None,
         }
     }
 }
@@ -390,13 +397,16 @@ async fn compile_runtime_snapshot(
                     .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?,
             )
         };
-        client_policies.push(ClientPolicy::new(
-            policy.key_id,
-            policy.plaintext_key,
-            Arc::new(account_scope),
-            true,
-            policy.limits,
-        ));
+        client_policies.push(
+            ClientPolicy::new(
+                policy.key_id,
+                policy.plaintext_key,
+                Arc::new(account_scope),
+                true,
+                policy.limits,
+            )
+            .with_user_admission(policy.user_admission),
+        );
     }
 
     RuntimeSnapshot::new(

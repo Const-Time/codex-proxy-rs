@@ -54,6 +54,7 @@ const CLIENT_API_KEY_LAST_USED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientApiKeySnapshot {
+    pub user_admission: Option<(ClientApiKeyId, RateLimits)>,
     pub id: ClientApiKeyId,
     pub plaintext_key: PlaintextClientApiKey,
     pub group_ids: Vec<AccountGroupId>,
@@ -70,6 +71,7 @@ impl ClientApiKeySnapshot {
     ) -> StoreResult<Self> {
         Ok(Self {
             id: ClientApiKeyId::new(id).map_err(|_| invalid("persisted key ID is invalid"))?,
+            user_admission: None,
             plaintext_key: PlaintextClientApiKey::new(key)
                 .map_err(|_| invalid("persisted plaintext key is invalid"))?,
             group_ids: group_ids
@@ -1066,8 +1068,9 @@ pub(crate) async fn update_client_api_key_in_transaction(
     key.validate()?;
     let result = sqlx::query(
         "update client_api_keys
-         set name = $2, label = $3, max_concurrency = $4,
-             requests_per_minute = $5, updated_at = now()
+         set name = $2, label = $3,
+             max_concurrency = case when exists(select 1 from users where users.id = client_api_keys.owner_user_id and role = 'admin') then $4 else max_concurrency end,
+             requests_per_minute = case when exists(select 1 from users where users.id = client_api_keys.owner_user_id and role = 'admin') then $5 else requests_per_minute end, updated_at = now()
          where id = $1",
     )
     .bind(&key.id)

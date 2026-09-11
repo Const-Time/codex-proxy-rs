@@ -168,6 +168,146 @@ fn reused_client_uses_updated_limits_for_each_execution() {
     );
 }
 
+#[derive(Default)]
+struct SharedUserAdmissions {
+    active: Mutex<BTreeMap<ClientApiKeyId, BTreeSet<ModelRequestId>>>,
+    counts: Mutex<BTreeMap<ClientApiKeyId, u64>>,
+}
+
+impl ClientAdmissionPort for SharedUserAdmissions {
+    fn admit(
+        &self,
+        request: ClientAdmissionRequest,
+    ) -> BoxFuture<'_, Result<ClientAdmissionDecision, ClientAdmissionError>> {
+        Box::pin(async move {
+            use gateway_core::engine::admission::ClientAdmissionRejection;
+            let mut active = self.active.lock().unwrap();
+            let ids = active.entry(request.client_api_key_id.clone()).or_default();
+            if request.limits.max_concurrency > 0
+                && ids.len() as u64 >= request.limits.max_concurrency
+            {
+                return Ok(ClientAdmissionDecision::Rejected(
+                    ClientAdmissionRejection::ConcurrencyLimited,
+                ));
+            }
+            let mut counts = self.counts.lock().unwrap();
+            let count = counts.entry(request.client_api_key_id).or_default();
+            if request.limits.requests_per_minute > 0
+                && *count >= request.limits.requests_per_minute
+            {
+                return Ok(ClientAdmissionDecision::Rejected(
+                    ClientAdmissionRejection::RateLimited,
+                ));
+            }
+            *count += 1;
+            ids.insert(request.model_request_id);
+            Ok(ClientAdmissionDecision::Granted)
+        })
+    }
+    fn release<'a>(
+        &'a self,
+        scope: &'a ClientApiKeyId,
+        request: &'a ModelRequestId,
+    ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
+        Box::pin(async move {
+            Ok(self
+                .active
+                .lock()
+                .unwrap()
+                .entry(scope.clone())
+                .or_default()
+                .remove(request))
+        })
+    }
+    fn restore(
+        &self,
+        _: ClientAdmissionRecovery,
+    ) -> BoxFuture<'_, Result<ClientAdmissionRestoreResult, ClientAdmissionError>> {
+        Box::pin(async { Ok(ClientAdmissionRestoreResult::default()) })
+    }
+}
+
+#[test]
+fn user_concurrency_and_rpm_are_shared_across_distinct_keys_and_release_both_scopes() {
+    for limits in [
+        RateLimits {
+            max_concurrency: 1,
+            requests_per_minute: 0,
+        },
+        RateLimits {
+            max_concurrency: 0,
+            requests_per_minute: 1,
+        },
+    ] {
+        let provider = ProviderKind::new("openai").unwrap();
+        let clients = ["a", "b", "other"].map(|id| {
+            ClientPolicy::new(
+                ClientApiKeyId::new(format!("key_{id}")).unwrap(),
+                PlaintextClientApiKey::new(format!("sk_{id}")).unwrap(),
+                account_scope(&provider, "acct_start"),
+                true,
+                RateLimits::unlimited(),
+            )
+            .with_user_admission(Some((
+                ClientApiKeyId::user_admission(if id == "other" { "bob" } else { "alice" }),
+                limits,
+            )))
+        });
+        let admissions = Arc::new(SharedUserAdmissions::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot_with_clients(1, clients.to_vec())),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            admissions.clone(),
+            Arc::new(UnusedCircuits),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let next = |key: &str| StartExecution {
+            client: service.authenticate(key).unwrap(),
+            public_model: PublicModelId::new("gpt-start").unwrap(),
+            operation: start_operation(),
+            metadata: ExecutionRequestMetadata {
+                protocol: "openai".into(),
+                endpoint: "/v1/responses".into(),
+                transport: ClientTransport::HttpSse,
+                stream: true,
+                client_ip: None,
+                user_agent: None,
+                previous_response_id: None,
+            },
+        };
+        let first = block_on(service.start(next("sk_a"))).unwrap();
+        if limits.requests_per_minute > 0 {
+            block_on(first.session.detach_finalize());
+        } else {
+            assert!(
+                matches!(block_on(service.start(next("sk_b"))), Err(error) if error.kind() == GatewayErrorKind::RateLimited)
+            );
+            let other = block_on(service.start(next("sk_other"))).unwrap();
+            block_on(other.session.detach_finalize());
+            block_on(first.session.detach_finalize());
+            let after_release = block_on(service.start(next("sk_b"))).unwrap();
+            block_on(after_release.session.detach_finalize());
+        }
+        if limits.requests_per_minute > 0 {
+            assert!(
+                matches!(block_on(service.start(next("sk_b"))), Err(error) if error.kind() == GatewayErrorKind::RateLimited)
+            );
+            let other = block_on(service.start(next("sk_other"))).unwrap();
+            block_on(other.session.detach_finalize());
+        }
+        assert!(
+            admissions
+                .active
+                .lock()
+                .unwrap()
+                .values()
+                .all(BTreeSet::is_empty)
+        );
+    }
+}
+
 #[test]
 fn reused_client_cannot_start_after_key_disable_or_snapshot_suspension() {
     for suspend in [false, true] {
@@ -1163,6 +1303,20 @@ fn start_snapshot() -> RuntimeSnapshot {
 
 fn start_snapshot_with_policy(revision: u64, enabled: bool, limits: RateLimits) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
+    start_snapshot_with_clients(
+        revision,
+        vec![ClientPolicy::new(
+            ClientApiKeyId::new("key_start_test").unwrap(),
+            PlaintextClientApiKey::new("sk_start_test").unwrap(),
+            account_scope(&provider, "acct_start"),
+            enabled,
+            limits,
+        )],
+    )
+}
+
+fn start_snapshot_with_clients(revision: u64, clients: Vec<ClientPolicy>) -> RuntimeSnapshot {
+    let provider = ProviderKind::new("openai").expect("provider kind");
     let capabilities =
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
@@ -1174,17 +1328,11 @@ fn start_snapshot_with_policy(revision: u64, enabled: bool, limits: RateLimits) 
         ),
         vec![provider.clone()],
         vec![ProviderModel::new(
-            provider.clone(),
+            provider,
             UpstreamModelId::new("gpt-start").expect("model ID"),
             capabilities,
         )],
-        vec![ClientPolicy::new(
-            ClientApiKeyId::new("key_start_test").expect("client API key ID"),
-            PlaintextClientApiKey::new("sk_start_test").expect("plaintext client API key"),
-            account_scope(&provider, "acct_start"),
-            enabled,
-            limits,
-        )],
+        clients,
     )
     .expect("start snapshot")
 }
