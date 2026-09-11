@@ -458,6 +458,7 @@ export interface UsageRecordFilters {
 }
 
 interface UsageRangeQuery {
+  personal?: boolean
   groupId?: string
   accountId?: string
   userId?: string
@@ -480,6 +481,7 @@ type UsagePageQuery = UsageRangeQuery & PageQuery
 type OpsErrorPageQuery = UsagePageQuery
 
 interface UsageDetailQuery {
+  personal?: boolean
   id: string
 }
 

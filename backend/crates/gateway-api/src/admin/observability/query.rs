@@ -27,6 +27,8 @@ impl DashboardQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageQuery {
+    #[serde(default)]
+    pub personal: bool,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
     pub client_transport: Option<String>,
@@ -69,6 +71,8 @@ impl UsageQuery {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DetailQuery {
+    #[serde(default)]
+    pub personal: bool,
     pub id: String,
 }
 
@@ -83,6 +87,12 @@ impl DetailQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DiagnosticsQuery {
+    pub group_id: Option<String>,
+    pub account_id: Option<String>,
+    pub user_id: Option<String>,
+    pub client_transport: Option<String>,
+    #[serde(default)]
+    pub personal: bool,
     pub dimension: Option<String>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
@@ -103,6 +113,8 @@ impl DiagnosticsQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpsQuery {
+    #[serde(default)]
+    pub personal: bool,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
     pub client_transport: Option<String>,

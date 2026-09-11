@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import type { Ref } from 'vue'
 import type { UsageDisplayRecord } from '../utils/records'
 import type { BaseTableColumn } from '@/components/base/BaseTable/columns'
 import { Minimize2 } from '@lucide/vue'
+import { inject } from 'vue'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import {
@@ -18,7 +20,6 @@ import UsageReasoningEffortCell from './UsageReasoningEffortCell.vue'
 import UsageTokenCell from './UsageTokenCell.vue'
 import UsageTransportBadge from './UsageTransportBadge.vue'
 
-// 使用记录表只负责该领域的单元格呈现；筛选与分页由页面组合。
 withDefaults(
   defineProps<{
     columns: BaseTableColumn<UsageDisplayRecord>[]
@@ -31,6 +32,8 @@ withDefaults(
     emptyText: '暂无使用记录',
   },
 )
+// 使用记录表只负责该领域的单元格呈现；筛选与分页由页面组合。
+const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 </script>
 
 <template>
@@ -43,7 +46,7 @@ withDefaults(
     <template #provider="{ row }">
       <ProviderIconGroup
         :provider="String(row.provider || '')"
-        :authentication-kind="usageAuthenticationKind(row)"
+        :authentication-kind="personal ? undefined : usageAuthenticationKind(row)"
       />
     </template>
 

@@ -332,8 +332,6 @@ async fn ordinary_sessions_are_rejected_by_administrator_routes_and_api_keys_by_
         "/api/admin/account-groups",
         "/api/admin/settings",
         "/api/admin/dashboard/summary",
-        "/api/admin/operations/errors",
-        "/api/admin/usage/insights/diagnostics",
     ] {
         let mut req = request(Method::GET, path, Body::empty());
         req.headers_mut().insert(
@@ -349,6 +347,8 @@ async fn ordinary_sessions_are_rejected_by_administrator_routes_and_api_keys_by_
         "/api/admin/client-keys",
         "/api/admin/usage/records",
         "/api/admin/usage/records/summary",
+        "/api/admin/operations/errors",
+        "/api/admin/usage/insights/diagnostics",
     ] {
         let mut req = request(Method::GET, path, Body::empty());
         req.headers_mut().insert(

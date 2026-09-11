@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
-import type { UsageViewModel } from '../utils/records'
+import type { Ref } from 'vue'
 
-import { computed } from 'vue'
+import type { UsageViewModel } from '../utils/records'
+import { computed, inject } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
@@ -36,6 +37,7 @@ const props = defineProps<{
 }>()
 
 const open = defineModel<boolean>({ default: false })
+const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 
 const { palette } = useChartPalette()
 
@@ -462,7 +464,7 @@ const tokenDonutOption = computed<EChartsOption>(() => {
         </div>
       </section>
 
-      <section v-if="record.providerMetadata" class="min-h-0" :class="[panelClass]">
+      <section v-if="!personal && record.providerMetadata" class="min-h-0" :class="[panelClass]">
         <UsageDetailCodePanel
           title="元数据"
           max-height="min(32dvh, 340px)"
@@ -471,7 +473,7 @@ const tokenDonutOption = computed<EChartsOption>(() => {
       </section>
     </div>
 
-    <RequestDiagnosticsPanel v-if="open && record" :request-id="record.requestId" />
+    <RequestDiagnosticsPanel v-if="!personal && open && record" :request-id="record.requestId" />
 
     <template #footer>
       <BaseButton variant="primary" @click="open = false">

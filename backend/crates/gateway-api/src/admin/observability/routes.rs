@@ -85,7 +85,7 @@ where
     S: AdminSessionState + Send + Sync,
 {
     let mut command = usage_command(&query).map_err(map_wire_error)?;
-    command.filter.owner_user_id = personal_owner(&auth);
+    command.filter.owner_user_id = personal_owner(&auth, query.personal);
     let result = state
         .admin_services()
         .observability()
@@ -94,7 +94,7 @@ where
         .map_err(map_service_error)?;
     let data = usage_page_view(result);
     let mut data = serde_json::to_value(data).map_err(|_| AdminError::internal())?;
-    if personal_owner(&auth).is_some()
+    if personal_owner(&auth, query.personal).is_some()
         && let Some(items) = data
             .get_mut("items")
             .and_then(serde_json::Value::as_array_mut)
@@ -118,12 +118,15 @@ where
     let result = state
         .admin_services()
         .observability()
-        .usage_record_detail(query.id.trim(), personal_owner(&auth).as_deref())
+        .usage_record_detail(
+            query.id.trim(),
+            personal_owner(&auth, query.personal).as_deref(),
+        )
         .await
         .map_err(map_service_error)?;
     let mut data =
         serde_json::to_value(usage_detail_view(result)).map_err(|_| AdminError::internal())?;
-    if personal_owner(&auth).is_some() {
+    if personal_owner(&auth, query.personal).is_some() {
         retain_personal_fields(&mut data);
     }
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
@@ -140,7 +143,7 @@ where
     let range = usage_range(query.start_time.as_deref(), query.end_time.as_deref())
         .map_err(map_wire_error)?;
     let mut filter = usage_filter(&query).map_err(map_wire_error)?;
-    filter.owner_user_id = personal_owner(&auth);
+    filter.owner_user_id = personal_owner(&auth, query.personal);
     let result = state
         .admin_services()
         .observability()
@@ -164,7 +167,7 @@ where
     let range = usage_range(query.start_time.as_deref(), query.end_time.as_deref())
         .map_err(map_wire_error)?;
     let mut filter = usage_filter(&query).map_err(map_wire_error)?;
-    filter.owner_user_id = personal_owner(&auth);
+    filter.owner_user_id = personal_owner(&auth, query.personal);
     let result = state
         .admin_services()
         .observability()
@@ -178,7 +181,7 @@ where
 }
 
 pub(crate) async fn usage_insights_diagnostics<S>(
-    _auth: AdminAuth,
+    auth: super::super::auth::UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<DiagnosticsQuery>,
 ) -> Result<impl IntoResponse, AdminError>
@@ -186,9 +189,18 @@ where
     S: AdminSessionState + Send + Sync,
 {
     let dimension = query.dimension().map_err(map_wire_error)?;
+    let owner = personal_owner(&auth, query.personal);
+    if owner.is_some() && dimension == DiagnosticDimension::Account {
+        return Err(AdminError::bad_request("个人使用记录不提供上游账号维度"));
+    }
     let range = usage_range(query.start_time.as_deref(), query.end_time.as_deref())
         .map_err(map_wire_error)?;
     let filter = domain::UsageFilter {
+        owner_user_id: owner,
+        user_id: non_empty(query.user_id),
+        group_id: non_empty(query.group_id),
+        provider_account_ref: non_empty(query.account_id),
+        client_transport: non_empty(query.client_transport),
         provider_kind: non_empty(query.provider),
         model: non_empty(query.model),
         status_code: parse_status(query.status_code).map_err(map_wire_error)?,
@@ -208,26 +220,48 @@ where
 }
 
 pub(crate) async fn ops_errors<S>(
-    _auth: AdminAuth,
+    auth: super::super::auth::UserAuth,
     State(state): State<S>,
     AdminQuery(query): AdminQuery<OpsQuery>,
 ) -> Result<impl IntoResponse, AdminError>
 where
     S: AdminSessionState + Send + Sync,
 {
-    let command = ops_command(&query).map_err(map_wire_error)?;
+    let mut command = ops_command(&query).map_err(map_wire_error)?;
+    let owner = personal_owner(&auth, query.personal);
+    if let Some(owner) = &owner {
+        command.filter.user_id = Some(owner.clone());
+    }
     let result = state
         .admin_services()
         .observability()
         .ops_errors(command)
         .await
         .map_err(map_service_error)?;
-    let data = ops_page_view(result);
+    let mut data = ops_page_view(result);
+    if owner.is_some() {
+        for item in &mut data.items {
+            item.account_id = None;
+            item.account_name = None;
+            item.account_email = None;
+            item.authentication_kind = None;
+            item.raw_upstream_error = None;
+            item.provider_error_code = None;
+            item.upstream_request_id = None;
+            item.message = format!("请求失败（{}）", item.failure_class);
+            item.metadata.account_label = None;
+            item.metadata.continuation_affinity_hash = None;
+            item.metadata.continuation_previous_response_id_hash = None;
+            item.metadata.upstream_connection_id = None;
+            item.metadata.upstream_connection_exit_reason = None;
+        }
+    }
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
 }
 
-fn personal_owner(auth: &super::super::auth::UserAuth) -> Option<String> {
-    (auth.user.role == gateway_admin::model::users::UserRole::User).then(|| auth.user.id.clone())
+fn personal_owner(auth: &super::super::auth::UserAuth, personal: bool) -> Option<String> {
+    (personal || auth.user.role == gateway_admin::model::users::UserRole::User)
+        .then(|| auth.user.id.clone())
 }
 
 /// An explicit public field contract: newly added administrator diagnostics do

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import type { OpsError } from '@/api'
+import type { Ref } from 'vue'
 
-import { computed } from 'vue'
+import type { OpsError } from '@/api'
+import { computed, inject } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import { failureClassText } from '../utils/opsErrorPresentation'
@@ -20,6 +21,7 @@ interface DetailField {
 const props = defineProps<{
   record: OpsError | null
 }>()
+const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 
 const open = defineModel<boolean>({ default: false })
 
@@ -130,7 +132,7 @@ function visibleFields(items: DetailField[]) {
     size="xl"
   >
     <template v-if="record">
-      <RequestDiagnosticsPanel v-if="open && record.requestId" class="mb-3" :request-id="record.requestId" :metadata="record.metadata" />
+      <RequestDiagnosticsPanel v-if="!personal && open && record.requestId" class="mb-3" :request-id="record.requestId" :metadata="record.metadata" />
       <section :class="panelClass">
         <h3 :class="panelTitleClass">
           错误

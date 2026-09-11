@@ -5,13 +5,13 @@ import { toast } from '@/components/base/BaseToast'
 import { errorMessage } from '@/utils/async'
 import { normalizeUsageRecord } from '../utils/records'
 
-export function useUsageRecordDetail() {
+export function useUsageRecordDetail(personal = false) {
   const showDetailModal = shallowRef(false)
   const selectedUsageRecord = shallowRef<UsageViewModel | null>(null)
 
   async function handleViewDetail(record: UsageDisplayRecord) {
     try {
-      const detail = await getUsageRecordDetail({ id: record.id })
+      const detail = await getUsageRecordDetail({ id: record.id, personal })
       selectedUsageRecord.value = normalizeUsageRecord(detail)
       showDetailModal.value = true
     }

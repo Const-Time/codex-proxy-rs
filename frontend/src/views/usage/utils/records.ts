@@ -80,7 +80,7 @@ export interface UsageViewModel {
 
 /** 将 Usage 详情 API 记录收口为详情组件消费的形状。 */
 export function normalizeUsageRecord(record: UsageRecordDetail): UsageViewModel {
-  const metadata = record.metadata
+  const metadata = record.metadata ?? {}
 
   return {
     id: record.id,

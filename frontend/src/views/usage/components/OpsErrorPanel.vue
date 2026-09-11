@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import type { Ref } from 'vue'
 import type { UsageTimeRangeParams } from '../composables/useUsageTimeRange'
 import type { OpsError } from '@/api'
 
 import { Eye, RefreshCw, Search } from '@lucide/vue'
-import { computed, shallowRef, toRef } from 'vue'
+import { computed, inject, shallowRef, toRef } from 'vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
@@ -34,6 +35,8 @@ const {
 } = useOpsErrorsTable(toRef(props, 'timeRangeParams'), computed(() => ({ ...props.recordFilters, provider: props.provider || undefined })))
 
 const selectedRecord = shallowRef<OpsError | null>(null)
+const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
+const columns = computed(() => personal?.value ? opsErrorColumns.filter(column => column.key !== 'accountId') : opsErrorColumns)
 const detailOpen = shallowRef(false)
 
 const upstreamSendStateLabels: Record<string, string> = {
@@ -113,7 +116,7 @@ function upstreamSendStateText(value: string | null | undefined) {
     <div class="flex min-h-0 min-w-0 flex-col">
       <BaseTable
         class="min-h-0 flex-1"
-        :columns="opsErrorColumns"
+        :columns="columns"
         :rows="records"
         :loading="loading"
         empty-text="当前时段没有错误"

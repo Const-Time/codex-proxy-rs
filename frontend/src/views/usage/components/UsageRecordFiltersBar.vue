@@ -1,14 +1,16 @@
 <script setup lang="ts">
+import type { Ref } from 'vue'
 import type { UsageRecordFilters } from '@/api'
 import type { SelectOption } from '@/components/base/BaseSelect.vue'
-import { computed, onMounted, shallowRef } from 'vue'
+import { computed, inject, onMounted, shallowRef } from 'vue'
 import { getAccountGroups, getAccounts } from '@/api'
-import { getUsers } from '@/api/modules/users'
+import { getUserGroups, getUsers } from '@/api/modules/users'
 import BaseButton from '@/components/base/BaseButton.vue'
 import FormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 
+const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 const filters = defineModel<UsageRecordFilters>({ required: true })
 const groups = shallowRef<SelectOption[]>([])
 const accounts = shallowRef<SelectOption[]>([])
@@ -40,6 +42,14 @@ async function load() {
     return
   loading.value = true
   error.value = ''
+  if (personal?.value) {
+    try {
+      groups.value = (await getUserGroups()).map(group => ({ label: group.name, value: group.id }))
+    }
+    catch { error.value = '分组选项加载失败，请重试。' }
+    finally { loading.value = false }
+    return
+  }
   const results = await Promise.allSettled([
     loadCatalog(page => getAccountGroups({ page, pageSize: 200 }), row => ({ label: row.name, value: row.id })),
     loadCatalog(page => getAccounts({ page, pageSize: 200 }), row => ({ label: row.email || row.name || row.id, value: row.id })),
@@ -67,10 +77,10 @@ onMounted(() => void load())
       <FormItem label="分组">
         <BaseSelect v-model="filters.groupId" class="w-full" aria-label="筛选分组" :disabled="loading" :options="[{ label: '全部分组', value: '' }, ...groups]" />
       </FormItem>
-      <FormItem label="账号">
+      <FormItem v-if="!personal" label="账号">
         <BaseSelect v-model="filters.accountId" class="w-full" aria-label="筛选账号" :disabled="loading" :options="[{ label: '全部账号', value: '' }, ...accounts]" />
       </FormItem>
-      <FormItem label="用户">
+      <FormItem v-if="!personal" label="用户">
         <BaseSelect v-model="filters.userId" class="w-full" aria-label="筛选用户" :disabled="loading" :options="[{ label: '全部用户', value: '' }, ...users]" />
       </FormItem>
       <FormItem label="模型">

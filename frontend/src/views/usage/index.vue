@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { UsageRecordFilters } from '@/api'
 import { Eye } from '@lucide/vue'
-import { computed, ref, shallowRef, watch } from 'vue'
+import { computed, provide, ref, shallowRef, watch } from 'vue'
 
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
@@ -21,6 +21,10 @@ import { useUsageRecordDetail } from './composables/useUsageRecordDetail'
 import { useUsageRecordsTable } from './composables/useUsageRecordsTable'
 import { useUsageTimeRange } from './composables/useUsageTimeRange'
 import { usageRecordColumns, usageTimeRangeOptions } from './constants'
+
+const props = defineProps<{ personal?: boolean }>()
+provide('personalUsage', computed(() => Boolean(props.personal)))
+const visibleColumns = computed(() => props.personal ? usageRecordColumns.filter(column => !['accountEmail', 'upstreamTransport'].includes(column.key)) : usageRecordColumns)
 
 const recordFilters = ref<UsageRecordFilters>({ groupId: '', accountId: '', userId: '', model: '', clientTransport: '' })
 const recordFilterParams = computed(() => Object.fromEntries(Object.entries(recordFilters.value).map(([key, value]) => [key, value.trim() || undefined])))
@@ -52,9 +56,10 @@ const {
   timeRangeParams,
   latestTimeRangeParams,
   recordFilters: recordFilterParams,
+  personal: props.personal,
 })
 
-const { showDetailModal, selectedUsageRecord, handleViewDetail } = useUsageRecordDetail()
+const { showDetailModal, selectedUsageRecord, handleViewDetail } = useUsageRecordDetail(Boolean(props.personal))
 
 watch(timeRange, () => {
   refreshTimeRangeEnd()
@@ -65,7 +70,7 @@ watch(timeRange, () => {
 
 <template>
   <div class="w-full">
-    <BasePageHeader title="使用统计" description="查看请求用量、性能趋势与调用错误记录">
+    <BasePageHeader :title="personal ? '使用记录' : '使用统计'" description="查看请求用量、性能趋势与调用错误记录">
       <template #actions>
         <BaseSelect v-model="timeRange" :options="usageTimeRangeOptions" class="w-34" />
         <ProviderFilterSegmented
@@ -119,7 +124,7 @@ watch(timeRange, () => {
           <div class="flex min-h-0 min-w-0 flex-col">
             <UsageRecordsTable
               class="min-h-0 flex-1"
-              :columns="usageRecordColumns"
+              :columns="visibleColumns"
               :rows="records"
               :loading="loading"
               empty-text="暂无使用记录"
