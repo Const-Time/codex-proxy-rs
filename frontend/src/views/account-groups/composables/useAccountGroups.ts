@@ -21,6 +21,7 @@ import { formatDateTime } from '@/utils/date'
 import { DEFAULT_ACCOUNT_GROUP_COLOR } from '../constants'
 
 export interface AccountGroupFormValue {
+  modelMultipliers: { model: string, multiplier: string }[]
   dailyLimitUsd: string
   weeklyLimitUsd: string
   name: string
@@ -111,6 +112,7 @@ export function useAccountGroups() {
   function openEdit(group: AccountGroup) {
     editingGroup.value = group
     form.value = {
+      modelMultipliers: Object.entries(group.modelMultipliers).map(([model, multiplier]) => ({ model, multiplier })),
       dailyLimitUsd: group.dailyLimitUsd,
       weeklyLimitUsd: group.weeklyLimitUsd,
       name: group.name,
@@ -134,6 +136,13 @@ export function useAccountGroups() {
       toast.warning('限额须为非负金额，最多 10 位小数')
       return
     }
+    const rates = form.value.modelMultipliers
+    if (rates.length > 200 || rates.some(row => !row.model.trim() || !/^\d{1,4}(?:\.\d{1,10})?$/.test(row.multiplier) || Number(row.multiplier) > 1000)
+      || new Set(rates.map(row => row.model.trim())).size !== rates.length) {
+      toast.warning('模型名称不能重复或为空；倍率须为 0 至 1000，最多 10 位小数')
+      return
+    }
+    const modelMultipliers = Object.fromEntries(rates.map(row => [row.model.trim(), row.multiplier]))
     const color = normalizeRgbaHexColor(form.value.color)
     if (!color) {
       toast.warning('请选择有效的分组颜色')
@@ -144,10 +153,11 @@ export function useAccountGroups() {
       const updating = Boolean(editingGroup.value)
       const description = form.value.description.trim() || null
       if (editingGroup.value) {
-        await updateAccountGroup({ id: editingGroup.value.id, name, description, color, dailyLimitUsd, weeklyLimitUsd })
+        await updateAccountGroup({ id: editingGroup.value.id, name, description, color, dailyLimitUsd, weeklyLimitUsd, modelMultipliers })
       }
       else {
         await createAccountGroup({
+          modelMultipliers,
           dailyLimitUsd,
           weeklyLimitUsd,
           name,
@@ -326,5 +336,5 @@ export function useAccountGroups() {
 }
 
 function emptyForm(): AccountGroupFormValue {
-  return { dailyLimitUsd: '0', weeklyLimitUsd: '0', name: '', description: '', color: DEFAULT_ACCOUNT_GROUP_COLOR }
+  return { modelMultipliers: [], dailyLimitUsd: '0', weeklyLimitUsd: '0', name: '', description: '', color: DEFAULT_ACCOUNT_GROUP_COLOR }
 }

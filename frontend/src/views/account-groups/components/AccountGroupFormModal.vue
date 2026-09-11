@@ -63,6 +63,24 @@ const description = computed(() => props.group
       <p class="m-0 text-cp-sm text-cp-text-secondary">
         0 表示不限。每位用户在本组的所有密钥共享额度；用户之间独立计算。
       </p>
+      <div class="grid gap-3" role="group" aria-label="模型计费倍率">
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-cp-sm font-semibold">模型计费倍率</span>
+          <BaseButton size="sm" :disabled="saving || form.modelMultipliers.length >= 200" @click="form.modelMultipliers.push({ model: '', multiplier: '1' })">
+            添加模型
+          </BaseButton>
+        </div>
+        <p class="m-0 text-cp-sm text-cp-text-secondary">
+          按请求模型名称精确匹配，未配置时为 1 倍。原始费用 × 倍率计入消费及日/周限额，历史请求不变。
+        </p>
+        <div v-for="(row, index) in form.modelMultipliers" :key="index" class="grid grid-cols-[minmax(0,1fr)_6rem_auto] items-center gap-2">
+          <BaseInput v-model="row.model" :aria-label="`模型名称 ${index + 1}`" placeholder="例如 gpt-5.5" :disabled="saving" maxlength="256" />
+          <BaseInput v-model="row.multiplier" :aria-label="`计费倍率 ${index + 1}`" type="number" min="0" max="1000" step="any" :disabled="saving" />
+          <BaseButton size="sm" :disabled="saving" @click="form.modelMultipliers.splice(index, 1)">
+            移除
+          </BaseButton>
+        </div>
+      </div>
       <BaseFormItem label="描述（可选）">
         <BaseTextarea
           v-model="form.description"

@@ -24,6 +24,7 @@ export interface AccountGroupUsage {
 }
 
 export interface AccountGroup extends AccountGroupRef {
+  modelMultipliers: Record<string, string>
   dailyLimitUsd: string
   weeklyLimitUsd: string
   description: string | null
@@ -64,6 +65,7 @@ interface AccountGroupListParams {
 }
 
 interface AccountGroupCreateParam {
+  modelMultipliers: Record<string, string>
   dailyLimitUsd: string
   weeklyLimitUsd: string
   name: string
@@ -72,6 +74,7 @@ interface AccountGroupCreateParam {
 }
 
 interface AccountGroupUpdateParam {
+  modelMultipliers: Record<string, string>
   dailyLimitUsd: string
   weeklyLimitUsd: string
   id: string

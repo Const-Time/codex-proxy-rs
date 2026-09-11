@@ -70,6 +70,8 @@ impl ListAccountGroupsQuery {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateAccountGroupRequest {
+    #[serde(default)]
+    model_multipliers: BTreeMap<String, String>,
     daily_limit_usd: Option<String>,
     weekly_limit_usd: Option<String>,
     name: String,
@@ -80,6 +82,8 @@ struct CreateAccountGroupRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateAccountGroupRequest {
+    #[serde(default)]
+    model_multipliers: BTreeMap<String, String>,
     daily_limit_usd: String,
     weekly_limit_usd: String,
     id: String,
@@ -97,6 +101,7 @@ struct AccountGroupIdRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountGroupView {
+    model_multipliers: BTreeMap<String, String>,
     daily_limit_usd: String,
     weekly_limit_usd: String,
     id: String,
@@ -139,6 +144,7 @@ struct AccountGroupUsageView {
 impl From<AccountGroupRecord> for AccountGroupView {
     fn from(record: AccountGroupRecord) -> Self {
         Self {
+            model_multipliers: record.model_multipliers,
             daily_limit_usd: record.budget.daily_usd.canonical(),
             weekly_limit_usd: record.budget.weekly_usd.canonical(),
             id: record.id.to_string(),
@@ -277,6 +283,7 @@ where
             .create(
                 &auth.context().mutation_context(),
                 CreateAccountGroup {
+                    model_multipliers: request.model_multipliers,
                     budget: parse_group_budget(
                         request.daily_limit_usd.as_deref().unwrap_or("0"),
                         request.weekly_limit_usd.as_deref().unwrap_or("0"),
@@ -307,6 +314,7 @@ where
             .update(
                 &auth.context().mutation_context(),
                 UpdateAccountGroup {
+                    model_multipliers: request.model_multipliers,
                     budget: parse_group_budget(
                         &request.daily_limit_usd,
                         &request.weekly_limit_usd,

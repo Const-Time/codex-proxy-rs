@@ -652,11 +652,17 @@ async fn recover_standard_costs(
         {
             continue;
         }
-        scenarios
-            .standard
-            .add(fact.bucket_start, breakdown.standard_amount.amount.clone())?;
+        let standard = breakdown
+            .standard_amount
+            .amount
+            .checked_mul(&fact.billing_multiplier)
+            .ok_or_else(|| AdminError::internal("模型倍率计费超出金额范围"))?;
+        scenarios.standard.add(fact.bucket_start, standard)?;
         if let Some(no_cache_cost) = no_cache_cost(&fact, &breakdown) {
-            scenarios.no_cache.add(fact.bucket_start, no_cache_cost)?;
+            let billed = no_cache_cost
+                .checked_mul(&fact.billing_multiplier)
+                .ok_or_else(|| AdminError::internal("模型倍率计费超出金额范围"))?;
+            scenarios.no_cache.add(fact.bucket_start, billed)?;
         }
     }
     Ok(scenarios)

@@ -375,6 +375,7 @@ pub(crate) fn admin_calculated_usage_billing_fact(
     fact: CalculatedUsageBillingFact,
 ) -> AdminStoreResult<admin_observability::UsageCalculatedBillingFact> {
     Ok(admin_observability::UsageCalculatedBillingFact {
+        billing_multiplier: admin_decimal_amount(fact.billing_multiplier)?,
         bucket_start: fact.bucket_start,
         provider_kind: fact.provider_kind,
         upstream_model_id: fact.upstream_model_id,
@@ -646,6 +647,7 @@ pub(crate) fn admin_usage_overview(
     overview: UsageOverview,
 ) -> AdminStoreResult<admin_observability::UsageOverview> {
     Ok(admin_observability::UsageOverview {
+        total_cost_usd: admin_decimal_amount(overview.total_cost_usd)?,
         range: admin_range(overview.range),
         requests: admin_request_metrics(overview.requests)?,
         attempts: admin_attempt_metrics(overview.attempts)?,
@@ -957,6 +959,7 @@ pub(crate) fn calculated_usage_billing_fact_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<CalculatedUsageBillingFact> {
     Ok(CalculatedUsageBillingFact {
+        billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
         bucket_start: get(row, "bucket_start")?,
         provider_kind: get(row, "provider_kind")?,
         upstream_model_id: get(row, "upstream_model_id")?,

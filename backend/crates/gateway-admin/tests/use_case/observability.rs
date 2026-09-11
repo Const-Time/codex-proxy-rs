@@ -343,6 +343,7 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
         ..RequestMetrics::default()
     };
     store.replace_overview(UsageOverview {
+        total_cost_usd: "0".parse().unwrap(),
         range,
         requests: metrics.clone(),
         attempts: AttemptMetrics {
@@ -372,6 +373,7 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
         }],
     }]);
     store.replace_calculated_billing_facts(vec![UsageCalculatedBillingFact {
+        billing_multiplier: "1".parse().unwrap(),
         bucket_start: quarter_hour_start(now),
         provider_kind: "openai".to_owned(),
         upstream_model_id: "gpt-5.5".to_owned(),
@@ -543,6 +545,7 @@ async fn usage_insights_should_reject_partial_costs_when_billing_stream_fails() 
     let range = observation_range(now);
     let store = Arc::new(FixtureObservabilityStore::new(range));
     store.replace_calculated_billing_facts(vec![UsageCalculatedBillingFact {
+        billing_multiplier: "1".parse().unwrap(),
         bucket_start: quarter_hour_start(now),
         provider_kind: "openai".to_owned(),
         upstream_model_id: "gpt-5.5".to_owned(),
@@ -586,6 +589,7 @@ impl FixtureObservabilityStore {
         Self {
             trend: Mutex::new(Vec::new()),
             overview: Mutex::new(UsageOverview {
+                total_cost_usd: "0".parse().unwrap(),
                 range,
                 requests: RequestMetrics::default(),
                 attempts: AttemptMetrics::default(),

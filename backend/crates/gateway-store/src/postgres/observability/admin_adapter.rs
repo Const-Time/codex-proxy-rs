@@ -257,6 +257,13 @@ impl ObservabilityRepository for PgObservabilityRepository {
             )
             .await?;
         Ok(UsageOverview {
+            total_cost_usd: self
+                .query_budget
+                .run(
+                    "load billed consumption",
+                    total_billed_consumption(&self.pool, range, &filter),
+                )
+                .await?,
             range,
             requests,
             attempts,

@@ -227,6 +227,14 @@ impl AccountGroupStore for PgAccountGroupRepository {
         context: &MutationContext,
     ) -> AdminStoreResult<AccountGroupMutation> {
         validate_group_fields(&command.name, command.description.as_deref())?;
+        if !gateway_admin::model::account_groups::valid_model_multipliers(
+            &command.model_multipliers,
+        ) {
+            return Err(admin_store_error(
+                ENTITY,
+                invalid("invalid model billing multipliers"),
+            ));
+        }
         let id = command.id.clone();
         let audit = mutation_audit(
             context,
@@ -246,8 +254,8 @@ impl AccountGroupStore for PgAccountGroupRepository {
                 Box::pin(async move {
                     sqlx::query(
                         "insert into account_groups
-                         (id, name, description, color, enabled, created_at, updated_at, daily_limit_usd, weekly_limit_usd)
-                         values ($1, $2, $3, $4, true, now(), now(), $5::text::numeric, $6::text::numeric)",
+                         (id, name, description, color, enabled, created_at, updated_at, daily_limit_usd, weekly_limit_usd, model_multipliers)
+                         values ($1, $2, $3, $4, true, now(), now(), $5::text::numeric, $6::text::numeric, $7)",
                     )
                     .bind(command.id.as_str())
                     .bind(command.name)
@@ -255,6 +263,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
                     .bind(command.color.as_str())
                     .bind(command.budget.daily_usd.canonical())
                     .bind(command.budget.weekly_usd.canonical())
+                    .bind(sqlx::types::Json(&command.model_multipliers))
                     .execute(&mut **transaction)
                     .await
                     .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
@@ -275,20 +284,34 @@ impl AccountGroupStore for PgAccountGroupRepository {
         context: &MutationContext,
     ) -> AdminStoreResult<AccountGroupMutation> {
         validate_group_fields(&command.name, command.description.as_deref())?;
+        if !gateway_admin::model::account_groups::valid_model_multipliers(
+            &command.model_multipliers,
+        ) {
+            return Err(admin_store_error(
+                ENTITY,
+                invalid("invalid model billing multipliers"),
+            ));
+        }
         let id = command.id.clone();
         let audit = mutation_audit(
             context,
             "update",
             "account_group",
             id.as_str(),
-            vec!["name".to_owned(), "description".to_owned()],
+            vec![
+                "name".to_owned(),
+                "description".to_owned(),
+                "model_multipliers".to_owned(),
+                "daily_limit_usd".to_owned(),
+                "weekly_limit_usd".to_owned(),
+            ],
         );
         let revision = self
             .mutate(audit, |transaction| {
                 Box::pin(async move {
                     let result = sqlx::query(
                         "update account_groups
-                 set name = $2, description = $3, color = $4, updated_at = now(), daily_limit_usd = $5::text::numeric, weekly_limit_usd = $6::text::numeric
+                 set name = $2, description = $3, color = $4, updated_at = now(), daily_limit_usd = $5::text::numeric, weekly_limit_usd = $6::text::numeric, model_multipliers = $7
                  where id = $1",
                     )
                     .bind(command.id.as_str())
@@ -297,6 +320,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
                     .bind(command.color.as_str())
                     .bind(command.budget.daily_usd.canonical())
                     .bind(command.budget.weekly_usd.canonical())
+                    .bind(sqlx::types::Json(&command.model_multipliers))
                     .execute(&mut **transaction)
                     .await
                     .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
@@ -409,7 +433,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
 
 fn group_select() -> QueryBuilder<Postgres> {
     QueryBuilder::new(
-        "select g.id, g.name, g.daily_limit_usd::text, g.weekly_limit_usd::text, g.description, g.color, g.enabled, g.created_at, g.updated_at,
+        "select g.id, g.name, g.model_multipliers, g.daily_limit_usd::text, g.weekly_limit_usd::text, g.description, g.color, g.enabled, g.created_at, g.updated_at,
                 coalesce(members.member_count, 0)::bigint as member_count,
                 coalesce(keys.client_key_count, 0)::bigint as client_key_count,
                 coalesce(members.provider_counts, '{}'::jsonb) as provider_counts
@@ -486,6 +510,10 @@ fn group_record(row: &sqlx::postgres::PgRow) -> StoreResult<AccountGroupRecord> 
     let provider_counts = serde_json::from_value::<BTreeMap<String, u64>>(provider_counts)
         .map_err(|_| invalid("invalid provider counts"))?;
     Ok(AccountGroupRecord {
+        model_multipliers: row
+            .try_get::<sqlx::types::Json<BTreeMap<String, String>>, _>("model_multipliers")
+            .map_err(|_| invalid("invalid model billing multipliers"))?
+            .0,
         budget: gateway_core::engine::budget::ClientBudgetLimits {
             daily_usd: row
                 .try_get::<String, _>("daily_limit_usd")
@@ -555,11 +583,11 @@ async fn group_costs(
            select unnest($1::text[])
          )
          select requested_groups.group_id,
-                coalesce(sum(mr.cost_amount) filter (
+                coalesce(sum(mr.billed_cost_amount) filter (
                   where mr.started_at >= date_trunc('day', now() at time zone 'Asia/Shanghai')
                     at time zone 'Asia/Shanghai'
                 ), 0)::text as today_usd,
-                coalesce(sum(mr.cost_amount), 0)::text as retained_total_usd
+                coalesce(sum(mr.billed_cost_amount), 0)::text as retained_total_usd
          from requested_groups
          cross join runtime_settings settings
          left join model_requests mr

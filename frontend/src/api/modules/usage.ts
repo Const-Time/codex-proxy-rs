@@ -301,6 +301,7 @@ export interface OpsErrorsResponse {
 }
 
 export interface UsageSummaryResponse {
+  totalCostUsd: string
   totalRequests: string
   inputTokens: string
   outputTokens: string

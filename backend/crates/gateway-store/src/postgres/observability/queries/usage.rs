@@ -137,7 +137,7 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             mr.upstream_model_id, mr.upstream_transport, mr.service_tier,
             mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
             mr.reasoning_tokens, mr.image_input_tokens, mr.image_output_tokens,
-            mr.total_tokens, mr.cost_source, mr.cost_amount::text, mr.cost_currency,
+            mr.total_tokens, mr.cost_source, mr.billed_cost_amount::text as cost_amount, mr.cost_currency,
             mr.transport_decision_wait_ms, mr.connect_ms, mr.headers_ms,
             mr.first_event_ms, mr.first_reasoning_ms, mr.first_text_ms, mr.first_token_ms,
             mr.provider_processing_ms, mr.latency_ms, mr.admission_decision_ms,
@@ -165,7 +165,7 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             mr.error_kind, mr.provider_error_code, mr.error_message, mr.retry_after_ms,
             mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
             mr.reasoning_tokens, mr.image_input_tokens, mr.image_output_tokens,
-            mr.total_tokens, mr.cost_source, mr.cost_amount::text,
+            mr.total_tokens, mr.cost_source, mr.billed_cost_amount::text as cost_amount,
             mr.cost_currency, mr.transport_decision_wait_ms, mr.connect_ms, mr.headers_ms,
             mr.first_event_ms, mr.first_reasoning_ms, mr.first_text_ms, mr.first_token_ms,
             mr.provider_processing_ms, mr.latency_ms, mr.admission_decision_ms,
@@ -399,7 +399,7 @@ pub(crate) async fn usage_diagnostics(
     statement.push(dimension_sql);
     statement.push(format!(
         " as dimension_name, mr.outcome, mr.attempt_count, mr.total_tokens,
-                mr.latency_ms, mr.first_token_ms, mr.cost_source, mr.cost_amount,
+                mr.latency_ms, mr.first_token_ms, mr.cost_source, mr.billed_cost_amount as cost_amount,
                 mr.cost_currency, mr.downstream_committed_at, mr.client_transport,
                 mr.client_status_code, ({completed_usage}) as is_completed_usage
          from model_requests mr where mr.started_at >= ",

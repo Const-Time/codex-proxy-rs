@@ -125,17 +125,17 @@ impl PgClientBudgetStore {
         advance_windows(&mut tx, scope, Utc::now())
             .await
             .map_err(|_| ClientBudgetError)?;
-        let changed = sqlx::query("insert into user_group_charge_events(request_id, user_id, account_group_id, client_api_key_ref, amount_usd, completed_at)
-            values ($1, $2, $3, $4, $5::text::numeric, $6) on conflict(request_id) do nothing")
+        let billed_amount = sqlx::query_scalar::<_, String>("insert into user_group_charge_events(request_id, user_id, account_group_id, client_api_key_ref, amount_usd, completed_at)
+            values ($1, $2, $3, $4, $5::text::numeric, $6) on conflict(request_id) do nothing returning amount_usd::text")
             .bind(charge.request_id.as_str()).bind(&scope.user_id).bind(scope.group_id.as_str()).bind(charge.key_id.as_str())
             .bind(charge.amount_usd.canonical()).bind(DateTime::<Utc>::from(charge.completed_at))
-            .execute(&mut *tx).await.map_err(|_| ClientBudgetError)?.rows_affected();
-        if changed == 1 {
+            .fetch_optional(&mut *tx).await.map_err(|_| ClientBudgetError)?;
+        if let Some(billed_amount) = billed_amount {
             sqlx::query("update user_group_budget_windows set
                 daily_used_usd = least(9999999999.9999999999, daily_used_usd + case when $4 >= daily_start and $4 < daily_end then $3::text::numeric else 0 end),
                 weekly_used_usd = least(9999999999.9999999999, weekly_used_usd + case when $4 >= weekly_start and $4 < weekly_end then $3::text::numeric else 0 end)
                 where user_id = $1 and account_group_id = $2")
-                .bind(&scope.user_id).bind(scope.group_id.as_str()).bind(charge.amount_usd.canonical())
+                .bind(&scope.user_id).bind(scope.group_id.as_str()).bind(billed_amount)
                 .bind(DateTime::<Utc>::from(charge.completed_at)).execute(&mut *tx).await.map_err(|_| ClientBudgetError)?;
         }
         tx.commit().await.map_err(|_| ClientBudgetError)

@@ -142,6 +142,7 @@ impl AccountGroupService for DefaultAccountGroupService {
                 .create_account_group(
                     NewAccountGroup {
                         budget: command.budget,
+                        model_multipliers: command.model_multipliers,
                         id,
                         name: command.name,
                         description: command.description,

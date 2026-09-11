@@ -189,6 +189,11 @@ impl DecimalAmount {
         Self::from_decimal(self.to_decimal()?.checked_add(other.to_decimal()?)?)
     }
 
+    #[must_use]
+    pub fn checked_mul(&self, other: &Self) -> Option<Self> {
+        Self::from_decimal(self.to_decimal()?.checked_mul(other.to_decimal()?)?)
+    }
+
     /// 将金额按非零请求数均分，保留最多十位小数。
     #[must_use]
     pub fn checked_div_u64(&self, divisor: u64) -> Option<Self> {
@@ -305,6 +310,7 @@ pub struct ProviderBillingInput {
 /// 控制面仅保留通用事实，具体 Provider 负责校验已持久化总额并恢复标准费用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageCalculatedBillingFact {
+    pub billing_multiplier: DecimalAmount,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
     pub upstream_model_id: String,
@@ -733,6 +739,7 @@ pub struct ProviderObservation {
 /// 用量总览。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageOverview {
+    pub total_cost_usd: DecimalAmount,
     pub range: TimeRange,
     pub requests: RequestMetrics,
     pub attempts: AttemptMetrics,
