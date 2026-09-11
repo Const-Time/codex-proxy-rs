@@ -504,7 +504,7 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 | `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, dailyLimitUsd, weeklyLimitUsd, modelMultipliers? }` | 更新名称、描述、颜色、日/周额度和模型倍率 |
 | `POST` | `/api/admin/account-groups/enable` | `{ id }` | 启用 |
 | `POST` | `/api/admin/account-groups/disable` | `{ id }` | 禁用；已绑定 Key 保持受限，不回退到全部账号 |
-| `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除未被 Client Key、额度窗口或计费账本引用的组；有引用时返回 409 并提示处理方式，已有额度或计费记录的组可禁用 |
+| `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除没有 Client Key 绑定的分组；仍有 Key 时返回 409。保留历史额度、计费账本和账号本身，移除账号关联及用户授权，在途请求仍按原归属结算 |
 
 列表数据为 `{ items, page, configRevision }`，其中 item 返回 `memberCount`、按 Provider 聚合的
 `providerCounts` 和 `clientKeyCount`。查询分组成员使用账号列表的 `groupId` 筛选，
