@@ -169,6 +169,8 @@ fn sensitive_response_views_do_not_require_debug_or_add_secret_fields() {
 #[test]
 fn billing_view_should_preserve_the_original_detail_contract() {
     let value = serde_json::to_value(BillingView {
+        group_multiplier_display: "1x".to_owned(),
+        original_amount_display: "$0.17".to_owned(),
         input_amount_display: "$0.03".to_owned(),
         output_amount_display: "$0.00".to_owned(),
         cache_read_amount_display: "$0.14".to_owned(),
@@ -922,6 +924,11 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         });
     {
         let mut records = fixture.usage_records.lock().expect("usage records");
+        records[0].billing = Some(UsageBilling::GroupAdjusted {
+            original: Box::new(records[0].billing.take().unwrap()),
+            multiplier: "2.5".parse().unwrap(),
+            total: usd("0.25"),
+        });
         for source in ["calculated", "provider_reported"] {
             let mut image = records[0].clone();
             image.id = format!("image_{source}");
@@ -1001,6 +1008,18 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         "$10 / 1M Token"
     );
     assert_eq!(
+        value["data"]["items"][0]["billing"]["groupMultiplierDisplay"],
+        "2.5x"
+    );
+    assert_eq!(
+        value["data"]["items"][0]["billing"]["originalAmountDisplay"],
+        "$0.10"
+    );
+    assert_eq!(
+        value["data"]["items"][0]["billing"]["totalAmountDisplay"],
+        "$0.25"
+    );
+    assert_eq!(
         value["data"]["items"][0]["billing"]["outputPriceDisplay"],
         "$60 / 1M Token"
     );
@@ -1077,7 +1096,7 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
     assert!(value["data"]["items"][0].get("metadata").is_none());
     assert_eq!(
         value["data"]["items"][1]["billing"]["totalAmountDisplay"],
-        "≈ $0.007"
+        "$0.007"
     );
     assert_eq!(
         value["data"]["items"][2]["billing"]["totalAmountDisplay"],

@@ -32,6 +32,8 @@ export interface UsageCostCoverage {
 }
 
 export interface UsageBilling {
+  groupMultiplierDisplay: string
+  originalAmountDisplay: string
   inputAmountDisplay: string
   outputAmountDisplay: string
   cacheReadAmountDisplay: string

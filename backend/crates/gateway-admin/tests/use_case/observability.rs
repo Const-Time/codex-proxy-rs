@@ -540,6 +540,43 @@ async fn usage_records_should_enrich_provider_reported_totals_when_pricing_match
 }
 
 #[tokio::test]
+async fn group_billing_enriches_original_cost_and_preserves_frozen_charge() {
+    let now = Utc::now();
+    let store = Arc::new(FixtureObservabilityStore::new(observation_range(now)));
+    let mut record = total_record("group-bill", Some("openai"), "calculated", now);
+    record.billing = Some(UsageBilling::GroupAdjusted {
+        original: Box::new(record.billing.take().unwrap()),
+        multiplier: "2".parse().unwrap(),
+        total: CurrencyCost {
+            currency: "USD".into(),
+            amount: "2.5".parse().unwrap(),
+        },
+    });
+    store.replace_usage_records(vec![record]);
+    let services = observability_services_with_calculated_billing(store).await;
+    let page = services
+        .observability()
+        .usage_records(usage_query(now))
+        .await
+        .unwrap();
+    let Some(UsageBilling::GroupAdjusted {
+        original,
+        multiplier,
+        total,
+    }) = &page.items[0].billing
+    else {
+        panic!("missing group bill");
+    };
+    assert_eq!(multiplier.as_str(), "2");
+    assert_eq!(total.amount.as_str(), "2.5");
+    let UsageBilling::Calculated(value) = original.as_ref() else {
+        panic!("original bill was not enriched");
+    };
+    assert_eq!(value.total_amount.amount.as_str(), "1.25");
+    assert_eq!(value.multiplier_percent, 125);
+}
+
+#[tokio::test]
 async fn usage_insights_should_reject_partial_costs_when_billing_stream_fails() {
     let now = Utc::now();
     let range = observation_range(now);

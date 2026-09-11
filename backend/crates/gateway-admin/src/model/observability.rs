@@ -344,7 +344,16 @@ pub struct CalculatedBillingBreakdown {
 /// Provider 上报费用或无法恢复逐项价格时保留总额；Provider 验证成功后升级为完整分解。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageBilling {
-    Total { source: String, total: CurrencyCost },
+    /// Frozen group multiplier; the original bill remains available for price validation.
+    GroupAdjusted {
+        multiplier: DecimalAmount,
+        original: Box<UsageBilling>,
+        total: CurrencyCost,
+    },
+    Total {
+        source: String,
+        total: CurrencyCost,
+    },
     Calculated(Box<CalculatedBillingBreakdown>),
 }
 

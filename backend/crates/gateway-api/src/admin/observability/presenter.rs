@@ -213,17 +213,25 @@ fn capitalize_first(value: &str) -> String {
 
 pub(crate) fn billing_view(billing: Option<&domain::UsageBilling>) -> Option<BillingView> {
     match billing? {
-        domain::UsageBilling::Total { source, total } => Some(BillingView {
+        domain::UsageBilling::GroupAdjusted {
+            multiplier,
+            original,
+            total,
+        } => {
+            let mut view = billing_view(Some(original.as_ref()))?;
+            view.group_multiplier_display = format!("{}x", multiplier.as_str());
+            view.total_amount_display = format_money(total);
+            Some(view)
+        }
+        domain::UsageBilling::Total { total, .. } => Some(BillingView {
+            group_multiplier_display: "1x".to_owned(),
+            original_amount_display: format_money(total),
             input_amount_display: "—".to_owned(),
             output_amount_display: "—".to_owned(),
             cache_read_amount_display: "—".to_owned(),
             cache_write_amount_display: "—".to_owned(),
             standard_amount_display: "—".to_owned(),
-            total_amount_display: if source == "calculated" {
-                format!("≈ {}", format_money(total))
-            } else {
-                format_money(total)
-            },
+            total_amount_display: format_money(total),
             input_price_display: "—".to_owned(),
             output_price_display: "—".to_owned(),
             cache_read_price_display: "—".to_owned(),
@@ -232,6 +240,8 @@ pub(crate) fn billing_view(billing: Option<&domain::UsageBilling>) -> Option<Bil
             multiplier_display: "—".to_owned(),
         }),
         domain::UsageBilling::Calculated(value) => Some(BillingView {
+            group_multiplier_display: "1x".to_owned(),
+            original_amount_display: format_money(&value.total_amount),
             input_amount_display: format_money(&value.input_amount),
             output_amount_display: format_money(&value.output_amount),
             cache_read_amount_display: format_money(&value.cache_read_amount),
