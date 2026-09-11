@@ -33,6 +33,46 @@ use super::AdminHarness;
 const GROUP_ID: &str = "grp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[tokio::test]
+async fn group_delete_conflict_explains_references_without_masking_other_errors() {
+    use gateway_admin::model::{AdminErrorKind, MutationActor};
+    for (store_kind, expected_kind) in [
+        (AdminStoreErrorKind::Conflict, AdminErrorKind::Conflict),
+        (
+            AdminStoreErrorKind::Unavailable,
+            AdminErrorKind::Unavailable,
+        ),
+        (AdminStoreErrorKind::NotFound, AdminErrorKind::NotFound),
+    ] {
+        let groups = Arc::new(FakeGroupStore {
+            delete_error: Some(store_kind),
+            ..Default::default()
+        });
+        let service = AdminHarness::new().account_groups(groups).build().await;
+        let error = service
+            .account_groups()
+            .delete(
+                &MutationContext {
+                    actor: MutationActor::AdminSession {
+                        admin_user_id: "test-owner".into(),
+                    },
+                    request_id: "delete-conflict".into(),
+                },
+                DeleteAccountGroup { id: group_id() },
+            )
+            .await
+            .expect_err("injected deletion failure");
+        assert_eq!(error.kind(), expected_kind);
+        assert!(!error.message().contains("private database context"));
+        if expected_kind == AdminErrorKind::Conflict {
+            assert!(error.message().contains("密钥、额度或计费记录"));
+            assert!(error.message().contains("禁用"));
+        } else {
+            assert!(!error.message().contains("禁用"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn group_query_service_enriches_only_current_page_members_with_runtime_facts() {
     let groups = Arc::new(FakeGroupStore::default());
     let runtime = Arc::new(FakeRuntimeStore::default());
@@ -90,6 +130,7 @@ async fn group_query_service_enriches_only_current_page_members_with_runtime_fac
 #[derive(Default)]
 struct FakeGroupStore {
     requested_groups: Mutex<Vec<String>>,
+    delete_error: Option<AdminStoreErrorKind>,
 }
 
 #[async_trait]
@@ -147,7 +188,12 @@ impl AccountGroupStore for FakeGroupStore {
         _: DeleteAccountGroup,
         _: &MutationContext,
     ) -> AdminStoreResult<AccountGroupMutation> {
-        Err(unused())
+        Err(AdminStoreError::new(
+            self.delete_error
+                .unwrap_or(AdminStoreErrorKind::Unavailable),
+            "account group",
+            "private database context",
+        ))
     }
 }
 
