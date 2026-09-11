@@ -134,6 +134,7 @@ experimental_bearer_token = "<client-api-key>"
 X-OpenAI-Actor-Authorization = "proxy-managed"
 
 [features]
+fast_mode = true
 image_generation = true
 goals = true
 ```
@@ -141,6 +142,20 @@ goals = true
 `OpenAI` 是自定义 Provider ID，大小写要与 `model_provider` 一致。合并配置时修改已有表，
 不要重复添加 `[features]` 或 Provider 表。更换模型时也要检查其支持的推理强度。
 密钥以明文保存，文件仅供本人读取，不要提交到 Git。
+
+### Fast 模式
+
+「使用密钥」中可切换默认 Fast，生成顶层 `service_tier = "fast"`；关闭时为 `"default"`。
+`[features]` 中保留 `fast_mode = true`。已有配置请修改原字段，保存后完全退出并重启 Codex。
+CCSwitch 一键导入默认仍使用标准档位，需要 Fast 时再修改顶层配置。
+
+代理透传客户端的服务档位，并从上游目录保留 `service_tiers`、`additional_speed_tiers` 的 Fast 声明；
+未声明的模型不自动标记支持。是否接受请求以及最终档位由上游决定，Fast 可能增加消费。
+
+Codex App 的速度选择还受登录方式限制；本地核对的 26.903.9818.0 版本仅对 ChatGPT 登录开放该菜单。
+代理密钥配置不能改变这一客户端条件，因此升级服务端不保证 App 中出现按钮。
+可用上述配置设置请求默认档位，但不代表取得额外账号权限；若上游不支持，改回 `"default"`。
+参见 [OpenAI Docs：Fast 模式](https://learn.chatgpt.com/docs/agent-configuration/speed)。
 
 ### auth.json
 

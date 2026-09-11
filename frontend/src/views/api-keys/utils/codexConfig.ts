@@ -5,6 +5,7 @@ export interface CodexConfigInput {
   apiKey: string
   baseUrl: string
   websocketEnabled?: boolean
+  fastMode?: boolean
 }
 
 export function buildCodexConfigFiles(input: CodexConfigInput) {
@@ -16,7 +17,7 @@ export function buildCodexConfigFiles(input: CodexConfigInput) {
 model = "${CODEX_DEFAULT_MODEL}"
 review_model = "${CODEX_DEFAULT_MODEL}"
 model_reasoning_effort = "max"
-service_tier = "default"
+service_tier = "${input.fastMode ? 'fast' : 'default'}"
 
 [model_providers.OpenAI]
 name = "OpenAI"
@@ -32,6 +33,7 @@ experimental_bearer_token = ${JSON.stringify(input.apiKey)}
 X-OpenAI-Actor-Authorization = "proxy-managed"
 
 [features]
+fast_mode = true
 image_generation = true
 goals = true`
 

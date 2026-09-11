@@ -29,6 +29,7 @@ const open = defineModel<boolean>({ default: false })
 
 const activePlatform = shallowRef('unix')
 const websocketEnabled = shallowRef(CODEX_WEBSOCKET_ENABLED_BY_DEFAULT)
+const fastMode = shallowRef(false)
 
 const platformOptions = [
   { label: 'macOS / Linux', value: 'unix', icon: Apple },
@@ -48,6 +49,7 @@ const codexConfigFiles = computed(() => buildCodexConfigFiles({
   apiKey: keyValue.value,
   baseUrl: props.apiBaseUrl,
   websocketEnabled: websocketEnabled.value,
+  fastMode: fastMode.value,
 }))
 
 const visibleFiles = computed(() => [
@@ -74,6 +76,14 @@ const visibleFiles = computed(() => [
           inline-prompt
           :width="56"
         />
+      </div>
+
+      <div class="flex flex-col gap-2">
+        <BaseSwitch v-model="fastMode" label="默认使用 Fast 模式" show-label />
+        <p class="text-cp-sm text-cp-text-secondary">
+          {{ fastMode ? '当前配置默认请求 Fast，可能增加消费，需要上游模型和账号支持。' : '当前配置默认使用标准模式。' }}
+          代理密钥登录时，Codex App 可能不显示 Fast 选项；可在此生成默认档位配置，保存后重启客户端。
+        </p>
       </div>
 
       <p class="text-cp-sm text-cp-text-secondary">

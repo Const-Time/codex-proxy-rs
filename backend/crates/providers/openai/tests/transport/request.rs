@@ -10,6 +10,19 @@ fn request(body: Map<String, Value>) -> GenerateRequest {
 }
 
 #[test]
+fn encoder_preserves_selected_service_tier_instead_of_forcing_standard_or_fast() {
+    for tier in ["default", "fast", "priority"] {
+        let request = request(Map::from_iter([
+            ("model".to_owned(), json!("client-model")),
+            ("input".to_owned(), json!("test")),
+            ("service_tier".to_owned(), json!(tier)),
+        ]));
+        let encoded = encode_generate_request(&request, "gpt-routed").expect("encode");
+        assert_eq!(encoded.body().get("service_tier"), Some(&json!(tier)));
+    }
+}
+
+#[test]
 fn encoder_should_preserve_openai_wire_fields_without_deriving_accountless_pool_identity() {
     let body = Map::from_iter([
         ("model".to_owned(), json!("client-model")),
