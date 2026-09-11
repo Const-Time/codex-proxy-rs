@@ -23,7 +23,7 @@ const MIXED_GROUP: &str = "grp_00000000000000000000000000000001";
 const EMPTY_GROUP: &str = "grp_00000000000000000000000000000002";
 
 #[tokio::test]
-async fn group_deletion_reports_budget_references_without_losing_history() {
+async fn group_deletion_preserves_budget_history_without_blocking_removal() {
     let Some(database) = TestDatabase::create("group_delete_budgets").await else {
         return;
     };
@@ -59,26 +59,23 @@ async fn group_deletion_reports_budget_references_without_losing_history() {
             .expect("seed retained reference");
         let revision = current_revision(&database.pool).await;
         let audits = audit_count(&database.pool).await;
-        let error = groups
+        let result = groups
             .delete_account_group(
                 DeleteAccountGroup { id: group_id(id) },
                 &context("delete-budget-group"),
             )
             .await
-            .expect_err("retained budget references must prevent deletion");
-        assert_eq!(error.kind(), AdminStoreErrorKind::Conflict);
-        assert_eq!(current_revision(&database.pool).await, revision);
-        assert_eq!(audit_count(&database.pool).await, audits);
-        groups
-            .set_account_group_enabled(
-                gateway_admin::model::account_groups::SetAccountGroupEnabled {
-                    id: group_id(id),
-                    enabled: false,
-                },
-                &context("disable-budget-group"),
-            )
-            .await
-            .expect("referenced group can still be disabled");
+            .expect("history must not prevent deletion of unused configuration");
+        assert!(result.record.is_none());
+        assert_eq!(current_revision(&database.pool).await, revision + 1);
+        assert_eq!(audit_count(&database.pool).await, audits + 1);
+        let exists: bool =
+            sqlx::query_scalar("select exists(select 1 from account_groups where id = $1)")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert!(!exists);
     }
     for table in ["user_group_budget_windows", "user_group_charge_events"] {
         let count: i64 =

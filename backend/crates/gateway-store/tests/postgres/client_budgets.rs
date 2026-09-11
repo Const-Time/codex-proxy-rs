@@ -564,6 +564,18 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
         scope: Some(scope),
         ..charge("first", "deleted", "0.7")
     };
+    PgAccountGroupRepository::new(db.pool.clone())
+        .delete_account_group(
+            gateway_admin::model::account_groups::DeleteAccountGroup {
+                id: group_id("first"),
+            },
+            &MutationContext {
+                request_id: "delete-inflight-group".into(),
+                actor: MutationActor::System,
+            },
+        )
+        .await
+        .expect("group with no keys can be removed while a request is in flight");
     store.settle(charge.clone()).await.unwrap();
     PgClientBudgetStore::new(db.pool.clone())
         .settle(charge)

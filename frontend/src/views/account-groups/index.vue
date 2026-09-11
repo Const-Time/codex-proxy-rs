@@ -212,7 +212,7 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
       @confirm="confirmDelete"
     >
       <p class="m-0">
-        确定删除“{{ pendingDeleteGroup?.name || '该分组' }}”吗？账号本身不会被删除。
+        确定删除“{{ pendingDeleteGroup?.name || '该分组' }}”吗？账号本身和历史消费记录会保留，分组授权及账号关联会移除。
       </p>
     </BaseConfirmModal>
   </div>
