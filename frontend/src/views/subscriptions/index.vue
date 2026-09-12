@@ -25,6 +25,7 @@ const confirmOpen = ref(false)
 const resetRequestId = ref('')
 const selected = ref<string[]>([])
 const resetTargets = ref<SubscriptionTarget[]>([])
+const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const rowKey = (item: SubscriptionTarget) => JSON.stringify([item.userId, item.groupId])
 const groups = computed(() => [...new Map(records.value.map(item => [item.groupId, item.groupName])).entries()])
 const filtered = computed(() => records.value.filter(item => (!groupId.value || item.groupId === groupId.value)
@@ -48,7 +49,12 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    records.value = await getSubscriptions()
+    records.value = (await getSubscriptions()).sort((a, b) =>
+      collator.compare(a.groupName, b.groupName)
+      || a.groupId.localeCompare(b.groupId)
+      || collator.compare(a.email, b.email)
+      || a.userId.localeCompare(b.userId),
+    )
     const keys = new Set(records.value.map(rowKey))
     selected.value = selected.value.filter(key => keys.has(key))
     page.value = Math.min(page.value, pageCount.value)

@@ -2,7 +2,6 @@
 import {
   ArrowUpCircle,
   ChartNoAxesColumn,
-  ClipboardList,
   CreditCard,
   FolderTree,
   Info,
@@ -68,7 +67,7 @@ const adminNavItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
   { label: '用户管理', icon: Users, path: '/users' },
   { label: '分组管理', icon: FolderTree, path: '/account-groups' },
-  { label: '订阅管理', icon: ClipboardList, path: '/subscriptions' },
+  { label: '订阅管理', icon: CreditCard, path: '/subscriptions' },
   { label: '账号管理', icon: Server, path: '/accounts' },
   { label: '代理管理', icon: Network, path: '/proxies' },
   { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
