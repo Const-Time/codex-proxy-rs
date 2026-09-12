@@ -512,6 +512,7 @@ impl MemoryAccountGroupStore {
                     color: group_color("#2563ebff"),
                     enabled: true,
                     member_count: 2,
+                    user_count: 3,
                     provider_counts: BTreeMap::from([
                         ("openai".to_owned(), 1),
                         ("xai".to_owned(), 1),
@@ -535,6 +536,7 @@ impl MemoryAccountGroupStore {
                     color: group_color("#64748B80"),
                     enabled: false,
                     member_count: 0,
+                    user_count: 0,
                     provider_counts: BTreeMap::new(),
                     client_key_count: 0,
                     account_summary: account_summary(0, 0, 0),
@@ -652,6 +654,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
             color: command.color,
             enabled: true,
             member_count: 0,
+            user_count: 0,
             provider_counts: BTreeMap::new(),
             client_key_count: 0,
             account_summary: account_summary(0, 0, 0),

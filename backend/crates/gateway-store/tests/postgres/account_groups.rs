@@ -23,6 +23,105 @@ const MIXED_GROUP: &str = "grp_00000000000000000000000000000001";
 const EMPTY_GROUP: &str = "grp_00000000000000000000000000000002";
 
 #[tokio::test]
+async fn user_counts_follow_grants_without_counting_keys_or_deleted_users() {
+    let Some(database) = TestDatabase::create("group_user_counts").await else {
+        return;
+    };
+    let groups = PgAccountGroupRepository::new(database.pool.clone());
+    for id in [MIXED_GROUP, EMPTY_GROUP] {
+        groups
+            .create_account_group(
+                NewAccountGroup {
+                    model_multipliers: Default::default(),
+                    id: group_id(id),
+                    name: id.into(),
+                    description: None,
+                    color: group_color("#2563EBFF"),
+                    budget: Default::default(),
+                },
+                &context("create-count-group"),
+            )
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql("insert into users(id, username, password_hash, enabled, deleted_at, created_at, updated_at) values
+        ('active', 'active@example.com', 'hash', true, null, now(), now()),
+        ('disabled', 'disabled@example.com', 'hash', false, null, now(), now()),
+        ('deleted', 'deleted@example.com', 'hash', false, now(), now(), now()),
+        ('unassigned', 'unassigned@example.com', 'hash', true, null, now(), now())")
+        .execute(&database.pool).await.unwrap();
+    for id in ["active", "disabled", "deleted", "test-owner"] {
+        sqlx::query("insert into user_account_groups(user_id, account_group_id) values ($1, $2)")
+            .bind(id)
+            .bind(MIXED_GROUP)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+    // The same administrator has both an implicit grant and an explicit grant,
+    // and owns two keys: it must still count as one user.
+    let keys = PgAdminClientKeyStore::new(database.pool.clone());
+    for id in ["count-key-one", "count-key-two"] {
+        keys.create_client_key(new_key(id, vec![group_id(MIXED_GROUP)]), &context(id))
+            .await
+            .unwrap();
+    }
+    let query = || AccountGroupListQuery {
+        page: 1,
+        page_size: PageSize::new(20).unwrap(),
+        search: None,
+        enabled: None,
+    };
+    let page = groups.list_account_groups(query()).await.unwrap();
+    let mixed = page
+        .items
+        .iter()
+        .find(|group| group.id.as_str() == MIXED_GROUP)
+        .unwrap();
+    assert_eq!(
+        mixed.user_count, 3,
+        "active, disabled, and administrator, independently of key count"
+    );
+    assert_eq!(mixed.client_key_count, 2);
+    assert_eq!(
+        page.items
+            .iter()
+            .find(|group| group.id.as_str() == EMPTY_GROUP)
+            .unwrap()
+            .user_count,
+        1,
+        "administrator with implicit access"
+    );
+    sqlx::query("update users set group_grants_configured = true where id = 'test-owner'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let page = groups.list_account_groups(query()).await.unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .find(|group| group.id.as_str() == EMPTY_GROUP)
+            .unwrap()
+            .user_count,
+        0
+    );
+    sqlx::query("delete from user_account_groups where user_id = 'active'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let page = groups.list_account_groups(query()).await.unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .find(|group| group.id.as_str() == MIXED_GROUP)
+            .unwrap()
+            .user_count,
+        2
+    );
+    database.close().await;
+}
+
+#[tokio::test]
 async fn group_deletion_preserves_budget_history_without_blocking_removal() {
     let Some(database) = TestDatabase::create("group_delete_budgets").await else {
         return;

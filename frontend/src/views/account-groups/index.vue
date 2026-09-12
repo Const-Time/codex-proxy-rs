@@ -136,6 +136,12 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
               <AccountGroupMetricsCell :group="row" kind="capacity" />
             </template>
 
+            <template #userCount="{ row }">
+              <span class="font-mono tabular-nums" title="授权用户数，包含已禁用用户，不含已删除用户；同一用户仅计一次">
+                {{ row.userCount }}
+              </span>
+            </template>
+
             <template #usage="{ row }">
               <AccountGroupMetricsCell :group="row" kind="usage" />
             </template>

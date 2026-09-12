@@ -101,6 +101,7 @@ pub struct AccountGroupRecord {
     pub color: AccountGroupColor,
     pub enabled: bool,
     pub member_count: u64,
+    pub user_count: u64,
     pub provider_counts: BTreeMap<String, u64>,
     pub client_key_count: u64,
     pub account_summary: AccountGroupAccountSummary,
