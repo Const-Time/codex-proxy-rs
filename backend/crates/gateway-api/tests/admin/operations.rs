@@ -19,6 +19,59 @@ fn app(state: AdminTestState) -> Router {
 }
 
 #[tokio::test]
+async fn audit_keeps_transport_peer_separate_from_forwarded_header_candidates() {
+    for (headers, expected) in [
+        (vec![], None),
+        (vec![("x-real-ip", "198.51.100.7")], Some("198.51.100.7")),
+        (
+            vec![("cf-connecting-ip", "2001:db8::7")],
+            Some("2001:db8::7"),
+        ),
+        (
+            vec![
+                ("x-forwarded-for", "192.0.2.8, 172.21.0.1"),
+                ("x-real-ip", "198.51.100.7"),
+            ],
+            Some("192.0.2.8"),
+        ),
+        (
+            vec![
+                ("x-forwarded-for", "invalid, 192.0.2.8"),
+                ("x-real-ip", "198.51.100.7"),
+            ],
+            Some("198.51.100.7"),
+        ),
+        (
+            vec![
+                ("x-real-ip", "invalid"),
+                ("cf-connecting-ip", "also-invalid"),
+            ],
+            None,
+        ),
+    ] {
+        let fixture = AdminTestFixture::new().await;
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/admin/users/update");
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        let mut request = builder.body(Body::empty()).unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "172.21.0.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app(fixture.state()).oneshot(request).await.unwrap();
+        assert!(!response.status().is_success());
+        let events = fixture.auth.operations.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].client_ip.as_deref(), Some("172.21.0.1"));
+        assert_eq!(events[0].forwarded_ip.as_deref(), expected);
+        assert_eq!(events[0].auth_method, "anonymous");
+        assert!(events[0].actor_user_id.is_none());
+    }
+}
+
+#[tokio::test]
 async fn audit_rejects_untrusted_identity_and_never_records_headers_body_or_query() {
     let fixture = AdminTestFixture::new().await;
     let mut request = Request::builder()
