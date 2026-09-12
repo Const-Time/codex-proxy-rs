@@ -3,6 +3,7 @@ import type { UsageRecordFilters } from '@/api'
 import { Eye } from '@lucide/vue'
 import { computed, provide, ref, shallowRef, watch } from 'vue'
 
+import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
@@ -17,6 +18,7 @@ import UsageRecordDetailModal from './components/UsageRecordDetailModal.vue'
 import UsageRecordFiltersBar from './components/UsageRecordFiltersBar.vue'
 import UsageRecordsTable from './components/UsageRecordsTable.vue'
 import UsageSummaryCards from './components/UsageSummaryCards.vue'
+import UserRankingModal from './components/UserRankingModal.vue'
 import { useUsageRecordDetail } from './composables/useUsageRecordDetail'
 import { useUsageRecordsTable } from './composables/useUsageRecordsTable'
 import { useUsageTimeRange } from './composables/useUsageTimeRange'
@@ -26,8 +28,9 @@ const props = defineProps<{ personal?: boolean }>()
 provide('personalUsage', computed(() => Boolean(props.personal)))
 const visibleColumns = computed(() => props.personal ? usageRecordColumns.filter(column => !['accountEmail', 'upstreamTransport'].includes(column.key)) : usageRecordColumns)
 
-const recordFilters = ref<UsageRecordFilters>({ groupId: '', accountId: '', userId: '', model: '', clientTransport: '' })
+const recordFilters = ref<UsageRecordFilters>({ clientApiKeyId: '', groupId: '', accountId: '', userId: '', model: '', clientTransport: '' })
 const recordFilterParams = computed(() => Object.fromEntries(Object.entries(recordFilters.value).map(([key, value]) => [key, value.trim() || undefined])))
+const rankingOpen = ref(false)
 const recordView = shallowRef('success')
 const recordViewOptions = [
   { label: '成功记录', value: 'success' },
@@ -38,7 +41,6 @@ const { timeRange, timeRangeParams, refreshTimeRangeEnd, latestTimeRangeParams }
 
 const {
   currentPage,
-  searchQuery,
   providerQuery,
   usagePagination,
   loading,
@@ -72,6 +74,9 @@ watch(timeRange, () => {
   <div class="w-full">
     <BasePageHeader :title="personal ? '使用记录' : '使用统计'" description="查看请求用量、性能趋势与调用错误记录">
       <template #actions>
+        <BaseButton v-if="!personal" @click="rankingOpen = true">
+          用户排行
+        </BaseButton>
         <BaseSelect v-model="timeRange" :options="usageTimeRangeOptions" class="w-34" />
         <ProviderFilterSegmented
           v-model="providerQuery"
@@ -81,6 +86,7 @@ watch(timeRange, () => {
       </template>
     </BasePageHeader>
 
+    <UserRankingModal v-if="!personal" v-model="rankingOpen" :range="timeRangeParams" :provider="providerQuery" />
     <UsageSummaryCards :summary="summary" />
     <UsageInsightsGrid
       v-model:diagnostic-dimension="diagnosticDimension"
@@ -115,7 +121,7 @@ watch(timeRange, () => {
           class="grid min-h-130 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-3"
         >
           <UsageFilters
-            v-model:search="searchQuery"
+
             :loading="loading"
             :refreshing="refreshingList"
             @refresh="refreshUsageRecords"

@@ -3,10 +3,9 @@ import type { Ref } from 'vue'
 import type { UsageTimeRangeParams } from '../composables/useUsageTimeRange'
 import type { OpsError } from '@/api'
 
-import { Eye, RefreshCw, Search } from '@lucide/vue'
+import { Eye, RefreshCw } from '@lucide/vue'
 import { computed, inject, shallowRef, toRef } from 'vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
@@ -27,7 +26,6 @@ const {
   loading,
   refreshing,
   records,
-  searchQuery,
   pagination,
   handlePageChange,
   handlePageSizeChange,
@@ -84,18 +82,6 @@ function upstreamSendStateText(value: string | null | undefined) {
       role="group"
       aria-label="错误筛选与操作"
     >
-      <div class="min-w-0 flex-1">
-        <BaseInput
-          v-model="searchQuery"
-          placeholder="请求 ID、Key 或账号"
-          class="min-w-0 w-full lg:max-w-96"
-        >
-          <template #prefix>
-            <Search class="size-4.5 text-cp-text-tertiary" />
-          </template>
-        </BaseInput>
-      </div>
-
       <div class="flex shrink-0 self-end items-center justify-end gap-2 lg:ml-auto">
         <BaseIconButton
           variant="ghost"

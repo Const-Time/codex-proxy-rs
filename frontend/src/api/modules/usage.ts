@@ -452,6 +452,7 @@ export interface UsageDiagnosticsResponse {
 
 // 请求参数类型：仅定义 API 边界的形状，调用方不依赖显式声明。
 export interface UsageRecordFilters {
+  clientApiKeyId: string
   groupId: string
   accountId: string
   userId: string
@@ -460,6 +461,7 @@ export interface UsageRecordFilters {
 }
 
 interface UsageRangeQuery {
+  clientApiKeyId?: string
   personal?: boolean
   groupId?: string
   accountId?: string
