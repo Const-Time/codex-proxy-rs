@@ -24,6 +24,8 @@ sudo chown "$(id -u):10001" deploy/config.yaml
 chmod 0640 deploy/config.yaml
 ```
 
+已有部署不要对整个 `.runtime` 统一执行 `chown`。容器初始化后，`.runtime/postgres` 和 `.runtime/redis` 应由各自数据库用户持有；应用的 `10001` 组仅用于 `.runtime/data` 和 `.runtime/logs`。
+
 为 PostgreSQL 与 Redis 分别生成一个密码：
 
 ```bash
@@ -296,6 +298,20 @@ OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 Postgr
 健康探针。Docker stdout 的独立轮转不承担应用文件日志的完整保留承诺。
 
 完整运行时、Provider、revision 与恢复边界见 [架构文档](../docs/architecture.md)。
+
+## Redis 数据目录权限故障
+
+若日志显示 Redis 无法在 `/data` 创建 `temp-*.rdb`，先修复容器挂载目录权限。RDB 保存失败时 Redis 的写入保护可能阻止请求准入和账号运行状态查询，表现为 503 或账号列表读取失败。
+
+使用本仓库 Redis 镜像和 Compose 配置时，从项目目录执行：
+
+```bash
+docker compose -f deploy/compose.yaml exec --user 0 redis sh -c 'chown redis:redis /data && chmod u+rwx /data'
+docker compose -f deploy/compose.yaml exec --user redis redis sh -c 'test -w /data && echo "Redis data directory is writable"'
+docker compose -f deploy/compose.yaml logs --since 2m --tail 30 redis
+```
+
+目录修复后等待自动重试，确认新日志出现 `Background saving terminated with success`，再刷新账号页面并重试请求。上述命令仅修改 Redis 数据目录本身，不清空数据，也不需要先重启 Redis。若仍然失败，继续检查挂载只读状态、磁盘空间与宿主机访问控制。不要通过关闭 `stop-writes-on-bgsave-error` 掩盖尚未解决的持久化故障。
 
 ## 密码语义
 

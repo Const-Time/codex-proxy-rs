@@ -3,6 +3,7 @@ import { ChevronDown, Grid2X2 } from '@lucide/vue'
 import { ref } from 'vue'
 
 import AccountGroupMarks from '@/components/AccountGroupMarks.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
@@ -36,6 +37,8 @@ import { accountColumns, derivedAccountStatus } from './constants'
 const selectedIds = ref<Set<string>>(new Set())
 const {
   loading,
+  hasLoaded,
+  loadError,
   accounts,
   loadAccounts,
   refreshAccountsSilently,
@@ -168,7 +171,7 @@ const {
       description="维护账号池，查看可用性、配额与使用状态"
     />
 
-    <AccountOverviewCards :summary="accountSummary" />
+    <AccountOverviewCards :summary="accountSummary" :pending="!hasLoaded" />
 
     <BaseCard
       class="mt-4 flex flex-col xl:h-[calc(100dvh-250px)] xl:min-h-125"
@@ -193,6 +196,12 @@ const {
 
       <template #body>
         <div class="flex min-h-0 flex-col xl:h-full">
+          <div v-if="loadError" role="alert" class="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-cp bg-cp-error-container px-4 py-3 text-cp-sm text-cp-error">
+            <span>账号加载失败：{{ loadError }}。{{ hasLoaded ? '当前保留上次加载的数据。' : '无法读取账号数据，不代表账号已被删除。' }}</span>
+            <BaseButton size="sm" :loading="loading" @click="loadAccounts()">
+              重新加载
+            </BaseButton>
+          </div>
           <BaseTable
             class="h-100! min-h-100 flex-none [--cp-table-row-height:72px] xl:h-auto! xl:min-h-0 xl:flex-1"
             :columns="accountColumns"
@@ -201,7 +210,7 @@ const {
             :selected-row-keys="selectedRowKeys"
             :expanded-row-keys="expandedRowKeys"
             :sort="sort"
-            empty-text="暂无账号数据"
+            :empty-text="loadError ? '账号数据读取失败，请重试' : '暂无账号数据'"
             @sort-change="handleSortChange"
           >
             <template #expander="{ row }">

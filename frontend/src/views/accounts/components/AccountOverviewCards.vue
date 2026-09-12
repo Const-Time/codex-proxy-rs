@@ -9,6 +9,7 @@ import { formatInteger } from '@/utils/number'
 
 const props = defineProps<{
   summary: Awaited<ReturnType<typeof getAccounts>>['summary']
+  pending?: boolean
 }>()
 
 const overviewItems = computed(() => [
@@ -65,7 +66,7 @@ function overviewIconClass(tone: string) {
             {{ item.label }}
           </p>
           <strong class="my-2 block font-mono text-[26px] leading-none font-extrabold text-cp-text">
-            {{ item.value }}
+            {{ pending ? '—' : item.value }}
           </strong>
           <p class="m-0 truncate text-cp-sm leading-none font-emphasis text-cp-text-quaternary">
             {{ item.caption }}
