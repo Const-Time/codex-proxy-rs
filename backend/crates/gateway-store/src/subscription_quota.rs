@@ -21,6 +21,15 @@ async fn lock(tx: &mut Transaction<'_, Postgres>, account_id: &str) -> AdminStor
         .map_err(error)?;
     Ok(())
 }
+async fn auto_reset_enabled(tx: &mut Transaction<'_, Postgres>) -> AdminStoreResult<bool> {
+    // Lock settings before account/observation rows, serializing with the settings save.
+    sqlx::query_scalar(
+        "select subscription_auto_reset_enabled from runtime_settings where id = 1 for share",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(error)
+}
 async fn reset(
     tx: &mut Transaction<'_, Postgres>,
     account_id: &str,
@@ -38,6 +47,7 @@ pub(crate) async fn reset_account(
     event_id: &str,
 ) -> AdminStoreResult<()> {
     let mut tx = pool.begin().await.map_err(error)?;
+    let enabled = auto_reset_enabled(&mut tx).await?;
     lock(&mut tx, account_id).await?;
     let event_id = format!("account:{account_id}:{event_id}");
     let existing: bool =
@@ -47,6 +57,19 @@ pub(crate) async fn reset_account(
             .await
             .map_err(error)?;
     if !existing {
+        if !enabled {
+            // Remember disabled redemptions too: retrying after enabling must not reset.
+            sqlx::query(
+                "select reset_user_subscriptions($1, array[]::text[], $2, 'upstream_manual', $3)",
+            )
+            .bind(&event_id)
+            .bind(account_id)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await
+            .map_err(error)?;
+            return tx.commit().await.map_err(error);
+        }
         reset(
             &mut tx,
             account_id,
@@ -77,6 +100,7 @@ pub(crate) async fn observe(
         return Ok(());
     }
     let mut tx = pool.begin().await.map_err(error)?;
+    let enabled = auto_reset_enabled(&mut tx).await?;
     lock(&mut tx, account_id).await?;
     let mut detected: Option<(&str, DateTime<Utc>)> = None;
     let manual_at: Option<DateTime<Utc>> = sqlx::query_scalar("select max(occurred_at) from subscription_reset_events where account_id = $1 and reason = 'upstream_manual'")
@@ -110,7 +134,7 @@ pub(crate) async fn observe(
             let externally_reset = boundary_advanced;
             // Only a changed weekly boundary proves a new upstream weekly window.
             // Percentage corrections and short-window recovery must not clear weekly budgets.
-            if externally_reset {
+            if enabled && externally_reset {
                 let at = if natural {
                     window
                         .reset_at

@@ -176,11 +176,13 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 
 | 方法 | 路由 | 请求 | 说明 |
 | --- | --- | --- | --- |
-| `POST` | `/api/admin/auth/login` | `{ username?, password }` | 创建用户会话并设置 Cookie |
+| `POST` | `/api/admin/auth/login` | `{ username, password }` | username 为登录邮箱；创建用户会话并设置 Cookie |
 | `GET` | `/api/admin/auth/status` | 无 | 返回当前 Cookie 是否已认证 |
 | `POST` | `/api/admin/auth/logout` | 无 | 删除当前会话并清除 Cookie |
 
 ### 用户与个人接口
+
+运行设置 `GET /api/admin/settings` 返回 `subscriptionAutoResetEnabled`。`POST /api/admin/settings/update` 可传布尔值修改开关，省略则保留现值。默认开启，关闭仅停止上游账号事件引发的订阅自动重置，不影响管理员手动重置和订阅自身到期刷新。重新开启后首次观察只建立基准，不补做关闭期间的重置。
 
 登录返回的 Cookie 名仍为 `cpr_admin_session`，适用于管理员和普通用户。`GET /api/admin/auth/status` 返回 `{ authenticated, user }`，未登录时 user 为 null；用户包含 id、username、role、enabled、groupIds、createdAt、updatedAt。用户名不区分大小写。停用用户或修改密码后，旧会话失效；更改分组授权也会使旧会话失效。
 
@@ -188,14 +190,14 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 | --- | --- | --- | --- |
 | GET | /api/admin/users | — | 管理员；用户列表，无密码或密钥 |
 | POST | /api/admin/users/create | { username, password, groupIds, maxConcurrency?, requestsPerMinute? } | 管理员；创建已启用的普通用户，不能指定角色 |
-| POST | /api/admin/users/update | { id, enabled, groupIds, quotaMultipliers?, maxConcurrency?, requestsPerMinute? } | 管理员；替换分组授权、额度倍率及用户限流，不能禁用管理员 |
+| POST | /api/admin/users/update | { id, username?, enabled, groupIds, quotaMultipliers?, maxConcurrency?, requestsPerMinute? } | 管理员；修改邮箱、分组授权、额度倍率及用户限流，不能禁用管理员 |
 | GET | /api/admin/subscriptions | — | 管理员；当前用户分组订阅、有效日周限额、已用额度、刷新时间及最近重置 |
 | POST | /api/admin/subscriptions/reset | { requestId, targets: [{ userId, groupId }] } | 管理员；幂等重置指定订阅，targets 必填且为 1–500 项，返回影响数量；不提供全体重置入口 |
 | GET | /api/profile | — | 本人会话；个人资料 |
 | GET | /api/profile/groups | — | 本人会话；获授权分组及本人的共享额度，不含上游账号资料 |
 | POST | /api/profile/password | { currentPassword, newPassword } | 本人会话；验证原密码、改密后重新登录 |
 
-新密码为 12–1024 字节；用户名最长 128 字符，不允许控制字符。没有自助注册或管理员代用户创建密钥入口。
+新密码为 12–1024 字节；username 作为登录邮箱，最长 128 字节，创建和修改时校验邮箱格式，首尾空白自动去除，不区分大小写且全局唯一。登录必须显式填写邮箱，不再回退到默认管理员账号。更新接口省略 username 时保留原邮箱，兼容旧客户端。既有邮箱用户名无需迁移，用户 ID、密码哈希、密钥所有权、历史记录和配额保持不变；改名后使用新邮箱和原密码登录。管理员可修改自身邮箱，不能修改其他管理员；自身修改保持当前登录会话。没有自助注册或管理员代用户创建密钥入口。
 
 管理接口要求 admin 角色或部署级管理 API Key；个人接口、Client Key 全部操作以及使用记录接口必须使用本人 Cookie，不接受部署级 API Key。普通用户访问管理接口返回 403。Client Key 的所有权由会话决定，任何角色均无法列出、读取、修改或删除他人的 Key；请求体不接受 owner/role 等代操作字段。
 

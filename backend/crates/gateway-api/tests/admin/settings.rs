@@ -37,6 +37,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 
 fn update_body() -> Value {
     json!({
+        "subscriptionAutoResetEnabled": true,
         "modelMappings": {
             "gpt-5.4": "gpt-5.5",
             "grok-latest": "grok-4.5"
@@ -109,6 +110,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         min_codex_cli_version: Some("0.40.0".to_owned()),
         usage_retention_days: 32,
         ops_event_retention_days: 31,
+        subscription_auto_reset_enabled: true,
         audit_retention_days: 91,
         updated_at: Utc
             .with_ymd_and_hms(2026, 8, 2, 10, 30, 0)
@@ -120,6 +122,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
     assert_eq!(
         value,
         json!({
+            "subscriptionAutoResetEnabled": true,
             "modelMappings": {
                 "gpt-5.4": "gpt-5.5",
                 "grok-latest": "grok-4.5"
@@ -182,6 +185,7 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         min_codex_cli_version: request.min_codex_cli_version,
         usage_retention_days: u32::try_from(request.usage_retention_days).expect("u32"),
         ops_event_retention_days: u32::try_from(request.ops_event_retention_days).expect("u32"),
+        subscription_auto_reset_enabled: true,
         audit_retention_days: u32::try_from(request.audit_retention_days).expect("u32"),
         updated_at: chrono::Utc::now(),
     };

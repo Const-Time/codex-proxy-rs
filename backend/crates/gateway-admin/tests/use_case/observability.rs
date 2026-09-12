@@ -809,6 +809,7 @@ impl SettingsStore for FixtureSettingsStore {
             min_codex_cli_version: None,
             usage_retention_days: 31,
             ops_event_retention_days: 30,
+            subscription_auto_reset_enabled: true,
             audit_retention_days: 30,
             updated_at: Utc::now(),
         })

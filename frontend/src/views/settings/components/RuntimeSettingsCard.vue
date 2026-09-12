@@ -5,6 +5,10 @@ import BaseCard from '@/components/base/BaseCard.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseForm from '@/components/base/BaseForm/index.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BaseSwitch from '@/components/base/BaseSwitch.vue'
+
+defineProps<{ disabled?: boolean }>()
+const subscriptionAutoResetEnabled = defineModel<boolean>('subscriptionAutoResetEnabled', { required: true })
 
 const maxConcurrentPerAccount = defineModel<string>('maxConcurrentPerAccount', { required: true })
 const refreshMarginSeconds = defineModel<string>('refreshMarginSeconds', { required: true })
@@ -78,5 +82,16 @@ const requestIntervalMs = defineModel<string>('requestIntervalMs', { required: t
         </BaseInput>
       </BaseFormItem>
     </BaseForm>
+    <div class="mt-5 flex items-center justify-between gap-4 border-t border-cp-border pt-5">
+      <div>
+        <p class="font-medium text-cp-text">
+          自动重置订阅分组配额
+        </p>
+        <p class="mt-1 text-cp-sm text-cp-text-secondary">
+          账号主动重置或上游周窗口变化时，自动重置关联分组下用户的日、周配额。关闭后仍可手动重置，订阅自身到期刷新不受影响；重新开启不补做关闭期间的重置。保存后生效。
+        </p>
+      </div>
+      <BaseSwitch v-model="subscriptionAutoResetEnabled" label="自动重置订阅分组配额" :disabled="disabled" />
+    </div>
   </BaseCard>
 </template>

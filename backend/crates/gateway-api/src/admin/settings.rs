@@ -32,6 +32,7 @@ pub type ModelMappings = BTreeMap<String, String>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettingsView {
+    pub subscription_auto_reset_enabled: bool,
     pub model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u64,
@@ -50,6 +51,8 @@ pub struct RuntimeSettingsView {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateRuntimeSettingsRequest {
+    #[serde(default)]
+    pub subscription_auto_reset_enabled: Option<bool>,
     pub model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u64,
@@ -97,6 +100,7 @@ impl UpdateRuntimeSettingsRequest {
     fn into_command(self) -> Result<ReplaceRuntimeSettings, WireValidationError> {
         self.validate()?;
         Ok(ReplaceRuntimeSettings {
+            subscription_auto_reset_enabled: self.subscription_auto_reset_enabled,
             model_mappings: domain_model_mappings(self.model_mappings)?,
             refresh_margin_seconds: self.refresh_margin_seconds,
             refresh_concurrency: u32::try_from(self.refresh_concurrency)
@@ -121,6 +125,7 @@ impl UpdateRuntimeSettingsRequest {
 impl From<RuntimeSettings> for RuntimeSettingsView {
     fn from(settings: RuntimeSettings) -> Self {
         Self {
+            subscription_auto_reset_enabled: settings.subscription_auto_reset_enabled,
             model_mappings: wire_model_mappings(settings.model_mappings),
             refresh_margin_seconds: settings.refresh_margin_seconds,
             refresh_concurrency: u64::from(settings.refresh_concurrency),

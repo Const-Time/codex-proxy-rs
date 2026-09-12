@@ -13,6 +13,7 @@ export function useSettingsForm() {
   const error = shallowRef('')
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
   const form = reactive({
+    subscriptionAutoResetEnabled: true,
     refreshMarginSeconds: null as number | null,
     refreshConcurrency: null as number | null,
     maxConcurrentPerAccount: null as number | null,
@@ -52,6 +53,7 @@ export function useSettingsForm() {
   }
 
   function applySettings(data: Awaited<ReturnType<typeof getSettings>>) {
+    form.subscriptionAutoResetEnabled = data.subscriptionAutoResetEnabled ?? true
     form.refreshMarginSeconds = data.refreshMarginSeconds
     form.refreshConcurrency = data.refreshConcurrency
     form.maxConcurrentPerAccount = data.maxConcurrentPerAccount
@@ -141,6 +143,7 @@ export function useSettingsForm() {
         usageRetentionDays: form.usageRetentionDays,
         opsEventRetentionDays: form.opsEventRetentionDays,
         auditRetentionDays: form.auditRetentionDays,
+        subscriptionAutoResetEnabled: form.subscriptionAutoResetEnabled,
       })
       applySettings(result)
       toast.success('设置已保存')

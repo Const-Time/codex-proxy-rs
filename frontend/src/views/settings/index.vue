@@ -123,10 +123,12 @@ watch(
       />
 
       <RuntimeSettingsCard
+        v-model:subscription-auto-reset-enabled="form.subscriptionAutoResetEnabled"
         v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
         v-model:refresh-margin-seconds="refreshMarginSecondsValue"
         v-model:refresh-concurrency="refreshConcurrencyValue"
         v-model:request-interval-ms="requestIntervalMsValue"
+        :disabled="loading || saving"
       />
 
       <ClientVersionSettings

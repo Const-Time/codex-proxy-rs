@@ -17,6 +17,7 @@ pub use gateway_core::account::RotationStrategy;
 /// 完整运行设置事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub subscription_auto_reset_enabled: bool,
     pub config_revision: Revision,
     pub model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
@@ -35,6 +36,7 @@ pub struct RuntimeSettings {
 /// 原子替换运行设置的命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceRuntimeSettings {
+    pub subscription_auto_reset_enabled: Option<bool>,
     pub model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
