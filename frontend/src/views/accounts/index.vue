@@ -174,7 +174,7 @@ const {
     <AccountOverviewCards :summary="accountSummary" :pending="!hasLoaded" />
 
     <BaseCard
-      class="mt-4 flex flex-col xl:h-[calc(100dvh-250px)] xl:min-h-125"
+      class="cp-mobile-table-host mt-4 flex flex-col xl:h-[calc(100dvh-250px)] xl:min-h-125"
     >
       <template #header>
         <AccountFilters

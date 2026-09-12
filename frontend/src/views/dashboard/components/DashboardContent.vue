@@ -77,7 +77,7 @@ const trendKind = defineModel<DashboardTrendKind>('trendKind', { required: true 
     </BasePageHeader>
 
     <section
-      class="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4 2xl:gap-6"
+      class="cp-mobile-metrics mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4 2xl:gap-6"
       aria-label="核心指标"
     >
       <MetricCard v-for="metric in metrics" :key="metric.title" :metric="metric" />

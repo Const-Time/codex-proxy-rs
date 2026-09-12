@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from '@lucide/vue'
-import { useResizeObserver } from '@vueuse/core'
+import { useMediaQuery, useResizeObserver } from '@vueuse/core'
 import { nextTick, onBeforeUnmount, useId, useTemplateRef, watch } from 'vue'
 
 import BaseIconButton from '../BaseIconButton.vue'
@@ -35,9 +35,10 @@ const open = defineModel<boolean>({ default: false })
 const panel = useTemplateRef<HTMLElement>('panel')
 const titleId = useId()
 const descriptionId = useId()
+const mobile = useMediaQuery('(max-width: 639px)')
 const { cancelDrag, constrainPosition, handlePointerDown, isDragging, resetPosition } = useModalDrag(
   panel,
-  () => props.draggable,
+  () => props.draggable && !mobile.value,
 )
 let previouslyFocused: HTMLElement | null = null
 let ownsScrollLock = false
@@ -225,7 +226,7 @@ onBeforeUnmount(() => {
                 ? 'grid-cols-[minmax(0,1fr)_28px]'
                 : 'grid-cols-[auto_minmax(0,1fr)_28px]',
               description ? 'items-start' : 'items-center',
-              draggable ? 'cp-modal-header--draggable' : undefined,
+              draggable && !mobile ? 'cp-modal-header--draggable' : undefined,
             ]"
             @pointerdown="handlePointerDown"
           >

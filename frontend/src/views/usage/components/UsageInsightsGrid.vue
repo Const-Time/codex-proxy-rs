@@ -36,7 +36,12 @@ const diagnosticDimension = defineModel('diagnosticDimension', {
       :cost="overview.cost"
       :granularity="overview.granularity"
       :loading="loading"
-    />
+      :show-ranking="Boolean($slots.ranking)"
+    >
+      <template v-if="$slots.ranking" #ranking>
+        <slot name="ranking" />
+      </template>
+    </UsageHealthCard>
 
     <UsageDiagnosticCard
       v-model:dimension="diagnosticDimension"

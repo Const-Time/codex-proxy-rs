@@ -53,8 +53,8 @@ const emit = defineEmits<{
       </div>
     </template>
 
-    <div class="grid max-w-6xl gap-4">
-      <div class="flex min-h-16 items-center justify-between gap-4 rounded-cp bg-cp-fill-quaternary px-4 py-3">
+    <div class="grid min-w-0 max-w-6xl grid-cols-1 gap-4">
+      <div class="flex min-h-16 min-w-0 items-center justify-between gap-4 rounded-cp bg-cp-fill-quaternary px-4 py-3">
         <div class="flex min-w-0 items-center gap-3">
           <BaseMotionIcon
             class="inline-flex size-9 shrink-0 items-center justify-center rounded-cp bg-cp-bg-container text-cp-cyan-solid shadow-cp-tertiary"
@@ -65,7 +65,7 @@ const emit = defineEmits<{
             <p class="m-0 text-cp leading-[1.15] font-bold text-cp-text">
               {{ status.exists ? '已启用' : '未生成' }}
             </p>
-            <p class="mt-1.5 mb-0 truncate text-cp-sm leading-[1.15] font-emphasis text-cp-text-secondary">
+            <p class="mt-1.5 mb-0 text-cp-sm leading-[1.4] font-emphasis text-cp-text-secondary sm:truncate sm:leading-[1.15]">
               {{
                 loading
                   ? '加载中...'

@@ -495,6 +495,9 @@ pub struct DashboardObservation {
 /// 使用记录列表所需的窄投影；完整执行、路由和客户端详情按 ID 单独读取。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub username: Option<String>,
     pub id: String,
     pub endpoint: String,
     pub client_transport: String,
@@ -709,6 +712,9 @@ pub struct DiagnosticObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsErrorRecord {
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub username: Option<String>,
     pub source: String,
     pub event_id: String,
     pub request_id: Option<String>,

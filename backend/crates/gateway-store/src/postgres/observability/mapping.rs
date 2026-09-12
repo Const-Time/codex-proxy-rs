@@ -459,6 +459,9 @@ pub(crate) fn admin_usage_list_record(
         }
     };
     Ok(admin_observability::UsageListRecord {
+        user_id: record.user_id,
+        user_email: record.user_email,
+        username: record.username,
         id: record.id,
         endpoint: record.endpoint,
         client_transport: record.client_transport,
@@ -750,6 +753,9 @@ pub(crate) fn admin_ops_error_page(
 
 pub(crate) fn admin_ops_error(error: OpsErrorRecord) -> admin_observability::OpsError {
     admin_observability::OpsError {
+        user_id: error.user_id,
+        user_email: error.user_email,
+        username: error.username,
         source: error.source,
         event_id: error.event_id,
         request_id: error.request_id,
@@ -807,6 +813,9 @@ pub(crate) fn usage_list_record_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<UsageListRecord> {
     Ok(UsageListRecord {
+        user_id: get(row, "user_id")?,
+        user_email: get(row, "user_email")?,
+        username: get(row, "username")?,
         id: get(row, "id")?,
         endpoint: get(row, "endpoint")?,
         client_transport: get(row, "client_transport")?,
@@ -942,6 +951,9 @@ pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<
 
 pub(crate) fn ops_error_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<OpsErrorRecord> {
     Ok(OpsErrorRecord {
+        user_id: get(row, "user_id")?,
+        user_email: get(row, "user_email")?,
+        username: get(row, "username")?,
         source: get(row, "source")?,
         event_id: get(row, "event_id")?,
         request_id: get(row, "request_id")?,

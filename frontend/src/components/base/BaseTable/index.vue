@@ -2,10 +2,11 @@
 import type { BaseTableProps, BaseTableSort, ResolvedTableColumn } from './columns'
 
 import { Triangle } from '@lucide/vue'
-import { useResizeObserver } from '@vueuse/core'
+import { useMediaQuery, useResizeObserver } from '@vueuse/core'
 import { computed, nextTick, onMounted, shallowRef, useSlots, useTemplateRef, watch } from 'vue'
 import BaseEmpty from '../BaseEmpty.vue'
 import BaseScrollbar from '../BaseScrollbar.vue'
+import BaseSelect from '../BaseSelect.vue'
 import {
   alignClass,
   cellContentClass,
@@ -34,7 +35,26 @@ const emit = defineEmits<{
   sortChange: [sort: BaseTableSort | undefined]
 }>()
 const slots = useSlots()
+const mobile = useMediaQuery('(max-width: 639px)')
 const computedColumns = computed(() => resolveColumns(props.columns))
+const mobileSortOptions = computed(() => [
+  { label: '默认排序', value: '' },
+  ...computedColumns.value.filter(column => column.sortable).flatMap(column => [
+    { label: `${column.label}：升序`, value: `${columnSortKey(column)}:asc` },
+    { label: `${column.label}：降序`, value: `${columnSortKey(column)}:desc` },
+  ]),
+])
+const mobileSort = computed({
+  get: () => props.sort ? `${props.sort.key}:${props.sort.direction}` : '',
+  set: (value: string) => {
+    if (!value) {
+      emit('sortChange', undefined)
+      return
+    }
+    const separator = value.lastIndexOf(':')
+    emit('sortChange', { key: value.slice(0, separator), direction: value.slice(separator + 1) === 'asc' ? 'asc' : 'desc' })
+  },
+})
 const resolvedTableStyle = computed(() => tableStyle(computedColumns.value))
 
 const retainedRows = shallowRef<Row[]>([])
@@ -184,10 +204,51 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
 </script>
 
 <template>
-  <div class="isolate flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden">
-    <div v-loading="loading" class="relative flex min-h-0 max-w-full flex-1 overflow-hidden">
+  <div class="cp-data-table isolate flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden">
+    <div v-loading="loading" class="cp-data-table-body relative flex min-h-0 max-w-full flex-1 overflow-hidden">
+      <div v-if="mobile && hasRows" class="w-full min-w-0">
+        <div v-if="computedColumns.some(column => column.sortable || column.kind === 'selection')" class="mb-3 flex flex-wrap items-center gap-3">
+          <div v-for="column in computedColumns.filter(column => column.kind === 'selection')" :key="column.key" class="flex items-center gap-2">
+            <slot :name="`header-${column.key}`" :column="column" />
+            <span class="text-cp-sm text-cp-text-secondary">选择当前页</span>
+          </div>
+          <BaseSelect v-if="mobileSortOptions.length > 1" v-model="mobileSort" class="min-w-0 flex-1" :options="mobileSortOptions" aria-label="列表排序" />
+        </div>
+        <div class="grid gap-3">
+          <article
+            v-for="(row, index) in displayRows"
+            :key="getRowKey(row, index)"
+            class="cp-record-card min-w-0 rounded-cp-card bg-(--cp-table-row-bg) p-4 ring-1 ring-inset ring-cp-border-secondary"
+            :class="isRowSelected(row, index) ? 'ring-cp-primary' : ''"
+          >
+            <dl class="m-0 grid min-w-0 gap-3">
+              <div
+                v-for="column in computedColumns"
+                :key="column.key"
+                class="cp-record-field"
+                :class="['actions', 'selection', 'expander'].includes(column.kind) ? 'cp-record-field--wide' : ''"
+              >
+                <dt class="text-cp-sm text-cp-text-secondary" :class="column.kind === 'actions' ? 'sr-only' : ''">
+                  <span v-if="column.kind === 'selection'">选择</span>
+                  <slot v-else :name="`header-${column.key}`" :column="column">
+                    {{ column.label || (column.kind === 'expander' ? '展开详情' : '') }}
+                  </slot>
+                </dt>
+                <dd class="cp-record-value m-0 min-w-0 text-cp-sm" :class="column.kind === 'numeric' ? 'font-mono tabular-nums' : ''">
+                  <slot :name="column.key" :row="row" :value="cellValue(row, column.key)" :display-value="cellDisplayValue(column, row)" :index="index">
+                    {{ cellDisplayValue(column, row) }}
+                  </slot>
+                </dd>
+              </div>
+            </dl>
+            <div v-if="isRowExpanded(row, index)" class="mt-4 min-w-0 border-t border-cp-border pt-4">
+              <slot name="expanded" :row="row" :index="index" />
+            </div>
+          </article>
+        </div>
+      </div>
       <BaseScrollbar
-        v-if="hasRows"
+        v-else-if="hasRows"
         ref="scrollbar"
         class="min-h-0 flex-1"
         :class="

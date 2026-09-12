@@ -120,7 +120,7 @@ function diagnosticNameDisplay(name: string) {
     as="article"
     title="热点诊断"
     :description="`按${selectedDimensionLabel}定位高影响请求`"
-    class="h-105 min-h-105 max-h-105 min-w-0 w-full lg:h-full lg:min-h-90 lg:max-h-105"
+    class="cp-mobile-auto-height h-105 min-h-105 max-h-105 min-w-0 w-full lg:h-full lg:min-h-90 lg:max-h-105"
   >
     <template #actions>
       <BaseSegmented

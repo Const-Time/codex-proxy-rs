@@ -6,6 +6,7 @@ import { formatProvider } from './utils/format'
 type OpsErrorRow = OpsError
 
 export const usageRecordColumns = defineTableColumns<UsageDisplayRecord>([
+  { key: 'userEmail', label: '用户', kind: 'custom', size: '3xl' },
   {
     key: 'accountEmail',
     label: '账号',
@@ -34,6 +35,7 @@ export const usageRecordColumns = defineTableColumns<UsageDisplayRecord>([
 ])
 
 export const opsErrorColumns = defineTableColumns<OpsErrorRow>([
+  { key: 'userEmail', label: '用户', kind: 'custom', size: '3xl' },
   { key: 'accountId', label: '账号', kind: 'identity', size: '3xl', emptyText: '未知账号' },
   { key: 'provider', label: '平台/类型', kind: 'custom', size: 'sm' },
   { key: 'message', label: '错误', kind: 'custom', size: '4xl' },

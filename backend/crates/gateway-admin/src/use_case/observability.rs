@@ -388,6 +388,12 @@ impl ObservabilityService for DefaultObservabilityService {
             })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| {
+            if dimension == DiagnosticDimension::User {
+                return right
+                    .total_tokens
+                    .cmp(&left.total_tokens)
+                    .then_with(|| left.key.cmp(&right.key));
+            }
             right
                 .impact_score
                 .total_cmp(&left.impact_score)

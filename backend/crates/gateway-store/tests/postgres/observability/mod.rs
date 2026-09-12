@@ -131,6 +131,136 @@ async fn observability_preserves_and_filters_opaque_response_ids() {
 }
 
 #[tokio::test]
+async fn user_ranking_selects_top_token_users_before_limit() {
+    let Some(database) = TestDatabase::create("user_ranking_tokens").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&database.pool, now).await.unwrap();
+    sqlx::query(
+        "insert into users
+         select (jsonb_populate_record(null::users, to_jsonb(u) ||
+           jsonb_build_object('id', 'rank_' || n, 'username', 'rank_' || n))).*
+         from users u cross join generate_series(1, 101) n where u.id = 'test-owner'",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into model_requests (
+           id, user_id, client_api_key_ref, config_revision, protocol, operation, endpoint,
+           client_transport, requested_model_id, provider_kind, provider_account_id,
+           provider_account_ref, upstream_model_id, upstream_transport, attempt_count,
+           upstream_send_state, downstream_committed_at, outcome, client_status_code,
+           input_tokens, output_tokens, total_tokens, cost_source, latency_ms,
+           started_at, deadline_at, completed_at, routing_scope,
+           routing_group_refs, routing_group_names_snapshot
+         )
+         select 'rank_req_' || n || '_' || r, 'rank_' || n,
+           client_api_key_ref, config_revision, protocol, operation, endpoint,
+           client_transport, requested_model_id, provider_kind, provider_account_id,
+           provider_account_ref, upstream_model_id, upstream_transport, attempt_count,
+           upstream_send_state, downstream_committed_at, outcome, client_status_code,
+           case when n = 101 then 1000000 else n end, 0,
+           case when n = 101 then 1000000 else n end, 'unavailable', latency_ms,
+           started_at, deadline_at, completed_at, routing_scope,
+           routing_group_refs, routing_group_names_snapshot
+         from model_requests mr cross join generate_series(1, 101) n
+           cross join generate_series(1, 2) r
+         where mr.id = 'req_observe_success' and (n < 101 or r = 1)",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let range =
+        ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1)).unwrap();
+    let ranking = observability_repository(&database.pool)
+        .usage_diagnostics(
+            range,
+            UsageRecordFilter::default(),
+            DiagnosticDimension::User,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ranking.len(), 100);
+    assert_eq!(ranking[0].key, "rank_101");
+    assert_eq!(ranking[0].request_count, 1);
+    assert_eq!(ranking[0].total_tokens, 1_000_000);
+    assert!(!ranking.iter().any(|item| item.key == "rank_1"));
+    assert!(
+        ranking
+            .windows(2)
+            .all(|pair| pair[0].total_tokens >= pair[1].total_tokens)
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn usage_user_identity_survives_key_and_user_deletion() {
+    let Some(database) = TestDatabase::create("usage_user_identity").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&database.pool, now).await.unwrap();
+    sqlx::query("update users set username = 'history@example.invalid', display_name = 'History' where id = 'test-owner'")
+        .execute(&database.pool).await.unwrap();
+    sqlx::query(
+        "update model_requests set user_id = 'test-owner' where id = 'req_observe_success'",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let store = admin_observability_store(&database.pool);
+    let query = || admin_observability::UsageQuery {
+        range: admin_observability::TimeRange {
+            start: now - TimeDelta::hours(1),
+            end: now + TimeDelta::hours(1),
+        },
+        filter: admin_observability::UsageFilter::default(),
+        current_page: 1,
+        page_size: PageSize::new(10).unwrap(),
+    };
+    // Ownership comes from the retained request fact, never from a live key lookup.
+    sqlx::query("delete from client_api_keys where owner_user_id = 'test-owner'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    sqlx::query("update users set enabled = false, deleted_at = now() where id = 'test-owner'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let page = store.list_usage_records(query()).await.unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].user_id.as_deref(), Some("test-owner"));
+    assert_eq!(
+        page.items[0].user_email.as_deref(),
+        Some("history@example.invalid")
+    );
+    assert_eq!(page.items[0].username.as_deref(), Some("History"));
+    sqlx::query("update users set display_name = '' where id = 'test-owner'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    assert!(
+        store.list_usage_records(query()).await.unwrap().items[0]
+            .username
+            .is_none()
+    );
+    sqlx::query("update model_requests set user_id = null where id = 'req_observe_success'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let page = store.list_usage_records(query()).await.unwrap();
+    assert_eq!(
+        page.total, 1,
+        "unassociated historical requests must not disappear"
+    );
+    assert!(page.items[0].user_id.is_none());
+    assert!(page.items[0].user_email.is_none());
+    database.close().await;
+}
+
+#[tokio::test]
 async fn usage_page_should_always_return_total() {
     let Some(database) = TestDatabase::create("usage_page_with_total").await else {
         return;

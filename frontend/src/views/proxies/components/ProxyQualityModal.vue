@@ -142,7 +142,7 @@ onBeforeUnmount(() => {
           </dl>
         </div>
         <div class="overflow-x-auto rounded-xl border border-cp-border">
-          <table class="w-full min-w-130 border-collapse text-left text-cp-sm">
+          <table class="cp-mobile-record-table w-full min-w-130 border-collapse text-left text-cp-sm">
             <caption class="sr-only">
               各目标的连通状态、HTTP 状态码和响应耗时
             </caption>
@@ -166,16 +166,16 @@ onBeforeUnmount(() => {
                 <th scope="row" class="whitespace-nowrap px-3 py-3 font-emphasis">
                   {{ check.name }}
                 </th>
-                <td class="px-3 py-3">
+                <td data-label="状态" class="px-3 py-3">
                   <span class="whitespace-nowrap rounded-full px-2 py-1 text-cp-xs" :class="tones[check.status]">{{ labels[check.status] }}</span>
                 </td>
-                <td class="px-3 py-3 font-mono text-cp-xs">
+                <td data-label="HTTP" class="px-3 py-3 font-mono text-cp-xs">
                   {{ check.httpStatus ?? '—' }}
                 </td>
-                <td class="whitespace-nowrap px-3 py-3 tabular-nums">
+                <td data-label="耗时" class="whitespace-nowrap px-3 py-3 tabular-nums">
                   {{ check.latencyMs }} ms
                 </td>
-                <td class="min-w-44 px-3 py-3 text-cp-xs leading-relaxed text-cp-text-secondary">
+                <td data-label="说明" class="min-w-44 px-3 py-3 text-cp-xs leading-relaxed text-cp-text-secondary">
                   {{ check.message }}
                 </td>
               </tr>

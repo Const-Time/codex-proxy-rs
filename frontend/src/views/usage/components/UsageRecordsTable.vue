@@ -43,6 +43,16 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
     :loading="loading"
     :empty-text="emptyText"
   >
+    <template #userEmail="{ row }">
+      <div class="grid min-w-0 gap-1">
+        <span class="truncate text-cp-sm font-bold" :title="row.username || row.userEmail || row.userId || '未关联用户'">
+          {{ row.username || row.userEmail || row.userId || '未关联用户' }}
+        </span>
+        <span v-if="row.username && row.userEmail" class="truncate text-cp-xs text-cp-text-secondary" :title="row.userEmail">
+          {{ row.userEmail }}
+        </span>
+      </div>
+    </template>
     <template #provider="{ row }">
       <ProviderIconGroup
         :provider="String(row.provider || '')"

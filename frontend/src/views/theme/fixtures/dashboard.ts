@@ -113,6 +113,9 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
 
   return {
     id: options.id,
+    userId: null,
+    userEmail: null,
+    username: null,
     provider: options.provider,
     authenticationKind: options.authenticationKind,
     accountId: `account_${options.id}`,

@@ -72,7 +72,7 @@ const sparklineOption = computed<EChartsOption | null>(() => {
 </script>
 
 <template>
-  <BaseCard as="article" padding="compact" class="relative h-38.5 w-full">
+  <BaseCard as="article" padding="compact" class="cp-dashboard-metric relative h-38.5 w-full">
     <div class="flex items-start gap-3">
       <BaseMotionIcon
         class="inline-flex size-8.5 shrink-0 items-center justify-center rounded-cp-lg"
@@ -99,7 +99,7 @@ const sparklineOption = computed<EChartsOption | null>(() => {
       />
     </div>
 
-    <div v-if="sparklineOption" class="pointer-events-none absolute top-7 right-6 h-16 w-[42%]">
+    <div v-if="sparklineOption" class="pointer-events-none absolute top-7 right-6 hidden h-16 w-[42%] sm:block">
       <BaseChart :option="sparklineOption" :height="64" />
     </div>
 

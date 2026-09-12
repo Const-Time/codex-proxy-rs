@@ -58,7 +58,7 @@ function overviewIconClass(tone: string) {
 </script>
 
 <template>
-  <div class="mt-5 grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+  <div class="cp-mobile-metrics mt-5 grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
     <BaseCard v-for="item in overviewItems" :key="item.label" as="article" padding="compact">
       <div class="flex items-stretch justify-between gap-3">
         <div class="flex min-w-0 flex-col">

@@ -10,12 +10,10 @@ import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import {
   toast,
 } from '@/components/base/BaseToast'
+import QuotaUsage from '@/components/quota/QuotaUsage.vue'
 import { useUserGroupCatalog } from '@/composables/useUserGroupCatalog'
 import { useAuthStore } from '@/stores/modules/auth'
 import { errorMessage } from '@/utils/async'
-import {
-  formatDateTime,
-} from '@/utils/date'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -28,7 +26,6 @@ const currentPassword = ref('')
 const newPassword = ref('')
 const confirmation = ref('')
 const saving = ref(false)
-const budget = (used: string, limit: string) => `$${Number(used).toFixed(4)} / ${Number(limit) ? `$${limit}` : '不限'}`
 async function save() {
   if (saving.value)
     return
@@ -71,17 +68,10 @@ async function save() {
       </p>
       <div class="grid gap-4 md:grid-cols-2">
         <div v-for="group in groups" :key="group.id" class="rounded-cp border border-cp-border p-4">
-          <h3 class="font-semibold">
+          <h3 class="mb-4 font-semibold">
             {{ group.name }}{{ group.enabled ? '' : '（已禁用）' }}
           </h3>
-          <p>今日已用 / 限额：{{ budget(group.dailyUsedUsd, group.dailyLimitUsd) }}</p>
-          <p>本周已用 / 限额：{{ budget(group.weeklyUsedUsd, group.weeklyLimitUsd) }}</p>
-          <p v-if="group.dailyResetsAt" class="text-cp-xs text-cp-text-secondary">
-            日额度重置：{{ formatDateTime(group.dailyResetsAt) }}
-          </p>
-          <p v-if="group.weeklyResetsAt" class="text-cp-xs text-cp-text-secondary">
-            周额度重置：{{ formatDateTime(group.weeklyResetsAt) }}
-          </p>
+          <QuotaUsage :budget="group" :label="group.name" />
         </div>
       </div>
       <p v-if="!loading && !groups.length" class="text-cp-text-secondary">

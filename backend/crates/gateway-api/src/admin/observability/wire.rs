@@ -76,6 +76,9 @@ pub struct BillingView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageListRecordView {
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub username: Option<String>,
     pub id: String,
     pub provider: Option<String>,
     pub authentication_kind: Option<String>,
@@ -767,6 +770,9 @@ pub struct DiagnosticsView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsErrorView {
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub username: Option<String>,
     pub id: String,
     pub request_id: Option<String>,
     pub client_api_key_id: Option<String>,
