@@ -18,6 +18,8 @@
 
 ```bash
 mkdir -p .runtime/data .runtime/logs
+sudo chown 10001:10001 .runtime/data .runtime/logs
+sudo chmod u+rwx .runtime/data .runtime/logs
 install -d -m 0750 .runtime/postgres .runtime/redis
 cp deploy/config.example.yaml deploy/config.yaml
 sudo chown "$(id -u):10001" deploy/config.yaml
@@ -298,6 +300,34 @@ OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 Postgr
 健康探针。Docker stdout 的独立轮转不承担应用文件日志的完整保留承诺。
 
 完整运行时、Provider、revision 与恢复边界见 [架构文档](../docs/architecture.md)。
+
+## 应用数据与日志目录权限故障
+
+默认 Compose 中应用以 `10001:10001` 运行，并通过 `cap_drop: ALL` 移除 Linux capabilities。因此即使通过 `docker compose exec --user 0` 进入应用容器，也不能依赖容器内的 root 修改挂载目录属主。
+
+若日志出现 `file_logging: ... PermissionDenied`，或在线更新获取 Release 后报错，先检查应用数据、日志目录是否可写。在宿主机的安装目录执行：
+
+```bash
+docker compose -f deploy/compose.yaml exec codex-proxy-rs sh -c '
+id
+for p in /app/.runtime/data /app/.runtime/logs; do
+  ls -ld "$p"
+  if test -w "$p"; then echo "writable: $p"; else echo "NOT writable: $p"; fi
+done'
+```
+
+沿用默认 UID/GID 和挂载路径时，在宿主机修复这两个目录及已有文件，再验证：
+
+```bash
+sudo chown -R 10001:10001 .runtime/data .runtime/logs
+sudo chmod -R u+rwX .runtime/data .runtime/logs
+docker compose -f deploy/compose.yaml exec codex-proxy-rs sh -c '
+test -w /app/.runtime/data &&
+test -w /app/.runtime/logs &&
+echo "Application directories are writable"'
+```
+
+不要对整个 `.runtime` 递归修改属主。修复后重试在线更新；如果仍失败，检查更新状态文件是否损坏及新的错误信息。目录权限修复不会清空数据。
 
 ## Redis 数据目录权限故障
 

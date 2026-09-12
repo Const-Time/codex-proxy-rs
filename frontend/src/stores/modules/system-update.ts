@@ -131,6 +131,8 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
     try {
       const event = JSON.parse(message.raw) as SystemUpdateEvent
       appendUpdateLog(event)
+      if (event.terminal && event.level === 'error')
+        updateError.value = event.message
       if (event.terminal)
         disconnectUpdateEvents()
     }
@@ -252,13 +254,16 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
       return result
     }
     catch (error: unknown) {
-      updateError.value = errorMessage(error, '更新失败')
-      appendUpdateLog({
-        id: `update-client-error-${Date.now()}`,
-        level: 'error',
-        message: updateError.value,
-        at: new Date().toISOString(),
-      })
+      const reportedError = [...updateLogs.value].reverse().find(event => event.terminal && event.level === 'error')
+      updateError.value = reportedError?.message || errorMessage(error, '更新失败')
+      if (!reportedError) {
+        appendUpdateLog({
+          id: `update-client-error-${Date.now()}`,
+          level: 'error',
+          message: updateError.value,
+          at: new Date().toISOString(),
+        })
+      }
       setPhase({ kind: 'failed' })
       throw error
     }
