@@ -10,7 +10,7 @@ import BaseForm from '@/components/base/BaseForm/index.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
-import { useAuthStore } from '@/stores/modules/auth'
+import BaseSelect from '@/components/base/BaseSelect.vue'
 
 const props = defineProps<{
   groups: UserGroup[]
@@ -25,8 +25,6 @@ const emit = defineEmits<{
   copy: [text: string]
   importCcs: []
 }>()
-
-const authStore = useAuthStore()
 
 const open = defineModel<boolean>({ default: false })
 const createdOpen = defineModel<boolean>('createdOpen', { default: false })
@@ -70,14 +68,7 @@ const selectedGroup = computed(() => props.groups.find(group => group.id === sel
       </BaseFormItem>
 
       <BaseFormItem label="分组" required>
-        <select v-model="selectedGroupId" aria-label="分组" :disabled="saving || groupLoading" class="w-full rounded-cp border border-cp-border bg-cp-bg px-3 py-2 text-cp-text">
-          <option value="">
-            请选择一个授权分组
-          </option>
-          <option v-for="group in groups" :key="group.id" :value="group.id" :disabled="!group.enabled">
-            {{ group.name }}{{ group.enabled ? '' : '（已禁用）' }}
-          </option>
-        </select>
+        <BaseSelect v-model="selectedGroupId" aria-label="分组" :disabled="saving || groupLoading" :options="groups.map(group => ({ value: group.id, label: group.name, disabled: !group.enabled }))" placeholder="请选择一个授权分组" />
         <p v-if="!groupLoading && groups.length === 0" class="text-cp-sm text-cp-text-secondary">
           暂无可用分组，请联系管理员分配。
         </p>
@@ -85,31 +76,7 @@ const selectedGroup = computed(() => props.groups.find(group => group.id === sel
           日限额：{{ selectedGroup.dailyLimitUsd }} USD，周限额：{{ selectedGroup.weeklyLimitUsd }} USD（0 表示不限）。同一分组内的所有个人密钥共用额度。
         </p>
       </BaseFormItem>
-      <div v-if="authStore.isAdmin" class="grid gap-6 sm:grid-cols-2">
-        <BaseFormItem label="最大并发">
-          <BaseInput
-            v-model="form.maxConcurrency"
-            type="number"
-            aria-label="最大并发"
-            min="0"
-            step="1"
-            placeholder="不限制"
-            :disabled="saving"
-          />
-        </BaseFormItem>
-        <BaseFormItem label="每分钟请求数（RPM）">
-          <BaseInput
-            v-model="form.requestsPerMinute"
-            type="number"
-            aria-label="每分钟请求数（RPM）"
-            min="0"
-            step="1"
-            placeholder="不限制"
-            :disabled="saving"
-          />
-        </BaseFormItem>
-      </div>
-      <p v-if="!authStore.isAdmin" class="text-cp-sm text-cp-text-secondary">
+      <p class="text-cp-sm text-cp-text-secondary">
         并发和 RPM 由管理员统一设置，同一用户的所有密钥共用限制。
       </p>
     </BaseForm>

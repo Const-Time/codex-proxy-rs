@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { Plus, Search, Trash2 } from '@lucide/vue'
+import { Plus, Trash2 } from '@lucide/vue'
 
 import BaseButton from '@/components/base/BaseButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
 
 defineProps<{
   batchDeleting: boolean
@@ -13,8 +12,6 @@ const emit = defineEmits<{
   create: []
   deleteSelected: []
 }>()
-
-const search = defineModel<string>('search', { required: true })
 </script>
 
 <template>
@@ -23,14 +20,6 @@ const search = defineModel<string>('search', { required: true })
     role="group"
     aria-label="API Key 筛选与操作"
   >
-    <div class="min-w-0 flex-1 md:w-96 md:flex-none">
-      <BaseInput v-model="search" placeholder="搜索名称、标签或 ID" class="w-full">
-        <template #prefix>
-          <Search class="size-4.5 text-cp-text-tertiary" />
-        </template>
-      </BaseInput>
-    </div>
-
     <div class="flex shrink-0 items-center justify-end gap-2 md:ml-auto">
       <BaseButton
         v-if="selectedCount > 0"

@@ -88,8 +88,8 @@ export function useApiKeyMutations(options: {
           name: form.value.name.trim(),
           label: form.value.label.trim() || null,
           groupIds: [...new Set(form.value.groupIds)],
-          maxConcurrency: authStore.isAdmin ? parseLimit(form.value.maxConcurrency) : 0,
-          requestsPerMinute: authStore.isAdmin ? parseLimit(form.value.requestsPerMinute) : 0,
+          maxConcurrency: authStore.isAdmin ? editingKey.value?.maxConcurrency ?? 0 : 0,
+          requestsPerMinute: authStore.isAdmin ? editingKey.value?.requestsPerMinute ?? 0 : 0,
         }
         const current = editingKey.value
         if (current) {
@@ -275,8 +275,4 @@ function emptyForm(): ApiKeyFormValue {
 
 function limitInputValue(limit: string | number) {
   return Number(limit) === 0 ? '' : String(limit)
-}
-
-function parseLimit(value: string) {
-  return Number(value)
 }
