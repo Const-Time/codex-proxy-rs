@@ -9,6 +9,7 @@ export interface ApiKey {
   label: string | null
   prefix: string
   enabled: boolean
+  activeConcurrency: number | null
   maxConcurrency: number
   requestsPerMinute: number
   dailyLimitUsd: string

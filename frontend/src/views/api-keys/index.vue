@@ -10,7 +10,6 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
 import { usePageSelection } from '@/composables/usePageSelection'
 import { useUserGroupCatalog } from '@/composables/useUserGroupCatalog'
-import { useAuthStore } from '@/stores/modules/auth'
 import ApiKeyActions from './components/ApiKeyActions.vue'
 import ApiKeyBudgetCell from './components/ApiKeyBudgetCell.vue'
 import ApiKeyCreateModal from './components/ApiKeyCreateModal.vue'
@@ -26,16 +25,10 @@ import { useApiKeyUse } from './composables/useApiKeyUse'
 import { apiKeyColumns } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
-const authStore = useAuthStore()
-function effectiveLimit(keyLimit: number, field: 'maxConcurrency' | 'requestsPerMinute') {
-  const userLimit = authStore.user?.[field] ?? 0
-  return keyLimit && userLimit ? Math.min(keyLimit, userLimit) : keyLimit || userLimit || '∞'
-}
 const {
   loading,
   apiKeys,
   loadApiKeys,
-  searchQuery,
   sort,
   apiKeyPagination,
   handlePageChange,
@@ -47,7 +40,7 @@ const {
   groups,
   loading: loadingGroups,
   loadGroups,
-} = useUserGroupCatalog({ immediate: false })
+} = useUserGroupCatalog()
 
 const {
   showFormModal,
@@ -113,7 +106,6 @@ watch(
     >
       <template #header>
         <ApiKeyFilters
-          v-model:search="searchQuery"
           :batch-deleting="batchDeleting"
           :selected-count="selectedIds.size"
           @create="openCreate"
@@ -159,26 +151,13 @@ watch(
               />
             </template>
             <template #scope="{ row }">
-              <ApiKeyScopeCell :api-key="row" />
+              <ApiKeyScopeCell :api-key="row" :groups="groups" :loading="loadingGroups" @updated="loadApiKeys" />
             </template>
             <template #budget="{ row }">
               <ApiKeyBudgetCell :api-key="row" />
             </template>
-            <template #limits="{ row }">
-              <dl class="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-xs tabular-nums">
-                <dt class="text-cp-text-tertiary">
-                  并发
-                </dt>
-                <dd class="m-0 truncate text-cp-text" title="用户总并发由所有密钥共享">
-                  {{ effectiveLimit(row.maxConcurrency, 'maxConcurrency') }}
-                </dd>
-                <dt class="text-cp-text-tertiary">
-                  RPM
-                </dt>
-                <dd class="m-0 truncate text-cp-text" title="用户总 RPM 由所有密钥共享">
-                  {{ effectiveLimit(row.requestsPerMinute, 'requestsPerMinute') }}
-                </dd>
-              </dl>
+            <template #activeConcurrency="{ row }">
+              <span class="font-mono tabular-nums" :class="row.activeConcurrency ? 'text-cp-success' : 'text-cp-text-secondary'" title="该密钥当前正在处理的请求数">{{ row.activeConcurrency ?? '—' }}</span>
             </template>
             <template #enabled="{ row }">
               <ApiKeyStatusBadge :api-key="row" />

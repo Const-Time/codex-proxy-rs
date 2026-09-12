@@ -1,5 +1,5 @@
 import type { BaseTableSort } from '@/components/base/BaseTable/columns'
-import { watchDebounced } from '@vueuse/core'
+import { useIntervalFn, watchDebounced } from '@vueuse/core'
 
 import { computed, onMounted, onScopeDispose, shallowRef } from 'vue'
 import { getApiKeys } from '@/api'
@@ -21,6 +21,25 @@ export function useApiKeysQuery() {
   const loading = shallowRef(false)
   const cursors = new Map<number, string | undefined>([[1, undefined]])
   let requestSequence = 0
+  let refreshingConcurrency = false
+  useIntervalFn(async () => {
+    if (document.hidden || loading.value || refreshingConcurrency || !apiKeys.value.length)
+      return
+    refreshingConcurrency = true
+    const sequence = requestSequence
+    try {
+      const result = await fetchPage(cursors.get(page.value), pageSize.value, undefined)
+      if (sequence !== requestSequence)
+        return
+      const counts = new Map(result.items.map(item => [item.id, item.activeConcurrency]))
+      apiKeys.value = apiKeys.value.map(item => ({ ...item, activeConcurrency: counts.get(item.id) ?? null }))
+    }
+    catch {
+      if (sequence === requestSequence)
+        apiKeys.value = apiKeys.value.map(item => ({ ...item, activeConcurrency: null }))
+    }
+    finally { refreshingConcurrency = false }
+  }, 10000)
 
   const apiKeyPagination = computed(() => ({
     currentPage: page.value,
