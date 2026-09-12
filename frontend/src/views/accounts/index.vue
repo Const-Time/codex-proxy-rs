@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown } from '@lucide/vue'
+import { ChevronDown, Grid2X2 } from '@lucide/vue'
 import { ref } from 'vue'
 
 import AccountGroupMarks from '@/components/AccountGroupMarks.vue'
@@ -271,8 +271,13 @@ const {
             </template>
 
             <template #capacity="{ row }">
-              <span class="whitespace-nowrap font-mono text-cp-sm" title="当前占用 / 并发总容量">
-                {{ row.usedSlots ?? '未知' }} / {{ row.totalSlots }}
+              <span
+                class="inline-flex items-center gap-1 whitespace-nowrap text-xs leading-none"
+                :class="(row.usedSlots ?? 0) > 0 ? 'text-cp-success' : 'text-cp-text'"
+                title="当前占用 / 并发总容量"
+              >
+                <Grid2X2 class="size-3 shrink-0" aria-hidden="true" />
+                <span class="font-mono font-semibold tabular-nums">{{ row.usedSlots ?? '未知' }} / {{ row.totalSlots }}</span>
               </span>
             </template>
 
