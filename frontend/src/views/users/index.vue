@@ -2,10 +2,11 @@
 import type { User } from '@/api/modules/users'
 import { Search } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
-import { createUser, getUsers, updateUser } from '@/api/modules/users'
+import { createUser, deleteUser, getUsers, setUserEnabled, updateUser } from '@/api/modules/users'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
+import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
@@ -18,6 +19,7 @@ import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { useAuthStore } from '@/stores/modules/auth'
 import { errorMessage } from '@/utils/async'
 import { isLoginEmail } from '@/utils/email'
+import UserPasswordActions from './UserPasswordActions.vue'
 
 const {
   groups,
@@ -28,6 +30,13 @@ const users = ref<User[]>([])
 const auth = useAuthStore()
 const loading = ref(false)
 const saving = ref(false)
+const passwordBusy = ref(false)
+const selfReset = ref(false)
+const actionBusy = ref(false)
+const actionTarget = ref<User | null>(null)
+const actionType = ref<'delete' | 'status'>('status')
+const confirmAction = ref(false)
+const busy = computed(() => saving.value || passwordBusy.value || actionBusy.value)
 const error = ref('')
 const open = ref(false)
 const editing = ref<User | null>(null)
@@ -55,6 +64,7 @@ async function load() {
   }
 }
 function edit(user: User | null) {
+  selfReset.value = false
   editing.value = user
   email.value = user?.email ?? ''
   username.value = user?.username ?? ''
@@ -68,7 +78,7 @@ function edit(user: User | null) {
   void loadGroups()
 }
 async function save() {
-  if (saving.value)
+  if (busy.value)
     return
   if (!isLoginEmail(email.value.trim())) {
     toast.warning('请输入有效的邮箱地址作为登录账号')
@@ -101,6 +111,27 @@ async function save() {
   finally {
     saving.value = false
   }
+}
+function requestAction(user: User, action: 'delete' | 'status') {
+  actionTarget.value = user
+  actionType.value = action
+  confirmAction.value = true
+}
+async function runAction() {
+  const user = actionTarget.value
+  if (!user || busy.value)
+    return
+  actionBusy.value = true
+  try {
+    if (actionType.value === 'delete')
+      await deleteUser(user.id)
+    else await setUserEnabled(user.id, !user.enabled)
+    confirmAction.value = false
+    toast.success(actionType.value === 'delete' ? '用户已删除，密钥已撤销' : user.enabled ? '用户已禁用' : '用户已启用')
+    await load()
+  }
+  catch (cause) { toast.error(errorMessage(cause, '操作失败')) }
+  finally { actionBusy.value = false }
 }
 onMounted(load)
 </script>
@@ -165,9 +196,17 @@ onMounted(load)
                 {{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}
               </td>
               <td class="p-3">
-                <BaseButton v-if="user.role !== 'admin' || user.id === auth.user?.id" variant="secondary" @click="edit(user)">
-                  编辑
-                </BaseButton>
+                <div class="flex items-center gap-2 whitespace-nowrap">
+                  <BaseButton v-if="user.role !== 'admin' || user.id === auth.user?.id" variant="secondary" :disabled="busy" @click="edit(user)">
+                    编辑
+                  </BaseButton>
+                  <BaseButton v-if="user.role !== 'admin'" variant="secondary" :disabled="busy" @click="requestAction(user, 'status')">
+                    {{ user.enabled ? '禁用' : '启用' }}
+                  </BaseButton>
+                  <BaseButton v-if="user.role !== 'admin'" variant="destructive" :disabled="busy" @click="requestAction(user, 'delete')">
+                    删除
+                  </BaseButton>
+                </div>
               </td>
             </tr>
             <tr v-if="!loading && !visibleUsers.length">
@@ -179,7 +218,7 @@ onMounted(load)
         </table>
       </div>
     </BaseCard>
-    <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!saving" size="md">
+    <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!busy && !selfReset" size="md">
       <div class="grid gap-5">
         <BaseFormItem label="登录邮箱" required description="仅支持邮箱登录。修改后请使用新邮箱登录，密码、密钥和历史记录保留。">
           <BaseInput v-model="email" aria-label="登录邮箱" type="email" :disabled="saving" maxlength="128" autocomplete="off" placeholder="name@example.com" />
@@ -190,6 +229,7 @@ onMounted(load)
         <BaseFormItem v-if="!editing" label="初始密码" required>
           <BaseInput v-model="password" aria-label="初始密码" type="password" autocomplete="new-password" :disabled="saving" placeholder="至少 12 位" />
         </BaseFormItem>
+        <UserPasswordActions v-if="open && editing" :key="editing.id" :user-id="editing.id" :disabled="saving" @busy="passwordBusy = $event" @self-reset="selfReset = true" />
         <div v-if="editing && editing.role !== 'admin'" class="flex items-center gap-2">
           <BaseSwitch v-model="enabled" label="启用用户" :disabled="saving" /><span>启用用户</span>
         </div>
@@ -223,12 +263,20 @@ onMounted(load)
         </div>
       </div>
       <template #footer>
-        <BaseButton variant="secondary" :disabled="saving" @click="open = false; password = ''">
+        <BaseButton variant="secondary" :disabled="busy || selfReset" @click="open = false; password = ''">
           取消
-        </BaseButton><BaseButton variant="primary" :loading="saving" @click="save">
+        </BaseButton><BaseButton variant="primary" :loading="saving" :disabled="passwordBusy || selfReset" @click="save">
           保存
         </BaseButton>
       </template>
     </BaseModal>
+    <BaseConfirmModal
+      v-model="confirmAction"
+      :title="actionType === 'delete' ? '删除用户' : actionTarget?.enabled ? '禁用用户' : '启用用户'"
+      :description="actionType === 'delete' ? `确定删除 ${actionTarget?.email}？该用户所有密钥将被删除，历史用量与操作日志保留。此操作无法撤销。` : `确定${actionTarget?.enabled ? '禁用' : '启用'} ${actionTarget?.email}？${actionTarget?.enabled ? '该用户将无法登录，已有密钥不能发起新请求。' : '该用户可重新登录并使用已有密钥。'}`"
+      :destructive="actionType === 'delete'"
+      :loading="actionBusy"
+      @confirm="runAction"
+    />
   </div>
 </template>

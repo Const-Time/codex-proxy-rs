@@ -20,6 +20,16 @@ struct MemoryAuthStore {
 
 #[async_trait]
 impl AuthStore for MemoryAuthStore {
+    async fn set_user_password(
+        &self,
+        _: &str,
+        hash: &str,
+        _: bool,
+        _: &gateway_admin::model::MutationContext,
+    ) -> AdminStoreResult<()> {
+        *self.password_hash.lock().unwrap() = Some(hash.to_owned());
+        Ok(())
+    }
     async fn find_user(
         &self,
         username: &str,
@@ -140,6 +150,93 @@ impl AuthStore for MemoryAuthStore {
         self.audits.lock().expect("audits").push(event);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn administrator_password_reset_generates_distinct_valid_passwords_and_hashes_them() {
+    use gateway_admin::model::{MutationActor, MutationContext};
+    let store = std::sync::Arc::new(MemoryAuthStore::default());
+    let services = super::AdminHarness::new().auth(store.clone()).build().await;
+    let context = MutationContext {
+        actor: MutationActor::AdminSession {
+            admin_user_id: "admin".into(),
+        },
+        request_id: "password-reset".into(),
+    };
+    let first = services
+        .auth()
+        .set_user_password("admin", None, &context)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.len(), 32);
+    assert!(
+        first
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    );
+    let hash = store.password_hash.lock().unwrap().clone().unwrap();
+    assert!(hash.starts_with("$argon2"));
+    assert!(!hash.contains(&first));
+    assert!(
+        services
+            .auth()
+            .login(LoginCommand {
+                username: Some("admin@example.com".into()),
+                password: first.clone()
+            })
+            .await
+            .is_ok()
+    );
+    let second = services
+        .auth()
+        .set_user_password("admin", None, &context)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first, second);
+    assert!(
+        services
+            .auth()
+            .login(LoginCommand {
+                username: Some("admin@example.com".into()),
+                password: first
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        services
+            .auth()
+            .set_user_password("admin", Some("short"), &context)
+            .await
+            .is_err()
+    );
+    assert!(
+        services
+            .auth()
+            .set_user_password("admin", Some(&"x".repeat(1025)), &context)
+            .await
+            .is_err()
+    );
+    assert!(
+        services
+            .auth()
+            .set_user_password("admin", Some("manually-set-password-123"), &context)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        services
+            .auth()
+            .login(LoginCommand {
+                username: Some("admin@example.com".into()),
+                password: "manually-set-password-123".into()
+            })
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]

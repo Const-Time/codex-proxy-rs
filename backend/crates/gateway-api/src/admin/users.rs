@@ -88,6 +88,35 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UserIdRequest {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UserStateRequest {
+    id: String,
+    enabled: bool,
+}
+
+// Password material deliberately has no Debug implementation.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdminPasswordRequest {
+    id: String,
+    new_password: Option<String>,
+    #[serde(default)]
+    reset: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordResult {
+    generated_password: Option<String>,
+}
+
 pub fn router<S>() -> Router<S>
 where
     S: AdminSessionState + Clone + Send + Sync + 'static,
@@ -101,6 +130,9 @@ where
         )
         .route("/api/admin/users/create", post(create::<S>))
         .route("/api/admin/users/update", post(update::<S>))
+        .route("/api/admin/users/delete", post(delete::<S>))
+        .route("/api/admin/users/status", post(set_enabled::<S>))
+        .route("/api/admin/users/password", post(admin_password::<S>))
         .route("/api/profile", get(profile::<S>))
         .route("/api/profile/groups", get(groups::<S>))
         .route("/api/profile/password", post(change_password::<S>))
@@ -314,6 +346,63 @@ where
     Ok(AdminResponse::new(
         StatusCode::OK,
         AdminEnvelope::ok(UserView::from(user)),
+    ))
+}
+
+async fn delete<S: AdminSessionState + Send + Sync>(
+    State(state): State<S>,
+    auth: AdminAuth,
+    AdminJson(body): AdminJson<UserIdRequest>,
+) -> Result<impl IntoResponse, AdminError> {
+    state
+        .admin_services()
+        .auth()
+        .delete_user(&body.id, &auth.context().mutation_context())
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(())))
+}
+
+async fn set_enabled<S: AdminSessionState + Send + Sync>(
+    State(state): State<S>,
+    auth: AdminAuth,
+    AdminJson(body): AdminJson<UserStateRequest>,
+) -> Result<impl IntoResponse, AdminError> {
+    state
+        .admin_services()
+        .auth()
+        .set_user_enabled(&body.id, body.enabled, &auth.context().mutation_context())
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(())))
+}
+
+async fn admin_password<S: AdminSessionState + Send + Sync>(
+    State(state): State<S>,
+    auth: AdminAuth,
+    AdminJson(body): AdminJson<AdminPasswordRequest>,
+) -> Result<impl IntoResponse, AdminError> {
+    if body.reset == body.new_password.is_some() {
+        return Err(AdminError::bad_request(
+            "请指定新密码或选择随机重置，两者不能同时使用",
+        ));
+    }
+    let generated_password = state
+        .admin_services()
+        .auth()
+        .set_user_password(
+            &body.id,
+            body.new_password.as_deref(),
+            &auth.context().mutation_context(),
+        )
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        AdminResponse::new(
+            StatusCode::OK,
+            AdminEnvelope::ok(PasswordResult { generated_password }),
+        ),
     ))
 }
 

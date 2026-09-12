@@ -511,6 +511,193 @@ fn key(id: &str) -> NewClientKey {
 }
 
 #[tokio::test]
+async fn admin_user_actions_revoke_access_preserve_history_and_protect_admins() {
+    let Some(db) = TestDatabase::create("user_actions").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    auth.create_password_hash_if_absent("admin", "admin-hash")
+        .await
+        .unwrap();
+    seed_group(&db).await;
+    let admin = context("admin");
+    let original = auth
+        .create_user(
+            "alice",
+            gateway_admin::model::users::UserIdentity::new("alice@example.com", "Alice"),
+            "old-hash",
+            &[GROUP.into()],
+            RateLimits::unlimited(),
+            &admin,
+        )
+        .await
+        .unwrap();
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    keys.create_client_key(key("alice-key"), &context("alice"))
+        .await
+        .unwrap();
+    sqlx::query("insert into model_requests(id, client_api_key_id, client_api_key_ref, user_id, config_revision, protocol, operation, endpoint, client_transport, routing_scope, started_at, deadline_at) values ('history', 'alice-key', 'alice-key', 'alice', 1, 'openai', 'responses', '/v1/responses', 'http_sse', 'all', now(), now() + interval '1 hour')").execute(&db.pool).await.unwrap();
+
+    assert!(auth.delete_user("alice", &context("alice")).await.is_err());
+    assert!(
+        auth.set_user_enabled("alice", false, &context("alice"))
+            .await
+            .is_err()
+    );
+    assert!(
+        auth.set_user_password("alice", "bad-hash", false, &context("alice"))
+            .await
+            .is_err()
+    );
+    assert!(auth.delete_user("admin", &admin).await.is_err());
+    assert!(auth.set_user_enabled("admin", false, &admin).await.is_err());
+    let deployment = MutationContext {
+        actor: MutationActor::AdminApiKey,
+        request_id: "deployment".into(),
+    };
+    assert!(
+        auth.set_user_password("admin", "bad-hash", true, &deployment)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        auth.load_password_hash("alice").await.unwrap().as_deref(),
+        Some("old-hash")
+    );
+
+    auth.set_user_enabled("alice", false, &admin).await.unwrap();
+    let disabled = auth.load_user("alice").await.unwrap().unwrap();
+    assert!(!disabled.enabled);
+    assert!(disabled.auth_version > original.auth_version);
+    assert_eq!(disabled.group_ids, original.group_ids);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from client_api_keys where owner_user_id = 'alice'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    auth.set_user_password("alice", "reset-hash", true, &admin)
+        .await
+        .unwrap();
+    let reset = auth.load_user("alice").await.unwrap().unwrap();
+    assert!(!reset.enabled);
+    assert!(reset.auth_version > disabled.auth_version);
+    assert_eq!(
+        auth.load_password_hash("alice").await.unwrap().as_deref(),
+        Some("reset-hash")
+    );
+    auth.set_user_enabled("alice", true, &admin).await.unwrap();
+    let enabled = auth.load_user("alice").await.unwrap().unwrap();
+    assert!(enabled.enabled);
+    assert!(enabled.auth_version > reset.auth_version);
+    auth.set_user_password("admin", "own-new-hash", false, &admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        auth.load_password_hash("admin").await.unwrap().as_deref(),
+        Some("own-new-hash")
+    );
+
+    auth.delete_user("alice", &admin).await.unwrap();
+    assert!(auth.load_user("alice").await.unwrap().is_none());
+    assert!(auth.find_user("alice@example.com").await.unwrap().is_none());
+    assert!(
+        auth.list_users()
+            .await
+            .unwrap()
+            .iter()
+            .all(|u| u.id != "alice")
+    );
+    assert!(
+        auth.subscriptions()
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.user_id != "alice")
+    );
+    assert!(auth.set_user_enabled("alice", true, &admin).await.is_err());
+    assert!(
+        auth.set_user_password("alice", "revive-hash", false, &admin)
+            .await
+            .is_err()
+    );
+    assert!(auth.delete_user("alice", &admin).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from client_api_keys where owner_user_id = 'alice'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("select user_id from model_requests where id = 'history'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "alice"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from user_account_groups where user_id = 'alice'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    auth.create_user(
+        "replacement",
+        gateway_admin::model::users::UserIdentity::new("ALICE@example.com", ""),
+        "fresh-hash",
+        &[],
+        RateLimits::unlimited(),
+        &admin,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        auth.find_user("alice@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "replacement"
+    );
+    let audits: String =
+        sqlx::query_scalar("select coalesce(json_agg(a)::text, '') from admin_audit_events a")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    for action in [
+        "user.delete",
+        "user.disable",
+        "user.enable",
+        "user.password.reset",
+        "user.password.set",
+    ] {
+        assert!(audits.contains(action));
+    }
+    for secret in [
+        "old-hash",
+        "reset-hash",
+        "own-new-hash",
+        "bad-hash",
+        "revive-hash",
+    ] {
+        assert!(!audits.contains(secret));
+    }
+    db.close().await;
+}
+
+#[tokio::test]
 async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     let Some(db) = TestDatabase::create("users_keys").await else {
         return;

@@ -287,6 +287,42 @@ pub trait AuthStore: Send + Sync {
         command: crate::model::users::UpdateUser,
         context: &MutationContext,
     ) -> AdminStoreResult<(Revision, crate::model::users::UserRecord)>;
+    async fn delete_user(
+        &self,
+        _id: &str,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<Revision> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "user",
+            "user deletion unavailable",
+        ))
+    }
+    async fn set_user_enabled(
+        &self,
+        _id: &str,
+        _enabled: bool,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<Revision> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "user",
+            "user state changes unavailable",
+        ))
+    }
+    async fn set_user_password(
+        &self,
+        _id: &str,
+        _hash: &str,
+        _generated: bool,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<()> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "user",
+            "password administration unavailable",
+        ))
+    }
     async fn change_password(
         &self,
         id: &str,

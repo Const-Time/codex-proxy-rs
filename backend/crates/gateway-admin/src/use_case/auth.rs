@@ -92,6 +92,26 @@ pub trait AuthService: Send + Sync {
         command: UpdateUser,
         context: &MutationContext,
     ) -> Result<UserRecord, AdminError>;
+    async fn delete_user(&self, _id: &str, _context: &MutationContext) -> Result<(), AdminError> {
+        Err(AdminError::new(AdminErrorKind::Unavailable, "服务不可用"))
+    }
+    async fn set_user_enabled(
+        &self,
+        _id: &str,
+        _enabled: bool,
+        _context: &MutationContext,
+    ) -> Result<(), AdminError> {
+        Err(AdminError::new(AdminErrorKind::Unavailable, "服务不可用"))
+    }
+    /// Returns plaintext only when a random password was requested. Never log the result.
+    async fn set_user_password(
+        &self,
+        _id: &str,
+        _password: Option<&str>,
+        _context: &MutationContext,
+    ) -> Result<Option<String>, AdminError> {
+        Err(AdminError::new(AdminErrorKind::Unavailable, "服务不可用"))
+    }
     async fn change_password(
         &self,
         user: &UserRecord,
@@ -327,6 +347,56 @@ impl AuthService for DefaultAuthService {
             .map_err(|e| map_store_error(e, "user"))?;
         super::publish_committed(self.snapshot.as_ref(), revision).await?;
         Ok(user)
+    }
+
+    async fn delete_user(&self, id: &str, context: &MutationContext) -> Result<(), AdminError> {
+        let revision = self
+            .store
+            .delete_user(id, context)
+            .await
+            .map_err(|e| map_store_error(e, "user"))?;
+        super::publish_committed(self.snapshot.as_ref(), revision).await
+    }
+
+    async fn set_user_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+        context: &MutationContext,
+    ) -> Result<(), AdminError> {
+        let revision = self
+            .store
+            .set_user_enabled(id, enabled, context)
+            .await
+            .map_err(|e| map_store_error(e, "user"))?;
+        super::publish_committed(self.snapshot.as_ref(), revision).await
+    }
+
+    async fn set_user_password(
+        &self,
+        id: &str,
+        password: Option<&str>,
+        context: &MutationContext,
+    ) -> Result<Option<String>, AdminError> {
+        let generated = if password.is_none() {
+            let mut bytes = [0_u8; 24];
+            OsRng
+                .try_fill_bytes(&mut bytes)
+                .map_err(|_| AdminError::internal("密码生成失败"))?;
+            Some(URL_SAFE_NO_PAD.encode(bytes))
+        } else {
+            None
+        };
+        let value = password
+            .or(generated.as_deref())
+            .ok_or_else(|| AdminError::internal("密码生成失败"))?;
+        validate_password(value)?;
+        let hash = hash_admin_password(value)?;
+        self.store
+            .set_user_password(id, &hash, generated.is_some(), context)
+            .await
+            .map_err(|e| map_store_error(e, "user password"))?;
+        Ok(generated)
     }
 
     async fn change_password(
