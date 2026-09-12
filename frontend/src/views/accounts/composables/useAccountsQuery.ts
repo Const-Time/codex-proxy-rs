@@ -25,6 +25,7 @@ export function useAccountsQuery() {
   const statusQuery = shallowRef('')
   const groupQuery = shallowRef('')
   const sort = shallowRef<BaseTableSort>()
+  const hasLoaded = shallowRef(false)
   const accountSummary = shallowRef({
     total: 0,
     normal: 0,
@@ -49,6 +50,7 @@ export function useAccountsQuery() {
       }),
     onSuccess: (result) => {
       accountSummary.value = result.summary
+      hasLoaded.value = true
     },
     onError: (error) => {
       toast.error(errorMessage(error, '账号加载失败'))
@@ -139,6 +141,8 @@ export function useAccountsQuery() {
     pageSize: query.pageSize,
     totalAccounts: query.total,
     loading: query.loading,
+    hasLoaded,
+    loadError: computed(() => query.error.value ? errorMessage(query.error.value, '账号加载失败') : ''),
     accounts: query.items,
     loadAccounts: query.execute,
     refreshAccountsSilently: () => query.execute({ silent: true }),

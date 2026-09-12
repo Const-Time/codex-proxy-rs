@@ -10,6 +10,7 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import FormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
+import { errorMessage } from '@/utils/async'
 
 const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 const filters = defineModel<UsageRecordFilters>({ required: true })
@@ -45,16 +46,20 @@ async function load() {
     return
   loading.value = true
   error.value = ''
+  const failures: string[] = []
   try {
     keys.value = (await getUsageKeyOptions(Boolean(personal?.value))).map(key => ({ value: key.id, label: `${key.name} · ${key.id.slice(-8)}` }))
   }
-  catch { error.value = '密钥选项加载失败，请重试。' }
+  catch (cause) { failures.push(`密钥选项加载失败：${errorMessage(cause, '请重试')}`) }
   if (personal?.value) {
     try {
       groups.value = (await getUserGroups()).map(group => ({ label: group.name, value: group.id }))
     }
-    catch { error.value = '分组选项加载失败，请重试。' }
-    finally { loading.value = false }
+    catch (cause) { failures.push(`分组选项加载失败：${errorMessage(cause, '请重试')}`) }
+    finally {
+      error.value = failures.join('；')
+      loading.value = false
+    }
     return
   }
   const results = await Promise.allSettled([
@@ -66,12 +71,14 @@ async function load() {
     }),
   ])
   const targets = [groups, accounts, users]
+  const labels = ['分组', '账号', '邮箱 / 用户名']
   results.forEach((result, index) => {
     if (result.status === 'fulfilled')
       targets[index]!.value = result.value
     else
-      error.value = '部分筛选选项加载失败，请重试。'
+      failures.push(`${labels[index]}选项加载失败：${errorMessage(result.reason, '请重试')}`)
   })
+  error.value = failures.join('；')
   loading.value = false
 }
 
