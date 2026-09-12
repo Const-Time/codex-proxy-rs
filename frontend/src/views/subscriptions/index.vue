@@ -9,6 +9,7 @@ import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import { toast } from '@/components/base/BaseToast'
 import { errorMessage } from '@/utils/async'
+import { generateRequestId } from '@/utils/requestId'
 
 const records = ref<Subscription[]>([])
 const loading = ref(false)
@@ -56,7 +57,7 @@ function openReset() {
   resetTargets.value = records.value.filter(item => selected.value.includes(rowKey(item))).map(({ userId, groupId }) => ({ userId, groupId }))
   if (!resetTargets.value.length)
     return
-  resetRequestId.value = crypto.randomUUID()
+  resetRequestId.value = generateRequestId()
   confirmOpen.value = true
 }
 async function resetSelected() {
