@@ -85,7 +85,9 @@ pub(crate) async fn observe(
         return Ok(());
     }
     for window in &quota.windows {
-        if window.local_usage_attribution != QuotaLocalUsageAttribution::AccountWide {
+        if window.local_usage_attribution != QuotaLocalUsageAttribution::AccountWide
+            || window.window_seconds != Some(604_800)
+        {
             continue;
         }
         let used = window
@@ -101,17 +103,14 @@ pub(crate) async fn observe(
                 continue;
             }
             let previous_reset: Option<DateTime<Utc>> = old.get("reset_at");
-            let previous_used: Option<f64> = old.get("used_percent");
             let boundary_advanced = previous_reset
                 .zip(window.reset_at)
                 .is_some_and(|(old, new)| new > old + chrono::Duration::seconds(60));
             let natural = boundary_advanced && previous_reset.is_some_and(|at| at <= observed_at);
             let externally_reset = boundary_advanced;
-            // A fixed-boundary reset can only be identified from an observed return to near-zero.
-            let recovered = previous_used
-                .zip(used)
-                .is_some_and(|(before, after)| before >= 5.0 && after <= 1.0);
-            if natural || externally_reset || recovered {
+            // Only a changed weekly boundary proves a new upstream weekly window.
+            // Percentage corrections and short-window recovery must not clear weekly budgets.
+            if externally_reset {
                 let at = if natural {
                     window
                         .reset_at
@@ -130,14 +129,7 @@ pub(crate) async fn observe(
                     observed_at
                 };
                 if detected.is_none_or(|(_, previous)| at > previous) {
-                    detected = Some((
-                        if natural || externally_reset {
-                            "upstream_window"
-                        } else {
-                            "upstream_recovery"
-                        },
-                        at,
-                    ));
+                    detected = Some(("upstream_window", at));
                 }
             }
         }
