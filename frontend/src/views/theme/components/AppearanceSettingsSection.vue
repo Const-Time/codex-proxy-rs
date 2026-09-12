@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { Check, RotateCcw, Save, Search, Undo2 } from '@lucide/vue'
+import { Check, RotateCcw, Save, Undo2 } from '@lucide/vue'
 
 import BaseButton from '@/components/base/BaseButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
@@ -20,7 +19,6 @@ const {
   preview,
   previewTheme,
   component,
-  query,
   resolvedPreview,
   previewStyle,
   modificationCount,
@@ -114,20 +112,9 @@ function saveTheme(event: MouseEvent) {
         class="theme-workbench-body grid min-h-180 gap-3 xl:min-h-0 xl:flex-1 xl:overflow-hidden xl:grid-cols-[370px_minmax(0,1fr)]"
       >
         <aside
-          class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 overflow-hidden rounded-cp-lg bg-cp-bg-container pt-3 pr-0 pb-3 pl-3 shadow-cp-secondary"
+          class="grid h-full min-h-0 grid-rows-[minmax(0,1fr)] gap-3 overflow-hidden rounded-cp-lg bg-cp-bg-container pt-3 pr-0 pb-3 pl-3 shadow-cp-secondary"
           aria-label="主题 Token 编辑面板"
         >
-          <BaseInput
-            v-model="query"
-            class="mr-3"
-            aria-label="搜索 Token"
-            placeholder="搜索 Seed、Alias 或 Component Token"
-          >
-            <template #prefix>
-              <Search class="size-4" />
-            </template>
-          </BaseInput>
-
           <BaseScrollbar class="h-full min-h-0">
             <div class="pr-4">
               <ThemeGlobalTokenPanel
@@ -135,7 +122,7 @@ function saveTheme(event: MouseEvent) {
                 v-model:category="globalCategory"
                 :draft="draft"
                 :resolved="resolvedPreview"
-                :query="query"
+                query=""
                 @mode="setMode"
                 @preset="selectPreset"
                 @primary="setPrimaryColor"
@@ -148,7 +135,7 @@ function saveTheme(event: MouseEvent) {
                 v-model="component"
                 :draft="draft"
                 :resolved="resolvedPreview"
-                :query="query"
+                query=""
                 @change="setTokenOverride"
                 @reset="resetTokenOverride"
                 @component-number="setComponentNumber"

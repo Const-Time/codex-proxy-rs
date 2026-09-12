@@ -11,7 +11,7 @@ const open = defineModel<boolean>({ default: false })
 
 const { version } = storeToRefs(useSystemUpdateStore())
 
-const author = 'Zyy'
+const author = 'Const-Time'
 const githubUrl = 'https://github.com/Const-Time/codex-proxy-rs'
 
 function normalizeBuildValue(value: string | undefined) {
@@ -55,14 +55,14 @@ const linkItems = [
         <span
           class="inline-flex size-9 shrink-0 items-center justify-center rounded-cp bg-cp-fill-quaternary font-mono text-cp-xl leading-none font-extrabold text-cp-text"
         >
-          Z
+          CT
         </span>
         <div class="min-w-0">
           <p class="m-0 truncate text-cp-xl leading-none font-heavy text-cp-text">
             {{ author }}
           </p>
           <p class="mt-1.5 mb-0 text-cp-sm leading-none font-emphasis text-cp-text-secondary">
-            Built by Zyy · Codex Proxy RS
+            Built by Const-Time · Codex Proxy RS
           </p>
         </div>
       </section>
