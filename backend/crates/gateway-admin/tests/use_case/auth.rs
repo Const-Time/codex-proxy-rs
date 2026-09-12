@@ -24,7 +24,11 @@ impl AuthStore for MemoryAuthStore {
         &self,
         username: &str,
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
-        self.load_user(username).await
+        if username.eq_ignore_ascii_case("admin@example.com") {
+            self.load_user("admin").await
+        } else {
+            Ok(None)
+        }
     }
     async fn load_user(
         &self,
@@ -35,7 +39,7 @@ impl AuthStore for MemoryAuthStore {
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: id.to_owned(),
-                username: id.to_owned(),
+                username: "admin@example.com".to_owned(),
                 role: gateway_admin::model::users::UserRole::Admin,
                 enabled: true,
                 auth_version: 1,
@@ -145,7 +149,7 @@ async fn successful_login_should_create_expiring_session_and_audit() {
     let result = services
         .auth()
         .login(LoginCommand {
-            username: Some("admin".to_owned()),
+            username: Some(" Admin@Example.com ".to_owned()),
             password: "strong-test-password".to_owned(),
         })
         .await
@@ -159,6 +163,125 @@ async fn successful_login_should_create_expiring_session_and_audit() {
             .expect("validate")
     );
     assert_eq!(store.audits.lock().expect("audits").len(), 1);
+}
+
+#[tokio::test]
+async fn login_requires_explicit_email_and_preserves_existing_email_passwords() {
+    use gateway_admin::model::auth::LoginError;
+    let store = std::sync::Arc::new(MemoryAuthStore::default());
+    let services = super::AdminHarness::new().auth(store.clone()).build().await;
+    for username in [
+        None,
+        Some("admin"),
+        Some("bad@@example.com"),
+        Some("admin@example.com\ninvalid"),
+    ] {
+        assert_eq!(
+            services
+                .auth()
+                .login(LoginCommand {
+                    username: username.map(str::to_owned),
+                    password: "strong-test-password".into(),
+                })
+                .await
+                .unwrap_err(),
+            LoginError::InvalidCredentials
+        );
+    }
+    assert!(store.sessions.lock().unwrap().is_empty());
+    let session = services
+        .auth()
+        .login(LoginCommand {
+            username: Some(" ADMIN@example.com ".into()),
+            password: "strong-test-password".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        services
+            .auth()
+            .current_user(Some(&session.session_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "admin"
+    );
+}
+
+#[tokio::test]
+async fn user_creation_and_email_edits_reject_invalid_addresses_before_writing() {
+    use gateway_admin::model::{
+        AdminErrorKind, MutationActor, MutationContext,
+        users::{CreateUser, UpdateUser},
+    };
+    let services = super::AdminHarness::new()
+        .auth(std::sync::Arc::new(MemoryAuthStore::default()))
+        .build()
+        .await;
+    let context = MutationContext {
+        actor: MutationActor::AdminSession {
+            admin_user_id: "admin".into(),
+        },
+        request_id: "validate-email".into(),
+    };
+    for email in [
+        "",
+        "alice",
+        "a@@example.com",
+        "a b@example.com",
+        "a@-example.com",
+        "a@example..com",
+        ".alice@example.com",
+        "alice..smith@example.com",
+        "alice@example.com\nother",
+        &format!("{}@example.com", "x".repeat(65)),
+    ] {
+        assert_eq!(
+            services
+                .auth()
+                .create_user(
+                    CreateUser {
+                        username: email.into(),
+                        password: "strong-test-password".into(),
+                        group_ids: vec![],
+                        limits: gateway_core::policy::RateLimits::unlimited()
+                    },
+                    &context
+                )
+                .await
+                .unwrap_err()
+                .kind(),
+            AdminErrorKind::Invalid
+        );
+        assert_eq!(
+            services
+                .auth()
+                .update_user(
+                    UpdateUser {
+                        username: Some(email.into()),
+                        id: "admin".into(),
+                        enabled: true,
+                        group_ids: vec![],
+                        quota_multipliers: None,
+                        limits: gateway_core::policy::RateLimits::unlimited()
+                    },
+                    &context
+                )
+                .await
+                .unwrap_err()
+                .kind(),
+            AdminErrorKind::Invalid
+        );
+    }
+    for email in [
+        "alice@example.com",
+        "ALICE+team@Example.COM",
+        "admin@cpr.local",
+        "first.last@sub.example.com",
+    ] {
+        assert!(gateway_admin::model::users::is_login_email(email));
+    }
 }
 
 #[tokio::test]
@@ -179,7 +302,7 @@ async fn repeated_default_initialization_should_not_replace_password() {
         services
             .auth()
             .login(LoginCommand {
-                username: Some("admin".to_owned()),
+                username: Some("admin@example.com".to_owned()),
                 password: "first-strong-password".to_owned(),
             })
             .await
@@ -200,7 +323,7 @@ async fn login_with_huge_session_ttl_should_clamp_expiry_instead_of_panicking() 
     let result = services
         .auth()
         .login(LoginCommand {
-            username: Some("admin".to_owned()),
+            username: Some("admin@example.com".to_owned()),
             password: "strong-test-password".to_owned(),
         })
         .await

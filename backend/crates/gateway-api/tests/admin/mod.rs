@@ -264,7 +264,11 @@ impl AuthStore for MemoryAuthStore {
         &self,
         username: &str,
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
-        self.load_user(username).await
+        if username.eq_ignore_ascii_case("admin@example.com") {
+            self.load_user("admin_1").await
+        } else {
+            Ok(None)
+        }
     }
     async fn load_user(
         &self,

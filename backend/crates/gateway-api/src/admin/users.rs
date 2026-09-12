@@ -63,6 +63,8 @@ struct CreateUserRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateUserRequest {
     #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
     quota_multipliers: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     max_concurrency: u64,
@@ -285,6 +287,7 @@ where
         .auth()
         .update_user(
             UpdateUser {
+                username: body.username,
                 quota_multipliers: body.quota_multipliers,
                 id: body.id,
                 enabled: body.enabled,

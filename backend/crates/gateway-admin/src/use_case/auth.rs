@@ -213,10 +213,8 @@ impl AuthService for DefaultAuthService {
         validate_password(&command.password)?;
         validate_user_limits(command.limits)?;
         let username = command.username.trim();
-        if username.is_empty() || username.len() > 128 || username.chars().any(char::is_control) {
-            return Err(AdminError::invalid(
-                "用户名须为 1 至 128 字节，且不能含控制字符",
-            ));
+        if !crate::model::users::is_login_email(username) {
+            return Err(AdminError::invalid("请输入有效的邮箱地址作为登录账号"));
         }
         validate_grants(&command.group_ids)?;
         let hash = hash_admin_password(&command.password)?;
@@ -235,9 +233,15 @@ impl AuthService for DefaultAuthService {
 
     async fn update_user(
         &self,
-        command: UpdateUser,
+        mut command: UpdateUser,
         context: &MutationContext,
     ) -> Result<UserRecord, AdminError> {
+        if let Some(username) = &mut command.username {
+            *username = username.trim().to_owned();
+            if !crate::model::users::is_login_email(username) {
+                return Err(AdminError::invalid("请输入有效的邮箱地址作为登录账号"));
+            }
+        }
         validate_grants(&command.group_ids)?;
         if let Some(multipliers) = &command.quota_multipliers {
             for (group, value) in multipliers {
@@ -332,8 +336,11 @@ impl AuthService for DefaultAuthService {
         let username = command
             .username
             .as_deref()
-            .unwrap_or(&self.default_admin_user_id)
+            .ok_or(LoginError::InvalidCredentials)?
             .trim();
+        if !crate::model::users::is_login_email(username) {
+            return Err(LoginError::InvalidCredentials);
+        }
         let user = self
             .store
             .find_user(username)
