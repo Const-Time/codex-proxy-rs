@@ -24,6 +24,7 @@ export interface AccountQuotaWindow {
   usedPercentDisplay: string
   limitReached: boolean
   localUsage?: unknown
+  estimatedQuota?: { usedUsd: string, totalUsd: string, percentDelta: number, sampleStart: string, sampleEnd: string } | null
   resetAtDisplay: string
 }
 

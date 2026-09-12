@@ -311,7 +311,19 @@ pub struct AccountQuotaWindowView {
     pub limit_reached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_usage: Option<serde_json::Value>,
+    pub estimated_quota: Option<AccountQuotaEstimateView>,
     pub reset_at_display: String,
+}
+
+/// Informational extrapolation of local USD usage, never a billing limit.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountQuotaEstimateView {
+    pub used_usd: String,
+    pub total_usd: String,
+    pub percent_delta: f64,
+    pub sample_start: String,
+    pub sample_end: String,
 }
 
 /// 账号观测用量。

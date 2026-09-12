@@ -763,12 +763,23 @@ pub struct ProviderQuotaWindow {
     pub limit_name: Option<String>,
     pub role: Option<ProviderQuotaWindowRole>,
     pub local_usage_attribution: QuotaLocalUsageAttribution,
+    pub estimated_quota: Option<QuotaIntervalEstimate>,
     pub window_seconds: Option<u64>,
     pub used_percent: Option<f64>,
     pub reset_at: Option<DateTime<Utc>>,
     pub limit_reached: bool,
     pub local_usage: Option<AccountUsage>,
     pub provider_data: Option<ProviderDocument>,
+}
+
+/// Display-only extrapolation from consumption between two quota observations.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QuotaIntervalEstimate {
+    pub used_usd: String,
+    pub total_usd: String,
+    pub percent_delta: f64,
+    pub sample_start: DateTime<Utc>,
+    pub sample_end: DateTime<Utc>,
 }
 
 /// 账号用量统计周期，按周优先、月次之选择；短期限流窗口不参与统计面板。

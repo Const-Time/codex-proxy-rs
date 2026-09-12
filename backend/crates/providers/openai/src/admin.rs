@@ -836,6 +836,7 @@ fn project_quota_snapshot(snapshot: CodexAccountQuotaSnapshot) -> ProviderQuota 
             limit_id: Some(window.source().to_owned()),
             limit_name: window.limit_name().map(str::to_owned),
             role: Some(quota_role(window.role())),
+            estimated_quota: None,
             local_usage_attribution: if window.is_account_wide() {
                 QuotaLocalUsageAttribution::AccountWide
             } else {

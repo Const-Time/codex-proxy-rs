@@ -42,6 +42,16 @@ const items = computed(() => props.windows.map((window) => {
     usedPercentDisplay: window.usedPercentDisplay,
     localUsageDisplay: quotaWindowLocalUsageDisplay(window),
     resetAtDisplay: window.resetAtDisplay,
+    showEstimate: Boolean(window.localUsage),
+    estimateDisplay: window.estimatedQuota
+      ? Number(window.estimatedQuota.totalUsd).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : '待估算',
+    estimateTitle: window.estimatedQuota
+      ? `采样区间 ${window.estimatedQuota.sampleStart} 至 ${window.estimatedQuota.sampleEnd}。区间消费 ÷ (百分比增量 / 100) = 预计总额度。按本服务记录的消费推算，非上游承诺额度；外部使用、模型组合变化或比例刷新延迟会影响准确性。`
+      : '刷新账号额度时记录采样点；同一周期内累计上升至少 1 个百分点且区间计费完整后估算。周期重置后重新采样。',
+    estimateBasis: window.estimatedQuota
+      ? `采样 $${window.estimatedQuota.usedUsd} / +${Number(window.estimatedQuota.percentDelta.toFixed(2))}%`
+      : '等待有效区间 · 至少 +1%',
     percentTextClass: presentation.percentTextClass,
     barClass: presentation.barClass,
     barStyle: presentation.barStyle,
@@ -137,6 +147,13 @@ const items = computed(() => props.windows.map((window) => {
               {{ item.resetAtDisplay }}
             </span>
           </p>
+          <div v-if="item.showEstimate" class="grid gap-1 rounded bg-cp-fill-quaternary px-2 py-1.5 text-cp-xs" :title="item.estimateTitle">
+            <div class="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+              <span class="text-cp-text-secondary">预计总额度 <span class="text-[10px] text-cp-text-quaternary">· 区间估算</span></span>
+              <strong class="font-mono tabular-nums text-cp-text">{{ item.estimateDisplay }}</strong>
+            </div>
+            <span class="text-[10px] text-cp-text-tertiary">{{ item.estimateBasis }}</span>
+          </div>
         </template>
       </div>
     </div>

@@ -67,7 +67,7 @@ impl PgAdminAccountStore {
         Ok(observations)
     }
 
-    async fn usage_by_windows(
+    pub(super) async fn usage_by_windows(
         &self,
         windows: &[AccountUsageWindowQuery],
     ) -> AdminStoreResult<Vec<AccountUsageWindowResult>> {
@@ -365,6 +365,13 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn attach_quota_estimates(
+        &self,
+        account_id: &str,
+        quota: &mut gateway_admin::model::provider_credentials::ProviderQuota,
+    ) -> AdminStoreResult<()> {
+        super::quota_estimate::attach(self, &self.pool, account_id, quota).await
+    }
     async fn observe_subscription_quota(
         &self,
         account_id: &str,

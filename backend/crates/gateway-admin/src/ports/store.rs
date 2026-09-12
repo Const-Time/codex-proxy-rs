@@ -87,6 +87,14 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
+    async fn attach_quota_estimates(
+        &self,
+        account_id: &str,
+        quota: &mut crate::model::provider_credentials::ProviderQuota,
+    ) -> AdminStoreResult<()> {
+        let _ = (account_id, quota);
+        Ok(())
+    }
     async fn observe_subscription_quota(
         &self,
         account_id: &str,

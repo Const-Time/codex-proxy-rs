@@ -160,6 +160,7 @@ pub(crate) fn quota_window_view(window: ProviderQuotaWindow) -> AccountQuotaWind
         limit_name,
         role,
         local_usage_attribution: _,
+        estimated_quota,
         window_seconds,
         used_percent,
         reset_at,
@@ -184,6 +185,13 @@ pub(crate) fn quota_window_view(window: ProviderQuotaWindow) -> AccountQuotaWind
             .map_or_else(|| "—".to_owned(), |value| format!("{value:.1}%")),
         limit_reached,
         local_usage: local_usage.as_ref().map(quota_local_usage),
+        estimated_quota: estimated_quota.map(|estimate| AccountQuotaEstimateView {
+            used_usd: estimate.used_usd,
+            total_usd: estimate.total_usd,
+            percent_delta: estimate.percent_delta,
+            sample_start: china_rfc3339(&estimate.sample_start),
+            sample_end: china_rfc3339(&estimate.sample_end),
+        }),
         reset_at_display: reset_at.map_or_else(|| "—".to_owned(), |value| china_datetime(&value)),
     }
 }
