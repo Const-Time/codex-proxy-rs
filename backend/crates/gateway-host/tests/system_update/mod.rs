@@ -20,6 +20,62 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TARGET_VERSION: &str = "1.9.9";
+
+#[tokio::test]
+async fn update_prepare_failures_emit_specific_terminal_errors_without_changing_files() {
+    for fail_lock in [true, false] {
+        let server = MockServer::start().await;
+        let fixture = Fixture::new();
+        fixture
+            .mount_release(
+                &server,
+                TARGET_VERSION,
+                ArchiveKind::Safe,
+                ChecksumKind::Valid,
+            )
+            .await;
+        let mut config = fixture.config(&format!("{}/repos", server.uri()));
+        if fail_lock {
+            // A file in place of the parent directory fails even when tests run as root.
+            config.update_lock_file = fixture.executable().join("update.lock");
+        } else {
+            fs::write(fixture.state(), "invalid state").unwrap();
+        }
+        let service = ProcessSystemOperations::new(CancellationToken::new(), config);
+        let mut events = service.update_events();
+        let error = service
+            .perform_update(Some(TARGET_VERSION.to_owned()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), SystemOperationErrorKind::Internal);
+        let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = events.next().await {
+                if event.level == SystemUpdateEventLevel::Error {
+                    return event;
+                }
+            }
+            panic!("missing failure event");
+        })
+        .await
+        .expect("failure is reported to the update UI");
+        assert_eq!(terminal.step.as_deref(), Some("prepare"));
+        assert_eq!(terminal.message, error.to_string());
+        assert!(terminal.message.contains(if fail_lock {
+            "update lock directory"
+        } else {
+            "invalid update state"
+        }));
+        assert!(
+            !fixture.lock().exists(),
+            "release any acquired lock after failure"
+        );
+        assert_eq!(fs::read(fixture.executable()).unwrap(), b"old-binary");
+        assert_eq!(
+            fs::read(fixture.web().join("index.html")).unwrap(),
+            b"old-web"
+        );
+    }
+}
 const CROSS_MAJOR_VERSION: &str = "2.0.0";
 
 #[tokio::test]
@@ -346,8 +402,9 @@ async fn update_events_should_preserve_complete_release_stage_sequence() {
     assert_eq!(
         steps,
         [
-            "release", "prepare", "asset", "asset", "verify", "prepare", "download", "download",
-            "download", "checksum", "checksum", "extract", "extract", "replace", "replace", "done",
+            "release", "prepare", "prepare", "asset", "asset", "verify", "prepare", "download",
+            "download", "download", "checksum", "checksum", "extract", "extract", "replace",
+            "replace", "done",
         ]
     );
 }

@@ -276,14 +276,25 @@ impl ProcessSystemOperations {
         }
 
         let operation_id = operation_id("update");
-        let file_lock = OperationFileLock::acquire(&self.config.update_lock_file)?;
+        self.events.info(
+            Some(&operation_id),
+            Some("prepare"),
+            "正在准备更新锁和状态文件",
+        );
+        let file_lock = OperationFileLock::acquire(&self.config.update_lock_file).inspect_err(|error| {
+            tracing::error!(operation_id = %operation_id, path = %self.config.update_lock_file.display(), error = %error, "创建系统更新锁失败");
+            self.events.error_terminal(Some(&operation_id), Some("prepare"), error.to_string());
+        })?;
         set_running(
             &self.config.update_state_file,
             &operation_id,
             SystemOperationKind::Update,
             Some(&target),
             &self.config.version,
-        )?;
+        ).inspect_err(|error| {
+            tracing::error!(operation_id = %operation_id, path = %self.config.update_state_file.display(), error = %error, "写入系统更新状态失败");
+            self.events.error_terminal(Some(&operation_id), Some("prepare"), error.to_string());
+        })?;
         self.events.info(
             Some(&operation_id),
             Some("prepare"),
