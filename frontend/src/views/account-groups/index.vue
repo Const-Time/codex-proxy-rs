@@ -51,7 +51,7 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
+  <div class="cp-mobile-auto-height flex h-full min-h-0 w-full flex-col overflow-hidden">
     <BasePageHeader
       class="h-17"
       title="分组管理"
@@ -59,7 +59,7 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
     />
 
     <BaseCard
-      class="mt-5 flex h-[calc(100dvh-136px)] min-h-125 flex-col"
+      class="cp-mobile-auto-height cp-mobile-table-host mt-5 flex h-[calc(100dvh-136px)] min-h-125 flex-col"
     >
       <template #header>
         <AccountGroupFilters

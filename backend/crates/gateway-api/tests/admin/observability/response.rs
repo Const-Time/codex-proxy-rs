@@ -544,6 +544,9 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
         .lock()
         .expect("ops errors")
         .push(OpsError {
+            user_id: Some("error-user".into()),
+            user_email: Some("error@example.invalid".into()),
+            username: Some("Error user".into()),
             source: "model_request".to_owned(),
             event_id: "err_snapshot".to_owned(),
             request_id: Some("req_err".to_owned()),
@@ -866,6 +869,9 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .lock()
         .expect("usage records")
         .push(UsageListRecord {
+            user_id: Some("user_history".into()),
+            user_email: Some("member@example.invalid".into()),
+            username: Some("Member".into()),
             id: "request_endpoint".to_owned(),
             endpoint: "/v1/responses".to_owned(),
             client_transport: "websocket".to_owned(),
@@ -971,6 +977,9 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
     assert_eq!(item["requestedModel"], "grok-4.5");
     assert_eq!(item["tokenDetails"]["imageInputTokens"], 31);
     for field in [
+        "userId",
+        "userEmail",
+        "username",
         "accountId",
         "accountName",
         "accountEmail",
@@ -1007,6 +1016,12 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .expect("usage response body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("usage response JSON");
 
+    assert_eq!(value["data"]["items"][0]["userId"], "user_history");
+    assert_eq!(
+        value["data"]["items"][0]["userEmail"],
+        "member@example.invalid"
+    );
+    assert_eq!(value["data"]["items"][0]["username"], "Member");
     assert_eq!(
         value["data"]["items"][0]["billing"]["inputPriceDisplay"],
         "$10 / 1M Token"

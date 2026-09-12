@@ -267,6 +267,9 @@ pub(crate) fn usage_list_record_view(record: domain::UsageListRecord) -> UsageLi
         .clone()
         .or_else(|| record.requested_model_id.clone());
     UsageListRecordView {
+        user_id: record.user_id,
+        user_email: record.user_email,
+        username: record.username,
         id: record.id,
         provider: record.provider_kind,
         authentication_kind: record.provider_account_authentication_kind,
@@ -552,6 +555,9 @@ pub(crate) fn ops_error_view(error: domain::OpsError) -> OpsErrorView {
         .clone()
         .or_else(|| error.requested_model_id.clone());
     OpsErrorView {
+        user_id: error.user_id,
+        user_email: error.user_email,
+        username: error.username,
         id: error.event_id,
         request_id: error.request_id,
         client_api_key_id: error.client_api_key_ref,

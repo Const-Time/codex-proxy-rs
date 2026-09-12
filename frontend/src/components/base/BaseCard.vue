@@ -45,7 +45,7 @@ const contentClasses = computed(() => [
 <template>
   <component
     :is="props.as"
-    class="overflow-hidden rounded-cp-card bg-(--cp-card-bg) shadow-cp-card"
+    class="cp-card overflow-hidden rounded-cp-card bg-(--cp-card-bg) shadow-cp-card"
     :class="[paddingClasses[padding], hasHeader ? 'flex min-h-0 flex-col' : undefined]"
   >
     <template v-if="$slots.header || hasManagedHeader || $slots.body">
@@ -70,7 +70,7 @@ const contentClasses = computed(() => [
                 </slot>
               </p>
             </div>
-            <div v-if="$slots.actions" class="shrink-0">
+            <div v-if="$slots.actions" class="cp-card-actions shrink-0">
               <slot name="actions" />
             </div>
           </div>

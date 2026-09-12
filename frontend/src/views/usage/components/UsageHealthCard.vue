@@ -35,6 +35,7 @@ const props = withDefaults(
     cost: Awaited<ReturnType<typeof getUsageRecordInsightsOverview>>['cost']
     granularity: string
     loading?: boolean
+    showRanking?: boolean
   }>(),
   {
     loading: false,
@@ -42,6 +43,11 @@ const props = withDefaults(
 )
 
 const activeView = ref('usage')
+const viewOptions = computed(() => [
+  { label: 'Token 用量', value: 'usage' },
+  { label: '请求健康', value: 'health' },
+  ...(props.showRanking ? [{ label: '用户排行', value: 'ranking' }] : []),
+])
 const tokenPoints = computed(() => {
   const requests = new Map(props.health.points.map(point => [point.bucket, point.totalRequests]))
   return props.cost.points.map(point => ({
@@ -176,14 +182,15 @@ function formatTooltip(params: unknown) {
   <BaseCard
     as="article"
     title="使用趋势"
-    :description="activeView === 'usage' ? `按${granularityText}展示 Token 用量与缓存命中率` : `按${granularityText}区分服务结果、取消、未完成与调用方错误`"
+    :description="activeView === 'ranking' ? '当前筛选范围内的用户用量排行' : activeView === 'usage' ? `按${granularityText}展示 Token 用量与缓存命中率` : `按${granularityText}区分服务结果、取消、未完成与调用方错误`"
     class="min-h-90 xl:h-full"
   >
     <template #actions>
-      <BaseSegmented v-model="activeView" label="使用趋势视图" :options="[{ label: 'Token 用量', value: 'usage' }, { label: '请求健康', value: 'health' }]" class="w-48" />
+      <BaseSegmented v-model="activeView" label="使用趋势视图" :options="viewOptions" :class="showRanking ? 'w-72' : 'w-48'" />
     </template>
     <template #body>
       <TokenUsageTrend v-if="activeView === 'usage'" :points="tokenPoints" :loading="loading" />
+      <slot v-else-if="activeView === 'ranking'" name="ranking" />
       <div v-else class="grid min-h-66" :class="hasData ? 'gap-3' : 'h-full'">
         <div v-if="hasData" class="grid grid-cols-3 gap-2 rounded-xl bg-cp-fill-quaternary/45 p-2">
           <div class="grid gap-1 px-2">

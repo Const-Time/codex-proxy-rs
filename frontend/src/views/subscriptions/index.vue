@@ -11,6 +11,7 @@ import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import { toast } from '@/components/base/BaseToast'
+import QuotaUsage from '@/components/quota/QuotaUsage.vue'
 import { errorMessage } from '@/utils/async'
 import { generateRequestId } from '@/utils/requestId'
 
@@ -41,8 +42,6 @@ watch([search, groupId], () => {
   page.value = 1
   selected.value = []
 })
-const money = (value: string) => `$${Number(value).toLocaleString('en-US', { maximumFractionDigits: 4 })}`
-const limit = (value: string) => Number(value) === 0 ? '不限' : money(value)
 const date = (value: string | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未开始'
 const reason = (value: string | null) => ({ manual: '管理员重置', upstream_manual: '账号主动重置', upstream_window: '上游窗口重置', upstream_recovery: '上游额度恢复' }[value ?? ''] ?? '—')
 async function load() {
@@ -106,9 +105,13 @@ onMounted(load)
     <p v-if="error" role="alert" class="text-cp-error">
       {{ error }}
     </p>
-    <BaseCard>
+    <BaseCard class="cp-mobile-table-host">
+      <div class="mb-3 flex items-center gap-2 sm:hidden">
+        <BaseCheckbox label="选择当前页订阅" :model-value="pageSelected" :indeterminate="!pageSelected && visible.some(item => selected.includes(rowKey(item)))" :disabled="loading || !visible.length" @update:model-value="togglePage" />
+        <span class="text-cp-sm text-cp-text-secondary">选择当前页订阅</span>
+      </div>
       <div class="overflow-x-auto">
-        <table class="w-full whitespace-nowrap text-left text-cp-sm">
+        <table class="cp-mobile-record-table w-full whitespace-nowrap text-left text-cp-sm">
           <thead class="text-cp-text-secondary">
             <tr>
               <th class="p-3">
@@ -121,11 +124,7 @@ onMounted(load)
               </th><th class="p-3">
                 额度倍率
               </th><th class="p-3">
-                日用量 / 日限
-              </th><th class="p-3">
-                周用量 / 周限
-              </th><th class="p-3">
-                下次刷新（日 / 周）
+                分组额度 · 已用 / 限额
               </th><th class="p-3">
                 最近重置
               </th>
@@ -133,10 +132,10 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-for="item in visible" :key="`${item.userId}:${item.groupId}`" class="border-t border-cp-border">
-              <td class="p-3">
+              <td data-label="选择" class="p-3">
                 <BaseCheckbox :label="`选择 ${item.username || item.email} / ${item.groupName}`" :model-value="selected.includes(rowKey(item))" @update:model-value="checked => selected = checked ? [...selected, rowKey(item)] : selected.filter(key => key !== rowKey(item))" />
               </td>
-              <td class="p-3">
+              <td data-label="用户" class="p-3">
                 <div class="font-medium">
                   {{ item.username || item.email }}
                   <div v-if="item.username" class="mt-1 text-cp-xs text-cp-text-secondary">
@@ -144,38 +143,34 @@ onMounted(load)
                   </div>
                 </div>
               </td>
-              <td class="p-3">
-                {{ item.groupName }} <span v-if="!item.enabled">· 已停用</span>
-              </td>
-              <td class="p-3 font-mono">
-                {{ Number(item.quotaMultiplier) }}x
-              </td>
-              <td class="p-3 font-mono">
-                {{ money(item.dailyUsedUsd) }} / {{ limit(item.dailyLimitUsd) }}
-              </td>
-              <td class="p-3 font-mono">
-                {{ money(item.weeklyUsedUsd) }} / {{ limit(item.weeklyLimitUsd) }}
-              </td>
-              <td class="p-3">
-                <div>{{ date(item.dailyResetsAt) }}</div><div class="mt-1 text-cp-text-secondary">
-                  {{ date(item.weeklyResetsAt) }}
+              <td data-label="分组" class="p-3">
+                <div>
+                  {{ item.groupName }} <span v-if="!item.enabled">· 已停用</span>
                 </div>
               </td>
-              <td class="p-3">
-                <div>{{ item.lastResetAt ? date(item.lastResetAt) : '—' }}</div><div class="mt-1 text-cp-text-secondary">
-                  {{ reason(item.lastResetReason) }}
+              <td data-label="额度倍率" class="p-3 font-mono">
+                {{ Number(item.quotaMultiplier) }}x
+              </td>
+              <td data-label="分组额度 · 已用 / 限额" class="cp-mobile-wide min-w-84 p-3 xl:w-2/5">
+                <QuotaUsage :budget="item" :label="`${item.username || item.email} / ${item.groupName}`" />
+              </td>
+              <td data-label="最近重置" class="p-3">
+                <div>
+                  <div>{{ item.lastResetAt ? date(item.lastResetAt) : '—' }}</div><div class="mt-1 text-cp-text-secondary">
+                    {{ reason(item.lastResetReason) }}
+                  </div>
                 </div>
               </td>
             </tr>
             <tr v-if="!visible.length">
-              <td colspan="8" class="p-6 text-center text-cp-text-secondary">
+              <td colspan="6" class="p-6 text-center text-cp-text-secondary">
                 {{ loading ? '加载中…' : '没有匹配的订阅' }}
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <div class="mt-4 flex items-center justify-between gap-3 text-cp-sm">
+      <div class="cp-mobile-pagination mt-4 flex items-center justify-between gap-3 text-cp-sm">
         <span>共 {{ filtered.length }} 条 · 每页 20 条</span>
         <div class="flex items-center gap-3">
           <BaseButton variant="secondary" :disabled="page <= 1" @click="page--">

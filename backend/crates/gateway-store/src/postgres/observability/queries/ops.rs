@@ -3,6 +3,7 @@
 use super::super::*;
 
 const REQUEST_ERROR_SELECT: &str = "select 'model_request'::text as source,
+       mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
        mr.id as event_id, mr.id as request_id,
        nullif(mr.attempt_count, 0) as attempt_index,
        mr.client_api_key_ref, 'model_request'::text as component, mr.operation,
@@ -31,10 +32,11 @@ const REQUEST_ERROR_SELECT: &str = "select 'model_request'::text as source,
        mr.recovery_retry_delay_ms, mr.recovery_total_latency_ms,
        mr.completed_at as occurred_at,
        'model_request:' || mr.id as stable_sort_id
-from model_requests mr
+from model_requests mr left join users u on u.id = mr.user_id
 where true";
 
 const OPS_EVENT_SELECT: &str = "select 'ops_event'::text as source,
+       mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
        oe.id as event_id, oe.model_request_id as request_id, oe.attempt_index,
        mr.client_api_key_ref, oe.component, oe.operation,
        mr.protocol, mr.client_transport, mr.requested_model_id, mr.service_tier,
@@ -64,6 +66,7 @@ const OPS_EVENT_SELECT: &str = "select 'ops_event'::text as source,
        'ops_event:' || oe.id as stable_sort_id
 from ops_events oe
 left join model_requests mr on mr.id = oe.model_request_id
+left join users u on u.id = mr.user_id
 where true";
 
 pub(crate) async fn list_ops_errors(

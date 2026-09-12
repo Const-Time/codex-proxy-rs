@@ -59,7 +59,7 @@ const emit = defineEmits<{
         <div
           v-for="(row, index) in mappings"
           :key="index"
-          class="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-3 rounded-cp-card bg-cp-fill-quaternary p-3"
+          class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-cp-card bg-cp-fill-quaternary p-3 sm:grid-cols-[1fr_auto_1fr_auto]"
         >
           <BaseInput
             :model-value="row.requestedModel"
@@ -67,15 +67,17 @@ const emit = defineEmits<{
             aria-label="请求模型"
             @update:model-value="emit('updateMapping', index, 'requestedModel', $event)"
           />
-          <span class="text-cp-text-quaternary">→</span>
+          <span class="hidden text-cp-text-quaternary sm:block">→</span>
           <BaseInput
             :model-value="row.upstreamModel"
+            class="col-start-1 row-start-2 sm:col-auto sm:row-auto"
             placeholder="上游模型"
             aria-label="上游模型名称"
             @update:model-value="emit('updateMapping', index, 'upstreamModel', $event)"
           />
           <BaseIconButton
             variant="ghost"
+            class="col-start-2 row-span-2 row-start-1 sm:col-auto sm:row-auto sm:row-span-1"
             label="删除映射"
             @click="emit('removeMapping', index)"
           >

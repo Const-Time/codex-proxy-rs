@@ -249,6 +249,9 @@ where
     let mut data = ops_page_view(result);
     if owner.is_some() {
         for item in &mut data.items {
+            item.user_id = None;
+            item.user_email = None;
+            item.username = None;
             item.account_id = None;
             item.account_name = None;
             item.account_email = None;

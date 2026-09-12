@@ -481,6 +481,59 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
 }
 
 #[tokio::test]
+async fn user_ranking_orders_by_total_tokens_not_requests_or_diagnostic_risk() {
+    let now = Utc::now();
+    let range = observation_range(now);
+    let store = Arc::new(FixtureObservabilityStore::new(range));
+    let mut risky = diagnostic("user_risky", 104);
+    risky.failure_count = 104;
+    risky.non_completion_count = 104;
+    risky.retry_count = 104;
+    risky.first_token_p95_ms = Some(60_000);
+    risky.total_tokens = 10;
+    let mut high_tokens = diagnostic("user_high", 1);
+    high_tokens.total_tokens = 1_000_000;
+    let mut tie_a = diagnostic("user_tie_a", 2);
+    tie_a.total_tokens = 42_300;
+    store.replace_diagnostics(vec![
+        risky,
+        diagnostic("user_tie_b", 423),
+        high_tokens,
+        tie_a,
+        diagnostic("user_low", 125),
+    ]);
+    let services = observability_services_with_calculated_billing(store).await;
+    let ranking = services
+        .observability()
+        .diagnostics(range, UsageFilter::default(), DiagnosticDimension::User)
+        .await
+        .unwrap();
+    assert_eq!(
+        ranking
+            .items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "user_high",
+            "user_tie_a",
+            "user_tie_b",
+            "user_low",
+            "user_risky"
+        ]
+    );
+    let diagnostic = services
+        .observability()
+        .diagnostics(range, UsageFilter::default(), DiagnosticDimension::Model)
+        .await
+        .unwrap();
+    assert_eq!(
+        diagnostic.items[0].key, "user_risky",
+        "hotspot diagnostics retain their risk ordering"
+    );
+}
+
+#[tokio::test]
 async fn usage_records_should_tolerate_records_that_fail_billing_enrichment() {
     let now = Utc::now();
     let store = Arc::new(FixtureObservabilityStore::new(observation_range(now)));
@@ -891,6 +944,9 @@ fn total_record(
     now: DateTime<Utc>,
 ) -> UsageListRecord {
     UsageListRecord {
+        user_id: None,
+        user_email: None,
+        username: None,
         id: id.to_owned(),
         endpoint: "/v1/responses".to_owned(),
         client_transport: "http_sse".to_owned(),

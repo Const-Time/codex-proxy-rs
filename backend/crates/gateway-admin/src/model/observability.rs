@@ -557,6 +557,9 @@ pub struct DashboardObservation {
 /// 使用记录表格的窄读模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub username: Option<String>,
     pub id: String,
     pub endpoint: String,
     pub client_transport: String,
@@ -785,6 +788,9 @@ pub struct DiagnosticObservation {
 /// 统一运维错误记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsError {
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub username: Option<String>,
     pub source: String,
     pub event_id: String,
     pub request_id: Option<String>,

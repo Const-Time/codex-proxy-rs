@@ -70,6 +70,9 @@ export interface UsageRecordMetadata {
 
 export interface UsageListRecord {
   id: string
+  userId: string | null
+  userEmail: string | null
+  username: string | null
   provider: string | null
   authenticationKind: string | null
   accountId: string | null
@@ -254,6 +257,9 @@ export interface OpsErrorMetadata {
 }
 
 export interface OpsError {
+  userId: string | null
+  userEmail: string | null
+  username: string | null
   id: string
   requestId: string | null
   clientApiKeyId: string | null

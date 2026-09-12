@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { onKeyStroke, useMediaQuery } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
-import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 
@@ -10,7 +11,6 @@ import { useUiStore } from '@/stores/modules/ui'
 
 import AppAboutModal from './components/AppAboutModal.vue'
 import AppSidebar from './components/AppSidebar.vue'
-import FloatingSidebarToggle from './components/FloatingSidebarToggle.vue'
 import SystemUpdateModal from './components/SystemUpdateModal/index.vue'
 
 const uiStore = useUiStore()
@@ -21,17 +21,48 @@ const { toggleSidebar } = uiStore
 const route = useRoute()
 const pageScrollbarRef = ref<InstanceType<typeof BaseScrollbar> | null>(null)
 const mobileSidebarOpen = shallowRef(false)
+const mobileSidebar = ref<HTMLElement | null>(null)
+const desktop = useMediaQuery('(min-width: 961px)')
+let sidebarTrigger: HTMLElement | null = null
 const aboutOpen = shallowRef(false)
 const systemUpdateOpen = shallowRef(false)
 const systemUpdateOpening = shallowRef(false)
 
-function openMobileSidebar() {
+async function openMobileSidebar() {
+  sidebarTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
   mobileSidebarOpen.value = true
+  await nextTick()
+  mobileSidebar.value?.querySelector<HTMLButtonElement>('button')?.focus()
 }
 
-function closeMobileSidebar() {
+async function closeMobileSidebar() {
   mobileSidebarOpen.value = false
+  await nextTick()
+  if (sidebarTrigger?.isConnected)
+    sidebarTrigger.focus()
 }
+provide('openMobileSidebar', openMobileSidebar)
+watch(desktop, value => value && closeMobileSidebar())
+onKeyStroke('Escape', (event) => {
+  if (!event.defaultPrevented && mobileSidebarOpen.value)
+    closeMobileSidebar()
+})
+onKeyStroke('Tab', (event) => {
+  if (!mobileSidebarOpen.value || event.defaultPrevented)
+    return
+  const controls = Array.from(mobileSidebar.value?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]') ?? [])
+    .filter(element => element.getClientRects().length > 0)
+  const first = controls[0]
+  const last = controls.at(-1)
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last?.focus()
+  }
+  else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first?.focus()
+  }
+})
 
 async function openSystemUpdate() {
   if (systemUpdateOpen.value || systemUpdateOpening.value)
@@ -79,8 +110,7 @@ watch(
       @open-about="aboutOpen = true"
       @open-system-update="openSystemUpdate"
     />
-    <FloatingSidebarToggle v-if="!mobileSidebarOpen" @open="openMobileSidebar" />
-    <main class="relative isolate h-dvh min-w-0 flex-1 overflow-hidden">
+    <main :inert="mobileSidebarOpen" class="relative isolate h-dvh min-w-0 flex-1 overflow-hidden">
       <BaseScrollbar ref="pageScrollbarRef">
         <div class="flex min-h-full min-w-0 flex-col p-4 min-[961px]:p-6">
           <RouterView v-slot="{ Component }">
@@ -92,7 +122,7 @@ watch(
 
     <Teleport to="body">
       <Transition name="mobile-sidebar">
-        <div v-if="mobileSidebarOpen" class="fixed inset-0 z-50 min-[961px]:hidden">
+        <div v-if="mobileSidebarOpen" ref="mobileSidebar" class="fixed inset-0 z-50 min-[961px]:hidden" role="dialog" aria-modal="true" aria-label="导航菜单" tabindex="-1">
           <button
             type="button"
             class="absolute inset-0 border-0 bg-black/32 backdrop-blur-[1px] cursor-default"

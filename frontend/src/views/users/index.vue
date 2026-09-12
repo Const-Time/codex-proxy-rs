@@ -155,9 +155,9 @@ onMounted(load)
     <p v-if="error" role="alert" class="text-cp-error">
       {{ error }}
     </p>
-    <BaseCard>
+    <BaseCard class="cp-mobile-table-host">
       <div class="overflow-x-auto">
-        <table class="w-full text-left text-cp-sm">
+        <table class="cp-mobile-record-table w-full text-left text-cp-sm">
           <thead class="text-cp-text-secondary">
             <tr>
               <th class="p-3">
@@ -177,25 +177,27 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-for="user in visibleUsers" :key="user.id" class="border-t border-cp-border">
-              <td class="p-3 font-medium">
-                {{ user.email }}
-                <div v-if="user.username" class="text-cp-xs text-cp-text-secondary">
-                  {{ user.username }}
+              <td data-label="用户 / 邮箱" class="p-3 font-medium">
+                <div>
+                  {{ user.email }}
+                  <div v-if="user.username" class="text-cp-xs text-cp-text-secondary">
+                    {{ user.username }}
+                  </div>
                 </div>
               </td>
-              <td class="p-3">
+              <td data-label="角色" class="p-3">
                 {{ user.role === 'admin' ? '管理员' : '普通用户' }}
               </td>
-              <td class="p-3">
+              <td data-label="状态" class="p-3">
                 {{ user.enabled ? '已启用' : '已禁用' }}
               </td>
-              <td class="max-w-md p-3">
+              <td data-label="授权分组" class="max-w-md p-3">
                 {{ groupNames(user) }}
               </td>
-              <td class="p-3 font-mono">
+              <td data-label="并发 / RPM" class="p-3 font-mono">
                 {{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}
               </td>
-              <td class="p-3">
+              <td class="cp-mobile-actions p-3">
                 <div class="flex items-center gap-2 whitespace-nowrap">
                   <BaseButton v-if="user.role !== 'admin' || user.id === auth.user?.id" variant="secondary" :disabled="busy" @click="edit(user)">
                     编辑

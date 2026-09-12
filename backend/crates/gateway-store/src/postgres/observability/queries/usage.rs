@@ -128,7 +128,8 @@ pub(crate) fn literal_prefix_pattern(value: &str) -> String {
 }
 
 pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
-    "select mr.id, mr.endpoint, mr.client_transport, mr.requested_model_id,
+    "select mr.id, mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
+            mr.endpoint, mr.client_transport, mr.requested_model_id,
             mr.provider_kind, mr.provider_account_ref,
             mr.provider_account_name_snapshot as provider_account_name,
             mr.provider_account_email_snapshot as provider_account_email,
@@ -145,7 +146,7 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             host(mr.client_ip) as client_ip, mr.user_agent,
             mr.reasoning_effort, mr.reasoning_preset, mr.subagent_kind, mr.compact,
             mr.started_at
-     from model_requests mr";
+     from model_requests mr left join users u on u.id = mr.user_id";
 
 pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
     "select mr.id, mr.client_api_key_ref, mr.config_revision,
@@ -394,6 +395,11 @@ pub(crate) async fn usage_diagnostics(
 ) -> StoreResult<Vec<DiagnosticObservation>> {
     filter.validate()?;
     let dimension_sql = diagnostic_dimension_sql(dimension);
+    let ranking_order = if dimension == DiagnosticDimension::User {
+        "total_tokens desc, dimension_name"
+    } else {
+        "request_count desc, dimension_name"
+    };
     let completed_usage = completed_usage_fact_predicate("mr");
     let mut statement = QueryBuilder::<Postgres>::new("with matched as (select ");
     statement.push(dimension_sql);
@@ -450,12 +456,18 @@ pub(crate) async fn usage_diagnostics(
             group by dimension_name, grouping sets ((), (cost_currency))
          ), selected_dimensions as (
            select dimension_name,
-                  row_number() over (order by request_count desc, dimension_name)
+                  row_number() over (order by ",
+    );
+    statement.push(ranking_order);
+    statement.push(
+        ")
                     as sort_position
              from aggregated
             where currency_grouping = 1
-            order by request_count desc, dimension_name limit ",
+            order by ",
     );
+    statement.push(ranking_order);
+    statement.push(" limit ");
     statement.push_bind(DIAGNOSTIC_LIMIT);
     statement.push(
         ")

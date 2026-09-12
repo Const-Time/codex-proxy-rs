@@ -51,13 +51,13 @@ const items = computed(() => [
 </script>
 
 <template>
-  <section class="mt-5 grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="使用概览">
+  <section class="cp-mobile-metrics mt-5 grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="使用概览">
     <BaseCard
       v-for="item in items"
       :key="item.key"
       as="article"
       padding="compact"
-      class="grid min-h-23 grid-cols-[36px_minmax(0,1fr)] items-stretch gap-3"
+      class="cp-usage-metric grid min-h-23 grid-cols-[36px_minmax(0,1fr)] items-stretch gap-3"
     >
       <BaseMotionIcon class="inline-flex size-9 shrink-0 items-center justify-center rounded-cp" :class="item.tone">
         <component :is="item.icon" class="size-4.5" />

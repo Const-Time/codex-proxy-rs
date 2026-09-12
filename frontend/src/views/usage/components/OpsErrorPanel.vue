@@ -34,7 +34,7 @@ const {
 
 const selectedRecord = shallowRef<OpsError | null>(null)
 const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
-const columns = computed(() => personal?.value ? opsErrorColumns.filter(column => column.key !== 'accountId') : opsErrorColumns)
+const columns = computed(() => personal?.value ? opsErrorColumns.filter(column => !['userEmail', 'accountId'].includes(column.key)) : opsErrorColumns)
 const detailOpen = shallowRef(false)
 
 const upstreamSendStateLabels: Record<string, string> = {
@@ -107,6 +107,16 @@ function upstreamSendStateText(value: string | null | undefined) {
         :loading="loading"
         empty-text="当前时段没有错误"
       >
+        <template #userEmail="{ row }">
+          <div class="grid min-w-0 gap-1">
+            <span class="truncate text-cp-sm font-bold" :title="row.username || row.userEmail || row.userId || '未关联用户'">
+              {{ row.username || row.userEmail || row.userId || '未关联用户' }}
+            </span>
+            <span v-if="row.username && row.userEmail" class="truncate text-cp-xs text-cp-text-secondary" :title="row.userEmail">
+              {{ row.userEmail }}
+            </span>
+          </div>
+        </template>
         <template #provider="{ row }">
           <ProviderIconGroup
             :provider="String(row.provider || '')"

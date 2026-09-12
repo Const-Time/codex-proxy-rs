@@ -79,7 +79,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
           模型使用排行
         </h3>
 
-        <div class="ml-auto flex items-baseline gap-4">
+        <div class="ml-auto flex min-w-0 flex-wrap items-baseline justify-end gap-4">
           <div v-if="hasUsageSummary" class="flex items-baseline gap-1.5 whitespace-nowrap">
             <Sigma class="size-3.5 self-center text-cp-text-tertiary" :stroke-width="1.75" />
             <span title="总 Token">
@@ -100,7 +100,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
         </div>
       </div>
 
-      <div class="h-56 min-w-0 xl:h-auto xl:min-h-0 xl:flex-1 xl:basis-0">
+      <div class="cp-mobile-auto-height h-56 min-w-0 xl:h-auto xl:min-h-0 xl:flex-1 xl:basis-0">
         <BaseTable
           :columns="modelUsageColumns"
           :rows="account.usage.models"

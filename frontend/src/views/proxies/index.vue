@@ -142,13 +142,13 @@ onMounted(() => void query.execute())
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
+  <div class="cp-mobile-auto-height flex h-full min-h-0 w-full flex-col overflow-hidden">
     <BasePageHeader
       class="h-17"
       title="代理管理"
       description="管理账号代理，检测出口和各平台连接质量"
     />
-    <BaseCard class="mt-5 flex h-[calc(100dvh-136px)] min-h-125 flex-col">
+    <BaseCard class="cp-mobile-auto-height cp-mobile-table-host mt-5 flex h-[calc(100dvh-136px)] min-h-125 flex-col">
       <template #header>
         <div class="flex w-full flex-col gap-3 sm:flex-row sm:items-center">
           <BaseInput v-model="search" class="sm:w-80" aria-label="搜索代理" placeholder="搜索代理名称...">

@@ -5,6 +5,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { getOperationLogs } from '@/api/modules/operations'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
+import BaseFilterPanel from '@/components/base/BaseFilterPanel.vue'
 import FormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
@@ -66,47 +67,49 @@ onMounted(search)
   <div class="grid gap-5">
     <BasePageHeader title="操作日志" description="记录登录、管理修改、敏感操作与鉴权失败，按系统日志保留天数保存。" />
     <BaseCard class="@container">
-      <form class="grid items-end gap-3 sm:grid-cols-2 @[760px]:grid-cols-4 @[1120px]:grid-cols-[minmax(130px,1.2fr)_minmax(150px,1.4fr)_minmax(130px,1fr)_104px_104px_104px_120px_auto]" @submit.prevent="search">
-        <FormItem label="操作者邮箱">
-          <BaseInput v-model="filters.email" aria-label="操作者邮箱" placeholder="按邮箱筛选">
-            <template #prefix>
-              <Search class="size-4" />
-            </template>
-          </BaseInput>
-        </FormItem>
-        <FormItem label="动作 / 路径">
-          <BaseInput v-model="filters.action" aria-label="动作或路径" placeholder="路径或动作" />
-        </FormItem>
-        <FormItem label="IP">
-          <BaseInput v-model="filters.ip" aria-label="IP" placeholder="连接 / 上报 IP" />
-        </FormItem>
-        <FormItem label="请求方法">
-          <BaseSelect v-model="filters.method" class="w-full" aria-label="请求方法" :options="[{ label: '全部方法', value: '' }, ...['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(value => ({ label: value, value }))]" />
-        </FormItem>
-        <FormItem label="认证方式">
-          <BaseSelect v-model="filters.authMethod" class="w-full" aria-label="认证方式" :options="[{ label: '全部方式', value: '' }, ...['session', 'api_key', 'anonymous'].map(value => ({ label: authName(value), value }))]" />
-        </FormItem>
-        <FormItem label="结果">
-          <BaseSelect v-model="filters.result" class="w-full" aria-label="结果" :options="[{ label: '全部结果', value: '' }, { label: '成功', value: 'success' }, { label: '失败', value: 'failure' }]" />
-        </FormItem>
-        <FormItem label="时间范围">
-          <BaseSelect v-model="filters.days" class="w-full" aria-label="时间范围" :options="[{ label: '最近 24 小时', value: '1' }, { label: '最近 7 天', value: '7' }, { label: '最近 30 天', value: '30' }, { label: '最近 90 天', value: '90' }]" />
-        </FormItem>
-        <div class="flex items-end gap-2 whitespace-nowrap">
-          <BaseButton type="submit" variant="primary" :loading="loading">
-            查询 / 刷新
-          </BaseButton><BaseButton type="button" @click="reset">
-            重置
-          </BaseButton>
-        </div>
-      </form>
+      <BaseFilterPanel :active-count="[filters.email, filters.action, filters.ip, filters.method, filters.authMethod, filters.result].filter(Boolean).length">
+        <form class="grid items-end gap-3 sm:grid-cols-2 @[760px]:grid-cols-4 @[1120px]:grid-cols-[minmax(130px,1.2fr)_minmax(150px,1.4fr)_minmax(130px,1fr)_104px_104px_104px_120px_auto]" @submit.prevent="search">
+          <FormItem label="操作者邮箱">
+            <BaseInput v-model="filters.email" aria-label="操作者邮箱" placeholder="按邮箱筛选">
+              <template #prefix>
+                <Search class="size-4" />
+              </template>
+            </BaseInput>
+          </FormItem>
+          <FormItem label="动作 / 路径">
+            <BaseInput v-model="filters.action" aria-label="动作或路径" placeholder="路径或动作" />
+          </FormItem>
+          <FormItem label="IP">
+            <BaseInput v-model="filters.ip" aria-label="IP" placeholder="连接 / 上报 IP" />
+          </FormItem>
+          <FormItem label="请求方法">
+            <BaseSelect v-model="filters.method" class="w-full" aria-label="请求方法" :options="[{ label: '全部方法', value: '' }, ...['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(value => ({ label: value, value }))]" />
+          </FormItem>
+          <FormItem label="认证方式">
+            <BaseSelect v-model="filters.authMethod" class="w-full" aria-label="认证方式" :options="[{ label: '全部方式', value: '' }, ...['session', 'api_key', 'anonymous'].map(value => ({ label: authName(value), value }))]" />
+          </FormItem>
+          <FormItem label="结果">
+            <BaseSelect v-model="filters.result" class="w-full" aria-label="结果" :options="[{ label: '全部结果', value: '' }, { label: '成功', value: 'success' }, { label: '失败', value: 'failure' }]" />
+          </FormItem>
+          <FormItem label="时间范围">
+            <BaseSelect v-model="filters.days" class="w-full" aria-label="时间范围" :options="[{ label: '最近 24 小时', value: '1' }, { label: '最近 7 天', value: '7' }, { label: '最近 30 天', value: '30' }, { label: '最近 90 天', value: '90' }]" />
+          </FormItem>
+          <div class="flex items-end gap-2 whitespace-nowrap">
+            <BaseButton type="submit" variant="primary" :loading="loading">
+              查询 / 刷新
+            </BaseButton><BaseButton type="button" @click="reset">
+              重置
+            </BaseButton>
+          </div>
+        </form>
+      </BaseFilterPanel>
     </BaseCard>
     <p v-if="error" role="alert" class="text-cp-error">
       {{ error }}
     </p>
-    <BaseCard>
+    <BaseCard class="cp-mobile-table-host">
       <div class="overflow-x-auto">
-        <table class="w-full whitespace-nowrap text-left text-cp-sm">
+        <table class="cp-mobile-record-table w-full whitespace-nowrap text-left text-cp-sm">
           <thead class="bg-cp-fill-quaternary text-cp-text-secondary">
             <tr>
               <th class="p-3">
@@ -128,29 +131,33 @@ onMounted(search)
           </thead>
           <tbody>
             <tr v-for="item in items" :key="item.id" class="border-b border-cp-border">
-              <td class="p-3">
+              <td data-label="时间" class="p-3">
                 {{ date(item.occurredAt) }}
-              </td><td class="p-3">
-                <div>{{ item.username || item.email || authName(item.authMethod) }}</div><div class="mt-1 text-cp-xs text-cp-text-secondary">
-                  {{ item.username ? item.email : authName(item.authMethod) }}
+              </td><td data-label="操作者" class="p-3">
+                <div>
+                  <div>{{ item.username || item.email || authName(item.authMethod) }}</div><div class="mt-1 text-cp-xs text-cp-text-secondary">
+                    {{ item.username ? item.email : authName(item.authMethod) }}
+                  </div>
                 </div>
-              </td><td class="max-w-md truncate p-3 font-mono" :title="`${item.method} ${item.path}`">
+              </td><td data-label="动作" class="max-w-md truncate p-3 font-mono" :title="`${item.method} ${item.path}`">
                 {{ item.method }} {{ item.path }}
-              </td><td class="p-3">
+              </td><td data-label="结果" class="p-3">
                 <span class="rounded-full px-2 py-1 text-cp-xs" :class="item.status < 400 ? 'bg-cp-success-container text-cp-success' : 'bg-cp-error-container text-cp-error'">{{ item.status }}</span>
-              </td><td class="p-3 font-mono">
+              </td><td data-label="耗时" class="p-3 font-mono">
                 {{ item.durationMs }} ms
-              </td><td class="p-3 font-mono">
-                <div :title="item.forwardedIp ? '代理请求头上报的地址，未经可信代理验证' : '应用直接连接的对端地址，可能是 Docker 网桥或反向代理'">
-                  {{ item.forwardedIp || item.clientIp || '未记录' }}
+              </td><td data-label="来源 IP" class="p-3 font-mono">
+                <div>
+                  <div :title="item.forwardedIp ? '代理请求头上报的地址，未经可信代理验证' : '应用直接连接的对端地址，可能是 Docker 网桥或反向代理'">
+                    {{ item.forwardedIp || item.clientIp || '未记录' }}
+                  </div>
+                  <div v-if="item.forwardedIp" class="mt-1 font-sans text-cp-xs text-cp-text-tertiary">
+                    代理上报 · 未验证
+                  </div>
+                  <div class="mt-1 text-cp-xs text-cp-text-secondary">
+                    {{ item.forwardedIp ? `连接 ${item.clientIp || '未记录'}` : '直连 · 未上报代理来源' }}
+                  </div>
                 </div>
-                <div v-if="item.forwardedIp" class="mt-1 font-sans text-cp-xs text-cp-text-tertiary">
-                  代理上报 · 未验证
-                </div>
-                <div class="mt-1 text-cp-xs text-cp-text-secondary">
-                  {{ item.forwardedIp ? `连接 ${item.clientIp || '未记录'}` : '直连 · 未上报代理来源' }}
-                </div>
-              </td><td class="p-3">
+              </td><td class="cp-mobile-actions p-3">
                 <BaseButton size="sm" @click="detail = item; detailOpen = true">
                   详情
                 </BaseButton>
@@ -163,7 +170,7 @@ onMounted(search)
           </tbody>
         </table>
       </div>
-      <div class="mt-4 flex items-center justify-between text-cp-sm">
+      <div class="cp-mobile-pagination mt-4 flex flex-wrap items-center justify-between gap-3 text-cp-sm">
         <span>共 {{ total }} 条 · 每页 50 条</span><div class="flex items-center gap-3">
           <BaseButton :disabled="loading || page <= 1" @click="changePage(page - 1)">
             上一页

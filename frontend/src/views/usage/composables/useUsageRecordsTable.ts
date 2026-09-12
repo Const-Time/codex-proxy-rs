@@ -17,7 +17,7 @@ import { errorMessage, withMinimumDuration } from '@/utils/async'
 interface UseUsageRecordsTableOptions {
   personal?: boolean
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>
-  latestTimeRangeParams: () => UsageTimeRangeParams
+  refreshTimeRangeEnd: () => void
   recordFilters?: Readonly<Ref<Record<string, string | undefined>>>
 }
 
@@ -51,7 +51,9 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   let diagnosticRequestId = 0
   const scopedParams = () => ({
     personal: options.personal,
+    ...options.recordFilters?.value,
     ...options.timeRangeParams.value,
+    search: usageSearchParam(searchQuery.value),
     ...(providerQuery.value ? { provider: providerQuery.value } : {}),
   })
   const filterParams = () => ({
@@ -144,6 +146,8 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     catch (error: unknown) {
       if (requestId !== analyticsRequestId)
         return
+      summary.value = emptySummary()
+      insights.value = emptyInsights()
       toast.error(errorMessage(error, '加载失败'))
     }
     finally {
@@ -181,9 +185,8 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
       return
     refreshingList.value = true
     try {
-      tableTimeRangeParams.value = options.latestTimeRangeParams()
-      resetPagination()
-      await withMinimumDuration(() => loadUsageRecords({ scope: 'table' }))
+      options.refreshTimeRangeEnd()
+      await withMinimumDuration(() => loadUsageRecords())
     }
     finally {
       refreshingList.value = false
@@ -217,7 +220,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     () => [searchQuery.value, options.recordFilters?.value],
     () => {
       resetPagination()
-      void loadUsageRecords({ scope: 'table' })
+      void loadUsageRecords()
     },
     { debounce: 250, deep: true },
   )
