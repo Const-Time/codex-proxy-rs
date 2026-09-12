@@ -104,6 +104,8 @@ fn trend_wire_should_serialize_kind_and_values_without_store_types() {
             output_tokens_value: 3,
             cached_tokens: "0".to_owned(),
             cached_tokens_value: 0,
+            cache_write_tokens: "1".to_owned(),
+            cache_write_tokens_value: 1,
             cache_hit_rate_value: 0.0,
             tokens_value: 5,
             errors: "0".to_owned(),
@@ -133,6 +135,8 @@ fn trend_wire_should_serialize_kind_and_values_without_store_types() {
     let value = serde_json::to_value(data).unwrap();
     assert_eq!(value["kind"], "usage");
     assert_eq!(value["points"][0]["requestsValue"], 1);
+    assert_eq!(value["points"][0]["cacheWriteTokensValue"], 1);
+    assert_eq!(value["points"][0]["cacheWriteTokens"], "1");
 }
 
 #[test]

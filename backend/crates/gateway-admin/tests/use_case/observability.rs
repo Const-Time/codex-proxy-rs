@@ -320,6 +320,8 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
         caller_error_count: 2,
         input_tokens: 800,
         output_tokens: 200,
+        cached_tokens: 400,
+        cache_write_tokens: 120,
         total_tokens: 1_000,
         latency_count: 5,
         admission_decision_count: 10,
@@ -413,6 +415,12 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
     assert_eq!(insights.performance.capacity_coverage, 0.8);
     assert_eq!(insights.performance.output_throughput_p50, Some(50));
     assert_eq!(insights.cost.tokens_per_request, 100.0);
+    assert_eq!(insights.cost.cached_tokens, 400);
+    assert_eq!(insights.cost.cache_write_tokens, 120);
+    assert_eq!(insights.cost.cached_token_rate, 0.5);
+    assert_eq!(insights.cost.points[0].cache_write_tokens, 120);
+    assert_eq!(insights.cost.points[0].cached_tokens, 400);
+    assert_eq!(insights.cost.points[0].cached_token_rate, 0.5);
     assert_eq!(
         insights
             .cost

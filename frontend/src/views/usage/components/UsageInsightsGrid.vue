@@ -33,6 +33,7 @@ const diagnosticDimension = defineModel('diagnosticDimension', {
   >
     <UsageHealthCard
       :health="overview.health"
+      :cost="overview.cost"
       :granularity="overview.granularity"
       :loading="loading"
     />

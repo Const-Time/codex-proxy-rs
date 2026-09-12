@@ -536,6 +536,7 @@ fn build_usage_insights(
         input_tokens: requests.input_tokens,
         output_tokens: requests.output_tokens,
         cached_tokens: requests.cached_tokens,
+        cache_write_tokens: requests.cache_write_tokens,
         total_tokens: requests.total_tokens,
         points: trend
             .iter()
@@ -544,6 +545,7 @@ fn build_usage_insights(
                 input_tokens: point.metrics.input_tokens,
                 output_tokens: point.metrics.output_tokens,
                 cached_tokens: point.metrics.cached_tokens,
+                cache_write_tokens: point.metrics.cache_write_tokens,
                 total_tokens: point.metrics.total_tokens,
                 estimated_cost: usd_cost(&point.costs),
                 standard_cost: standard_costs_by_bucket.get(&point.bucket_start).cloned(),
