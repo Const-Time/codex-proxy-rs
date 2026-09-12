@@ -114,12 +114,19 @@ pub async fn audit_request<S: AdminSessionState + Clone + Send + Sync + 'static>
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip().to_string());
-    let forwarded_ip = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .and_then(|v| v.trim().parse::<IpAddr>().ok())
+    // Retain a proxy-reported candidate separately from the transport peer.
+    // These headers are not authenticated and must not be used for authorization.
+    let forwarded_ip = ["x-forwarded-for", "x-real-ip", "cf-connecting-ip"]
+        .into_iter()
+        .find_map(|name| {
+            let value = request.headers().get(name)?.to_str().ok()?;
+            let candidate = if name == "x-forwarded-for" {
+                value.split(',').next()?
+            } else {
+                value
+            };
+            candidate.trim().parse::<IpAddr>().ok()
+        })
         .map(|ip| ip.to_string());
     // An audit-owned ID prevents a caller from forging links to other audit events.
     let request_id = uuid::Uuid::now_v7().to_string();

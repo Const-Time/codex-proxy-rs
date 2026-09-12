@@ -120,7 +120,7 @@ onMounted(search)
               </th><th class="p-3">
                 耗时
               </th><th class="p-3">
-                连接 IP
+                来源 IP
               </th><th class="p-3">
                 操作
               </th>
@@ -141,7 +141,15 @@ onMounted(search)
               </td><td class="p-3 font-mono">
                 {{ item.durationMs }} ms
               </td><td class="p-3 font-mono">
-                {{ item.clientIp || '未记录' }}
+                <div :title="item.forwardedIp ? '代理请求头上报的地址，未经可信代理验证' : '应用直接连接的对端地址，可能是 Docker 网桥或反向代理'">
+                  {{ item.forwardedIp || item.clientIp || '未记录' }}
+                </div>
+                <div v-if="item.forwardedIp" class="mt-1 font-sans text-cp-xs text-cp-text-tertiary">
+                  代理上报 · 未验证
+                </div>
+                <div class="mt-1 text-cp-xs text-cp-text-secondary">
+                  {{ item.forwardedIp ? `连接 ${item.clientIp || '未记录'}` : '直连 · 未上报代理来源' }}
+                </div>
               </td><td class="p-3">
                 <BaseButton size="sm" @click="detail = item; detailOpen = true">
                   详情
@@ -174,9 +182,13 @@ onMounted(search)
             {{ detail.requestId }}
           </dd><dt>操作者</dt><dd>{{ detail.email || authName(detail.authMethod) }}</dd><dt>路径</dt><dd class="break-all">
             {{ detail.method }} {{ detail.path }}
-          </dd><dt>连接 IP</dt><dd>{{ detail.clientIp || '未记录' }}</dd><dt>代理上报 IP</dt><dd>
+          </dd><dt>连接 IP</dt><dd>
+            {{ detail.clientIp || '未记录' }}<p class="mt-1 text-cp-xs text-cp-text-tertiary">
+              应用直接连接的对端地址，经过 Docker 或反向代理后可能始终相同。
+            </p>
+          </dd><dt>代理上报 IP</dt><dd>
             {{ detail.forwardedIp || '未上报' }}<p class="mt-1 text-cp-xs text-cp-text-tertiary">
-              来自 X-Forwarded-For，仅供排查，未经可信代理验证。
+              来自 X-Forwarded-For、X-Real-IP 或 CF-Connecting-IP，仅供排查，未经可信代理验证。未上报时无法从连接地址还原访客 IP。
             </p>
           </dd><dt>认证 / 结果</dt><dd>{{ authName(detail.authMethod) }} / {{ detail.status }}</dd>
         </dl><section v-for="(change, index) in detail.changes" :key="index" class="rounded-cp bg-cp-fill-quaternary p-3">
