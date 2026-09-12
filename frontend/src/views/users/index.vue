@@ -15,6 +15,7 @@ import {
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { useAuthStore } from '@/stores/modules/auth'
 import { errorMessage } from '@/utils/async'
+import { isLoginEmail } from '@/utils/email'
 
 const {
   groups,
@@ -65,8 +66,12 @@ function edit(user: User | null) {
 async function save() {
   if (saving.value)
     return
-  if (!editing.value && (!username.value.trim() || password.value.length < 12)) {
-    toast.warning('请输入用户名和至少 12 位初始密码')
+  if (!isLoginEmail(username.value.trim())) {
+    toast.warning('请输入有效的邮箱地址作为登录账号')
+    return
+  }
+  if (!editing.value && password.value.length < 12) {
+    toast.warning('请输入至少 12 位初始密码')
     return
   }
   saving.value = true
@@ -77,12 +82,14 @@ async function save() {
       return
     }
     if (editing.value)
-      await updateUser({ quotaMultipliers: Object.fromEntries(groupIds.value.map(id => [id, quotaMultipliers.value[id] || '1'])), id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value, ...limits })
+      await updateUser({ username: username.value.trim(), quotaMultipliers: Object.fromEntries(groupIds.value.map(id => [id, quotaMultipliers.value[id] || '1'])), id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value, ...limits })
     else await createUser({ username: username.value.trim(), password: password.value, groupIds: groupIds.value, ...limits })
     password.value = ''
     open.value = false
     toast.success(editing.value ? '用户已更新' : '普通用户已创建')
     await load()
+    if (editing.value?.id === auth.user?.id)
+      await auth.checkAuth()
   }
   catch (cause) {
     toast.error(errorMessage(cause, '保存失败'))
@@ -98,7 +105,7 @@ onMounted(load)
   <div class="flex flex-col gap-5">
     <BasePageHeader title="用户管理" description="创建普通用户并分配可用分组。用户自行创建和管理密钥。" />
     <div class="flex flex-wrap items-center gap-3">
-      <BaseInput v-model="search" aria-label="搜索用户" placeholder="搜索用户名" class="max-w-sm" />
+      <BaseInput v-model="search" aria-label="搜索用户邮箱" placeholder="搜索邮箱" class="max-w-sm" />
       <BaseButton variant="primary" @click="edit(null)">
         新建用户
       </BaseButton>
@@ -115,7 +122,7 @@ onMounted(load)
           <thead class="text-cp-text-secondary">
             <tr>
               <th class="p-3">
-                用户名
+                登录邮箱
               </th><th class="p-3">
                 角色
               </th><th class="p-3">
@@ -163,8 +170,8 @@ onMounted(load)
     </BaseCard>
     <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!saving" size="md">
       <div class="grid gap-5">
-        <BaseFormItem label="用户名" required>
-          <BaseInput v-model="username" aria-label="用户名" :disabled="saving || !!editing" maxlength="128" autocomplete="off" />
+        <BaseFormItem label="登录邮箱（用户名）" required description="仅支持邮箱登录。修改后请使用新邮箱登录，密码、密钥和历史记录保留。">
+          <BaseInput v-model="username" aria-label="登录邮箱" type="email" :disabled="saving" maxlength="128" autocomplete="off" placeholder="name@example.com" />
         </BaseFormItem>
         <BaseFormItem v-if="!editing" label="初始密码" required>
           <BaseInput v-model="password" aria-label="初始密码" type="password" autocomplete="new-password" :disabled="saving" placeholder="至少 12 位" />

@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 
 import { useAuthStore } from '@/stores/modules/auth'
 import { useThemeStore } from '@/stores/modules/theme'
+import { isLoginEmail } from '@/utils/email'
 
 import LoginBackground from './components/LoginBackground.vue'
 import LoginPanel from './components/LoginPanel.vue'
@@ -24,6 +25,11 @@ const submitDisabled = computed<boolean>(() => loginLoading.value || !canSubmit.
 
 async function handleSubmit(): Promise<void> {
   if (!canSubmit.value || loginPending.value) {
+    return
+  }
+
+  if (!isLoginEmail(username.value.trim())) {
+    authStore.error = '请输入有效的邮箱地址'
     return
   }
 

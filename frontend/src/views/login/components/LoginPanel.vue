@@ -100,12 +100,13 @@ function togglePasswordVisible(): void {
       </div>
 
       <div class="grid min-w-0 gap-2">
-        <span class="text-cp leading-[1.1] font-bold text-(--cp-login-label-color)">用户名</span>
+        <span class="text-cp leading-[1.1] font-bold text-(--cp-login-label-color)">邮箱</span>
         <BaseInput
           v-model="username"
           name="username"
-          aria-label="用户名"
-          placeholder="输入用户名"
+          aria-label="邮箱"
+          type="email"
+          placeholder="输入邮箱地址"
           autocomplete="username"
         >
           <template #prefix>

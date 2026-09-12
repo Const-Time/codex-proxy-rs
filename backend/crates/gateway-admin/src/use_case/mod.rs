@@ -37,6 +37,9 @@ use gateway_core::{
 };
 
 fn map_store_error(error: AdminStoreError, resource: &'static str) -> AdminError {
+    if error.kind() == AdminStoreErrorKind::Conflict && error.resource() == "user_email" {
+        return AdminError::new(AdminErrorKind::Conflict, "该邮箱已被其他用户使用");
+    }
     let kind = match error.kind() {
         AdminStoreErrorKind::Invalid => AdminErrorKind::Invalid,
         AdminStoreErrorKind::NotFound => AdminErrorKind::NotFound,

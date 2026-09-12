@@ -45,6 +45,16 @@ fn invalid_limits() -> AdminStoreError {
 }
 
 fn db_error(error: sqlx::Error) -> AdminStoreError {
+    if error
+        .as_database_error()
+        .is_some_and(|e| e.is_unique_violation() && e.constraint() == Some("users_username_idx"))
+    {
+        return AdminStoreError::new(
+            AdminStoreErrorKind::Conflict,
+            "user_email",
+            "email already exists",
+        );
+    }
     let kind = if error
         .as_database_error()
         .is_some_and(|e| e.is_unique_violation())
@@ -374,11 +384,11 @@ impl UserAuthStore {
             return Err(AdminStoreError::new(
                 AdminStoreErrorKind::Conflict,
                 "user",
-                "administrator may only edit their own group grants",
+                "administrator may only edit their own email and group grants",
             ));
         }
-        sqlx::query("update users set enabled = $2, max_concurrency = $3, requests_per_minute = $4, group_grants_configured = true, auth_version = auth_version + case when role = 'admin' then 0 else 1 end, updated_at = now() where id = $1")
-            .bind(&command.id).bind(command.enabled).bind(i64::try_from(command.limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(command.limits.requests_per_minute).map_err(|_| invalid_limits())?).execute(&mut *tx).await.map_err(db_error)?;
+        sqlx::query("update users set username = coalesce($5, username), enabled = $2, max_concurrency = $3, requests_per_minute = $4, group_grants_configured = true, auth_version = auth_version + case when role = 'admin' then 0 else 1 end, updated_at = now() where id = $1")
+            .bind(&command.id).bind(command.enabled).bind(i64::try_from(command.limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(command.limits.requests_per_minute).map_err(|_| invalid_limits())?).bind(&command.username).execute(&mut *tx).await.map_err(db_error)?;
         grants(&mut tx, &command.id, &command.group_ids).await?;
         if let Some(multipliers) = &command.quota_multipliers {
             for group in &command.group_ids {
@@ -395,6 +405,7 @@ impl UserAuthStore {
                 "user",
                 &command.id,
                 vec![
+                    "username".into(),
                     "enabled".into(),
                     "group_ids".into(),
                     "quota_multipliers".into(),

@@ -116,7 +116,7 @@ async fn default_auth_service_should_initialize_login_validate_and_logout() {
     let service = fixture.services.auth();
     let session = service
         .login(LoginCommand {
-            username: Some("admin_1".to_owned()),
+            username: Some("admin@example.com".to_owned()),
             password: "strong-admin-password".to_owned(),
         })
         .await
@@ -190,7 +190,7 @@ async fn audit_failure_should_revoke_new_session_before_returning_it() {
             .services
             .auth()
             .login(LoginCommand {
-                username: None,
+                username: Some("admin@example.com".to_owned()),
                 password: "strong-admin-password".to_owned(),
             })
             .await

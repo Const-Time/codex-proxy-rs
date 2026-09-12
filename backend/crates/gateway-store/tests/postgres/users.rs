@@ -68,6 +68,7 @@ async fn administrator_can_scope_own_keys_without_losing_management_or_session()
         .await
         .unwrap();
     let mut update = UpdateUser {
+        username: None,
         id: "admin".into(),
         enabled: true,
         limits: before.limits,
@@ -111,6 +112,160 @@ async fn administrator_can_scope_own_keys_without_losing_management_or_session()
     )
     .await
     .unwrap();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn email_rename_preserves_identity_password_keys_and_quota_and_rejects_duplicates() {
+    let Some(db) = TestDatabase::create("user_email_rename").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    auth.create_password_hash_if_absent("admin@example.com", "admin-hash")
+        .await
+        .unwrap();
+    seed_group(&db).await;
+    let admin = context("admin@example.com");
+    let original = auth
+        .create_user(
+            "stable-user",
+            "Original@Example.com",
+            "existing-password-hash",
+            &[GROUP.into()],
+            RateLimits::unlimited(),
+            &admin,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        auth.find_user("original@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        original.id
+    );
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    keys.create_client_key(key("existing-email-key"), &context(&original.id))
+        .await
+        .unwrap();
+    sqlx::query("select reset_user_subscriptions('seed-email',null,null,'manual',now())")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update user_group_budget_windows set daily_used_usd=7, weekly_used_usd=9 where user_id=$1",
+    )
+    .bind(&original.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut update = UpdateUser {
+        username: Some("Changed@Example.com".into()),
+        id: original.id.clone(),
+        enabled: true,
+        group_ids: original.group_ids.clone(),
+        quota_multipliers: None,
+        limits: original.limits,
+    };
+    let (_, changed) = auth.update_user(update.clone(), &admin).await.unwrap();
+    assert_eq!(changed.id, original.id);
+    assert_eq!(changed.group_ids, original.group_ids);
+    assert_eq!(
+        auth.load_password_hash(&original.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("existing-password-hash")
+    );
+    assert!(
+        auth.find_user("original@example.com")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        auth.find_user("changed@example.COM")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        original.id
+    );
+    assert!(
+        keys.reveal_client_key(
+            &original.id,
+            &ClientApiKeyId::new("existing-email-key").unwrap()
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    let usage: (String, String) = sqlx::query_as("select daily_used_usd::text, weekly_used_usd::text from user_group_budget_windows where user_id=$1").bind(&original.id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(usage.0.parse::<f64>().unwrap(), 7.0);
+    assert_eq!(usage.1.parse::<f64>().unwrap(), 9.0);
+    update.username = Some("ADMIN@example.com".into());
+    assert_eq!(
+        auth.update_user(update.clone(), &admin)
+            .await
+            .unwrap_err()
+            .kind(),
+        AdminStoreErrorKind::Conflict
+    );
+    assert_eq!(
+        auth.load_user(&original.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .username,
+        "Changed@Example.com"
+    );
+    update.username = None;
+    assert_eq!(
+        auth.update_user(update, &admin).await.unwrap().1.username,
+        "Changed@Example.com"
+    );
+    let admin_before = auth.load_user("admin@example.com").await.unwrap().unwrap();
+    let (_, renamed_admin) = auth
+        .update_user(
+            UpdateUser {
+                username: Some("renamed-admin@example.com".into()),
+                id: admin_before.id.clone(),
+                enabled: true,
+                group_ids: admin_before.group_ids.clone(),
+                quota_multipliers: None,
+                limits: admin_before.limits,
+            },
+            &admin,
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed_admin.auth_version, admin_before.auth_version);
+    assert!(
+        !auth
+            .create_password_hash_if_absent("admin@example.com", "replacement-hash")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        auth.load_password_hash(&admin_before.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("admin-hash")
+    );
+    assert!(auth.find_user("admin@example.com").await.unwrap().is_none());
+    assert_eq!(
+        auth.find_user("renamed-admin@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        admin_before.id
+    );
     db.close().await;
 }
 
@@ -239,6 +394,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     .await
     .unwrap();
     let mut update = UpdateUser {
+        username: None,
         id: "alice".into(),
         enabled: true,
         group_ids: vec![GROUP.into()],
@@ -396,6 +552,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     );
     auth.update_user(
         UpdateUser {
+            username: None,
             quota_multipliers: Default::default(),
             limits: gateway_core::policy::RateLimits::unlimited(),
             id: "alice".into(),
@@ -459,6 +616,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     let (_, disabled) = auth
         .update_user(
             UpdateUser {
+                username: None,
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: "alice".into(),
@@ -474,6 +632,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     assert!(
         auth.update_user(
             UpdateUser {
+                username: None,
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: "admin".into(),
