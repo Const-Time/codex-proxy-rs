@@ -10,7 +10,7 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use crate::{admin_adapter::UserAuthStore, admin_store_error, mutation_audit};
 
 const USER_SELECT: &str = "select u.id, u.username, u.role, u.enabled, u.auth_version, u.max_concurrency, u.requests_per_minute, u.created_at, u.updated_at,
-    array(select account_group_id from user_account_groups where user_id = u.id order by account_group_id) as group_ids,
+    array(select g.id from account_groups g where (u.role = 'admin' and not u.group_grants_configured) or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id) order by g.id) as group_ids,
     coalesce((select jsonb_object_agg(account_group_id, quota_multiplier::text) from user_account_groups where user_id = u.id), '{}'::jsonb) as quota_multipliers
     from users u";
 
@@ -186,27 +186,40 @@ impl UserAuthStore {
             .collect())
     }
 
-    pub(crate) async fn reset_all_subscriptions(
+    pub(crate) async fn reset_selected_subscriptions(
         &self,
         event_id: &str,
+        targets: &[gateway_admin::model::users::SubscriptionTarget],
         context: &MutationContext,
     ) -> AdminStoreResult<u64> {
+        if targets.is_empty() || targets.len() > 500 {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Invalid,
+                "subscriptions",
+                "explicit subscription selection required",
+            ));
+        }
+        let mut targets = targets.to_vec();
+        targets.sort();
+        targets.dedup();
         let mut tx = self.security.pool.begin().await.map_err(db_error)?;
         audit(
             &mut tx,
             context,
             event_id,
-            "subscriptions.reset_all",
+            "subscriptions.reset_selected",
             &["daily_used_usd", "weekly_used_usd"],
         )
         .await?;
         require_administrator(&mut tx, context).await?;
-        let count: i64 =
-            sqlx::query_scalar("select reset_user_subscriptions($1, null, null, 'manual', now())")
-                .bind(event_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(db_error)?;
+        let count: i64 = sqlx::query_scalar(
+            "select reset_user_subscriptions($1, null, null, 'manual', now(), $2)",
+        )
+        .bind(event_id)
+        .bind(sqlx::types::Json(targets))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         Ok(count.unsigned_abs())
     }
@@ -221,7 +234,7 @@ impl UserAuthStore {
             case when w.weekly_end > now() then w.weekly_end end as weekly_end
             from users u cross join account_groups g
             left join user_group_budget_windows w on w.user_id = u.id and w.account_group_id = g.id
-            where u.id = $1 and u.enabled and (u.role = 'admin' or exists(
+            where u.id = $1 and u.enabled and ((u.role = 'admin' and not u.group_grants_configured) or exists(
                 select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id))
             order by g.name, g.id")
             .bind(id).fetch_all(&self.security.pool).await.map_err(db_error)?;
@@ -340,22 +353,31 @@ impl UserAuthStore {
             .await
             .map_err(|e| admin_store_error("user", e))?;
         require_administrator(&mut tx, context).await?;
-        let row = sqlx::query("select role from users where id = $1 for update")
-            .bind(&command.id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_error)?
-            .ok_or_else(|| {
-                AdminStoreError::new(AdminStoreErrorKind::NotFound, "user", "user not found")
-            })?;
-        if row.get::<String, _>("role") == "admin" && !command.enabled {
+        let row = sqlx::query(
+            "select role, max_concurrency, requests_per_minute from users where id = $1 for update",
+        )
+        .bind(&command.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            AdminStoreError::new(AdminStoreErrorKind::NotFound, "user", "user not found")
+        })?;
+        if row.get::<String, _>("role") == "admin"
+            && (!command.enabled
+                || !matches!(&context.actor, MutationActor::AdminSession { admin_user_id } if admin_user_id == &command.id)
+                || i64::try_from(command.limits.max_concurrency).ok()
+                    != Some(row.get("max_concurrency"))
+                || i64::try_from(command.limits.requests_per_minute).ok()
+                    != Some(row.get("requests_per_minute")))
+        {
             return Err(AdminStoreError::new(
                 AdminStoreErrorKind::Conflict,
                 "user",
-                "cannot disable administrator",
+                "administrator may only edit their own group grants",
             ));
         }
-        sqlx::query("update users set enabled = $2, max_concurrency = $3, requests_per_minute = $4, auth_version = auth_version + 1, updated_at = now() where id = $1")
+        sqlx::query("update users set enabled = $2, max_concurrency = $3, requests_per_minute = $4, group_grants_configured = true, auth_version = auth_version + case when role = 'admin' then 0 else 1 end, updated_at = now() where id = $1")
             .bind(&command.id).bind(command.enabled).bind(i64::try_from(command.limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(command.limits.requests_per_minute).map_err(|_| invalid_limits())?).execute(&mut *tx).await.map_err(db_error)?;
         grants(&mut tx, &command.id, &command.group_ids).await?;
         if let Some(multipliers) = &command.quota_multipliers {

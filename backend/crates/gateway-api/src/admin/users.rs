@@ -156,6 +156,7 @@ where
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ResetSubscriptionsRequest {
     request_id: String,
+    targets: Vec<gateway_admin::model::users::SubscriptionTarget>,
 }
 
 async fn reset_subscriptions<S>(
@@ -171,7 +172,11 @@ where
     let count = state
         .admin_services()
         .auth()
-        .reset_subscriptions(request_id, &auth.context().mutation_context())
+        .reset_subscriptions(
+            request_id,
+            &body.targets,
+            &auth.context().mutation_context(),
+        )
         .await
         .map_err(map_admin_service_error)?;
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(count)))

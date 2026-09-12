@@ -6,7 +6,7 @@ use gateway_admin::{
             ClientKeyListQuery, ClientKeyPageSize, ClientKeySort, ClientKeySortField,
             DeleteClientKey, NewClientKey, SortDirection,
         },
-        users::{UpdateUser, UserRole},
+        users::{SubscriptionTarget, UpdateUser, UserRole},
     },
     ports::store::{AdminStoreErrorKind, AuthStore, ClientKeyStore},
 };
@@ -46,6 +46,150 @@ async fn auth_store(db: &TestDatabase) -> Option<UserAuthStore> {
 async fn seed_group(db: &TestDatabase) {
     sqlx::query("insert into account_groups(id, name, color, created_at, updated_at) values ($1, 'Users group', '#64748BFF', now(), now())")
         .bind(GROUP).execute(&db.pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn administrator_can_scope_own_keys_without_losing_management_or_session() {
+    let Some(db) = TestDatabase::create("admin_personal_grants").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    auth.create_password_hash_if_absent("admin", "hash")
+        .await
+        .unwrap();
+    seed_group(&db).await;
+    let before = auth.load_user("admin").await.unwrap().unwrap();
+    assert_eq!(before.group_ids, vec![GROUP]);
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    keys.create_client_key(key("admin-own"), &context("admin"))
+        .await
+        .unwrap();
+    let mut update = UpdateUser {
+        id: "admin".into(),
+        enabled: true,
+        limits: before.limits,
+        group_ids: vec![GROUP.into()],
+        quota_multipliers: Some([(GROUP.into(), "2".into())].into()),
+    };
+    let (_, changed) = auth
+        .update_user(update.clone(), &context("admin"))
+        .await
+        .unwrap();
+    assert_eq!(changed.auth_version, before.auth_version);
+    assert_eq!(changed.role, UserRole::Admin);
+    assert_eq!(changed.quota_multipliers[GROUP], "2.00");
+    update.group_ids.clear();
+    update.quota_multipliers = None;
+    auth.update_user(update, &context("admin")).await.unwrap();
+    assert!(auth.user_groups("admin").await.unwrap().is_empty());
+    assert!(
+        keys.create_client_key(key("admin-denied"), &context("admin"))
+            .await
+            .is_err()
+    );
+    use gateway_core::engine::budget::ClientBudgetPort as _;
+    assert!(
+        gateway_store::postgres::PgClientBudgetStore::new(db.pool.clone())
+            .admit(
+                ClientApiKeyId::new("admin-own").unwrap(),
+                Some(AccountGroupId::new(GROUP).unwrap())
+            )
+            .await
+            .is_err()
+    );
+    // System administration remains available even with no personal group grants.
+    auth.create_user(
+        "another",
+        "another",
+        "hash",
+        &[],
+        RateLimits::unlimited(),
+        &context("admin"),
+    )
+    .await
+    .unwrap();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn selected_resets_use_exact_pairs_and_preserve_unselected_usage() {
+    let Some(db) = TestDatabase::create("selected_subscription_pairs").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    auth.create_password_hash_if_absent("admin", "hash")
+        .await
+        .unwrap();
+    seed_group(&db).await;
+    let other = "grp_00000000000000000000000000000098";
+    sqlx::query("insert into account_groups(id,name,color,created_at,updated_at) values($1,'Other','#64748BFF',now(),now())").bind(other).execute(&db.pool).await.unwrap();
+    for user in ["alice", "bob"] {
+        auth.create_user(
+            user,
+            user,
+            "hash",
+            &[GROUP.into(), other.into()],
+            RateLimits::unlimited(),
+            &context("admin"),
+        )
+        .await
+        .unwrap();
+    }
+    sqlx::query("select reset_user_subscriptions('seed',null,null,'manual',now())")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update user_group_budget_windows set daily_used_usd=7, weekly_used_usd=7")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let targets = vec![
+        SubscriptionTarget {
+            user_id: "alice".into(),
+            group_id: GROUP.into(),
+        },
+        SubscriptionTarget {
+            user_id: "bob".into(),
+            group_id: other.into(),
+        },
+    ];
+    assert_eq!(
+        auth.reset_subscriptions("selected", &targets, &context("admin"))
+            .await
+            .unwrap(),
+        2
+    );
+    for row in auth.subscriptions().await.unwrap() {
+        let selected = targets
+            .iter()
+            .any(|t| t.user_id == row.user_id && t.group_id == row.group_id);
+        assert_eq!(
+            row.weekly_used_usd.parse::<f64>().unwrap(),
+            if selected { 0.0 } else { 7.0 }
+        );
+    }
+    sqlx::query("update user_group_budget_windows set daily_used_usd=2, weekly_used_usd=2 where user_id='alice'").execute(&db.pool).await.unwrap();
+    assert_eq!(
+        auth.reset_subscriptions("selected", &targets, &context("admin"))
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(
+        auth.subscriptions()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.user_id == "alice")
+            .all(|r| r.weekly_used_usd.parse::<f64>().unwrap() == 2.0)
+    );
+    db.close().await;
 }
 fn key(id: &str) -> NewClientKey {
     NewClientKey {
@@ -132,16 +276,40 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     );
     let subscriptions = auth.subscriptions().await.unwrap();
     assert_eq!(subscriptions.len(), 2);
+    let targets = vec![SubscriptionTarget {
+        user_id: "alice".into(),
+        group_id: GROUP.into(),
+    }];
     assert!(
-        auth.reset_subscriptions("test-reset", &context("alice"))
+        auth.reset_subscriptions("test-reset", &targets, &context("alice"))
             .await
             .is_err()
     );
     assert_eq!(
-        auth.reset_subscriptions("test-reset", &context("admin"))
+        auth.reset_subscriptions("test-reset", &targets, &context("admin"))
             .await
             .unwrap(),
-        2
+        1
+    );
+    assert!(
+        auth.reset_subscriptions("empty-reset", &[], &context("admin"))
+            .await
+            .is_err()
+    );
+    let windows: Vec<String> =
+        sqlx::query_scalar("select user_id from user_group_budget_windows order by user_id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(windows, vec!["alice"]);
+    let different = vec![SubscriptionTarget {
+        user_id: "bob".into(),
+        group_id: GROUP.into(),
+    }];
+    assert!(
+        auth.reset_subscriptions("test-reset", &different, &context("admin"))
+            .await
+            .is_err()
     );
     assert_eq!(
         auth.create_user(

@@ -272,7 +272,7 @@ async fn load_client_keys(
          join client_api_key_groups kg on kg.client_api_key_id = k.id
          join account_groups g on g.id = kg.account_group_id and g.enabled
          where k.enabled and exists(select 1 from users u where u.id = k.owner_user_id and u.enabled
-             and (u.role = 'admin' or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = kg.account_group_id)))
+             and ((u.role = 'admin' and not u.group_grants_configured) or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = kg.account_group_id)))
          group by k.id, owner.id
          order by k.id",
     )

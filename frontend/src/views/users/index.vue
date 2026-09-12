@@ -13,6 +13,7 @@ import {
   toast,
 } from '@/components/base/BaseToast'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
+import { useAuthStore } from '@/stores/modules/auth'
 import { errorMessage } from '@/utils/async'
 
 const {
@@ -21,6 +22,7 @@ const {
   loadGroups,
 } = useAccountGroupCatalog()
 const users = ref<User[]>([])
+const auth = useAuthStore()
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -35,7 +37,7 @@ const maxConcurrency = ref('')
 const requestsPerMinute = ref('')
 const search = ref('')
 const visibleUsers = computed(() => users.value.filter(user => user.username.toLowerCase().includes(search.value.toLowerCase())))
-const groupNames = (user: User) => user.role === 'admin' ? '全部分组' : user.groupIds.map(id => groups.value.find(group => group.id === id)?.name ?? id).join('、') || '未分配'
+const groupNames = (user: User) => user.groupIds.map(id => groups.value.find(group => group.id === id)?.name ?? id).join('、') || '未分配'
 
 async function load() {
   loading.value = true
@@ -145,7 +147,7 @@ onMounted(load)
                 {{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}
               </td>
               <td class="p-3">
-                <BaseButton v-if="user.role !== 'admin'" variant="secondary" @click="edit(user)">
+                <BaseButton v-if="user.role !== 'admin' || user.id === auth.user?.id" variant="secondary" @click="edit(user)">
                   编辑
                 </BaseButton>
               </td>
@@ -167,11 +169,11 @@ onMounted(load)
         <BaseFormItem v-if="!editing" label="初始密码" required>
           <BaseInput v-model="password" aria-label="初始密码" type="password" autocomplete="new-password" :disabled="saving" placeholder="至少 12 位" />
         </BaseFormItem>
-        <label v-if="editing" for="user-enabled" class="flex items-center gap-2"><input id="user-enabled" v-model="enabled" type="checkbox" :disabled="saving">启用用户</label>
-        <p v-if="editing" class="text-cp-sm text-cp-text-secondary">
+        <label v-if="editing && editing.role !== 'admin'" for="user-enabled" class="flex items-center gap-2"><input id="user-enabled" v-model="enabled" type="checkbox" :disabled="saving">启用用户</label>
+        <p v-if="editing && editing.role !== 'admin'" class="text-cp-sm text-cp-text-secondary">
           禁用后无法登录，已有密钥不能发起新请求。
         </p>
-        <div class="grid gap-4 sm:grid-cols-2">
+        <div v-if="editing?.role !== 'admin'" class="grid gap-4 sm:grid-cols-2">
           <BaseFormItem label="最大并发">
             <BaseInput v-model="maxConcurrency" type="number" min="0" step="1" aria-label="最大并发" placeholder="不限制" :disabled="saving" />
           </BaseFormItem>
@@ -179,12 +181,15 @@ onMounted(load)
             <BaseInput v-model="requestsPerMinute" type="number" min="0" step="1" aria-label="每分钟请求数（RPM）" placeholder="不限制" :disabled="saving" />
           </BaseFormItem>
         </div>
-        <p class="text-cp-sm text-cp-text-secondary">
+        <p v-if="editing?.role !== 'admin'" class="text-cp-sm text-cp-text-secondary">
           0 表示不限制。同一用户的所有密钥共用并发和 RPM 限制。
         </p>
         <BaseFormItem label="授权分组">
           <AccountGroupCheckboxGrid v-model="groupIds" :groups="groups" :loading="groupsLoading" :disabled="saving" />
         </BaseFormItem>
+        <p v-if="editing?.role === 'admin'" class="text-cp-sm text-cp-text-secondary">
+          授权分组用于您自己的密钥和额度，不影响系统管理权限。取消授权后，该分组的已有密钥将无法发起新请求。
+        </p>
         <div v-if="editing && groupIds.length" class="grid gap-3">
           <p class="text-cp-sm text-cp-text-secondary">
             额度倍率同时调整该用户的日限和周限，不改变消费计价。默认 1 倍，分组不限额时仍不限额。

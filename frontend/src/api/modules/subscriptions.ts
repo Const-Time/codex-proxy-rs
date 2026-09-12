@@ -17,4 +17,5 @@ export interface Subscription {
   lastResetReason: string | null
 }
 export const getSubscriptions = () => request<Subscription[]>({ url: '/api/admin/subscriptions', method: 'GET' })
-export const resetSubscriptions = (requestId: string) => request<number>({ url: '/api/admin/subscriptions/reset', method: 'POST', data: { requestId } })
+export type SubscriptionTarget = Pick<Subscription, 'userId' | 'groupId'>
+export const resetSubscriptions = (requestId: string, targets: SubscriptionTarget[]) => request<number>({ url: '/api/admin/subscriptions/reset', method: 'POST', data: { requestId, targets } })
