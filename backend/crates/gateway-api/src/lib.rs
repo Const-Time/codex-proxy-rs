@@ -192,6 +192,10 @@ pub fn initialize(
             headers_ms = latency.as_millis(), "HTTP response headers ready");
     });
     let router = router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin::operations::audit_request::<ApiState>,
+        ))
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(trace_layer)
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))

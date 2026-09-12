@@ -248,6 +248,7 @@ impl ClientKeyMutationRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientKeyView {
+    active_concurrency: Option<u64>,
     id: String,
     name: String,
     label: Option<String>,
@@ -286,6 +287,7 @@ impl From<ClientKeyRecord> for ClientKeyView {
             "groups"
         };
         Self {
+            active_concurrency: record.active_concurrency,
             id: record.id.to_string(),
             name: record.name,
             label: record.label,

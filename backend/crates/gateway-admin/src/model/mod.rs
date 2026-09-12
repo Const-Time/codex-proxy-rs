@@ -9,6 +9,7 @@ pub mod backup;
 pub mod client_distribution;
 pub mod client_keys;
 pub mod observability;
+pub mod operations;
 pub mod provider_credentials;
 pub mod proxies;
 pub mod settings;

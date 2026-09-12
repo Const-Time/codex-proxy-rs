@@ -87,6 +87,7 @@ impl DetailQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DiagnosticsQuery {
+    pub client_api_key_id: Option<String>,
     pub group_id: Option<String>,
     pub account_id: Option<String>,
     pub user_id: Option<String>,
@@ -177,6 +178,7 @@ impl TrendKind {
 /// 诊断聚合维度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticDimension {
+    User,
     Model,
     Account,
     ApiKey,
@@ -191,6 +193,7 @@ impl DiagnosticDimension {
     pub fn parse(value: Option<&str>) -> Result<Self, WireValidationError> {
         match trimmed(value) {
             None | Some("model") => Ok(Self::Model),
+            Some("user") => Ok(Self::User),
             Some("account") => Ok(Self::Account),
             Some("apiKey" | "api_key") => Ok(Self::ApiKey),
             Some("provider") => Ok(Self::Provider),
@@ -206,6 +209,7 @@ impl DiagnosticDimension {
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Model => "model",
+            Self::User => "user",
             Self::Account => "account",
             Self::ApiKey => "apiKey",
             Self::Provider => "provider",
@@ -274,6 +278,7 @@ pub(crate) fn domain_diagnostic_dimension(
     dimension: DiagnosticDimension,
 ) -> domain::DiagnosticDimension {
     match dimension {
+        DiagnosticDimension::User => domain::DiagnosticDimension::User,
         DiagnosticDimension::Model => domain::DiagnosticDimension::Model,
         DiagnosticDimension::Account => domain::DiagnosticDimension::Account,
         DiagnosticDimension::ApiKey => domain::DiagnosticDimension::ApiKey,

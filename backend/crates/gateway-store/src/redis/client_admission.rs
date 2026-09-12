@@ -240,6 +240,15 @@ pub struct RedisClientAdmissionRepository {
 }
 
 impl RedisClientAdmissionRepository {
+    /// Count only unexpired leases using the same Redis clock as admission.
+    pub async fn active_count(&self, key: &str) -> StoreResult<u64> {
+        let keys = self.keys(key)?;
+        Script::new("local t = redis.call('TIME'); return redis.call('ZCOUNT', KEYS[1], '(' .. (tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)), '+inf')")
+            .key(&keys[0])
+            .invoke_async(&mut self.connection.clone())
+            .await
+            .map_err(|_| redis_unavailable("read active client requests"))
+    }
     pub fn new(connection: ConnectionManager, key_namespace: &str) -> StoreResult<Self> {
         Ok(Self {
             connection,

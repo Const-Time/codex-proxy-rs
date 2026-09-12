@@ -57,7 +57,7 @@ async function save() {
 
 <template>
   <div class="flex flex-col gap-5">
-    <BasePageHeader title="个人资料" :description="`${auth.user?.username ?? ''} · ${auth.isAdmin ? '管理员' : '普通用户'}`" />
+    <BasePageHeader title="个人资料" :description="`${auth.user?.username || auth.user?.email || ''} · ${auth.isAdmin ? '管理员' : '普通用户'}`" />
     <BaseCard>
       <div class="flex items-center justify-between gap-3">
         <h2 class="text-lg font-semibold">

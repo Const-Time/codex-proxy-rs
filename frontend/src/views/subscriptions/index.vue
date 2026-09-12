@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import type { Subscription, SubscriptionTarget } from '@/api/modules/subscriptions'
+import { Search } from '@lucide/vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getSubscriptions, resetSubscriptions } from '@/api/modules/subscriptions'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
+import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
+import BaseSelect from '@/components/base/BaseSelect.vue'
 import { toast } from '@/components/base/BaseToast'
 import { errorMessage } from '@/utils/async'
 import { generateRequestId } from '@/utils/requestId'
@@ -25,7 +28,7 @@ const resetTargets = ref<SubscriptionTarget[]>([])
 const rowKey = (item: SubscriptionTarget) => JSON.stringify([item.userId, item.groupId])
 const groups = computed(() => [...new Map(records.value.map(item => [item.groupId, item.groupName])).entries()])
 const filtered = computed(() => records.value.filter(item => (!groupId.value || item.groupId === groupId.value)
-  && item.username.toLowerCase().includes(search.value.toLowerCase())))
+  && `${item.email} ${item.username || item.email}`.toLowerCase().includes(search.value.toLowerCase())))
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / 20)))
 const visible = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20))
 const pageSelected = computed(() => visible.value.length > 0 && visible.value.every(item => selected.value.includes(rowKey(item))))
@@ -81,15 +84,12 @@ onMounted(load)
   <div class="flex flex-col gap-5">
     <BasePageHeader title="订阅管理" description="查看用户的分组额度与用量。额度倍率由用户管理配置，历史消费在使用统计中保留。" />
     <div class="flex flex-wrap items-center gap-3">
-      <BaseInput v-model="search" aria-label="搜索用户名" placeholder="搜索用户名" class="max-w-sm" />
-      <select v-model="groupId" aria-label="筛选分组" class="rounded-cp border border-cp-border bg-cp-fill-tertiary p-2.5 text-cp-sm">
-        <option value="">
-          全部分组
-        </option>
-        <option v-for="[id, name] in groups" :key="id" :value="id">
-          {{ name }}
-        </option>
-      </select>
+      <BaseInput v-model="search" aria-label="搜索邮箱或用户名" placeholder="搜索邮箱或用户名" class="w-full sm:w-80">
+        <template #prefix>
+          <Search class="size-4" />
+        </template>
+      </BaseInput>
+      <BaseSelect v-model="groupId" aria-label="筛选分组" class="w-full sm:w-40" :options="[{ label: '全部分组', value: '' }, ...groups.map(([value, label]) => ({ value, label }))]" />
       <BaseButton variant="secondary" :loading="loading" @click="load">
         刷新
       </BaseButton>
@@ -106,7 +106,7 @@ onMounted(load)
           <thead class="text-cp-text-secondary">
             <tr>
               <th class="p-3">
-                <input type="checkbox" aria-label="选择当前页订阅" :checked="pageSelected" :disabled="loading || !visible.length" @change="togglePage(($event.target as HTMLInputElement).checked)">
+                <BaseCheckbox label="选择当前页订阅" :model-value="pageSelected" :indeterminate="!pageSelected && visible.some(item => selected.includes(rowKey(item)))" :disabled="loading || !visible.length" @update:model-value="togglePage" />
               </th>
               <th class="p-3">
                 用户
@@ -128,11 +128,14 @@ onMounted(load)
           <tbody>
             <tr v-for="item in visible" :key="`${item.userId}:${item.groupId}`" class="border-t border-cp-border">
               <td class="p-3">
-                <input v-model="selected" type="checkbox" :value="rowKey(item)" :aria-label="`选择 ${item.username} / ${item.groupName}`">
+                <BaseCheckbox :label="`选择 ${item.username || item.email} / ${item.groupName}`" :model-value="selected.includes(rowKey(item))" @update:model-value="checked => selected = checked ? [...selected, rowKey(item)] : selected.filter(key => key !== rowKey(item))" />
               </td>
               <td class="p-3">
                 <div class="font-medium">
-                  {{ item.username }}
+                  {{ item.username || item.email }}
+                  <div v-if="item.username" class="mt-1 text-cp-xs text-cp-text-secondary">
+                    {{ item.email }}
+                  </div>
                 </div>
               </td>
               <td class="p-3">

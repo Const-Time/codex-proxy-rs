@@ -199,6 +199,24 @@ pub(crate) fn store_model_mappings(
 
 #[async_trait::async_trait]
 impl AuthStore for UserAuthStore {
+    async fn record_operation(
+        &self,
+        event: gateway_admin::model::operations::OperationLog,
+    ) -> AdminStoreResult<()> {
+        self.record_operation_stored(event).await
+    }
+    async fn operation_logs(
+        &self,
+        query: gateway_admin::model::operations::OperationLogQuery,
+    ) -> AdminStoreResult<gateway_admin::model::operations::OperationLogPage> {
+        self.operation_logs_stored(query).await
+    }
+    async fn usage_key_options(
+        &self,
+        owner: Option<&str>,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::operations::UsageKeyOption>> {
+        self.usage_key_options_stored(owner).await
+    }
     async fn subscriptions(
         &self,
     ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserSubscription>> {
@@ -237,13 +255,13 @@ impl AuthStore for UserAuthStore {
     async fn create_user(
         &self,
         id: &str,
-        username: &str,
+        identity: gateway_admin::model::users::UserIdentity<'_>,
         password_hash: &str,
         groups: &[String],
         limits: gateway_core::policy::RateLimits,
         context: &MutationContext,
     ) -> AdminStoreResult<gateway_admin::model::users::UserRecord> {
-        self.insert_user(id, username, password_hash, groups, limits, context)
+        self.insert_user(id, identity, password_hash, groups, limits, context)
             .await
     }
     async fn update_user(

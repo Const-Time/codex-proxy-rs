@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 pub struct UserView {
     id: String,
     username: String,
+    email: String,
     role: &'static str,
     enabled: bool,
     group_ids: Vec<String>,
@@ -33,7 +34,8 @@ impl From<UserRecord> for UserView {
     fn from(user: UserRecord) -> Self {
         Self {
             id: user.id,
-            username: user.username,
+            username: user.display_name,
+            email: user.username,
             role: user.role.as_str(),
             enabled: user.enabled,
             max_concurrency: user.limits.max_concurrency,
@@ -49,10 +51,12 @@ impl From<UserRecord> for UserView {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateUserRequest {
+    email: String,
     #[serde(default)]
     max_concurrency: u64,
     #[serde(default)]
     requests_per_minute: u64,
+    #[serde(default)]
     username: String,
     password: String,
     #[serde(default)]
@@ -62,6 +66,8 @@ struct CreateUserRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateUserRequest {
+    #[serde(default)]
+    email: Option<String>,
     #[serde(default)]
     username: Option<String>,
     #[serde(default)]
@@ -103,6 +109,7 @@ where
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SubscriptionView {
+    email: String,
     user_id: String,
     username: String,
     enabled: bool,
@@ -136,7 +143,8 @@ where
         .into_iter()
         .map(|s| SubscriptionView {
             user_id: s.user_id,
-            username: s.username,
+            username: s.display_name,
+            email: s.username,
             enabled: s.enabled,
             group_id: s.group_id,
             group_name: s.group_name,
@@ -256,7 +264,8 @@ where
         .auth()
         .create_user(
             CreateUser {
-                username: body.username,
+                username: body.email,
+                display_name: body.username,
                 password: body.password,
                 group_ids: body.group_ids,
                 limits: gateway_core::policy::RateLimits {
@@ -287,7 +296,8 @@ where
         .auth()
         .update_user(
             UpdateUser {
-                username: body.username,
+                username: body.email,
+                display_name: body.username,
                 quota_multipliers: body.quota_multipliers,
                 id: body.id,
                 enabled: body.enabled,

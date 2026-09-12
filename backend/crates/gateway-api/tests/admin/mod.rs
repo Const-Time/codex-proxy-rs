@@ -82,6 +82,7 @@ mod auth;
 mod client_keys;
 mod errors;
 mod observability;
+mod operations;
 mod proxies;
 mod settings;
 mod system;
@@ -208,6 +209,7 @@ impl AdminSessionState for AdminTestState {
 }
 
 pub(super) struct MemoryAuthStore {
+    operations: Mutex<Vec<gateway_admin::model::operations::OperationLog>>,
     password_hash: Mutex<Option<String>>,
     sessions: Mutex<BTreeMap<String, AdminSession>>,
     audits: Mutex<Vec<AdminAuditEvent>>,
@@ -218,6 +220,7 @@ pub(super) struct MemoryAuthStore {
 impl MemoryAuthStore {
     fn new(api_key: Arc<Mutex<Option<AdminApiKey>>>) -> Self {
         Self {
+            operations: Mutex::new(Vec::new()),
             password_hash: Mutex::new(None),
             sessions: Mutex::new(BTreeMap::new()),
             audits: Mutex::new(Vec::new()),
@@ -260,6 +263,13 @@ impl MemoryAuthStore {
 
 #[async_trait]
 impl AuthStore for MemoryAuthStore {
+    async fn record_operation(
+        &self,
+        event: gateway_admin::model::operations::OperationLog,
+    ) -> AdminStoreResult<()> {
+        self.operations.lock().unwrap().push(event);
+        Ok(())
+    }
     async fn find_user(
         &self,
         username: &str,
@@ -276,6 +286,7 @@ impl AuthStore for MemoryAuthStore {
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
         Ok((["admin_1", "ordinary"].contains(&id)).then(|| {
             gateway_admin::model::users::UserRecord {
+                display_name: String::new(),
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: id.to_owned(),
@@ -305,7 +316,7 @@ impl AuthStore for MemoryAuthStore {
     async fn create_user(
         &self,
         _: &str,
-        _: &str,
+        _: gateway_admin::model::users::UserIdentity<'_>,
         _: &str,
         _: &[String],
         _: gateway_core::policy::RateLimits,
@@ -739,6 +750,7 @@ impl ClientKeyStore for MemoryClientKeyStore {
         let now = Utc::now();
         Ok(Some(ClientKeySecret::new(
             ClientKeyRecord {
+                active_concurrency: None,
                 budget: Default::default(),
                 id: id.clone(),
                 name: "revealed".to_owned(),

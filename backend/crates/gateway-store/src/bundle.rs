@@ -116,7 +116,14 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
                 REDIS_NAMESPACE,
             )?,
         }),
-        Arc::new(postgres::PgAdminClientKeyStore::new(pool.clone())),
+        Arc::new(
+            postgres::PgAdminClientKeyStore::new(pool.clone()).with_admissions(
+                redis::RedisClientAdmissionRepository::new(
+                    redis_connection.clone(),
+                    REDIS_NAMESPACE,
+                )?,
+            ),
+        ),
         Arc::new(postgres::PgAdminObservabilityStore::new(
             pool.clone(),
             Some(credential_leases.clone()),

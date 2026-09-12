@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { User } from '@/api/modules/users'
+import { Search } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { createUser, getUsers, updateUser } from '@/api/modules/users'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
@@ -9,6 +10,7 @@ import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
+import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import {
   toast,
 } from '@/components/base/BaseToast'
@@ -29,6 +31,7 @@ const saving = ref(false)
 const error = ref('')
 const open = ref(false)
 const editing = ref<User | null>(null)
+const email = ref('')
 const username = ref('')
 const password = ref('')
 const groupIds = ref<string[]>([])
@@ -37,7 +40,7 @@ const enabled = ref(true)
 const maxConcurrency = ref('')
 const requestsPerMinute = ref('')
 const search = ref('')
-const visibleUsers = computed(() => users.value.filter(user => user.username.toLowerCase().includes(search.value.toLowerCase())))
+const visibleUsers = computed(() => users.value.filter(user => `${user.email} ${user.username}`.toLowerCase().includes(search.value.toLowerCase())))
 const groupNames = (user: User) => user.groupIds.map(id => groups.value.find(group => group.id === id)?.name ?? id).join('、') || '未分配'
 
 async function load() {
@@ -53,6 +56,7 @@ async function load() {
 }
 function edit(user: User | null) {
   editing.value = user
+  email.value = user?.email ?? ''
   username.value = user?.username ?? ''
   password.value = ''
   groupIds.value = [...(user?.groupIds ?? [])]
@@ -66,7 +70,7 @@ function edit(user: User | null) {
 async function save() {
   if (saving.value)
     return
-  if (!isLoginEmail(username.value.trim())) {
+  if (!isLoginEmail(email.value.trim())) {
     toast.warning('请输入有效的邮箱地址作为登录账号')
     return
   }
@@ -82,8 +86,8 @@ async function save() {
       return
     }
     if (editing.value)
-      await updateUser({ username: username.value.trim(), quotaMultipliers: Object.fromEntries(groupIds.value.map(id => [id, quotaMultipliers.value[id] || '1'])), id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value, ...limits })
-    else await createUser({ username: username.value.trim(), password: password.value, groupIds: groupIds.value, ...limits })
+      await updateUser({ email: email.value.trim(), username: username.value.trim(), quotaMultipliers: Object.fromEntries(groupIds.value.map(id => [id, quotaMultipliers.value[id] || '1'])), id: editing.value.id, enabled: enabled.value, groupIds: groupIds.value, ...limits })
+    else await createUser({ email: email.value.trim(), username: username.value.trim(), password: password.value, groupIds: groupIds.value, ...limits })
     password.value = ''
     open.value = false
     toast.success(editing.value ? '用户已更新' : '普通用户已创建')
@@ -105,7 +109,11 @@ onMounted(load)
   <div class="flex flex-col gap-5">
     <BasePageHeader title="用户管理" description="创建普通用户并分配可用分组。用户自行创建和管理密钥。" />
     <div class="flex flex-wrap items-center gap-3">
-      <BaseInput v-model="search" aria-label="搜索用户邮箱" placeholder="搜索邮箱" class="max-w-sm" />
+      <BaseInput v-model="search" aria-label="搜索邮箱或用户名" placeholder="搜索邮箱或用户名" class="w-full sm:w-80">
+        <template #prefix>
+          <Search class="size-4" />
+        </template>
+      </BaseInput>
       <BaseButton variant="primary" @click="edit(null)">
         新建用户
       </BaseButton>
@@ -139,7 +147,10 @@ onMounted(load)
           <tbody>
             <tr v-for="user in visibleUsers" :key="user.id" class="border-t border-cp-border">
               <td class="p-3 font-medium">
-                {{ user.username }}
+                {{ user.email }}
+                <div v-if="user.username" class="text-cp-xs text-cp-text-secondary">
+                  {{ user.username }}
+                </div>
               </td>
               <td class="p-3">
                 {{ user.role === 'admin' ? '管理员' : '普通用户' }}
@@ -170,13 +181,18 @@ onMounted(load)
     </BaseCard>
     <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!saving" size="md">
       <div class="grid gap-5">
-        <BaseFormItem label="登录邮箱（用户名）" required description="仅支持邮箱登录。修改后请使用新邮箱登录，密码、密钥和历史记录保留。">
-          <BaseInput v-model="username" aria-label="登录邮箱" type="email" :disabled="saving" maxlength="128" autocomplete="off" placeholder="name@example.com" />
+        <BaseFormItem label="登录邮箱" required description="仅支持邮箱登录。修改后请使用新邮箱登录，密码、密钥和历史记录保留。">
+          <BaseInput v-model="email" aria-label="登录邮箱" type="email" :disabled="saving" maxlength="128" autocomplete="off" placeholder="name@example.com" />
+        </BaseFormItem>
+        <BaseFormItem label="用户名（选填）" description="用于显示，与登录邮箱分开；不填写时显示邮箱。">
+          <BaseInput v-model="username" aria-label="用户名" maxlength="128" :disabled="saving" placeholder="自定义用户名" />
         </BaseFormItem>
         <BaseFormItem v-if="!editing" label="初始密码" required>
           <BaseInput v-model="password" aria-label="初始密码" type="password" autocomplete="new-password" :disabled="saving" placeholder="至少 12 位" />
         </BaseFormItem>
-        <label v-if="editing && editing.role !== 'admin'" for="user-enabled" class="flex items-center gap-2"><input id="user-enabled" v-model="enabled" type="checkbox" :disabled="saving">启用用户</label>
+        <div v-if="editing && editing.role !== 'admin'" class="flex items-center gap-2">
+          <BaseSwitch v-model="enabled" label="启用用户" :disabled="saving" /><span>启用用户</span>
+        </div>
         <p v-if="editing && editing.role !== 'admin'" class="text-cp-sm text-cp-text-secondary">
           禁用后无法登录，已有密钥不能发起新请求。
         </p>

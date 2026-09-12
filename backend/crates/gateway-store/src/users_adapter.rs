@@ -9,7 +9,7 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 
 use crate::{admin_adapter::UserAuthStore, admin_store_error, mutation_audit};
 
-const USER_SELECT: &str = "select u.id, u.username, u.role, u.enabled, u.auth_version, u.max_concurrency, u.requests_per_minute, u.created_at, u.updated_at,
+const USER_SELECT: &str = "select u.id, u.username, u.display_name, u.role, u.enabled, u.auth_version, u.max_concurrency, u.requests_per_minute, u.created_at, u.updated_at,
     array(select g.id from account_groups g where (u.role = 'admin' and not u.group_grants_configured) or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id) order by g.id) as group_ids,
     coalesce((select jsonb_object_agg(account_group_id, quota_multiplier::text) from user_account_groups where user_id = u.id), '{}'::jsonb) as quota_multipliers
     from users u";
@@ -18,6 +18,7 @@ fn decode(row: PgRow) -> UserRecord {
     UserRecord {
         id: row.get("id"),
         username: row.get("username"),
+        display_name: row.get("display_name"),
         role: if row.get::<String, _>("role") == "admin" {
             UserRole::Admin
         } else {
@@ -161,7 +162,7 @@ impl UserAuthStore {
             select user_id, account_group_id from user_account_groups
             union select k.owner_user_id, kg.account_group_id from client_api_keys k
             join client_api_key_groups kg on kg.client_api_key_id = k.id)
-            select u.id as user_id, u.username, u.enabled and g.enabled as enabled,
+            select u.id as user_id, u.username, u.display_name, u.enabled and g.enabled as enabled,
             g.id as group_id, g.name as group_name, coalesce(ug.quota_multiplier, 1)::text as quota_multiplier,
             user_group_quota_limit(g.daily_limit_usd, u.id, g.id)::text as daily_limit_usd,
             user_group_quota_limit(g.weekly_limit_usd, u.id, g.id)::text as weekly_limit_usd,
@@ -178,6 +179,7 @@ impl UserAuthStore {
         Ok(rows
             .into_iter()
             .map(|row| gateway_admin::model::users::UserSubscription {
+                display_name: row.get("display_name"),
                 user_id: row.get("user_id"),
                 username: row.get("username"),
                 enabled: row.get("enabled"),
@@ -317,7 +319,7 @@ impl UserAuthStore {
     pub(crate) async fn insert_user(
         &self,
         id: &str,
-        username: &str,
+        identity: gateway_admin::model::users::UserIdentity<'_>,
         password_hash: &str,
         group_ids: &[String],
         limits: gateway_core::policy::RateLimits,
@@ -338,8 +340,8 @@ impl UserAuthStore {
         )
         .await?;
         require_administrator(&mut tx, context).await?;
-        sqlx::query("insert into users(id, username, password_hash, max_concurrency, requests_per_minute, created_at, updated_at) values ($1, $2, $3, $4, $5, now(), now())")
-            .bind(id).bind(username).bind(password_hash).bind(i64::try_from(limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(limits.requests_per_minute).map_err(|_| invalid_limits())?).execute(&mut *tx).await.map_err(db_error)?;
+        sqlx::query("insert into users(id, username, display_name, password_hash, max_concurrency, requests_per_minute, created_at, updated_at) values ($1, $2, $6, $3, $4, $5, now(), now())")
+            .bind(id).bind(identity.email).bind(password_hash).bind(i64::try_from(limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(limits.requests_per_minute).map_err(|_| invalid_limits())?).bind(identity.display_name).execute(&mut *tx).await.map_err(db_error)?;
         grants(&mut tx, id, group_ids).await?;
         let record = sqlx::QueryBuilder::<Postgres>::new(USER_SELECT)
             .push(" where u.id = $1")
@@ -387,8 +389,8 @@ impl UserAuthStore {
                 "administrator may only edit their own email and group grants",
             ));
         }
-        sqlx::query("update users set username = coalesce($5, username), enabled = $2, max_concurrency = $3, requests_per_minute = $4, group_grants_configured = true, auth_version = auth_version + case when role = 'admin' then 0 else 1 end, updated_at = now() where id = $1")
-            .bind(&command.id).bind(command.enabled).bind(i64::try_from(command.limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(command.limits.requests_per_minute).map_err(|_| invalid_limits())?).bind(&command.username).execute(&mut *tx).await.map_err(db_error)?;
+        sqlx::query("update users set username = coalesce($5, username), display_name = coalesce($6, display_name), enabled = $2, max_concurrency = $3, requests_per_minute = $4, group_grants_configured = true, auth_version = auth_version + case when role = 'admin' then 0 else 1 end, updated_at = now() where id = $1")
+            .bind(&command.id).bind(command.enabled).bind(i64::try_from(command.limits.max_concurrency).map_err(|_| invalid_limits())?).bind(i64::try_from(command.limits.requests_per_minute).map_err(|_| invalid_limits())?).bind(&command.username).bind(&command.display_name).execute(&mut *tx).await.map_err(db_error)?;
         grants(&mut tx, &command.id, &command.group_ids).await?;
         if let Some(multipliers) = &command.quota_multipliers {
             for group in &command.group_ids {
@@ -405,6 +407,7 @@ impl UserAuthStore {
                 "user",
                 &command.id,
                 vec![
+                    "email".into(),
                     "username".into(),
                     "enabled".into(),
                     "group_ids".into(),

@@ -19,6 +19,8 @@ impl UserRole {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {
+    /// Optional public username, separate from the legacy login-email field.
+    pub display_name: String,
     pub id: String,
     pub username: String,
     pub role: UserRole,
@@ -31,8 +33,23 @@ pub struct UserRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Distinct login email and optional public username for an atomic user creation.
+pub struct UserIdentity<'a> {
+    pub email: &'a str,
+    pub display_name: &'a str,
+}
+impl<'a> UserIdentity<'a> {
+    pub const fn new(email: &'a str, display_name: &'a str) -> Self {
+        Self {
+            email,
+            display_name,
+        }
+    }
+}
+
 // Deliberately no Debug: password material must never enter logs.
 pub struct CreateUser {
+    pub display_name: String,
     pub limits: gateway_core::policy::RateLimits,
     pub username: String,
     pub password: String,
@@ -41,6 +58,7 @@ pub struct CreateUser {
 
 #[derive(Debug, Clone)]
 pub struct UpdateUser {
+    pub display_name: Option<String>,
     /// Login email; omission preserves the existing identity for older clients.
     pub username: Option<String>,
     pub quota_multipliers: Option<std::collections::BTreeMap<String, String>>,
@@ -89,6 +107,7 @@ pub struct UserGroup {
 /// One currently authorized user/group subscription, including its effective quota.
 #[derive(Debug, Clone)]
 pub struct UserSubscription {
+    pub display_name: String,
     pub user_id: String,
     pub username: String,
     pub enabled: bool,

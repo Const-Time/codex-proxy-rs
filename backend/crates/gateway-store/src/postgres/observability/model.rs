@@ -197,6 +197,7 @@ pub struct OpsErrorQuery {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticDimension {
+    User,
     Provider,
     Model,
     Account,

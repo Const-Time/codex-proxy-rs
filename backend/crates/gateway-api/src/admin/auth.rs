@@ -50,6 +50,12 @@ where
             .await
             .map_err(super::wire::map_admin_service_error)?
             .ok_or_else(AdminError::admin_session_required)?;
+        super::operations::mark_actor(
+            parts,
+            AdminPrincipal::Session {
+                admin_user_id: user.id.clone(),
+            },
+        );
         let request_id = admin_request_id(parts).ok_or_else(AdminError::internal)?;
         Ok(Self {
             context: AdminRequestContext {
@@ -92,6 +98,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let principal = require_admin_auth(state, &parts.headers).await?;
+        super::operations::mark_actor(parts, principal.clone());
         let request_id = admin_request_id(parts).ok_or_else(AdminError::internal)?;
         Ok(Self {
             context: AdminRequestContext {
@@ -269,6 +276,16 @@ where
         AdminEnvelope::ok(AdminLoginData::new(session.expires_at.to_rfc3339())),
     )
     .into_response();
+    if let Ok(Some(user)) = state
+        .admin_services()
+        .auth()
+        .current_user(Some(&session.session_id))
+        .await
+    {
+        response.extensions_mut().insert(AdminPrincipal::Session {
+            admin_user_id: user.id,
+        });
+    }
     let cookie = format!(
         "{ADMIN_SESSION_COOKIE}={}; {ADMIN_SESSION_COOKIE_ATTRS}",
         session.session_id
@@ -306,12 +323,24 @@ async fn logout<S>(State(state): State<S>, headers: HeaderMap) -> Result<Respons
 where
     S: AdminSessionState + Send + Sync,
 {
+    let actor = state
+        .admin_services()
+        .auth()
+        .current_user(admin_session_cookie(&headers).as_deref())
+        .await
+        .ok()
+        .flatten();
     if let Some(session_id) = admin_session_cookie(&headers) {
         let _ = state.admin_services().auth().logout(&session_id).await;
     }
     let mut response =
         AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(AdminLogoutData::new()))
             .into_response();
+    if let Some(user) = actor {
+        response.extensions_mut().insert(AdminPrincipal::Session {
+            admin_user_id: user.id,
+        });
+    }
     let cookie = format!("{ADMIN_SESSION_COOKIE}=; {ADMIN_SESSION_COOKIE_ATTRS}; Max-Age=0");
     response.headers_mut().insert(
         SET_COOKIE,
