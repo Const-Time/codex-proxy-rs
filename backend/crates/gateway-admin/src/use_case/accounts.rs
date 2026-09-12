@@ -296,6 +296,14 @@ impl DefaultAccountsService {
                     }
                 }
             }
+            // Estimation must never make the account directory unavailable.
+            if let Err(error) = self
+                .accounts
+                .attach_quota_estimates(&item.account.id, quota)
+                .await
+            {
+                tracing::warn!(account_id = %item.account.id, %error, "quota estimate unavailable");
+            }
         }
         Ok(())
     }

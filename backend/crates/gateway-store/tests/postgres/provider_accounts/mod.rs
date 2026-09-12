@@ -45,6 +45,8 @@ use serde_json::json;
 
 use super::{TestDatabase, admin_account_store};
 
+mod quota_estimate;
+
 #[derive(sqlx::FromRow)]
 struct RecoveredAccountRow {
     enabled: bool,
