@@ -3,6 +3,7 @@ import {
   ArrowUpCircle,
   ChartNoAxesColumn,
   ClipboardList,
+  CreditCard,
   FolderTree,
   Info,
   KeyRound,
@@ -15,6 +16,7 @@ import {
   PanelLeftOpen,
   Server,
   Settings,
+  ShieldCheck,
   Sun,
   UserRound,
   Users,
@@ -32,6 +34,7 @@ import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 import { useAuthStore } from '@/stores/modules/auth'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { useThemeStore } from '@/stores/modules/theme'
+import MySubscriptionsModal from './MySubscriptionsModal.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -50,6 +53,7 @@ const emit = defineEmits<{
   openSystemUpdate: []
   toggle: []
 }>()
+const subscriptionsOpen = ref(false)
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
@@ -68,6 +72,7 @@ const adminNavItems = [
   { label: '账号管理', icon: Server, path: '/accounts' },
   { label: '代理管理', icon: Network, path: '/proxies' },
   { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
+  { label: '操作日志', icon: ShieldCheck, path: '/operation-logs' },
   { label: '系统设置', icon: Settings, path: '/settings' },
 ]
 
@@ -424,20 +429,28 @@ onBeforeUnmount(() => {
       </div>
     </BaseScrollbar>
 
-    <div class="mx-4 mb-6 shrink-0" :class="isCollapsed ? 'w-11' : 'self-stretch'">
+    <MySubscriptionsModal v-model="subscriptionsOpen" />
+    <div class="mb-6 max-w-[calc(100%-2rem)] shrink-0 self-center" :class="isCollapsed ? 'w-11' : 'w-50'">
       <div
         class="bg-cp-fill-quaternary"
-        :class="isCollapsed ? 'grid gap-1 rounded-cp p-1' : 'flex h-11 items-center justify-between rounded-cp-lg px-2'"
+        :class="isCollapsed ? 'grid gap-1 rounded-cp p-1' : 'grid gap-1 rounded-cp-lg px-2 py-2'"
       >
-        <span
+        <div
           v-if="!isCollapsed"
-          class="inline-flex whitespace-nowrap h-7 items-center gap-1.5 rounded-lg bg-cp-success-container px-2.5 text-xs leading-none font-emphasis text-cp-success-on-container"
+          class="flex min-w-0 items-center gap-1 text-cp-sm font-emphasis text-cp-text-secondary"
         >
-          <i class="size-1.5 rounded-full bg-cp-success" />
-          在线
-        </span>
+          <div class="flex min-w-0 flex-1 items-center gap-1" :title="`在线 · ${authStore.user?.email || ''}`">
+            <span class="inline-flex size-cp-control-sm shrink-0 items-center justify-center" aria-label="在线">
+              <span class="size-2 rounded-full bg-cp-success" />
+            </span>
+            <span class="truncate">{{ authStore.user?.username || authStore.user?.email }}</span>
+          </div>
+          <BaseIconButton size="sm" class="shrink-0" label="退出登录" variant="destructive" @click="handleLogout">
+            <LogOut :size="18" />
+          </BaseIconButton>
+        </div>
 
-        <div class="flex items-center" :class="isCollapsed ? 'grid gap-1' : 'gap-1'">
+        <div class="flex items-center" :class="isCollapsed ? 'grid gap-1' : 'w-full justify-between'">
           <BaseIconButton
             v-if="authStore.isAdmin && isCollapsed && hasUpdate"
             variant="success"
@@ -449,12 +462,17 @@ onBeforeUnmount(() => {
           </BaseIconButton>
 
           <BaseIconButton
-            :size="isCollapsed ? 'md' : 'sm'"
+            v-if="isCollapsed"
+            size="md"
             label="退出登录"
             variant="destructive"
             @click="handleLogout"
           >
-            <LogOut :size="isCollapsed ? 19 : 18" />
+            <LogOut :size="19" />
+          </BaseIconButton>
+
+          <BaseIconButton variant="ghost" :size="isCollapsed ? 'md' : 'sm'" label="我的订阅" :pressed="subscriptionsOpen" @click="subscriptionsOpen = true">
+            <CreditCard :size="isCollapsed ? 19 : 18" />
           </BaseIconButton>
 
           <BaseIconButton

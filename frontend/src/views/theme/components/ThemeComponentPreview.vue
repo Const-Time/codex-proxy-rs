@@ -50,7 +50,6 @@ interface PreviewTableRow {
   updatedAt: string
 }
 
-const search = shallowRef('中继账号')
 const notes = shallowRef('优先保持当前账号，额度耗尽后再切换。')
 const brandColor = shallowRef('#5983F4')
 const invalidKey = shallowRef('sk-invalid')
@@ -230,11 +229,6 @@ function statusClass(status: PreviewTableRow['status']) {
       <BaseCard padding="compact" class="col-span-5 h-full min-w-0 bg-cp-fill-quaternary! shadow-none!" title="表单与输入" description="BaseInput · BaseSelect · BaseNumberInput · BaseRange · BaseTextarea · BaseColorPicker">
         <template #body>
           <BaseForm class="grid-cols-2 gap-3!">
-            <BaseInput v-model="search" aria-label="搜索账号" placeholder="搜索账号">
-              <template #prefix>
-                <Search class="size-4" />
-              </template>
-            </BaseInput>
             <BaseSelect v-model="provider" aria-label="选择平台" :options="providerOptions" />
             <BaseInput v-model="invalidKey" aria-label="访问密钥错误示例" aria-invalid="true">
               <template #prefix>
