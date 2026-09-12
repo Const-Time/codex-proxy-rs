@@ -204,9 +204,11 @@ impl AuthStore for UserAuthStore {
     async fn reset_subscriptions(
         &self,
         event_id: &str,
+        targets: &[gateway_admin::model::users::SubscriptionTarget],
         context: &MutationContext,
     ) -> AdminStoreResult<u64> {
-        self.reset_all_subscriptions(event_id, context).await
+        self.reset_selected_subscriptions(event_id, targets, context)
+            .await
     }
     async fn user_groups(
         &self,

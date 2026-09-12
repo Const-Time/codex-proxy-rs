@@ -223,9 +223,10 @@ pub trait AuthStore: Send + Sync {
     async fn reset_subscriptions(
         &self,
         event_id: &str,
+        targets: &[crate::model::users::SubscriptionTarget],
         context: &MutationContext,
     ) -> AdminStoreResult<u64> {
-        let _ = (event_id, context);
+        let _ = (event_id, targets, context);
         Err(AdminStoreError::new(
             AdminStoreErrorKind::Unavailable,
             "subscriptions",

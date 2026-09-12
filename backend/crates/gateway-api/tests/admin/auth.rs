@@ -39,21 +39,36 @@ async fn subscriptions_are_admin_only_and_reset_requires_valid_request_id() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
-    let response = gateway_api::admin::users::router::<super::AdminTestState>()
-        .with_state(fixture.state())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/admin/subscriptions/reset")
-                .header(header::COOKIE, "cpr_admin_session=admin-session")
-                .header("x-request-id", "subscriptions-validation")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"requestId":"invalid"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    for (body, expected) in [
+        (
+            r#"{"requestId":"invalid","targets":[]}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            r#"{"requestId":"00000000-0000-4000-8000-000000000001"}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            r#"{"requestId":"00000000-0000-4000-8000-000000000001","targets":[]}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = gateway_api::admin::users::router::<super::AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/subscriptions/reset")
+                    .header(header::COOKIE, "cpr_admin_session=admin-session")
+                    .header("x-request-id", "subscriptions-validation")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
 }
 
 #[test]

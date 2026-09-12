@@ -43,6 +43,7 @@ pub trait AuthService: Send + Sync {
     async fn reset_subscriptions(
         &self,
         event_id: uuid::Uuid,
+        targets: &[crate::model::users::SubscriptionTarget],
         context: &MutationContext,
     ) -> Result<u64, AdminError>;
     async fn user_groups(
@@ -143,10 +144,22 @@ impl AuthService for DefaultAuthService {
     async fn reset_subscriptions(
         &self,
         event_id: uuid::Uuid,
+        targets: &[crate::model::users::SubscriptionTarget],
         context: &MutationContext,
     ) -> Result<u64, AdminError> {
+        if targets.is_empty()
+            || targets.len() > 500
+            || targets.iter().any(|t| {
+                t.user_id.is_empty()
+                    || t.group_id.is_empty()
+                    || t.user_id.len() > 256
+                    || t.group_id.len() > 256
+            })
+        {
+            return Err(AdminError::invalid("请选择 1 至 500 个用户分组订阅"));
+        }
         self.store
-            .reset_subscriptions(&format!("manual:{event_id}"), context)
+            .reset_subscriptions(&format!("manual:{event_id}"), targets, context)
             .await
             .map_err(|e| map_store_error(e, "subscriptions"))
     }

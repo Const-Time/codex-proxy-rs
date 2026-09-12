@@ -171,7 +171,7 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 | POST | /api/admin/users/create | { username, password, groupIds, maxConcurrency?, requestsPerMinute? } | 管理员；创建已启用的普通用户，不能指定角色 |
 | POST | /api/admin/users/update | { id, enabled, groupIds, quotaMultipliers?, maxConcurrency?, requestsPerMinute? } | 管理员；替换分组授权、额度倍率及用户限流，不能禁用管理员 |
 | GET | /api/admin/subscriptions | — | 管理员；当前用户分组订阅、有效日周限额、已用额度、刷新时间及最近重置 |
-| POST | /api/admin/subscriptions/reset | { requestId } | 管理员；幂等重置全部当前订阅，requestId 为 UUID，返回影响的用户分组数量 |
+| POST | /api/admin/subscriptions/reset | { requestId, targets: [{ userId, groupId }] } | 管理员；幂等重置指定订阅，targets 必填且为 1–500 项，返回影响数量；不提供全体重置入口 |
 | GET | /api/profile | — | 本人会话；个人资料 |
 | GET | /api/profile/groups | — | 本人会话；获授权分组及本人的共享额度，不含上游账号资料 |
 | POST | /api/profile/password | { currentPassword, newPassword } | 本人会话；验证原密码、改密后重新登录 |
@@ -186,7 +186,7 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 
 订阅管理的“全部重置”不受页面筛选影响，保留历史请求和计费账本。日窗口至下一个北京时间零点，周窗口从重置时间开始 7 天；同一 requestId 重试不会清除后续消费。重置与在途结算按数据库事务串行化，重置之后完成的请求仍计入配额。
 
-账号主动重置成功会重置该账号关联的所有分组下、所有用户的日/周额度。上游自行重置和自然恢复通过已持久化的配额快照识别：同一窗口刷新边界向后推进超过 60 秒，或已用比例从至少 5% 回到不高于 1%。首次观察只建立基线，重复、过期快照及重复兑换不重复重置；后台每 60 秒检查一次已取得的上游配额，账号页面读取新配额时也会检查。自然窗口有明确边界时，保留边界之后已经产生的消费。识别时效取决于上游配额刷新；未被快照观察到的外部重置无法可靠识别。
+账号主动重置成功会重置该账号关联的所有分组下、所有用户的日/周额度。上游自行重置和自然恢复通过已持久化的配额快照识别：仅 `window_seconds = 604800` 的账号级周窗口，其刷新边界向后推进超过 60 秒才触发。5 小时等短周期、比例下降和周边界未变化均不触发。首次观察只建立基线，重复、过期快照及重复兑换不重复重置；后台每 60 秒检查一次已取得的上游配额，账号页面读取新配额时也会检查。自然窗口有明确边界时，保留边界之后已经产生的消费。识别时效取决于上游配额刷新；未被快照观察到的外部重置无法可靠识别。
 
 请求费用展示额外提供 `billing.originalAmountDisplay`、`billing.groupMultiplierDisplay`。模型原始费用先按 Provider 价格规则校验和分解，再单独展示请求发生时冻结的分组模型倍率与最终总费用。`multiplierDisplay` 仍表示服务档位倍率，两者不混用。列表和详情金额不再添加 `≈`；无法恢复单价的历史请求仍保留原始总额、分组倍率和实际总额。
 
@@ -764,3 +764,7 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 请求建立时冻结倍率，原始模型费用 × 倍率（四舍五入至十位小数）作为消费并计入日/周额度。历史请求及账本保留当时倍率，后来修改分组不会重算。`GET /api/admin/usage/records/summary` 新增 `totalCostUsd` 字符串，按时间和查询范围汇总 USD 消费，也包括已产生费用的失败请求及内部重试；已结算账本优先，避免重复计费。成功请求指标保持成功范围，缓存 Token 合并显示在总 Token 卡片中。
 
 账号列表及详情新增 `usedSlots: number | null`、`totalSlots: number`。分别表示当前占用和总并发容量；账号未单独设置并发上限时，总容量继承运行设置，Redis 不可用时占用返回 null，页面显示“未知”。
+
+管理员可通过用户更新接口编辑自己的个人分组授权和额度倍率，管理权限保持不变，不允许通过此接口修改其他管理员或禁用管理员。尚未配置过的旧管理员保留原有全部分组访问，第一次保存后按显式授权执行；空列表表示没有个人分组，已有未授权组密钥停止接受新请求。分组变更不使管理员自己的登录会话失效。
+
+订阅重置的 `targets` 按用户和分组精确配对，不将用户集合与分组集合做笛卡尔积。重复项去重；同一 requestId 重试不会再次清零，改变选择必须使用新的 requestId。缺失或空选择会被拒绝。

@@ -46,7 +46,7 @@ impl PgClientBudgetStore {
             join client_api_key_groups kg on kg.client_api_key_id = k.id
             join account_groups g on g.id = kg.account_group_id and g.enabled
             where k.id = $1 and k.enabled and g.id = $2
-            and (u.role = 'admin' or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id))")
+            and ((u.role = 'admin' and not u.group_grants_configured) or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id))")
             .bind(key_id.as_str()).bind(group.as_str()).fetch_optional(&self.pool).await.map_err(|_| unavailable())?
             .ok_or_else(|| GatewayError::new(GatewayErrorKind::PolicyDenied, "user, key or group access is disabled or changed"))?;
         let scope = ClientBudgetScope {

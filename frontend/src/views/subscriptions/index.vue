@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Subscription } from '@/api/modules/subscriptions'
+import type { Subscription, SubscriptionTarget } from '@/api/modules/subscriptions'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getSubscriptions, resetSubscriptions } from '@/api/modules/subscriptions'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -19,13 +19,22 @@ const groupId = ref('')
 const page = ref(1)
 const confirmOpen = ref(false)
 const resetRequestId = ref('')
+const selected = ref<string[]>([])
+const resetTargets = ref<SubscriptionTarget[]>([])
+const rowKey = (item: SubscriptionTarget) => JSON.stringify([item.userId, item.groupId])
 const groups = computed(() => [...new Map(records.value.map(item => [item.groupId, item.groupName])).entries()])
 const filtered = computed(() => records.value.filter(item => (!groupId.value || item.groupId === groupId.value)
   && item.username.toLowerCase().includes(search.value.toLowerCase())))
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / 20)))
 const visible = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20))
+const pageSelected = computed(() => visible.value.length > 0 && visible.value.every(item => selected.value.includes(rowKey(item))))
+function togglePage(checked: boolean) {
+  const keys = visible.value.map(rowKey)
+  selected.value = checked ? [...new Set([...selected.value, ...keys])] : selected.value.filter(key => !keys.includes(key))
+}
 watch([search, groupId], () => {
   page.value = 1
+  selected.value = []
 })
 const money = (value: string) => `$${Number(value).toLocaleString('en-US', { maximumFractionDigits: 4 })}`
 const limit = (value: string) => Number(value) === 0 ? '不限' : money(value)
@@ -36,22 +45,28 @@ async function load() {
   error.value = ''
   try {
     records.value = await getSubscriptions()
+    const keys = new Set(records.value.map(rowKey))
+    selected.value = selected.value.filter(key => keys.has(key))
     page.value = Math.min(page.value, pageCount.value)
   }
   catch (cause) { error.value = errorMessage(cause, '订阅加载失败') }
   finally { loading.value = false }
 }
 function openReset() {
+  resetTargets.value = records.value.filter(item => selected.value.includes(rowKey(item))).map(({ userId, groupId }) => ({ userId, groupId }))
+  if (!resetTargets.value.length)
+    return
   resetRequestId.value = crypto.randomUUID()
   confirmOpen.value = true
 }
-async function resetAll() {
+async function resetSelected() {
   if (resetting.value)
     return
   resetting.value = true
   try {
-    const count = await resetSubscriptions(resetRequestId.value)
+    const count = await resetSubscriptions(resetRequestId.value, resetTargets.value)
     confirmOpen.value = false
+    selected.value = []
     toast.success(`已重置 ${count} 个用户分组配额`)
     await load()
   }
@@ -77,8 +92,8 @@ onMounted(load)
       <BaseButton variant="secondary" :loading="loading" @click="load">
         刷新
       </BaseButton>
-      <BaseButton variant="destructive" :disabled="loading || !records.length" @click="openReset">
-        重置所有用户配额
+      <BaseButton variant="destructive" :disabled="loading || !selected.length || selected.length > 500" @click="openReset">
+        重置选中订阅（{{ selected.length }}）
       </BaseButton>
     </div>
     <p v-if="error" role="alert" class="text-cp-error">
@@ -90,7 +105,12 @@ onMounted(load)
           <thead class="text-cp-text-secondary">
             <tr>
               <th class="p-3">
-                用户 / 分组
+                <input type="checkbox" aria-label="选择当前页订阅" :checked="pageSelected" :disabled="loading || !visible.length" @change="togglePage(($event.target as HTMLInputElement).checked)">
+              </th>
+              <th class="p-3">
+                用户
+              </th><th class="p-3">
+                分组
               </th><th class="p-3">
                 额度倍率
               </th><th class="p-3">
@@ -107,11 +127,15 @@ onMounted(load)
           <tbody>
             <tr v-for="item in visible" :key="`${item.userId}:${item.groupId}`" class="border-t border-cp-border">
               <td class="p-3">
+                <input v-model="selected" type="checkbox" :value="rowKey(item)" :aria-label="`选择 ${item.username} / ${item.groupName}`">
+              </td>
+              <td class="p-3">
                 <div class="font-medium">
                   {{ item.username }}
-                </div><div class="mt-1 text-cp-text-secondary">
-                  {{ item.groupName }} <span v-if="!item.enabled">· 已停用</span>
                 </div>
+              </td>
+              <td class="p-3">
+                {{ item.groupName }} <span v-if="!item.enabled">· 已停用</span>
               </td>
               <td class="p-3 font-mono">
                 {{ Number(item.quotaMultiplier) }}x
@@ -134,7 +158,7 @@ onMounted(load)
               </td>
             </tr>
             <tr v-if="!visible.length">
-              <td colspan="6" class="p-6 text-center text-cp-text-secondary">
+              <td colspan="8" class="p-6 text-center text-cp-text-secondary">
                 {{ loading ? '加载中…' : '没有匹配的订阅' }}
               </td>
             </tr>
@@ -152,15 +176,15 @@ onMounted(load)
         </div>
       </div>
     </BaseCard>
-    <BaseModal v-model="confirmOpen" title="重置所有用户配额">
+    <BaseModal v-model="confirmOpen" title="重置选中订阅" :dismissible="!resetting">
       <p class="text-cp-sm leading-relaxed">
-        将清零所有用户在所有分组下的日、周已用额度，不受当前筛选条件影响。日额度在下一个北京时间零点刷新，周额度从本次重置起重新计算 7 天。历史请求和消费记录保留。
+        将重置选中的 {{ resetTargets.length }} 个用户分组订阅（包含跨页选择）的日、周额度，其他订阅不受影响。日额度在下一个北京时间零点刷新，周额度从本次重置起重新计算 7 天。历史请求和消费记录保留。
       </p>
       <template #footer>
         <BaseButton variant="secondary" :disabled="resetting" @click="confirmOpen = false">
           取消
-        </BaseButton><BaseButton variant="destructive" :loading="resetting" @click="resetAll">
-          确认重置全部
+        </BaseButton><BaseButton variant="destructive" :loading="resetting" @click="resetSelected">
+          确认重置选中订阅
         </BaseButton>
       </template>
     </BaseModal>

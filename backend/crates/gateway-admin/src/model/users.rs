@@ -75,3 +75,10 @@ pub struct UserSubscription {
     pub last_reset_at: Option<DateTime<Utc>>,
     pub last_reset_reason: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubscriptionTarget {
+    pub user_id: String,
+    pub group_id: String,
+}

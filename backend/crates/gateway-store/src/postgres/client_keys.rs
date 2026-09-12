@@ -1024,12 +1024,14 @@ pub(super) async fn authorize_key_mutation(
         .as_deref()
         .filter(|_| audit.actor_kind == super::AdminAuditActorKind::AdminSession)
         .ok_or_else(|| invalid("personal session required"))?;
-    let user = sqlx::query("select role from users where id = $1 and enabled for share")
-        .bind(owner)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|_| postgres_unavailable("authorize key owner"))?
-        .ok_or_else(|| invalid("user is disabled or missing"))?;
+    let user = sqlx::query(
+        "select role, group_grants_configured from users where id = $1 and enabled for share",
+    )
+    .bind(owner)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| postgres_unavailable("authorize key owner"))?
+    .ok_or_else(|| invalid("user is disabled or missing"))?;
     if let Some(id) = key_id {
         let found = sqlx::query_scalar::<_, String>(
             "select id from client_api_keys where id = $1 and owner_user_id = $2 for update",
@@ -1052,7 +1054,7 @@ pub(super) async fn authorize_key_mutation(
         }
         let allowed = sqlx::query_scalar::<_, bool>("select exists(select 1 from account_groups g where g.id = $1 and g.enabled
             and ($3 or exists(select 1 from user_account_groups ug where ug.user_id = $2 and ug.account_group_id = g.id)))")
-            .bind(&groups[0]).bind(owner).bind(user.get::<String,_>("role") == "admin")
+            .bind(&groups[0]).bind(owner).bind(user.get::<String,_>("role") == "admin" && !user.get::<bool,_>("group_grants_configured"))
             .fetch_one(&mut **tx).await.map_err(|_| postgres_unavailable("authorize key group"))?;
         if !allowed {
             return Err(invalid("account group is not available to this user"));
