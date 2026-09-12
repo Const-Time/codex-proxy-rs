@@ -401,11 +401,9 @@ function aggregateUsageTrend(points: DashboardTrendPoint[]) {
     const errorsValue = sum(group, point => point.errorsValue)
     const inputTokensValue = sum(group, point => point.inputTokensValue)
     const outputTokensValue = sum(group, point => point.outputTokensValue)
-    const cachedTokensValue = Math.min(
-      inputTokensValue,
-      sum(group, point => point.cachedTokensValue),
-    )
-    const uncachedInputTokensValue = inputTokensValue - cachedTokensValue
+    const cacheWriteTokensValue = sum(group, point => point.cacheWriteTokensValue ?? 0)
+    const cachedTokensValue = sum(group, point => point.cachedTokensValue)
+    const uncachedInputTokensValue = Math.max(0, inputTokensValue - cachedTokensValue)
     const effectiveTokensValue = uncachedInputTokensValue + outputTokensValue
     const cacheHitRateValue = inputTokensValue ? cachedTokensValue / inputTokensValue : 0
     const successRateValue = requestsValue
@@ -420,6 +418,8 @@ function aggregateUsageTrend(points: DashboardTrendPoint[]) {
       inputTokensValue,
       outputTokens: formatCompactNumber(outputTokensValue),
       outputTokensValue,
+      cacheWriteTokens: formatCompactNumber(cacheWriteTokensValue),
+      cacheWriteTokensValue,
       cachedTokens: formatCompactNumber(cachedTokensValue),
       cachedTokensValue,
       uncachedInputTokens: formatCompactNumber(uncachedInputTokensValue),
@@ -428,7 +428,7 @@ function aggregateUsageTrend(points: DashboardTrendPoint[]) {
       effectiveTokensValue: effectiveTokensValue > 0 ? effectiveTokensValue : null,
       cacheHitRate: formatDashboardRate(cacheHitRateValue),
       cacheHitRateValue,
-      tokensValue: inputTokensValue + outputTokensValue,
+      tokensValue: sum(group, point => point.tokensValue),
       errors: formatCompactNumber(errorsValue),
       errorsValue,
       successRate: `${successRateValue.toFixed(1)}%`,

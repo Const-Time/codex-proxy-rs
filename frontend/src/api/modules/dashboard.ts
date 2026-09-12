@@ -19,6 +19,8 @@ export interface DashboardTrendPoint {
   outputTokensValue: number
   cachedTokens: string
   cachedTokensValue: number
+  cacheWriteTokens: string
+  cacheWriteTokensValue: number
   cacheHitRateValue: number
   tokensValue: number
   errors: string

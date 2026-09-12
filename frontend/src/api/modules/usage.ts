@@ -389,6 +389,7 @@ export interface UsageOverviewCostPoint {
   inputTokens: number
   outputTokens: number
   cachedTokens: number
+  cacheWriteTokens: number
   totalTokens: number
   estimatedCost: string | null
   standardCost: string | null
@@ -412,6 +413,7 @@ export interface UsageOverviewCost {
   inputTokens: number
   outputTokens: number
   cachedTokens: number
+  cacheWriteTokens: number
   totalTokens: number
   points: UsageOverviewCostPoint[]
   coverage: UsageCostCoverage

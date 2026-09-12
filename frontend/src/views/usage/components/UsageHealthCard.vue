@@ -4,10 +4,12 @@ import type { getUsageRecordInsightsOverview } from '@/api'
 import { BarChart } from 'echarts/charts'
 import { use } from 'echarts/core'
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
+import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
+import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import { useChartPalette } from '@/composables/useChartPalette'
 import { formatLocalizedCompactNumber as formatCompactNumber } from '@/utils/number'
 
@@ -30,6 +32,7 @@ type HealthPoint = Health['points'][number]
 const props = withDefaults(
   defineProps<{
     health: Health
+    cost: Awaited<ReturnType<typeof getUsageRecordInsightsOverview>>['cost']
     granularity: string
     loading?: boolean
   }>(),
@@ -37,6 +40,17 @@ const props = withDefaults(
     loading: false,
   },
 )
+
+const activeView = ref('usage')
+const tokenPoints = computed(() => {
+  const requests = new Map(props.health.points.map(point => [point.bucket, point.totalRequests]))
+  return props.cost.points.map(point => ({
+    ...point,
+    cacheWriteTokens: point.cacheWriteTokens ?? 0,
+    requests: requests.get(point.bucket) ?? 0,
+    cost: point.estimatedCost,
+  }))
+})
 
 use([BarChart])
 
@@ -161,12 +175,16 @@ function formatTooltip(params: unknown) {
 <template>
   <BaseCard
     as="article"
-    title="请求健康"
-    :description="`按${granularityText}区分服务结果、取消、未完成与调用方错误`"
+    title="使用趋势"
+    :description="activeView === 'usage' ? `按${granularityText}展示 Token 用量与缓存命中率` : `按${granularityText}区分服务结果、取消、未完成与调用方错误`"
     class="min-h-90 xl:h-full"
   >
+    <template #actions>
+      <BaseSegmented v-model="activeView" label="使用趋势视图" :options="[{ label: 'Token 用量', value: 'usage' }, { label: '请求健康', value: 'health' }]" class="w-48" />
+    </template>
     <template #body>
-      <div class="grid min-h-66" :class="hasData ? 'gap-3' : 'h-full'">
+      <TokenUsageTrend v-if="activeView === 'usage'" :points="tokenPoints" :loading="loading" />
+      <div v-else class="grid min-h-66" :class="hasData ? 'gap-3' : 'h-full'">
         <div v-if="hasData" class="grid grid-cols-3 gap-2 rounded-xl bg-cp-fill-quaternary/45 p-2">
           <div class="grid gap-1 px-2">
             <span class="text-[10px] font-bold text-cp-text-quaternary">服务成功率</span>

@@ -74,6 +74,8 @@ function previewTrendPoint(requestsValue: number, index: number): DashboardTrend
     outputTokensValue,
     cachedTokens: cachedTokensValue.toLocaleString('zh-CN'),
     cachedTokensValue,
+    cacheWriteTokens: '0',
+    cacheWriteTokensValue: 0,
     cacheHitRateValue: cachedTokensValue / inputTokensValue,
     tokensValue: inputTokensValue + outputTokensValue,
     errors: errorsValue.toLocaleString('zh-CN'),

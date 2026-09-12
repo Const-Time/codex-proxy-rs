@@ -179,6 +179,9 @@ jobs:
       - name: Frontend build
         run: pnpm --dir frontend build
 
+      - name: Frontend unit tests
+        run: pnpm --dir frontend test
+
       - name: Upload frontend artifact
         if: inputs.upload_frontend
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import type { dashboardTrendView, normalizeDashboardTrendKind } from '../composables/useDashboard'
 
-import { toRef } from 'vue'
+import { computed, toRef } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
+import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import { useRequestTrendChart } from '../composables/useRequestTrendChart'
 
 type TrendKind = ReturnType<typeof normalizeDashboardTrendKind>
@@ -26,6 +27,15 @@ const emit = defineEmits<{
 }>()
 
 const activeKind = defineModel<TrendKind>('kind', { required: true })
+const tokenPoints = computed(() => props.points.map(point => ({
+  label: point.label,
+  inputTokens: point.inputTokensValue,
+  outputTokens: point.outputTokensValue,
+  cachedTokens: point.cachedTokensValue,
+  cacheWriteTokens: point.cacheWriteTokensValue ?? 0,
+  totalTokens: point.tokensValue,
+  requests: point.requestsValue,
+})))
 const {
   tabs,
   pinnedSummaryLabel,
@@ -56,7 +66,8 @@ const {
     </template>
 
     <template #body>
-      <div class="grid gap-3.5">
+      <TokenUsageTrend v-if="activeKind === 'usage'" :points="tokenPoints" :loading="loading" />
+      <div v-else class="grid gap-3.5">
         <div class="grid h-14.25 min-w-0 grid-cols-3 gap-1.5 rounded-xl bg-cp-fill-quaternary/45 p-1.5">
           <button
             v-for="item in props.summary"
