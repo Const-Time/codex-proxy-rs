@@ -251,6 +251,39 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
         .observe_subscription_quota(account, &quota)
         .await
         .unwrap();
+    assert_eq!(
+        status(&db, "linked").await.weekly_used_usd.canonical(),
+        "3",
+        "percentage recovery without a weekly boundary change must not reset"
+    );
+    let mut short = quota.windows[0].clone();
+    short.key = "codex:primary".into();
+    short.window_seconds = Some(18_000);
+    short.used_percent = Some(90.0);
+    quota.windows.push(short);
+    quota.observed_at = Some(now + chrono::Duration::milliseconds(1100));
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    quota.windows[1].reset_at = Some(now + chrono::Duration::days(2));
+    quota.windows[1].used_percent = Some(0.0);
+    quota.observed_at = Some(now + chrono::Duration::milliseconds(1200));
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "linked").await.weekly_used_usd.canonical(),
+        "3",
+        "five-hour rollover must not clear weekly subscriptions"
+    );
+    quota.windows[0].reset_at = Some(now + chrono::Duration::days(7));
+    quota.observed_at = Some(now + chrono::Duration::milliseconds(1500));
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
     assert_eq!(status(&db, "linked").await.weekly_used_usd.canonical(), "0");
     assert_eq!(status(&db, "other").await.weekly_used_usd.canonical(), "4");
     let mut after = charge("linked", "linked-after", "2");
