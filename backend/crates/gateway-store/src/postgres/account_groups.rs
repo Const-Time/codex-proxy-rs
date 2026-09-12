@@ -433,6 +433,7 @@ fn group_select() -> QueryBuilder<Postgres> {
         "select g.id, g.name, g.model_multipliers, g.daily_limit_usd::text, g.weekly_limit_usd::text, g.description, g.color, g.enabled, g.created_at, g.updated_at,
                 coalesce(members.member_count, 0)::bigint as member_count,
                 coalesce(keys.client_key_count, 0)::bigint as client_key_count,
+                authorized_users.user_count,
                 coalesce(members.provider_counts, '{}'::jsonb) as provider_counts
          from account_groups g
          left join lateral (
@@ -452,6 +453,14 @@ fn group_select() -> QueryBuilder<Postgres> {
            from client_api_key_groups kg
            where kg.account_group_id = g.id
          ) keys on true
+         left join lateral (
+           select count(*)::bigint as user_count
+           from users u
+           where u.deleted_at is null
+             and ((u.role = 'admin' and not u.group_grants_configured)
+               or exists (select 1 from user_account_groups ug
+                          where ug.user_id = u.id and ug.account_group_id = g.id))
+         ) authorized_users on true
          where true",
     )
 }
@@ -542,6 +551,7 @@ fn group_record(row: &sqlx::postgres::PgRow) -> StoreResult<AccountGroupRecord> 
             .try_get("enabled")
             .map_err(|_| invalid("invalid enabled"))?,
         member_count: count_value(row, "member_count")?,
+        user_count: count_value(row, "user_count")?,
         provider_counts,
         client_key_count: count_value(row, "client_key_count")?,
         account_summary: AccountGroupAccountSummary {

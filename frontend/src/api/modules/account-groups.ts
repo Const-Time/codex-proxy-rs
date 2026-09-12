@@ -29,6 +29,7 @@ export interface AccountGroup extends AccountGroupRef {
   weeklyLimitUsd: string
   description: string | null
   memberCount: number
+  userCount: number
   providerCounts: Record<string, number>
   clientKeyCount: number
   accountSummary: AccountGroupAccountSummary
