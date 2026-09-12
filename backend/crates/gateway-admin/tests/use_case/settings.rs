@@ -71,6 +71,7 @@ async fn settings_should_reject_zero_refresh_margin_before_store_call() {
                 min_codex_cli_version: None,
                 usage_retention_days: 31,
                 ops_event_retention_days: 30,
+                subscription_auto_reset_enabled: None,
                 audit_retention_days: 30,
             },
         )

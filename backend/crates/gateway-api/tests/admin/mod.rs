@@ -434,6 +434,9 @@ impl SettingsStore for MemorySettingsStore {
             min_codex_cli_version: command.min_codex_cli_version,
             usage_retention_days: command.usage_retention_days,
             ops_event_retention_days: command.ops_event_retention_days,
+            subscription_auto_reset_enabled: command
+                .subscription_auto_reset_enabled
+                .unwrap_or(settings.subscription_auto_reset_enabled),
             audit_retention_days: command.audit_retention_days,
             updated_at: Utc::now(),
         };
@@ -1208,6 +1211,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         min_codex_cli_version: None,
         usage_retention_days: 31,
         ops_event_retention_days: 30,
+        subscription_auto_reset_enabled: true,
         audit_retention_days: 90,
         updated_at: Utc::now(),
     }

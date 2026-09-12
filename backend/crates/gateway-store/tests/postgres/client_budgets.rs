@@ -338,6 +338,87 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
         .await
         .unwrap();
     assert_eq!(events, 3);
+    sqlx::query("update runtime_settings set subscription_auto_reset_enabled = false where id = 1")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update user_group_budget_windows set daily_used_usd = 7, weekly_used_usd = 7")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    quota.observed_at = Some(now + chrono::Duration::seconds(4));
+    quota.windows[0].reset_at = Some(now + chrono::Duration::days(14));
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    admin
+        .reset_account_subscriptions(account, "disabled-credit")
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "linked").await.weekly_used_usd.canonical(),
+        "7",
+        "disabled blocks both observed and explicit upstream resets"
+    );
+    // The administrator's selected-subscription reset remains independent of this switch.
+    sqlx::query(
+        "select reset_user_subscriptions('selected-while-disabled',null,null,'manual',now(),$1)",
+    )
+    .bind(sqlx::types::Json(
+        serde_json::json!([{"userId":"budget-user","groupId":group_id("linked").as_str()}]),
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let reset_reason: String = sqlx::query_scalar(
+        "select last_reset_reason from user_group_budget_windows where account_group_id=$1",
+    )
+    .bind(group_id("linked").as_str())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(reset_reason, "manual");
+    sqlx::query("update user_group_budget_windows set daily_used_usd = 5, weekly_used_usd = 5")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update runtime_settings set subscription_auto_reset_enabled = true where id = 1")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let baselines: i64 = sqlx::query_scalar("select count(*) from subscription_quota_observations")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(baselines, 0, "reenabling discards pre-enable baselines");
+    quota.observed_at = Some(now + chrono::Duration::seconds(5));
+    quota.windows[0].reset_at = Some(now + chrono::Duration::days(21));
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    admin
+        .reset_account_subscriptions(account, "disabled-credit")
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "linked").await.weekly_used_usd.canonical(),
+        "5",
+        "no catch-up rollover or replay of disabled redemption"
+    );
+    quota.observed_at = Some(now + chrono::Duration::seconds(6));
+    quota.windows[0].reset_at = Some(now + chrono::Duration::days(28));
+    admin
+        .observe_subscription_quota(account, &quota)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "linked").await.weekly_used_usd.canonical(),
+        "0",
+        "new enabled rollover resets normally"
+    );
+    assert_eq!(status(&db, "other").await.weekly_used_usd.canonical(), "5");
     db.close().await;
 }
 

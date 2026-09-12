@@ -23,6 +23,7 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
         min_codex_cli_version: None,
         usage_retention_days: 31,
         ops_event_retention_days: 30,
+        subscription_auto_reset_enabled: None,
         audit_retention_days: 90,
     }
 }
@@ -31,6 +32,53 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
 fn runtime_settings_keep_account_rotation_global() {
     let settings = settings_with_margin(3_600);
     assert!(settings.validate().is_ok());
+}
+
+#[tokio::test]
+async fn subscription_auto_reset_setting_persists_and_omission_preserves_disabled_value() {
+    let Some(database) = TestDatabase::create("subscription_reset_setting").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    assert!(
+        repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .subscription_auto_reset_enabled
+    );
+    let mut update = settings_with_margin(3600);
+    update.subscription_auto_reset_enabled = Some(false);
+    repository.update_runtime_settings(update).await.unwrap();
+    assert!(
+        !repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .subscription_auto_reset_enabled
+    );
+    repository
+        .update_runtime_settings(settings_with_margin(1800))
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .subscription_auto_reset_enabled
+    );
+    let mut update = settings_with_margin(1800);
+    update.subscription_auto_reset_enabled = Some(true);
+    repository.update_runtime_settings(update).await.unwrap();
+    assert!(
+        repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .subscription_auto_reset_enabled
+    );
+    database.close().await;
 }
 
 #[test]

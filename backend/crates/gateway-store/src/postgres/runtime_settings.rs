@@ -18,6 +18,7 @@ use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub subscription_auto_reset_enabled: bool,
     pub config_revision: Revision,
     pub admin_api_key: Option<String>,
     pub refresh_margin_seconds: u64,
@@ -64,6 +65,7 @@ impl fmt::Debug for RuntimeSettings {
 
 #[derive(Clone)]
 pub struct RuntimeSettingsUpdate {
+    pub subscription_auto_reset_enabled: Option<bool>,
     pub admin_api_key: Option<String>,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
@@ -164,7 +166,7 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                     rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
-                    min_codex_cli_version, updated_at
+                    min_codex_cli_version, updated_at, subscription_auto_reset_enabled
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -203,7 +205,7 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                 rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
-                min_codex_cli_version, updated_at
+                min_codex_cli_version, updated_at, subscription_auto_reset_enabled
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -238,6 +240,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 audit_retention_days = $10,
 	                 min_codex_desktop_version = $11,
 	                 min_codex_cli_version = $12,
+                     subscription_auto_reset_enabled = coalesce($13, subscription_auto_reset_enabled),
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -254,6 +257,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(i64::from(update.audit_retention_days))
     .bind(update.min_codex_desktop_version.as_deref())
     .bind(update.min_codex_cli_version.as_deref())
+    .bind(update.subscription_auto_reset_enabled)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -316,10 +320,12 @@ type RuntimeSettingsRow = (
     Option<String>,
     Option<String>,
     DateTime<Utc>,
+    bool,
 );
 
 fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSettings> {
     Ok(RuntimeSettings {
+        subscription_auto_reset_enabled: row.14,
         config_revision: Revision::new(to_u64(row.0)?)?,
         admin_api_key: row.1,
         refresh_margin_seconds: to_u64(row.2)?,
