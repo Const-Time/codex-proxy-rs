@@ -627,6 +627,7 @@ impl AuthStore for FakeAuthStore {
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
         Ok(
             (id == "admin").then(|| gateway_admin::model::users::UserRecord {
+                display_name: String::new(),
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: id.to_owned(),
@@ -652,7 +653,7 @@ impl AuthStore for FakeAuthStore {
     async fn create_user(
         &self,
         _: &str,
-        _: &str,
+        _: gateway_admin::model::users::UserIdentity<'_>,
         _: &str,
         _: &[String],
         _: gateway_core::policy::RateLimits,

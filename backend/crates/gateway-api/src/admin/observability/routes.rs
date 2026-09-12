@@ -190,14 +190,22 @@ where
 {
     let dimension = query.dimension().map_err(map_wire_error)?;
     let owner = personal_owner(&auth, query.personal);
-    if owner.is_some() && dimension == DiagnosticDimension::Account {
-        return Err(AdminError::bad_request("个人使用记录不提供上游账号维度"));
+    if owner.is_some()
+        && matches!(
+            dimension,
+            DiagnosticDimension::Account | DiagnosticDimension::User
+        )
+    {
+        return Err(AdminError::bad_request(
+            "个人使用记录不提供上游账号或用户排行维度",
+        ));
     }
     let range = usage_range(query.start_time.as_deref(), query.end_time.as_deref())
         .map_err(map_wire_error)?;
     let filter = domain::UsageFilter {
         owner_user_id: owner,
         user_id: non_empty(query.user_id),
+        client_api_key_ref: non_empty(query.client_api_key_id),
         group_id: non_empty(query.group_id),
         provider_account_ref: non_empty(query.account_id),
         client_transport: non_empty(query.client_transport),

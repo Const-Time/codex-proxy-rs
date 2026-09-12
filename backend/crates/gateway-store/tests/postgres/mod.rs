@@ -247,6 +247,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "client_api_key_groups",
             "client_api_keys",
             "model_requests",
+            "operation_logs",
             "ops_events",
             "outbound_proxies",
             "provider_accounts",

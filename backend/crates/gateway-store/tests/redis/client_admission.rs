@@ -16,6 +16,39 @@ fn client_admission_rejects_zero_ttl() {
     assert!(request.validate().is_err());
 }
 
+#[tokio::test]
+async fn active_count_is_key_scoped_and_excludes_expired_leases() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    assert_eq!(repository.active_count("counter-a").await.unwrap(), 0);
+    for (key, request) in [("counter-a", "active-a"), ("counter-b", "active-b")] {
+        repository
+            .admit_client_request(&admission_request(request, key, Duration::from_secs(30)))
+            .await
+            .unwrap();
+        assert_eq!(repository.active_count(key).await.unwrap(), 1);
+    }
+    let keys = namespace_keys(&mut connection, &namespace).await;
+    for key in keys.iter().filter(|k| k.ends_with(":active")) {
+        redis::cmd("ZADD")
+            .arg(key)
+            .arg(0)
+            .arg("expired-request")
+            .query_async::<i64>(&mut connection)
+            .await
+            .unwrap();
+    }
+    assert_eq!(repository.active_count("counter-a").await.unwrap(), 1);
+    repository
+        .release_client_request("counter-a", "active-a")
+        .await
+        .unwrap();
+    assert_eq!(repository.active_count("counter-a").await.unwrap(), 0);
+    assert_eq!(repository.active_count("counter-b").await.unwrap(), 1);
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
 #[test]
 fn client_admission_rejects_values_outside_redis_exact_integer_range() {
     let mut request = admission_request("request-1", "key-1", Duration::from_secs(30));

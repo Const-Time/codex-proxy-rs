@@ -164,6 +164,11 @@ impl RetentionRepository for PgRetentionRepository {
                 settings.audit_retention_days,
                 "delete expired admin audit events",
             ),
+            RetentionTarget::new(
+                "delete from operation_logs where ctid in (select ctid from operation_logs where occurred_at < $1 - ($2 * interval '1 day') limit $3)",
+                settings.audit_retention_days,
+                "delete expired operation logs",
+            ),
         ];
         let started_at = Instant::now();
         let mut batches = 0_u32;

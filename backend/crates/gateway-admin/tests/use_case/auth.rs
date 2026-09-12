@@ -36,6 +36,7 @@ impl AuthStore for MemoryAuthStore {
     ) -> AdminStoreResult<Option<gateway_admin::model::users::UserRecord>> {
         Ok(
             (id == "admin").then(|| gateway_admin::model::users::UserRecord {
+                display_name: String::new(),
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
                 id: id.to_owned(),
@@ -61,7 +62,7 @@ impl AuthStore for MemoryAuthStore {
     async fn create_user(
         &self,
         _: &str,
-        _: &str,
+        _: gateway_admin::model::users::UserIdentity<'_>,
         _: &str,
         _: &[String],
         _: gateway_core::policy::RateLimits,
@@ -242,6 +243,7 @@ async fn user_creation_and_email_edits_reject_invalid_addresses_before_writing()
                 .auth()
                 .create_user(
                     CreateUser {
+                        display_name: String::new(),
                         username: email.into(),
                         password: "strong-test-password".into(),
                         group_ids: vec![],
@@ -259,6 +261,7 @@ async fn user_creation_and_email_edits_reject_invalid_addresses_before_writing()
                 .auth()
                 .update_user(
                     UpdateUser {
+                        display_name: None,
                         username: Some(email.into()),
                         id: "admin".into(),
                         enabled: true,

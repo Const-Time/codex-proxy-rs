@@ -602,6 +602,7 @@ pub(crate) fn diagnostic_dimension_sql(dimension: DiagnosticDimension) -> &'stat
         DiagnosticDimension::Model => MODEL_DIAGNOSTIC_DIMENSION_SQL,
         DiagnosticDimension::Account => "coalesce(mr.provider_account_ref, 'unrouted')",
         DiagnosticDimension::ApiKey => "mr.client_api_key_ref",
+        DiagnosticDimension::User => "coalesce(mr.user_id, 'unknown')",
         DiagnosticDimension::Transport => {
             "coalesce(mr.upstream_transport, mr.client_transport, 'unknown')"
         }
@@ -632,6 +633,7 @@ pub(crate) fn push_diagnostic_dimension_filter(
         DiagnosticDimension::Provider
         | DiagnosticDimension::Account
         | DiagnosticDimension::ApiKey
+        | DiagnosticDimension::User
         | DiagnosticDimension::Transport => {}
     }
 }

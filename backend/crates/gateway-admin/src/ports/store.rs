@@ -213,6 +213,36 @@ pub trait AccountRuntimeStore: Send + Sync {
 /// 管理员密码、会话和安全审计。
 #[async_trait]
 pub trait AuthStore: Send + Sync {
+    async fn record_operation(
+        &self,
+        _event: crate::model::operations::OperationLog,
+    ) -> AdminStoreResult<()> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "operation log",
+            "store not configured",
+        ))
+    }
+    async fn operation_logs(
+        &self,
+        _query: crate::model::operations::OperationLogQuery,
+    ) -> AdminStoreResult<crate::model::operations::OperationLogPage> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "operation log",
+            "store not configured",
+        ))
+    }
+    async fn usage_key_options(
+        &self,
+        _owner: Option<&str>,
+    ) -> AdminStoreResult<Vec<crate::model::operations::UsageKeyOption>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "operation log",
+            "store not configured",
+        ))
+    }
     async fn subscriptions(&self) -> AdminStoreResult<Vec<crate::model::users::UserSubscription>> {
         Err(AdminStoreError::new(
             AdminStoreErrorKind::Unavailable,
@@ -246,7 +276,7 @@ pub trait AuthStore: Send + Sync {
     async fn create_user(
         &self,
         id: &str,
-        username: &str,
+        identity: crate::model::users::UserIdentity<'_>,
         password_hash: &str,
         group_ids: &[String],
         limits: gateway_core::policy::RateLimits,

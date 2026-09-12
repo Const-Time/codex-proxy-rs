@@ -164,6 +164,7 @@ pub struct OpsErrorQuery {
 /// 用量诊断维度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticDimension {
+    User,
     Provider,
     Model,
     Account,

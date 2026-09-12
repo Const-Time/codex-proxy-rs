@@ -49,6 +49,156 @@ async fn seed_group(db: &TestDatabase) {
 }
 
 #[tokio::test]
+async fn optional_display_names_do_not_change_email_identity_or_need_to_be_unique() {
+    let Some(db) = TestDatabase::create("display_names").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    auth.create_password_hash_if_absent("admin@example.com", "admin-hash")
+        .await
+        .unwrap();
+    let admin = context("admin@example.com");
+    let first = auth
+        .create_user(
+            "user-a",
+            gateway_admin::model::users::UserIdentity::new("First@example.com", "自定义名字"),
+            "hash-a",
+            &[],
+            RateLimits::unlimited(),
+            &admin,
+        )
+        .await
+        .unwrap();
+    auth.create_user(
+        "user-b",
+        gateway_admin::model::users::UserIdentity::new("second@example.com", "自定义名字"),
+        "hash-b",
+        &[],
+        RateLimits::unlimited(),
+        &admin,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.display_name, "自定义名字");
+    assert_eq!(
+        auth.find_user("first@EXAMPLE.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "user-a"
+    );
+    assert!(auth.find_user("自定义名字").await.unwrap().is_none());
+    let (_, changed) = auth
+        .update_user(
+            UpdateUser {
+                id: first.id,
+                username: None,
+                display_name: Some(String::new()),
+                enabled: true,
+                group_ids: vec![],
+                quota_multipliers: None,
+                limits: RateLimits::unlimited(),
+            },
+            &admin,
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.username, "First@example.com");
+    assert!(changed.display_name.is_empty());
+    assert_eq!(
+        auth.load_password_hash("user-a").await.unwrap().as_deref(),
+        Some("hash-a")
+    );
+    let legacy = auth.load_user("admin@example.com").await.unwrap().unwrap();
+    assert_eq!(legacy.username, "admin@example.com");
+    assert!(legacy.display_name.is_empty());
+    db.close().await;
+}
+
+#[tokio::test]
+async fn operation_logs_keep_actor_snapshots_and_bind_filters() {
+    use gateway_admin::model::operations::{OperationLog, OperationLogQuery};
+    let Some(db) = TestDatabase::create("operation_logs").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    auth.create_password_hash_if_absent("admin@example.com", "admin-hash")
+        .await
+        .unwrap();
+    let now = chrono::Utc::now();
+    for (id, actor, status) in [
+        ("audit-ok", Some("admin@example.com".to_owned()), 200),
+        ("audit-denied", None, 401),
+    ] {
+        auth.record_operation(OperationLog {
+            id: id.into(),
+            occurred_at: now,
+            actor_user_id: actor,
+            email: None,
+            username: None,
+            auth_method: if status == 200 {
+                "session"
+            } else {
+                "anonymous"
+            }
+            .into(),
+            method: "POST".into(),
+            path: "/api/admin/users/update".into(),
+            status,
+            duration_ms: 10,
+            client_ip: Some("127.0.0.1".into()),
+            forwarded_ip: Some("192.0.2.1".into()),
+            request_id: id.into(),
+        })
+        .await
+        .unwrap();
+    }
+    let query = || OperationLogQuery {
+        email: None,
+        action: None,
+        ip: None,
+        method: None,
+        auth_method: None,
+        result: None,
+        start_time: Some(now - chrono::Duration::hours(1)),
+        end_time: Some(now + chrono::Duration::hours(1)),
+        page: Some(1),
+    };
+    let all = auth.operation_logs(query()).await.unwrap();
+    assert_eq!(all.total, 2);
+    assert_eq!(
+        all.items.iter().find(|i| i["id"] == "audit-ok").unwrap()["email"],
+        "admin@example.com"
+    );
+    let mut filtered = query();
+    filtered.result = Some("failure".into());
+    let failures = auth.operation_logs(filtered).await.unwrap();
+    assert_eq!(failures.total, 1);
+    assert_eq!(failures.items[0]["status"], 401);
+    assert!(failures.items[0]["email"].is_null());
+    let mut filtered = query();
+    filtered.email = Some("%' or true --".into());
+    assert_eq!(auth.operation_logs(filtered).await.unwrap().total, 0);
+    let mut filtered = query();
+    filtered.email = Some("ADMIN@".into());
+    filtered.ip = Some("192.0.2.1".into());
+    assert_eq!(auth.operation_logs(filtered).await.unwrap().total, 1);
+    assert!(
+        !serde_json::to_string(&all.items)
+            .unwrap()
+            .contains("admin-hash")
+    );
+    db.close().await;
+}
+
+#[tokio::test]
 async fn administrator_can_scope_own_keys_without_losing_management_or_session() {
     let Some(db) = TestDatabase::create("admin_personal_grants").await else {
         return;
@@ -68,6 +218,7 @@ async fn administrator_can_scope_own_keys_without_losing_management_or_session()
         .await
         .unwrap();
     let mut update = UpdateUser {
+        display_name: None,
         username: None,
         id: "admin".into(),
         enabled: true,
@@ -104,7 +255,7 @@ async fn administrator_can_scope_own_keys_without_losing_management_or_session()
     // System administration remains available even with no personal group grants.
     auth.create_user(
         "another",
-        "another",
+        gateway_admin::model::users::UserIdentity::new("another", ""),
         "hash",
         &[],
         RateLimits::unlimited(),
@@ -132,7 +283,7 @@ async fn email_rename_preserves_identity_password_keys_and_quota_and_rejects_dup
     let original = auth
         .create_user(
             "stable-user",
-            "Original@Example.com",
+            gateway_admin::model::users::UserIdentity::new("Original@Example.com", ""),
             "existing-password-hash",
             &[GROUP.into()],
             RateLimits::unlimited(),
@@ -164,6 +315,7 @@ async fn email_rename_preserves_identity_password_keys_and_quota_and_rejects_dup
     .await
     .unwrap();
     let mut update = UpdateUser {
+        display_name: None,
         username: Some("Changed@Example.com".into()),
         id: original.id.clone(),
         enabled: true,
@@ -232,6 +384,7 @@ async fn email_rename_preserves_identity_password_keys_and_quota_and_rejects_dup
     let (_, renamed_admin) = auth
         .update_user(
             UpdateUser {
+                display_name: None,
                 username: Some("renamed-admin@example.com".into()),
                 id: admin_before.id.clone(),
                 enabled: true,
@@ -287,7 +440,7 @@ async fn selected_resets_use_exact_pairs_and_preserve_unselected_usage() {
     for user in ["alice", "bob"] {
         auth.create_user(
             user,
-            user,
+            gateway_admin::model::users::UserIdentity::new(user, ""),
             "hash",
             &[GROUP.into(), other.into()],
             RateLimits::unlimited(),
@@ -374,7 +527,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
         let created = auth
             .create_user(
                 user,
-                user,
+                gateway_admin::model::users::UserIdentity::new(user, ""),
                 "user-hash",
                 &[GROUP.into()],
                 gateway_core::policy::RateLimits::unlimited(),
@@ -394,6 +547,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     .await
     .unwrap();
     let mut update = UpdateUser {
+        display_name: None,
         username: None,
         id: "alice".into(),
         enabled: true,
@@ -470,7 +624,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     assert_eq!(
         auth.create_user(
             "duplicate",
-            "Alice",
+            gateway_admin::model::users::UserIdentity::new("Alice", ""),
             "hash",
             &[],
             gateway_core::policy::RateLimits::unlimited(),
@@ -484,7 +638,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     assert!(
         auth.create_user(
             "intruder",
-            "intruder",
+            gateway_admin::model::users::UserIdentity::new("intruder", ""),
             "hash",
             &[],
             gateway_core::policy::RateLimits::unlimited(),
@@ -552,6 +706,7 @@ async fn administrator_creates_regular_users_and_only_owner_can_manage_keys() {
     );
     auth.update_user(
         UpdateUser {
+            display_name: None,
             username: None,
             quota_multipliers: Default::default(),
             limits: gateway_core::policy::RateLimits::unlimited(),
@@ -587,7 +742,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     let user = auth
         .create_user(
             "alice",
-            "alice",
+            gateway_admin::model::users::UserIdentity::new("alice", ""),
             "old-hash",
             &[],
             gateway_core::policy::RateLimits::unlimited(),
@@ -616,6 +771,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     let (_, disabled) = auth
         .update_user(
             UpdateUser {
+                display_name: None,
                 username: None,
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),
@@ -632,6 +788,7 @@ async fn disabling_and_password_changes_invalidate_versions_and_audit_atomically
     assert!(
         auth.update_user(
             UpdateUser {
+                display_name: None,
                 username: None,
                 quota_multipliers: Default::default(),
                 limits: gateway_core::policy::RateLimits::unlimited(),

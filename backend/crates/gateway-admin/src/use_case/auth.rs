@@ -26,6 +26,15 @@ use crate::model::{
     users::{CreateUser, UpdateUser, UserRecord, UserRole},
 };
 
+fn validate_display_name(value: &str) -> Result<(), AdminError> {
+    if value.chars().count() > 128 || value.chars().any(char::is_control) {
+        return Err(AdminError::invalid(
+            "用户名最多 128 个字符，不能包含控制字符",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_user_limits(limits: gateway_core::policy::RateLimits) -> Result<(), AdminError> {
     if limits.max_concurrency > 9_007_199_254_740_991
         || limits.requests_per_minute > 9_007_199_254_740_991
@@ -38,6 +47,24 @@ fn validate_user_limits(limits: gateway_core::policy::RateLimits) -> Result<(), 
 /// API 鉴权与管理员登录消费的统一服务。
 #[async_trait]
 pub trait AuthService: Send + Sync {
+    async fn record_operation(
+        &self,
+        _event: crate::model::operations::OperationLog,
+    ) -> Result<(), AdminError> {
+        Err(AdminError::new(AdminErrorKind::Unavailable, "服务不可用"))
+    }
+    async fn operation_logs(
+        &self,
+        _query: crate::model::operations::OperationLogQuery,
+    ) -> Result<crate::model::operations::OperationLogPage, AdminError> {
+        Err(AdminError::new(AdminErrorKind::Unavailable, "服务不可用"))
+    }
+    async fn usage_key_options(
+        &self,
+        _owner: Option<&str>,
+    ) -> Result<Vec<crate::model::operations::UsageKeyOption>, AdminError> {
+        Err(AdminError::new(AdminErrorKind::Unavailable, "服务不可用"))
+    }
     async fn subscriptions(&self)
     -> Result<Vec<crate::model::users::UserSubscription>, AdminError>;
     async fn reset_subscriptions(
@@ -133,6 +160,33 @@ impl DefaultAuthService {
 
 #[async_trait]
 impl AuthService for DefaultAuthService {
+    async fn record_operation(
+        &self,
+        event: crate::model::operations::OperationLog,
+    ) -> Result<(), AdminError> {
+        self.store
+            .record_operation(event)
+            .await
+            .map_err(|e| map_store_error(e, "operation log"))
+    }
+    async fn operation_logs(
+        &self,
+        query: crate::model::operations::OperationLogQuery,
+    ) -> Result<crate::model::operations::OperationLogPage, AdminError> {
+        self.store
+            .operation_logs(query)
+            .await
+            .map_err(|e| map_store_error(e, "operation log"))
+    }
+    async fn usage_key_options(
+        &self,
+        owner: Option<&str>,
+    ) -> Result<Vec<crate::model::operations::UsageKeyOption>, AdminError> {
+        self.store
+            .usage_key_options(owner)
+            .await
+            .map_err(|e| map_store_error(e, "operation log"))
+    }
     async fn subscriptions(
         &self,
     ) -> Result<Vec<crate::model::users::UserSubscription>, AdminError> {
@@ -210,6 +264,7 @@ impl AuthService for DefaultAuthService {
         command: CreateUser,
         context: &MutationContext,
     ) -> Result<UserRecord, AdminError> {
+        validate_display_name(command.display_name.trim())?;
         validate_password(&command.password)?;
         validate_user_limits(command.limits)?;
         let username = command.username.trim();
@@ -221,7 +276,7 @@ impl AuthService for DefaultAuthService {
         self.store
             .create_user(
                 &format!("user_{}", Uuid::now_v7().simple()),
-                username,
+                crate::model::users::UserIdentity::new(username, command.display_name.trim()),
                 &hash,
                 &command.group_ids,
                 command.limits,
@@ -236,6 +291,10 @@ impl AuthService for DefaultAuthService {
         mut command: UpdateUser,
         context: &MutationContext,
     ) -> Result<UserRecord, AdminError> {
+        if let Some(name) = &mut command.display_name {
+            *name = name.trim().to_owned();
+            validate_display_name(name)?;
+        }
         if let Some(username) = &mut command.username {
             *username = username.trim().to_owned();
             if !crate::model::users::is_login_email(username) {

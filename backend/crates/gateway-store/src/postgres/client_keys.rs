@@ -643,6 +643,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Admin 用例所需的 Client Key 事务能力。
 #[derive(Clone)]
 pub struct PgAdminClientKeyStore {
+    admissions: Option<crate::redis::RedisClientAdmissionRepository>,
     keys: PgClientApiKeyRepository,
     control_plane: PgControlPlaneRepository,
 }
@@ -651,9 +652,18 @@ impl PgAdminClientKeyStore {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self {
+            admissions: None,
             keys: PgClientApiKeyRepository::new(pool.clone()),
             control_plane: PgControlPlaneRepository::new(pool),
         }
+    }
+
+    pub fn with_admissions(
+        mut self,
+        admissions: crate::redis::RedisClientAdmissionRepository,
+    ) -> Self {
+        self.admissions = Some(admissions);
+        self
     }
 
     async fn revision(&self) -> AdminStoreResult<gateway_admin::model::Revision> {
@@ -695,13 +705,19 @@ impl ClientKeyStore for PgAdminClientKeyStore {
             .list_client_api_keys(store_client_key_query(owner, query)?)
             .await
             .map_err(|error| admin_store_error(ENTITY, error))?;
+        let mut items = page
+            .items
+            .into_iter()
+            .map(admin_client_key_record)
+            .collect::<AdminStoreResult<Vec<_>>>()?;
+        if let Some(admissions) = &self.admissions {
+            for item in &mut items {
+                item.active_concurrency = admissions.active_count(item.id.as_str()).await.ok();
+            }
+        }
         Ok(AdminClientKeyPage {
             config_revision,
-            items: page
-                .items
-                .into_iter()
-                .map(admin_client_key_record)
-                .collect::<AdminStoreResult<Vec<_>>>()?,
+            items,
             total: page.total,
             next_cursor: page.next_cursor.map(admin_client_key_cursor).transpose()?,
         })
@@ -945,6 +961,7 @@ fn admin_client_key_cursor(cursor: ClientApiKeyCursor) -> AdminStoreResult<Admin
 
 fn admin_client_key_record(record: ClientApiKeyRecord) -> AdminStoreResult<AdminClientKeyRecord> {
     Ok(AdminClientKeyRecord {
+        active_concurrency: None,
         id: ClientApiKeyId::new(record.id)
             .map_err(|_| admin_store_error(ENTITY, invalid("invalid client key id")))?,
         name: record.name,

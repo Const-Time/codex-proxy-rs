@@ -10,6 +10,7 @@ export const routes: RouteRecordRaw[] = [
     path: '/',
     component: () => import('@/layout/index.vue'),
     children: [
+      { path: 'operation-logs', name: 'operation-logs', component: () => import('@/views/operation-logs/index.vue') },
       { path: 'users', name: 'users', component: () => import('@/views/users/index.vue') },
       { path: 'subscriptions', name: 'subscriptions', component: () => import('@/views/subscriptions/index.vue') },
       { path: 'profile', name: 'profile', component: () => import('@/views/profile/index.vue') },

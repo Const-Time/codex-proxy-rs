@@ -2,6 +2,7 @@ import request from '../request'
 
 export interface Subscription {
   userId: string
+  email: string
   username: string
   enabled: boolean
   groupId: string
