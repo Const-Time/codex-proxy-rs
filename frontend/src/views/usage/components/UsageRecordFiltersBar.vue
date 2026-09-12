@@ -4,6 +4,7 @@ import type { UsageRecordFilters } from '@/api'
 import type { SelectOption } from '@/components/base/BaseSelect.vue'
 import { computed, inject, onMounted, shallowRef } from 'vue'
 import { getAccountGroups, getAccounts } from '@/api'
+import { getUsageKeyOptions } from '@/api/modules/operations'
 import { getUserGroups, getUsers } from '@/api/modules/users'
 import BaseButton from '@/components/base/BaseButton.vue'
 import FormItem from '@/components/base/BaseForm/FormItem.vue'
@@ -15,6 +16,8 @@ const filters = defineModel<UsageRecordFilters>({ required: true })
 const groups = shallowRef<SelectOption[]>([])
 const accounts = shallowRef<SelectOption[]>([])
 const users = shallowRef<SelectOption[]>([])
+const usernames = shallowRef<SelectOption[]>([])
+const keys = shallowRef<SelectOption[]>([])
 const loading = shallowRef(false)
 const error = shallowRef('')
 const active = computed(() => Object.values(filters.value).some(value => value.trim()))
@@ -42,6 +45,10 @@ async function load() {
     return
   loading.value = true
   error.value = ''
+  try {
+    keys.value = (await getUsageKeyOptions(Boolean(personal?.value))).map(key => ({ value: key.id, label: `${key.name} · ${key.id.slice(-8)}` }))
+  }
+  catch { error.value = '密钥选项加载失败，请重试。' }
   if (personal?.value) {
     try {
       groups.value = (await getUserGroups()).map(group => ({ label: group.name, value: group.id }))
@@ -53,7 +60,10 @@ async function load() {
   const results = await Promise.allSettled([
     loadCatalog(page => getAccountGroups({ page, pageSize: 200 }), row => ({ label: row.name, value: row.id })),
     loadCatalog(page => getAccounts({ page, pageSize: 200 }), row => ({ label: row.email || row.name || row.id, value: row.id })),
-    getUsers().then(rows => rows.map(row => ({ label: row.username, value: row.id }))),
+    getUsers().then((rows) => {
+      usernames.value = rows.map(row => ({ label: row.username ? `${row.username} · ${row.email}` : `${row.email}（未设用户名）`, value: row.id }))
+      return rows.map(row => ({ label: row.email, value: row.id }))
+    }),
   ])
   const targets = [groups, accounts, users]
   results.forEach((result, index) => {
@@ -66,22 +76,28 @@ async function load() {
 }
 
 function reset() {
-  filters.value = { groupId: '', accountId: '', userId: '', model: '', clientTransport: '' }
+  filters.value = { clientApiKeyId: '', groupId: '', accountId: '', userId: '', model: '', clientTransport: '' }
 }
 onMounted(() => void load())
 </script>
 
 <template>
   <div class="space-y-2" role="group" aria-label="请求明细筛选">
-    <div class="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-[repeat(5,minmax(0,1fr))_auto]">
+    <div class="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-[repeat(7,minmax(0,1fr))_auto]">
       <FormItem label="分组">
         <BaseSelect v-model="filters.groupId" class="w-full" aria-label="筛选分组" :disabled="loading" :options="[{ label: '全部分组', value: '' }, ...groups]" />
       </FormItem>
       <FormItem v-if="!personal" label="账号">
         <BaseSelect v-model="filters.accountId" class="w-full" aria-label="筛选账号" :disabled="loading" :options="[{ label: '全部账号', value: '' }, ...accounts]" />
       </FormItem>
-      <FormItem v-if="!personal" label="用户">
-        <BaseSelect v-model="filters.userId" class="w-full" aria-label="筛选用户" :disabled="loading" :options="[{ label: '全部用户', value: '' }, ...users]" />
+      <FormItem v-if="!personal" label="邮箱">
+        <BaseSelect v-model="filters.userId" class="w-full" aria-label="按邮箱筛选" :disabled="loading" :options="[{ label: '全部邮箱', value: '' }, ...users]" />
+      </FormItem>
+      <FormItem v-if="!personal" label="用户名">
+        <BaseSelect v-model="filters.userId" class="w-full" aria-label="按用户名筛选" :disabled="loading" :options="[{ label: '全部用户名', value: '' }, ...usernames]" />
+      </FormItem>
+      <FormItem label="密钥">
+        <BaseSelect v-model="filters.clientApiKeyId" class="w-full" aria-label="按密钥筛选" :disabled="loading" :options="[{ label: '全部密钥', value: '' }, ...keys]" />
       </FormItem>
       <FormItem label="模型">
         <BaseInput v-model="filters.model" class="w-full" aria-label="筛选模型" placeholder="模型名称（精确匹配）" />
