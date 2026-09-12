@@ -9,6 +9,12 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 
 use crate::{admin_adapter::UserAuthStore, admin_store_error, mutation_audit};
 
+pub(crate) enum UserChange<'a> {
+    Delete,
+    Enabled(bool),
+    Password { hash: &'a str, generated: bool },
+}
+
 const USER_SELECT: &str = "select u.id, u.username, u.display_name, u.role, u.enabled, u.auth_version, u.max_concurrency, u.requests_per_minute, u.created_at, u.updated_at,
     array(select g.id from account_groups g where (u.role = 'admin' and not u.group_grants_configured) or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id) order by g.id) as group_ids,
     coalesce((select jsonb_object_agg(account_group_id, quota_multiplier::text) from user_account_groups where user_id = u.id), '{}'::jsonb) as quota_multipliers
@@ -174,6 +180,7 @@ impl UserAuthStore {
             from scopes s join users u on u.id = s.user_id join account_groups g on g.id = s.account_group_id
             left join user_account_groups ug on ug.user_id = u.id and ug.account_group_id = g.id
             left join user_group_budget_windows w on w.user_id = u.id and w.account_group_id = g.id
+            where u.deleted_at is null
             order by u.username, g.name, u.id, g.id")
             .fetch_all(&self.security.pool).await.map_err(db_error)?;
         Ok(rows
@@ -298,6 +305,7 @@ impl UserAuthStore {
         sqlx::QueryBuilder::<Postgres>::new(USER_SELECT)
             .push(" where ")
             .push(predicate)
+            .push(" and u.deleted_at is null")
             .build()
             .bind(value)
             .fetch_optional(&self.security.pool)
@@ -308,7 +316,7 @@ impl UserAuthStore {
 
     pub(crate) async fn users(&self) -> AdminStoreResult<Vec<UserRecord>> {
         sqlx::QueryBuilder::<Postgres>::new(USER_SELECT)
-            .push(" order by u.created_at desc, u.id desc")
+            .push(" where u.deleted_at is null order by u.created_at desc, u.id desc")
             .build()
             .fetch_all(&self.security.pool)
             .await
@@ -366,7 +374,7 @@ impl UserAuthStore {
             .map_err(|e| admin_store_error("user", e))?;
         require_administrator(&mut tx, context).await?;
         let row = sqlx::query(
-            "select role, max_concurrency, requests_per_minute from users where id = $1 for update",
+            "select role, max_concurrency, requests_per_minute from users where id = $1 and deleted_at is null for update",
         )
         .bind(&command.id)
         .fetch_optional(&mut *tx)
@@ -429,6 +437,97 @@ impl UserAuthStore {
             .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         Ok((crate::admin_revision(revision)?, decode(record)))
+    }
+
+    pub(crate) async fn manage_user(
+        &self,
+        id: &str,
+        change: UserChange<'_>,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        let mut tx = self.security.pool.begin().await.map_err(db_error)?;
+        let revision = crate::postgres::bump_config_revision_in_transaction(&mut tx)
+            .await
+            .map_err(|e| admin_store_error("user", e))?;
+        require_administrator(&mut tx, context).await?;
+        let role = sqlx::query_scalar::<_, String>(
+            "select role from users where id = $1 and deleted_at is null for update",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            AdminStoreError::new(AdminStoreErrorKind::NotFound, "user", "user not found")
+        })?;
+        if role == "admin"
+            && !(matches!(&change, UserChange::Password { .. })
+                && matches!(&context.actor, MutationActor::AdminSession { admin_user_id } if admin_user_id == id))
+        {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Conflict,
+                "user",
+                "administrator is protected",
+            ));
+        }
+        let (action, fields) = match change {
+            UserChange::Delete => {
+                sqlx::query("delete from client_api_keys where owner_user_id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_error)?;
+                sqlx::query("delete from user_account_groups where user_id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_error)?;
+                sqlx::query("update users set enabled = false, deleted_at = now(), auth_version = auth_version + 1, updated_at = now() where id = $1")
+                    .bind(id).execute(&mut *tx).await.map_err(db_error)?;
+                (
+                    "user.delete",
+                    vec![
+                        "deleted_at".into(),
+                        "enabled".into(),
+                        "client_api_keys".into(),
+                        "group_ids".into(),
+                    ],
+                )
+            }
+            UserChange::Enabled(enabled) => {
+                sqlx::query("update users set enabled = $2, auth_version = auth_version + 1, updated_at = now() where id = $1")
+                    .bind(id).bind(enabled).execute(&mut *tx).await.map_err(db_error)?;
+                (
+                    if enabled {
+                        "user.enable"
+                    } else {
+                        "user.disable"
+                    },
+                    vec!["enabled".into()],
+                )
+            }
+            UserChange::Password { hash, generated } => {
+                sqlx::query("update users set password_hash = $2, auth_version = auth_version + 1, updated_at = now() where id = $1")
+                    .bind(id).bind(hash).execute(&mut *tx).await.map_err(db_error)?;
+                (
+                    if generated {
+                        "user.password.reset"
+                    } else {
+                        "user.password.set"
+                    },
+                    vec!["password".into()],
+                )
+            }
+        };
+        crate::postgres::append_admin_audit_event_in_transaction(
+            &mut tx,
+            mutation_audit(context, action, "user", id, fields),
+            revision,
+        )
+        .await
+        .map_err(|e| admin_store_error("user", e))?;
+        tx.commit().await.map_err(db_error)?;
+        crate::admin_revision(revision)
     }
 
     pub(crate) async fn replace_password(

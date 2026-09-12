@@ -274,6 +274,42 @@ impl AuthStore for UserAuthStore {
     )> {
         self.modify_user(command, context).await
     }
+    async fn delete_user(
+        &self,
+        id: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        self.manage_user(id, crate::users_adapter::UserChange::Delete, context)
+            .await
+    }
+    async fn set_user_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        self.manage_user(
+            id,
+            crate::users_adapter::UserChange::Enabled(enabled),
+            context,
+        )
+        .await
+    }
+    async fn set_user_password(
+        &self,
+        id: &str,
+        hash: &str,
+        generated: bool,
+        context: &MutationContext,
+    ) -> AdminStoreResult<()> {
+        self.manage_user(
+            id,
+            crate::users_adapter::UserChange::Password { hash, generated },
+            context,
+        )
+        .await
+        .map(|_| ())
+    }
     async fn change_password(
         &self,
         id: &str,

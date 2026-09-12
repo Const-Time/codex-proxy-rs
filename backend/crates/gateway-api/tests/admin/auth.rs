@@ -7,6 +7,62 @@ use serde_json::json;
 use super::AdminTestFixture;
 
 #[tokio::test]
+async fn user_actions_are_admin_only_and_password_modes_are_exclusive() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt as _;
+    let fixture = AdminTestFixture::new().await;
+    fixture
+        .auth
+        .insert_user_session("ordinary-session", "ordinary");
+    fixture.auth.insert_session("admin-session");
+    for path in ["delete", "status", "password"] {
+        for (cookie, expected) in [
+            ("", StatusCode::UNAUTHORIZED),
+            ("cpr_admin_session=ordinary-session", StatusCode::FORBIDDEN),
+        ] {
+            let response = gateway_api::admin::users::router::<super::AdminTestState>()
+                .with_state(fixture.state())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/admin/users/{path}"))
+                        .header(header::COOKIE, cookie)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"id":"ordinary","reset":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+    for body in [
+        r#"{"id":"ordinary"}"#,
+        r#"{"id":"ordinary","reset":true,"newPassword":"valid-password-123"}"#,
+        r#"{"id":"ordinary","newPassword":"short"}"#,
+    ] {
+        let response = gateway_api::admin::users::router::<super::AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/users/password")
+                    .header(header::COOKIE, "cpr_admin_session=admin-session")
+                    .header("x-request-id", "password-validation")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn subscriptions_are_admin_only_and_reset_requires_valid_request_id() {
     use axum::{
         body::Body,
