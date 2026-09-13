@@ -22,7 +22,7 @@ pub(crate) async fn provider_account_usage(
                   mr.cached_tokens, mr.cache_write_tokens, mr.reasoning_tokens,
                   mr.image_input_tokens, mr.image_output_tokens,
                   mr.image_generation_succeeded, mr.total_tokens, mr.cost_source,
-                  mr.cost_amount, mr.started_at
+                  mr.cost_amount, mr.billed_cost_amount, mr.started_at
              from provider_accounts pa
              left join model_requests mr
                on mr.provider_account_ref = pa.id and mr.started_at >= ",
@@ -64,7 +64,7 @@ pub(crate) async fn provider_account_usage(
                   count(request_id) filter (where cost_source = 'unavailable')::bigint
                     as unavailable_count,
                   max(started_at) as last_used_at,
-                  sum(cost_amount)::text as amount
+                  sum(cost_amount)::text as amount, sum(billed_cost_amount)::text as billed_amount
              from matched
             group by id, provider_kind, authentication_kind, name, email, plan_type,
                      grouping sets ((), (cost_currency), (model), (model, cost_currency))
@@ -107,7 +107,7 @@ pub(crate) async fn provider_account_usage(
                 costs
                     .entry(get(row, "id")?)
                     .or_default()
-                    .push(cost_from_row(row)?);
+                    .push(account_cost_from_row(row)?);
             }
             (0, 1) if get::<Option<String>>(row, "model")?.is_some() => {
                 models
@@ -122,7 +122,7 @@ pub(crate) async fn provider_account_usage(
                 model_costs
                     .entry((get(row, "id")?, get(row, "model")?))
                     .or_default()
-                    .push(cost_from_row(row)?);
+                    .push(account_cost_from_row(row)?);
             }
             (0 | 1, 0 | 1) => {}
             _ => {
@@ -276,4 +276,12 @@ pub(crate) fn provider_account_from_row(
         request_buckets: Vec::new(),
         models: Vec::new(),
     })
+}
+
+fn account_cost_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<CurrencyCostTotal> {
+    let mut cost = cost_from_row(row)?;
+    cost.billed_amount = get::<Option<String>>(row, "billed_amount")?
+        .map(|amount| DecimalAmount::from_str(&amount))
+        .transpose()?;
+    Ok(cost)
 }

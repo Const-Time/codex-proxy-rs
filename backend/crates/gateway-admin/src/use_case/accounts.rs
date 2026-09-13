@@ -158,7 +158,7 @@ impl DefaultAccountsService {
         }
     }
 
-    pub(crate) async fn sync_subscription_quotas(&self) -> Result<(), AdminError> {
+    pub(crate) async fn sync_quota_observations(&self) -> Result<(), AdminError> {
         let mut page = 1;
         loop {
             let batch = self
@@ -179,9 +179,6 @@ impl DefaultAccountsService {
                 .await
                 .map_err(|e| map_store_error(e, "subscription accounts"))?;
             for item in &batch.items {
-                if item.account.groups.is_empty() {
-                    continue;
-                }
                 let Ok(provider) = self.providers.require(&item.account.provider_kind) else {
                     continue;
                 };
@@ -195,11 +192,25 @@ impl DefaultAccountsService {
                     })
                     .await
                 {
-                    Ok(quota) => self
-                        .accounts
-                        .observe_subscription_quota(&item.account.id, &quota)
-                        .await
-                        .map_err(|e| map_store_error(e, "subscription quota"))?,
+                    Ok(mut quota) => {
+                        // Sample persisted provider observations without querying upstream or
+                        // waiting for an administrator to load the account directory.
+                        if let Err(error) = self
+                            .accounts
+                            .attach_quota_estimates(&item.account.id, &mut quota)
+                            .await
+                        {
+                            tracing::warn!(account_id = %item.account.id, %error, "background quota estimate unavailable; will retry");
+                        }
+                        if !item.account.groups.is_empty()
+                            && let Err(error) = self
+                                .accounts
+                                .observe_subscription_quota(&item.account.id, &quota)
+                                .await
+                        {
+                            tracing::warn!(account_id = %item.account.id, %error, "subscription quota synchronization failed; will retry");
+                        }
+                    }
                     Err(_) => {
                         tracing::warn!(account_id = %item.account.id, "subscription quota observation unavailable")
                     }
@@ -303,6 +314,12 @@ impl DefaultAccountsService {
                 .await
             {
                 tracing::warn!(account_id = %item.account.id, %error, "quota estimate unavailable");
+                for window in &mut quota.windows {
+                    if window.local_usage_attribution == QuotaLocalUsageAttribution::AccountWide {
+                        window.estimate_hint =
+                            Some("暂时无法读取额度采样，请稍后刷新重试".to_owned());
+                    }
+                }
             }
         }
         Ok(())

@@ -17,6 +17,12 @@ struct Sample {
     observed_at: DateTime<Utc>,
     percent: f64,
     estimate: Option<QuotaIntervalEstimate>,
+    #[serde(default)]
+    last_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pending_reason: Option<String>,
+    #[serde(default)]
+    pending_end: Option<DateTime<Utc>>,
 }
 
 fn error(error: impl std::fmt::Display) -> AdminStoreError {
@@ -38,6 +44,7 @@ pub(super) async fn attach(
     };
     for window in &mut quota.windows {
         window.estimated_quota = None;
+        window.estimate_hint = Some("等待有效的上游额度快照".to_owned());
         if window.local_usage_attribution != QuotaLocalUsageAttribution::AccountWide {
             continue;
         }
@@ -64,6 +71,7 @@ pub(super) async fn attach(
         let previous: Option<serde_json::Value> = sqlx::query_scalar(
             "select state from account_quota_estimate_samples where account_id=$1 and window_key=$2"
         ).bind(account_id).bind(&window.key).fetch_optional(pool).await.map_err(error)?;
+        let previous_state = previous.clone();
         let previous = previous
             .map(serde_json::from_value::<Sample>)
             .transpose()
@@ -76,14 +84,23 @@ pub(super) async fn attach(
             observed_at,
             percent,
             estimate: None,
+            last_attempt_at: None,
+            pending_reason: None,
+            pending_end: None,
         };
         let mut sample = previous.clone().unwrap_or_else(|| fresh.clone());
         if let Some(old) = &previous {
             // A cached or out-of-order snapshot must not move the sampling endpoints.
-            if observed_at <= old.observed_at {
+            if observed_at < old.observed_at {
                 if reset_at == old.reset_at && seconds == old.seconds && percent == old.percent {
                     window.estimated_quota = old.estimate.clone();
+                    window.estimate_hint = Some(sampling_hint(old));
                 }
+                continue;
+            }
+            if observed_at == old.observed_at
+                && (reset_at != old.reset_at || seconds != old.seconds || percent != old.percent)
+            {
                 continue;
             }
             if reset_at != old.reset_at || seconds != old.seconds || percent < old.percent {
@@ -92,29 +109,58 @@ pub(super) async fn attach(
                 sample.observed_at = observed_at;
                 sample.percent = percent;
                 // Accumulate the whole observed interval instead of averaging noisy point estimates.
-                if percent > old.percent && percent - sample.start_percent >= 1.0 {
+                // Retry incomplete intervals, including cached snapshots, after late usage settles.
+                // A plateau with an existing estimate keeps its original paired endpoints.
+                let retry_due = old
+                    .last_attempt_at
+                    .is_none_or(|at| Utc::now() - at >= Duration::seconds(30));
+                let needs_billed_backfill = old
+                    .estimate
+                    .as_ref()
+                    .is_some_and(|estimate| estimate.billed_total_usd.is_none());
+                if (percent > old.percent
+                    || ((old.estimate.is_none()
+                        || needs_billed_backfill
+                        || old.pending_reason.is_some())
+                        && retry_due))
+                    && percent - sample.start_percent >= 1.0 - 1e-9
+                {
+                    let estimate_end = if percent == old.percent {
+                        old.pending_end
+                            .or_else(|| old.estimate.as_ref().map(|estimate| estimate.sample_end))
+                            .unwrap_or(observed_at)
+                    } else {
+                        observed_at
+                    };
                     let usage = store
                         .usage_by_windows(&[AccountUsageWindowQuery {
                             account_id: account_id.to_owned(),
                             key: window.key.clone(),
                             range: TimeRange {
                                 start: sample.start_at,
-                                end: observed_at,
+                                end: estimate_end,
                             },
                         }])
                         .await?;
-                    sample.estimate = usage.first().and_then(|usage| {
+                    sample.last_attempt_at = Some(Utc::now());
+                    let estimate = usage.first().and_then(|usage| {
                         interval_estimate(
                             &usage.usage,
                             sample.start_percent,
                             percent,
                             sample.start_at,
-                            observed_at,
+                            estimate_end,
                         )
                     });
-                    // Missing/partial billing or an externally consumed interval is not usable.
-                    if sample.estimate.is_none() {
-                        sample = fresh.clone();
+                    if let Some(estimate) = estimate {
+                        sample.estimate = Some(estimate);
+                        sample.pending_reason = None;
+                        sample.pending_end = None;
+                    } else {
+                        // Keep the baseline so late completion can repair this same interval.
+                        sample.pending_reason =
+                            Some("等待采样区间计费完整；暂无可用消费或存在缺失费用".to_owned());
+                        sample.pending_end = Some(estimate_end);
                     }
                 }
             }
@@ -123,13 +169,14 @@ pub(super) async fn attach(
         let changed = if let Some(old) = previous {
             sqlx::query(
                 "update account_quota_estimate_samples set observed_at=$3, state=$4
-                where account_id=$1 and window_key=$2 and observed_at=$5",
+                where account_id=$1 and window_key=$2 and observed_at=$5 and state=$6",
             )
             .bind(account_id)
             .bind(&window.key)
             .bind(observed_at)
             .bind(state)
             .bind(old.observed_at)
+            .bind(previous_state)
             .execute(pool)
             .await
             .map_err(error)?
@@ -141,10 +188,28 @@ pub(super) async fn attach(
                 .execute(pool).await.map_err(error)?.rows_affected()
         };
         if changed == 1 {
+            window.estimate_hint = Some(sampling_hint(&sample));
             window.estimated_quota = sample.estimate;
         }
     }
     Ok(())
+}
+
+fn sampling_hint(sample: &Sample) -> String {
+    if let Some(reason) = &sample.pending_reason {
+        return reason.clone();
+    }
+    let delta = (sample.percent - sample.start_percent).max(0.0);
+    if delta < 1.0 - 1e-9 {
+        format!(
+            "起点 {:.1}% · 已上涨 {:.1} 个百分点，还需 {:.1}；后台自动采样",
+            sample.start_percent,
+            (delta * 10.0).floor() / 10.0,
+            ((1.0 - delta) * 10.0).ceil() / 10.0
+        )
+    } else {
+        "同一采样区间，按请求发生时的倍率计算".to_owned()
+    }
 }
 
 fn interval_estimate(
@@ -156,7 +221,7 @@ fn interval_estimate(
 ) -> Option<QuotaIntervalEstimate> {
     let delta = end_percent - start_percent;
     if !delta.is_finite()
-        || delta < 1.0
+        || delta < 1.0 - 1e-9
         || start >= end
         || usage.request_count == 0
         || usage.cost_coverage.unavailable_count > 0
@@ -169,17 +234,28 @@ fn interval_estimate(
         return None;
     }
     let mut amount = 0.0;
+    let mut billed_amount = Some(0.0);
     for cost in &usage.costs {
         if !cost.currency.eq_ignore_ascii_case("USD") {
             return None;
         }
         amount += cost.amount.as_str().parse::<f64>().ok()?;
+        billed_amount = billed_amount
+            .zip(cost.billed_amount.as_ref())
+            .and_then(|(sum, value)| value.as_str().parse::<f64>().ok().map(|value| sum + value));
     }
     let total = amount / (delta / 100.0);
     if !amount.is_finite() || amount <= 0.0 || !total.is_finite() || total <= 0.0 {
         return None;
     }
     Some(QuotaIntervalEstimate {
+        billed_used_usd: billed_amount
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| format!("{value:.2}")),
+        billed_total_usd: billed_amount
+            .map(|value| value / (delta / 100.0))
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| format!("{value:.2}")),
         used_usd: format!("{amount:.2}"),
         total_usd: format!("{total:.2}"),
         percent_delta: delta,

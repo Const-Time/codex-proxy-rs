@@ -161,6 +161,7 @@ pub(crate) fn quota_window_view(window: ProviderQuotaWindow) -> AccountQuotaWind
         role,
         local_usage_attribution: _,
         estimated_quota,
+        estimate_hint,
         window_seconds,
         used_percent,
         reset_at,
@@ -185,7 +186,10 @@ pub(crate) fn quota_window_view(window: ProviderQuotaWindow) -> AccountQuotaWind
             .map_or_else(|| "—".to_owned(), |value| format!("{value:.1}%")),
         limit_reached,
         local_usage: local_usage.as_ref().map(quota_local_usage),
+        estimate_hint,
         estimated_quota: estimated_quota.map(|estimate| AccountQuotaEstimateView {
+            billed_used_usd: estimate.billed_used_usd,
+            billed_total_usd: estimate.billed_total_usd,
             used_usd: estimate.used_usd,
             total_usd: estimate.total_usd,
             percent_delta: estimate.percent_delta,
@@ -338,6 +342,15 @@ pub(super) fn account_model_usage_view(
         image_request_failed_count_display: format_number(usage.image_request_failed_count),
         total_tokens: usage.total_tokens,
         total_tokens_display: display_optional_tokens(usage.total_tokens),
+        billed_amount_usd: usd
+            .and_then(|cost| cost.billed_amount.as_ref())
+            .map(|amount| amount.as_str().to_owned()),
+        billed_amount_usd_display: usd
+            .and_then(|cost| cost.billed_amount.as_ref())
+            .map_or_else(
+                || "—".to_owned(),
+                |amount| format_decimal_currency(amount.as_str(), "USD"),
+            ),
         billing_amount_usd: usd.map(|cost| cost.amount.as_str().to_owned()),
         billing_amount_usd_display: usd.map_or_else(
             || "—".to_owned(),
@@ -355,6 +368,14 @@ pub(super) fn account_model_usage_view(
 
 pub(super) fn account_currency_cost_view(cost: &AccountCost) -> CurrencyCostView {
     CurrencyCostView {
+        billed_amount: cost
+            .billed_amount
+            .as_ref()
+            .map(|amount| amount.as_str().to_owned()),
+        billed_amount_display: cost.billed_amount.as_ref().map_or_else(
+            || "—".to_owned(),
+            |amount| format_decimal_currency(amount.as_str(), &cost.currency),
+        ),
         currency: cost.currency.clone(),
         estimated_amount: cost.amount.as_str().to_owned(),
         estimated_amount_display: format_decimal_currency(cost.amount.as_str(), &cost.currency),

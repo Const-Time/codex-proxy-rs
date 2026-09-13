@@ -228,6 +228,7 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
             limit_name: None,
             role: None,
             estimated_quota: None,
+            estimate_hint: None,
             local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
             window_seconds: Some(604800),
             used_percent: Some(75.0),

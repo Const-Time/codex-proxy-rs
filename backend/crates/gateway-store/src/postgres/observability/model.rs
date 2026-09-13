@@ -210,6 +210,7 @@ pub enum DiagnosticDimension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrencyCostTotal {
     pub currency: String,
+    pub billed_amount: Option<DecimalAmount>,
     pub amount: DecimalAmount,
 }
 

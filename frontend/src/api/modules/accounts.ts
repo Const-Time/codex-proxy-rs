@@ -24,7 +24,8 @@ export interface AccountQuotaWindow {
   usedPercentDisplay: string
   limitReached: boolean
   localUsage?: unknown
-  estimatedQuota?: { usedUsd: string, totalUsd: string, percentDelta: number, sampleStart: string, sampleEnd: string } | null
+  estimateHint?: string | null
+  estimatedQuota?: { billedUsedUsd?: string | null, billedTotalUsd?: string | null, usedUsd: string, totalUsd: string, percentDelta: number, sampleStart: string, sampleEnd: string } | null
   resetAtDisplay: string
 }
 
@@ -37,6 +38,8 @@ export interface AccountQuota {
 }
 
 export interface AccountCurrencyCost {
+  billedAmount?: string | null
+  billedAmountDisplay?: string
   currency: string
   estimatedAmount: string
   estimatedAmountDisplay: string
@@ -64,6 +67,8 @@ export interface AccountModelUsage {
   imageRequestFailedCountDisplay: string
   totalTokens: number | null
   totalTokensDisplay: string
+  billedAmountUsd?: string | null
+  billedAmountUsdDisplay?: string
   billingAmountUsd: string | null
   billingAmountUsdDisplay: string
   costEstimateStatus: string

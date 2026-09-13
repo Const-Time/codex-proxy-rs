@@ -15,6 +15,7 @@ type AccountModelUsage = AccountRow['usage']['models'][number]
 
 const totalBilling = computed(() => props.account.usage.costs.find(cost => cost.currency.toUpperCase() === 'USD'))
 const totalBillingDisplay = computed(() => totalBilling.value?.estimatedAmountDisplay ?? '—')
+const totalBilledDisplay = computed(() => totalBilling.value?.billedAmountDisplay ?? '—')
 const hasUsageSummary = computed(() => (props.account.usage.totalTokens ?? 0) > 0 || totalBilling.value !== undefined)
 
 const modelUsageColumns = defineTableColumns<AccountModelUsage>([
@@ -25,7 +26,8 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
   { key: 'outputTokensDisplay', label: '输出', kind: 'numeric', size: 'xs' },
   { key: 'cachedTokensDisplay', label: '缓存', kind: 'numeric', size: 'xs' },
   { key: 'totalTokensDisplay', label: '总计', kind: 'numeric', size: 'xs' },
-  { key: 'billingAmountUsdDisplay', label: '计费', kind: 'numeric', size: 'sm' },
+  { key: 'billingAmountUsdDisplay', label: '原始费用', kind: 'numeric', size: 'sm' },
+  { key: 'billedAmountUsdDisplay', label: '倍率后计费', kind: 'numeric', size: 'sm' },
   { key: 'lastUsedAtDisplay', label: '最近请求', kind: 'datetime', size: 'sm' },
 ])
 </script>
@@ -80,7 +82,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
         </h3>
 
         <div class="ml-auto flex min-w-0 flex-wrap items-baseline justify-end gap-4">
-          <div v-if="hasUsageSummary" class="flex items-baseline gap-1.5 whitespace-nowrap">
+          <div v-if="hasUsageSummary" class="flex flex-wrap items-baseline justify-end gap-x-3 gap-y-1">
             <Sigma class="size-3.5 self-center text-cp-text-tertiary" :stroke-width="1.75" />
             <span title="总 Token">
               <span class="sr-only">总 Token：</span>
@@ -89,11 +91,15 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
               </span>
             </span>
             <span class="mx-0.5 text-[10px] leading-none font-emphasis text-cp-text-quaternary"> / </span>
-            <span title="总计费">
-              <span class="sr-only">总计费：</span>
+            <span title="原始费用合计，不含分组模型倍率">
+              <span class="text-cp-xs text-cp-text-tertiary">原始费用 </span>
               <span class="font-mono text-cp-sm font-heavy tabular-nums text-cp-green-text">
                 {{ totalBillingDisplay }}
               </span>
+            </span>
+            <span title="按每笔请求发生时保存的分组模型倍率汇总；对账需统一时间和账号范围">
+              <span class="text-cp-xs text-cp-text-tertiary">倍率后计费 </span>
+              <span class="font-mono text-cp-sm font-heavy tabular-nums text-cp-green-text">{{ totalBilledDisplay }}</span>
             </span>
           </div>
           <span class="whitespace-nowrap text-cp-xs font-emphasis text-cp-text-quaternary">{{ account.usage.windowLabelDisplay }}</span>
@@ -108,6 +114,9 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
           density="compact"
           empty-text="暂无模型用量"
         >
+          <template #billedAmountUsdDisplay="{ row }">
+            {{ row.billedAmountUsdDisplay ?? '—' }}
+          </template>
           <template #successRateDisplay="{ row }">
             <span :class="modelSuccessRateTextClass(row.successRate)">
               {{ row.successRateDisplay }}

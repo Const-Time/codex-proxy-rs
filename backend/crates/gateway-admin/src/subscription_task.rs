@@ -1,4 +1,4 @@
-//! Reconcile persisted provider quota observations even when no administrator page is open.
+//! Reconcile subscriptions and sample quota estimates without an open administrator page.
 use crate::use_case::accounts::DefaultAccountsService;
 use futures::future::BoxFuture;
 use gateway_core::{
@@ -14,8 +14,8 @@ impl DaemonTask for SubscriptionTask {
             loop {
                 tokio::select! {
                     _ = cancellation.cancelled() => return Ok(()),
-                    result = self.0.sync_subscription_quotas() => {
-                        if result.is_err() { tracing::warn!("subscription quota synchronization failed; will retry"); }
+                    result = self.0.sync_quota_observations() => {
+                        if result.is_err() { tracing::warn!("background quota synchronization failed; will retry"); }
                     }
                 }
                 tokio::select! {

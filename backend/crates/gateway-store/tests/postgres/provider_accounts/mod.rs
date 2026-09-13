@@ -880,6 +880,10 @@ async fn terminal_admin_usage_chunks_large_selections_and_preserves_exact_costs(
     )
     .await
     .expect("seed exact usage request");
+    sqlx::query("update model_requests set billing_multiplier = 2 where id = 'req_usage_exact'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
     let mut account_ids = vec!["acct_usage_exact".to_owned()];
     account_ids.extend((0..200).map(|index| format!("missing_account_{index}")));
 
@@ -900,6 +904,10 @@ async fn terminal_admin_usage_chunks_large_selections_and_preserves_exact_costs(
     assert_eq!(usage[0].total_tokens, Some(18));
     assert_eq!(usage[0].costs[0].currency, "USD");
     assert_eq!(usage[0].costs[0].amount.as_str(), "1.2345678901");
+    assert_eq!(
+        usage[0].costs[0].billed_amount.as_ref().unwrap().as_str(),
+        "2.4691357802"
+    );
     assert_eq!(usage[0].request_buckets.len(), 2);
     assert_eq!(
         usage[0]
@@ -912,6 +920,14 @@ async fn terminal_admin_usage_chunks_large_selections_and_preserves_exact_costs(
     assert_eq!(usage[0].models.len(), 1);
     assert_eq!(usage[0].models[0].model, "gpt-exact");
     assert_eq!(usage[0].models[0].costs[0].amount.as_str(), "1.2345678901");
+    assert_eq!(
+        usage[0].models[0].costs[0]
+            .billed_amount
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "2.4691357802"
+    );
 
     database.close().await;
 }
