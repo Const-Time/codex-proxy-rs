@@ -204,6 +204,12 @@ pub(crate) fn admin_account_usage_window_model_cost(
         key,
         AccountCost {
             currency: window_usage_value(row, "cost_currency")?,
+            billed_amount: window_usage_value::<Option<String>>(row, "billed_amount")?
+                .map(|value| {
+                    AdminDecimalAmount::from_str(&value)
+                        .map_err(|_| invalid_window_usage("billed_amount"))
+                })
+                .transpose()?,
             amount,
         },
     ))
@@ -228,6 +234,12 @@ pub(crate) fn admin_account_usage_window_cost(
         key,
         AccountCost {
             currency: window_usage_value(row, "cost_currency")?,
+            billed_amount: window_usage_value::<Option<String>>(row, "billed_amount")?
+                .map(|value| {
+                    AdminDecimalAmount::from_str(&value)
+                        .map_err(|_| invalid_window_usage("billed_amount"))
+                })
+                .transpose()?,
             amount,
         },
     ))
@@ -319,6 +331,13 @@ pub(crate) fn admin_account_costs(
             })?;
             Ok(AccountCost {
                 currency: cost.currency,
+                billed_amount: cost
+                    .billed_amount
+                    .map(|value| {
+                        AdminDecimalAmount::from_str(value.as_str())
+                            .map_err(|_| invalid_window_usage("billed_amount"))
+                    })
+                    .transpose()?,
                 amount,
             })
         })

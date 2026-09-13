@@ -19,6 +19,7 @@ fn quota(at: chrono::DateTime<Utc>, reset: chrono::DateTime<Utc>, percent: f64) 
             role: None,
             local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
             estimated_quota: None,
+            estimate_hint: None,
             window_seconds: Some(604800),
             used_percent: Some(percent),
             reset_at: Some(reset),
@@ -62,6 +63,8 @@ async fn quota_estimates_use_persisted_interval_cost_not_lifetime_or_cached_snap
         .await
         .unwrap();
     }
+    sqlx::query("update model_requests set billing_multiplier = case when id = 'req_interval' then 2 else 0.5 end where provider_account_ref = $1")
+        .bind(id).execute(&db.pool).await.unwrap();
     let mut first = quota(base, reset, 20.0);
     admin_account_store(&db.pool)
         .attach_quota_estimates(id, &mut first)
@@ -77,6 +80,23 @@ async fn quota_estimates_use_persisted_interval_cost_not_lifetime_or_cached_snap
     let estimate = second.windows[0].estimated_quota.clone().unwrap();
     assert_eq!(estimate.used_usd, "10.00");
     assert_eq!(estimate.total_usd, "500.00");
+    assert_eq!(estimate.billed_used_usd.as_deref(), Some("20.00"));
+    assert_eq!(estimate.billed_total_usd.as_deref(), Some("1000.00"));
+    let windows = admin_account_store(&db.pool)
+        .load_account_usage_by_windows(&[AccountUsageWindowQuery {
+            account_id: id.to_owned(),
+            key: "weekly".to_owned(),
+            range: TimeRange {
+                start: base,
+                end: base + TimeDelta::hours(1),
+            },
+        }])
+        .await
+        .unwrap();
+    let cost = &windows[0].usage.costs[0];
+    assert_eq!(cost.amount.as_str(), "10");
+    assert_eq!(cost.billed_amount.as_ref().unwrap().as_str(), "20");
+    assert_eq!(windows[0].usage.models[0].costs[0], *cost);
     assert_eq!(estimate.percent_delta, 2.0);
     admin_account_store(&db.pool)
         .attach_quota_estimates(id, &mut second)
@@ -103,6 +123,8 @@ async fn quota_estimates_use_persisted_interval_cost_not_lifetime_or_cached_snap
     let result = third.windows[0].estimated_quota.as_ref().unwrap();
     assert_eq!(result.used_usd, "100.00");
     assert_eq!(result.total_usd, "2500.00");
+    assert_eq!(result.billed_used_usd.as_deref(), Some("65.00"));
+    assert_eq!(result.billed_total_usd.as_deref(), Some("1625.00"));
     assert_eq!(result.percent_delta, 4.0);
     // A manual reset within the same cycle starts a new baseline.
     let mut rollback = quota(now - TimeDelta::minutes(5), reset, 1.0);
@@ -194,6 +216,97 @@ async fn quota_estimates_wait_for_sufficient_delta_and_reject_partial_or_unattri
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    assert_eq!(state["start_percent"], 4.0);
+    assert_eq!(state["start_percent"], 0.0);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn quota_estimates_retry_late_billing_without_losing_baseline_or_extending_plateau() {
+    let Some(db) = TestDatabase::create("quota_estimate_retry").await else {
+        return;
+    };
+    let id = "acct_estimate_retry";
+    PgProviderAccountRepository::new(db.pool.clone())
+        .insert_provider_account(account(id, "estimate-retry-user"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let base = now - TimeDelta::hours(3);
+    let reset = now + TimeDelta::days(3);
+    let mut first = quota(base, reset, 4.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut first)
+        .await
+        .unwrap();
+    assert!(
+        first.windows[0]
+            .estimate_hint
+            .as_ref()
+            .unwrap()
+            .contains("起点 4.0%")
+    );
+    let endpoint = base + TimeDelta::hours(1);
+    let mut second = quota(endpoint, reset, 5.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut second)
+        .await
+        .unwrap();
+    assert!(second.windows[0].estimated_quota.is_none());
+    assert!(
+        second.windows[0]
+            .estimate_hint
+            .as_ref()
+            .unwrap()
+            .contains("计费完整")
+    );
+    for (request_id, started_at, amount) in [
+        ("req_late", base + TimeDelta::minutes(30), "10"),
+        ("req_plateau", base + TimeDelta::minutes(90), "90"),
+    ] {
+        seed_model_request(
+            &db.pool,
+            ModelRequestSeed {
+                request_id,
+                account_id: id,
+                provider_kind: "openai",
+                model: "test-model",
+                total_tokens: 100,
+                cost_amount: amount,
+                started_at,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // Zero-rate groups still have a valid (zero) billed estimate.
+    sqlx::query("update model_requests set billing_multiplier = 0 where provider_account_ref = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update account_quota_estimate_samples set state = state - 'last_attempt_at'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let mut plateau = quota(base + TimeDelta::hours(2), reset, 5.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut plateau)
+        .await
+        .unwrap();
+    let estimate = plateau.windows[0].estimated_quota.as_ref().unwrap();
+    assert_eq!(estimate.total_usd, "1000.00");
+    assert_eq!(estimate.billed_total_usd.as_deref(), Some("0.00"));
+    assert_eq!(estimate.sample_start, base);
+    assert_eq!(estimate.sample_end, endpoint);
+    // Older releases' serialized estimates lack billed fields. Backfill the same interval.
+    sqlx::query("update account_quota_estimate_samples set state = (state - 'last_attempt_at') #- '{estimate,billed_used_usd}' #- '{estimate,billed_total_usd}'").execute(&db.pool).await.unwrap();
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut plateau)
+        .await
+        .unwrap();
+    let backfill = plateau.windows[0].estimated_quota.as_ref().unwrap();
+    assert_eq!(backfill.total_usd, "1000.00");
+    assert_eq!(backfill.billed_total_usd.as_deref(), Some("0.00"));
+    assert_eq!(backfill.sample_end, endpoint);
     db.close().await;
 }

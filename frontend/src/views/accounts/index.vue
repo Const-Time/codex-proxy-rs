@@ -203,7 +203,8 @@ const {
             </BaseButton>
           </div>
           <BaseTable
-            class="h-100! min-h-100 flex-none [--cp-table-row-height:72px] xl:h-auto! xl:min-h-0 xl:flex-1"
+            class="flex-none [--cp-table-row-height:72px] sm:h-100! sm:min-h-100 xl:h-auto! xl:min-h-0 xl:flex-1"
+            mobile-actions-first
             :columns="accountColumns"
             :rows="accounts"
             :loading="loading"
@@ -218,6 +219,7 @@ const {
                 type="button"
                 class="inline-flex size-6 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent text-cp-text-secondary transition hover:bg-cp-bg-text-hover hover:text-cp-text"
                 :title="expandedAccountIds.has(row.id) ? '收起统计' : '展开统计'"
+                :aria-expanded="expandedAccountIds.has(row.id)"
                 @click.stop="toggleExpanded(row.id)"
               >
                 <ChevronDown

@@ -196,6 +196,10 @@ impl AdminHarness {
     }
 
     pub(super) async fn build(self) -> AdminServices {
+        self.build_bundle().await.services()
+    }
+
+    pub(super) async fn build_bundle(self) -> gateway_admin::AdminBundle {
         gateway_admin::initialize(
             AdminConfig {
                 session_ttl_minutes: self.session_ttl_minutes,
@@ -223,7 +227,6 @@ impl AdminHarness {
         )
         .await
         .expect("initialize admin test harness")
-        .services()
     }
 }
 

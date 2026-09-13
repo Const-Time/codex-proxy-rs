@@ -764,6 +764,7 @@ pub struct ProviderQuotaWindow {
     pub role: Option<ProviderQuotaWindowRole>,
     pub local_usage_attribution: QuotaLocalUsageAttribution,
     pub estimated_quota: Option<QuotaIntervalEstimate>,
+    pub estimate_hint: Option<String>,
     pub window_seconds: Option<u64>,
     pub used_percent: Option<f64>,
     pub reset_at: Option<DateTime<Utc>>,
@@ -775,6 +776,10 @@ pub struct ProviderQuotaWindow {
 /// Display-only extrapolation from consumption between two quota observations.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QuotaIntervalEstimate {
+    #[serde(default)]
+    pub billed_used_usd: Option<String>,
+    #[serde(default)]
+    pub billed_total_usd: Option<String>,
     pub used_usd: String,
     pub total_usd: String,
     pub percent_delta: f64,

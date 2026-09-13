@@ -36,6 +36,7 @@ export interface BaseTableSort {
 }
 
 export interface BaseTableProps<Row extends TableRow> {
+  mobileActionsFirst?: boolean
   columns: BaseTableColumn<Row>[]
   rows: Row[]
   rowKey?: string | ((row: Row, index: number) => string | number)

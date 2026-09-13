@@ -436,6 +436,11 @@ impl ProviderAdmin for FakeProviderAdmin {
 }
 
 pub(super) struct FakeAccountStore {
+    estimate_observations: Mutex<Vec<String>>,
+    subscription_observations: Mutex<Vec<String>>,
+    quota_notify: tokio::sync::Notify,
+    fail_estimate_for: Mutex<Option<String>>,
+    fail_subscription_for: Mutex<Option<String>>,
     events: EventLog,
     accounts: Mutex<Vec<AccountRecord>>,
     account_after_probe: Mutex<Option<AccountRecord>>,
@@ -455,6 +460,11 @@ impl FakeAccountStore {
         Arc::new(Self {
             events,
             accounts: Mutex::new(vec![account]),
+            estimate_observations: Mutex::new(Vec::new()),
+            subscription_observations: Mutex::new(Vec::new()),
+            quota_notify: tokio::sync::Notify::new(),
+            fail_estimate_for: Mutex::new(None),
+            fail_subscription_for: Mutex::new(None),
             account_after_probe: Mutex::new(None),
             fail_commit: Mutex::new(false),
             audit_requests: Mutex::new(Vec::new()),
@@ -542,6 +552,38 @@ impl FakeAccountStore {
 
 #[async_trait]
 impl AccountStore for FakeAccountStore {
+    async fn attach_quota_estimates(
+        &self,
+        account_id: &str,
+        _: &mut ProviderQuota,
+    ) -> AdminStoreResult<()> {
+        self.estimate_observations
+            .lock()
+            .unwrap()
+            .push(account_id.to_owned());
+        self.quota_notify.notify_one();
+        if self.fail_estimate_for.lock().unwrap().as_deref() == Some(account_id) {
+            return Err(store_unavailable());
+        }
+        Ok(())
+    }
+
+    async fn observe_subscription_quota(
+        &self,
+        account_id: &str,
+        _: &ProviderQuota,
+    ) -> AdminStoreResult<()> {
+        self.subscription_observations
+            .lock()
+            .unwrap()
+            .push(account_id.to_owned());
+        self.quota_notify.notify_one();
+        if self.fail_subscription_for.lock().unwrap().as_deref() == Some(account_id) {
+            return Err(store_unavailable());
+        }
+        Ok(())
+    }
+
     async fn list_accounts(
         &self,
         _: AccountListQuery,
@@ -1488,6 +1530,7 @@ async fn accounts_list_should_degrade_quota_failure_to_empty_window_without_drop
             limit_name: None,
             role: None,
             estimated_quota: None,
+            estimate_hint: None,
             local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
             window_seconds: Some(5 * 60 * 60),
             used_percent: Some(97.0),
@@ -1621,6 +1664,7 @@ async fn accounts_list_should_not_derive_rate_limited_from_provider_quota_view()
             limit_name: None,
             role: None,
             estimated_quota: None,
+            estimate_hint: None,
             local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
             window_seconds: Some(5 * 60 * 60),
             used_percent: Some(100.0),
@@ -1670,6 +1714,7 @@ async fn accounts_list_should_not_derive_exhaustion_from_provider_quota_view() {
             limit_name: None,
             role: None,
             estimated_quota: None,
+            estimate_hint: None,
             local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
             window_seconds: Some(5 * 60 * 60),
             used_percent: Some(100.0),
@@ -1720,6 +1765,7 @@ async fn accounts_list_should_attach_local_usage_to_quota_windows() {
             limit_name: None,
             role: None,
             estimated_quota: None,
+            estimate_hint: None,
             local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
             window_seconds: Some(5 * 60 * 60),
             used_percent: Some(97.0),
@@ -1785,6 +1831,7 @@ async fn accounts_list_and_quota_refresh_should_select_the_same_weekly_or_monthl
         limit_name: None,
         role: None,
         estimated_quota: None,
+        estimate_hint: None,
         local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
         window_seconds: Some(18_000),
         used_percent: Some(50.0),
@@ -1880,6 +1927,7 @@ async fn accounts_list_should_not_attach_account_usage_to_model_specific_quota_w
                 limit_name: None,
                 role: None,
                 estimated_quota: None,
+                estimate_hint: None,
                 local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
                 window_seconds: Some(7 * 24 * 60 * 60),
                 used_percent: Some(1.0),
@@ -1896,6 +1944,7 @@ async fn accounts_list_should_not_attach_account_usage_to_model_specific_quota_w
                 limit_name: Some("GPT-5.3-Codex-Spark".to_owned()),
                 role: None,
                 estimated_quota: None,
+                estimate_hint: None,
                 local_usage_attribution: QuotaLocalUsageAttribution::Unavailable,
                 window_seconds: Some(7 * 24 * 60 * 60),
                 used_percent: Some(0.0),
@@ -2342,4 +2391,92 @@ pub(super) fn import_settings() -> gateway_admin::model::accounts::AccountImport
                 .expect("group ID"),
         ],
     }
+}
+
+#[tokio::test]
+async fn accounts_background_worker_samples_without_a_page_or_extra_upstream_queries() {
+    use gateway_admin::model::account_groups::{AccountGroupColor, AccountGroupRef};
+    use gateway_core::{
+        lifecycle::CancellationToken,
+        routing::AccountGroupId,
+        task::{WorkerContribution, WorkerRunnable},
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events);
+    let mut first = account_record("openai");
+    first.id = "acct_sample_failure".to_owned();
+    let mut second = account_record("openai");
+    second.id = "acct_subscription_failure".to_owned();
+    second.groups.push(AccountGroupRef {
+        id: AccountGroupId::new("grp_00000000000000000000000000000088").unwrap(),
+        name: "background".to_owned(),
+        color: AccountGroupColor::parse("#112233FF").unwrap(),
+        enabled: true,
+    });
+    let mut third = account_record("openai");
+    third.id = "acct_ungrouped".to_owned();
+    store.set_accounts(vec![first, second, third]);
+    *store.fail_estimate_for.lock().unwrap() = Some("acct_sample_failure".to_owned());
+    *store.fail_subscription_for.lock().unwrap() = Some("acct_subscription_failure".to_owned());
+    let mut bundle = super::AdminHarness::new()
+        .accounts(store.clone())
+        .settings(Arc::new(StaticSettingsStore))
+        .provider(provider.clone())
+        .build_bundle()
+        .await;
+    let task = bundle
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|contribution| {
+            if let WorkerContribution::Registration(registration) = contribution
+                && registration.id.owner() == "subscriptions"
+                && let WorkerRunnable::Daemon { task, .. } = registration.runnable
+            {
+                Some(task)
+            } else {
+                None
+            }
+        })
+        .expect("background quota daemon registered");
+    let cancellation = CancellationToken::new();
+    let worker_cancellation = cancellation.clone();
+    let worker = tokio::spawn(async move { task.run(worker_cancellation).await });
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if store.estimate_observations.lock().unwrap().len() == 3
+                && store.subscription_observations.lock().unwrap().len() == 1
+            {
+                break;
+            }
+            store.quota_notify.notified().await;
+        }
+    })
+    .await;
+    cancellation.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+        .await
+        .expect("worker cancellation")
+        .expect("join worker")
+        .expect("worker result");
+    observed.expect("all accounts sampled despite failures");
+    assert_eq!(
+        *store.estimate_observations.lock().unwrap(),
+        [
+            "acct_sample_failure",
+            "acct_subscription_failure",
+            "acct_ungrouped"
+        ]
+    );
+    assert_eq!(
+        *store.subscription_observations.lock().unwrap(),
+        ["acct_subscription_failure"]
+    );
+    let requests = provider.quota_requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.refresh && request.rolling_usage.is_none())
+    );
 }

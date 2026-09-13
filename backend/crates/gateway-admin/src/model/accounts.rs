@@ -112,6 +112,7 @@ pub struct AccountRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountCost {
     pub currency: String,
+    pub billed_amount: Option<super::observability::DecimalAmount>,
     pub amount: super::observability::DecimalAmount,
 }
 

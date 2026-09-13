@@ -27,7 +27,7 @@ pub(crate) fn account_usage_by_windows_sql() -> String {
                 mr.cache_write_tokens, mr.reasoning_tokens,
                 mr.image_input_tokens, mr.image_output_tokens,
                 mr.image_generation_succeeded, mr.total_tokens,
-                mr.cost_source, mr.cost_amount, mr.cost_currency, mr.started_at
+                mr.cost_source, mr.cost_amount, mr.billed_cost_amount, mr.cost_currency, mr.started_at
            from requested_windows requested
            left join model_requests mr
              on mr.provider_account_ref = requested.account_id
@@ -65,7 +65,7 @@ pub(crate) fn account_usage_by_windows_sql() -> String {
             count(request_id) filter (where cost_source = 'unavailable')::bigint
               as unavailable_count,
             max(started_at) as last_used_at,
-            sum(cost_amount)::text as amount
+            sum(cost_amount)::text as amount, sum(billed_cost_amount)::text as billed_amount
        from matched
       group by grouping sets (
         (account_id, window_key),

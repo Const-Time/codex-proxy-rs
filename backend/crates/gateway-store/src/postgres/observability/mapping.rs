@@ -1011,6 +1011,7 @@ pub(crate) fn ops_error_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<Ops
 
 pub(crate) fn cost_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<CurrencyCostTotal> {
     Ok(CurrencyCostTotal {
+        billed_amount: None,
         currency: get(row, "cost_currency")?,
         amount: DecimalAmount::from_str(&get::<String>(row, "amount")?)?,
     })

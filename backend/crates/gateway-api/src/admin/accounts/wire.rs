@@ -312,6 +312,7 @@ pub struct AccountQuotaWindowView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_usage: Option<serde_json::Value>,
     pub estimated_quota: Option<AccountQuotaEstimateView>,
+    pub estimate_hint: Option<String>,
     pub reset_at_display: String,
 }
 
@@ -319,6 +320,8 @@ pub struct AccountQuotaWindowView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountQuotaEstimateView {
+    pub billed_used_usd: Option<String>,
+    pub billed_total_usd: Option<String>,
     pub used_usd: String,
     pub total_usd: String,
     pub percent_delta: f64,
@@ -390,6 +393,8 @@ pub struct ModelUsageView {
     pub image_request_failed_count_display: String,
     pub total_tokens: Option<u64>,
     pub total_tokens_display: String,
+    pub billed_amount_usd: Option<String>,
+    pub billed_amount_usd_display: String,
     pub billing_amount_usd: Option<String>,
     pub billing_amount_usd_display: String,
     pub cost_estimate_status: String,
@@ -405,6 +410,8 @@ pub struct ModelUsageView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrencyCostView {
+    pub billed_amount: Option<String>,
+    pub billed_amount_display: String,
     pub currency: String,
     pub estimated_amount: String,
     pub estimated_amount_display: String,

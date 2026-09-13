@@ -37,6 +37,16 @@ const emit = defineEmits<{
 const slots = useSlots()
 const mobile = useMediaQuery('(max-width: 639px)')
 const computedColumns = computed(() => resolveColumns(props.columns))
+const mobileColumns = computed(() => {
+  const columns = [...computedColumns.value]
+  if (props.mobileActionsFirst) {
+    const actions = columns.findIndex(column => column.kind === 'actions')
+    const expander = columns.findIndex(column => column.kind === 'expander')
+    if (actions >= 0 && expander >= 0)
+      [columns[actions], columns[expander]] = [columns[expander]!, columns[actions]!]
+  }
+  return columns
+})
 const mobileSortOptions = computed(() => [
   { label: '默认排序', value: '' },
   ...computedColumns.value.filter(column => column.sortable).flatMap(column => [
@@ -223,7 +233,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
           >
             <dl class="m-0 grid min-w-0 gap-3">
               <div
-                v-for="column in computedColumns"
+                v-for="column in mobileColumns"
                 :key="column.key"
                 class="cp-record-field"
                 :class="['actions', 'selection', 'expander'].includes(column.kind) ? 'cp-record-field--wide' : ''"
@@ -231,7 +241,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
                 <dt class="text-cp-sm text-cp-text-secondary" :class="column.kind === 'actions' ? 'sr-only' : ''">
                   <span v-if="column.kind === 'selection'">选择</span>
                   <slot v-else :name="`header-${column.key}`" :column="column">
-                    {{ column.label || (column.kind === 'expander' ? '展开详情' : '') }}
+                    {{ column.label || (column.kind === 'expander' ? '查看详情' : '') }}
                   </slot>
                 </dt>
                 <dd class="cp-record-value m-0 min-w-0 text-cp-sm" :class="column.kind === 'numeric' ? 'font-mono tabular-nums' : ''">
