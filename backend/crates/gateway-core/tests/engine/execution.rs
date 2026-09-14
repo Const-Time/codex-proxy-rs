@@ -440,6 +440,9 @@ fn only_provider_attributable_failures_should_affect_circuit() {
     assert!(!provider_failure_affects_circuit(
         ProviderErrorKind::ContinuationRecoveryRequired
     ));
+    assert!(!provider_failure_affects_circuit(
+        ProviderErrorKind::UpstreamCapacityUnavailable
+    ));
 }
 
 #[test]

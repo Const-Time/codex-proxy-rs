@@ -720,6 +720,36 @@ fn decoder_should_classify_official_server_overloaded_failure() {
 }
 
 #[test]
+fn capacity_failure_preserves_original_wire_and_diagnostics() {
+    for path in ["error", "response.failed"] {
+        let data = if path == "error" {
+            r#"{"type":"error","error":{"code":"slow_down","message":"busy","extra":123456789012345678901234567890},"extension":true}"#
+        } else {
+            r#"{"type":"response.failed","response":{"id":"resp_capacity","error":{"code":"server_is_overloaded","message":"busy","extra":123456789012345678901234567890}},"extension":true}"#
+        };
+        let raw = format!("event: {path}\r\nid: upstream-id\r\nretry: 123\r\ndata: {data}\r\n\r\n");
+        let failure = CodexCanonicalDecoder::new("fallback")
+            .with_raw_sse_passthrough()
+            .push(raw.as_bytes())
+            .expect_err("capacity failure");
+        let wire = failure.events()[0].wire_event().expect("client wire");
+        let expected: serde_json::Value = serde_json::from_str(data).expect("original JSON");
+        assert_eq!(wire.data(), &expected);
+        assert_eq!(wire.sse_id(), Some("upstream-id"));
+        assert_eq!(wire.sse_retry(), Some(123));
+        assert_eq!(
+            wire.raw_sse_frame().map(AsRef::as_ref),
+            Some(raw.as_bytes())
+        );
+        let CodexCanonicalError::Upstream(upstream) = failure.error() else {
+            panic!("typed failure")
+        };
+        assert_eq!(upstream.raw_body(), data);
+        assert_ne!(upstream.upstream_code.as_deref(), Some("server_error"));
+    }
+}
+
+#[test]
 fn decoder_should_classify_official_cyber_policy_as_an_invalid_request() {
     assert_failed_event("cyber_policy", "policy-secret-marker");
 }
