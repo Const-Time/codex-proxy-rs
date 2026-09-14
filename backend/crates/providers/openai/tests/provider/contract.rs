@@ -467,6 +467,7 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
         "acct_websocket_turn_state",
         "acct_ws_quota_a",
         "acct_ws_quota_b",
+        "acct_ws_midstream_overload",
     ]
     .into_iter()
     .map(|id| {
@@ -2326,6 +2327,114 @@ async fn abrupt_websocket_disconnect_preserves_diagnosis_and_ambiguous_send_stat
         Some(
             "OpenAI WebSocket disconnected without a closing handshake after payload send; result is ambiguous"
         ),
+    );
+}
+
+#[tokio::test]
+async fn websocket_midstream_error_frame_surfaces_upstream_message_after_delivery() {
+    const ACCOUNT_ID: &str = "acct_ws_midstream_overload";
+    const RESPONSE_ID: &str = "resp_midstream_overload";
+    const OVERLOAD_MESSAGE: &str = "Our servers are currently overloaded. Please try again later.";
+
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept WebSocket");
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        let _request = websocket
+            .next()
+            .await
+            .expect("WebSocket request")
+            .expect("valid WebSocket request");
+        // 真实生产观察：OpenAI 在流已开始后发送带原话的 `error` 帧再断连。
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.created",
+                    "response": {"id": RESPONSE_ID, "model": "gpt-5.4", "status": "in_progress"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send response.created");
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.in_progress",
+                    "response": {"id": RESPONSE_ID, "model": "gpt-5.4", "status": "in_progress"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send response.in_progress");
+        tokio::time::sleep(Duration::from_millis(1_600)).await;
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "error",
+                    "error": {
+                        "type": "service_unavailable_error",
+                        "code": "server_is_overloaded",
+                        "message": OVERLOAD_MESSAGE,
+                        "param": null
+                    },
+                    "sequence_number": 2
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send error frame");
+        // 不发送任何终止事件，直接断开，模拟上游发完错误帧后的真实行为。
+    });
+
+    let provider = provider_with_base_url(&store, base_url);
+    let mut stream = provider
+        .execute(
+            planned_request("openai", generate_operation()),
+            context("req_ws_midstream_overload", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare midstream-failure stream");
+    let mut failure = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("midstream error frame must surface a typed failure"),
+        }
+    };
+    server.abort();
+
+    assert_eq!(
+        failure.kind(),
+        ProviderErrorKind::UpstreamCapacityUnavailable
+    );
+    assert_eq!(failure.send_state(), UpstreamSendState::Sent);
+    // 交给 Core 的失败必须保留上游原话：客户端只能靠它知道失败原因。
+    let visible = failure
+        .client_visible_upstream_error()
+        .expect("overload frame must carry a client-visible upstream error");
+    assert_eq!(visible.code(), Some("server_is_overloaded"));
+    assert_eq!(visible.message(), OVERLOAD_MESSAGE);
+    // 原始错误帧必须随失败一起交给交付边界（SSE 侧据此翻译成 response.failed）。
+    let atomic = failure.take_atomic_client_events();
+    let error_frame = atomic
+        .iter()
+        .find_map(|event| {
+            let wire = event.wire_event()?;
+            (wire.event_type() == Some("error")).then(|| wire.data().clone())
+        })
+        .expect("atomic batch must carry the upstream error frame");
+    assert_eq!(
+        error_frame
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str),
+        Some(OVERLOAD_MESSAGE)
     );
 }
 

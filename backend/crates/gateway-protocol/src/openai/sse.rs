@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use thiserror::Error;
 
 /// 单条 SSE 事件。
@@ -277,12 +277,7 @@ pub fn response_failed_sse_data_with_id(
         "code": code,
         "message": message,
     });
-    let response_id = response_id
-        .filter(|value| !value.trim().is_empty())
-        .map_or_else(
-            || format!("resp_proxy_{}", uuid::Uuid::new_v4().simple()),
-            ToString::to_string,
-        );
+    let response_id = response_id_or_generated(response_id);
     json!({
         "type": "response.failed",
         "response": {
@@ -292,6 +287,50 @@ pub fn response_failed_sse_data_with_id(
         },
         "error": error,
     })
+}
+
+/// 将携带嵌套错误的上游事件投影为 OpenAI Responses `response.failed` 数据。
+///
+/// 该投影供客户端 SSE 兼容转换使用。原始错误对象和事件级元数据保持不透明；
+/// 已有 response 快照只更新失败终态字段。
+pub fn response_failed_sse_data_from_error_event(
+    response: Option<&Value>,
+    response_id: Option<&str>,
+    error_event: &Value,
+) -> Option<Value> {
+    let mut event = error_event.as_object()?.clone();
+    let error = event.remove("error").filter(Value::is_object)?;
+    let mut response = response
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let has_response_id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_response_id {
+        response.insert(
+            "id".to_owned(),
+            Value::String(response_id_or_generated(response_id)),
+        );
+    }
+    response.insert("status".to_owned(), Value::String("failed".to_owned()));
+    response.insert("error".to_owned(), error);
+    event.insert(
+        "type".to_owned(),
+        Value::String("response.failed".to_owned()),
+    );
+    event.insert("response".to_owned(), Value::Object(response));
+    Some(Value::Object(event))
+}
+
+fn response_id_or_generated(response_id: Option<&str>) -> String {
+    response_id
+        .filter(|value| !value.trim().is_empty())
+        .map_or_else(
+            || format!("resp_proxy_{}", uuid::Uuid::new_v4().simple()),
+            ToString::to_string,
+        )
 }
 
 /// 返回下一个完整 SSE 帧结束位置（含分隔符）。
