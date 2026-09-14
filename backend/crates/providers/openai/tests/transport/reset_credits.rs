@@ -147,6 +147,50 @@ async fn consume_should_send_exact_credit_and_redeem_request_id_without_retry() 
 }
 
 #[tokio::test]
+async fn count_only_credits_should_allow_upstream_selected_consumption() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "available_count": 1,
+            "credits": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "code": "reset" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server.uri());
+    let credits = client
+        .list_rate_limit_reset_credits(context())
+        .await
+        .expect("count-only reset credits");
+    assert_eq!(credits.available_count, 1);
+    assert!(credits.credits.is_empty());
+
+    let redeem_request_id =
+        Uuid::parse_str("8fbf302d-11df-4bd5-82e4-08e4b3df7874").expect("redeem request ID");
+    let result = client
+        .consume_rate_limit_reset_credit(context(), None, redeem_request_id)
+        .await
+        .expect("upstream-selected reset-credit consume");
+    assert_eq!(result.code, "reset");
+    let requests = server.received_requests().await.expect("received requests");
+    let request = requests
+        .iter()
+        .find(|request| request.method == Method::POST)
+        .expect("consume request");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&request.body).expect("consume JSON"),
+        json!({ "redeem_request_id": "8fbf302d-11df-4bd5-82e4-08e4b3df7874" })
+    );
+}
+
+#[tokio::test]
 async fn consume_should_preserve_raw_upstream_error_and_never_retry() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

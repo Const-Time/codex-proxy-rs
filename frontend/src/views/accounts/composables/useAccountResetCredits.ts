@@ -13,8 +13,8 @@ import { generateRequestId } from '@/utils/requestId'
 
 interface PendingResetCreditOperation {
   accountId: string
-  creditId: string
-  credit: AccountResetCredit
+  creditId?: string
+  credit?: AccountResetCredit
   redeemRequestId: string
   hasTransportFailure: boolean
 }
@@ -49,11 +49,15 @@ export function useAccountResetCredits(options: {
     availableCredits.value.find(credit => credit.id === selectedCreditId.value),
   )
   const consumptionCredit = computed(() =>
-    pendingOperation.value?.credit ?? selectedCredit.value,
+    pendingOperation.value ? pendingOperation.value.credit : selectedCredit.value,
   )
   const ambiguous = computed(() => pendingOperation.value?.hasTransportFailure === true)
+  const canStartConsume = computed(() =>
+    hasSnapshot.value && !loadError.value && availableCount.value > 0
+    && (selectedCredit.value !== undefined || availableCredits.value.length === 0),
+  )
   const canRequestConsume = computed(() =>
-    ambiguous.value || (availableCount.value > 0 && selectedCredit.value !== undefined),
+    ambiguous.value || canStartConsume.value,
   )
 
   function reconcileSelectedCredit(accountId: string) {
@@ -62,7 +66,7 @@ export function useAccountResetCredits(options: {
 
     const operation = pendingOperation.value
     if (operation?.accountId === accountId) {
-      selectedCreditId.value = operation.creditId
+      selectedCreditId.value = operation.creditId ?? ''
       return
     }
 
@@ -136,17 +140,17 @@ export function useAccountResetCredits(options: {
   }
 
   function requestConsume() {
+    if (consuming.value || loading.value || !canRequestConsume.value)
+      return
     const accountId = options.accountId()
     const existing = pendingOperation.value
     if (!existing || existing.accountId !== accountId) {
-      if (availableCount.value <= 0)
+      if (!canStartConsume.value)
         return
       const credit = selectedCredit.value
-      if (!credit)
-        return
       pendingOperation.value = {
         accountId,
-        creditId: credit.id,
+        creditId: credit?.id,
         credit,
         redeemRequestId: generateRequestId(),
         hasTransportFailure: false,
