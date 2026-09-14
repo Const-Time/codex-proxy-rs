@@ -310,3 +310,211 @@ async fn quota_estimates_retry_late_billing_without_losing_baseline_or_extending
     assert_eq!(backfill.sample_end, endpoint);
     db.close().await;
 }
+
+#[tokio::test]
+async fn quota_cycle_estimates_work_on_first_snapshot_and_upgrade_legacy_pending_samples() {
+    let Some(db) = TestDatabase::create("quota_cycle_first").await else {
+        return;
+    };
+    let id = "acct_cycle";
+    PgProviderAccountRepository::new(db.pool.clone())
+        .insert_provider_account(account(id, "cycle-user"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let reset = now + TimeDelta::days(3);
+    let start = reset - TimeDelta::days(7);
+    sqlx::query("update provider_accounts set created_at=$2 where id=$1")
+        .bind(id)
+        .bind(start - TimeDelta::days(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for (request_id, amount, started_at) in [
+        ("req_old_cycle", "900", start - TimeDelta::hours(1)),
+        ("req_current_cycle", "70", start + TimeDelta::hours(1)),
+        (
+            "req_after_cycle_snapshot",
+            "90",
+            now - TimeDelta::minutes(5),
+        ),
+    ] {
+        seed_model_request(
+            &db.pool,
+            ModelRequestSeed {
+                request_id,
+                account_id: id,
+                provider_kind: "openai",
+                model: "test-model",
+                total_tokens: 100,
+                cost_amount: amount,
+                started_at,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    sqlx::query("update model_requests set billing_multiplier=2 where provider_account_ref=$1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let at = now - TimeDelta::minutes(10);
+    let mut first = quota(at, reset, 35.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut first)
+        .await
+        .unwrap();
+    let value = first.windows[0].estimated_quota.as_ref().unwrap();
+    assert!(value.cycle_based);
+    assert_eq!(value.total_usd, "200.00");
+    assert_eq!(value.billed_total_usd.as_deref(), Some("400.00"));
+    assert_eq!(value.sample_start, start);
+    assert_eq!(value.request_count, 1);
+
+    // Recreate v3.8.1's late baseline. The same cached percentage can now
+    // recover a cycle estimate without waiting for another percentage rise.
+    sqlx::query("update account_quota_estimate_samples set state=$2 where account_id=$1")
+        .bind(id)
+        .bind(json!({
+            "reset_at":reset,"seconds":604800,"start_at":at-TimeDelta::hours(1),
+            "start_percent":34.0,"observed_at":at,"percent":35.0,
+            "estimate":{
+                "used_usd":"1.00","total_usd":"100.00","percent_delta":1.0,
+                "sample_start":start,"sample_end":start+TimeDelta::minutes(30)
+            },
+            "pending_reason":"等待采样区间计费完整","pending_end":at
+        }))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut first)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.windows[0].estimated_quota.as_ref().unwrap().total_usd,
+        "200.00"
+    );
+    // A later plateau must not pull post-snapshot consumption into the old ratio.
+    sqlx::query("update account_quota_estimate_samples set state=state-'last_attempt_at'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let mut plateau = quota(now - TimeDelta::minutes(1), reset, 35.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut plateau)
+        .await
+        .unwrap();
+    assert_eq!(
+        plateau.windows[0]
+            .estimated_quota
+            .as_ref()
+            .unwrap()
+            .used_usd,
+        "70.00"
+    );
+    // Reset inside the same cycle invalidates the cumulative pre-reset costs.
+    let mut rollback = quota(now, reset, 1.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut rollback)
+        .await
+        .unwrap();
+    assert!(rollback.windows[0].estimated_quota.is_none());
+    db.close().await;
+}
+
+#[tokio::test]
+async fn quota_partial_costs_are_disclosed_and_late_costs_repair_the_same_cycle() {
+    let Some(db) = TestDatabase::create("quota_partial_cycle").await else {
+        return;
+    };
+    let id = "acct_partial_cycle";
+    PgProviderAccountRepository::new(db.pool.clone())
+        .insert_provider_account(account(id, "partial-cycle-user"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let reset = now + TimeDelta::days(3);
+    let start = reset - TimeDelta::days(7);
+    sqlx::query("update provider_accounts set created_at=$2 where id=$1")
+        .bind(id)
+        .bind(start - TimeDelta::days(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for request_id in ["req_known", "req_unknown"] {
+        seed_model_request(
+            &db.pool,
+            ModelRequestSeed {
+                request_id,
+                account_id: id,
+                provider_kind: "openai",
+                model: "test-model",
+                total_tokens: 100,
+                cost_amount: "10",
+                started_at: start + TimeDelta::hours(1),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    sqlx::query("update model_requests set cost_source='unavailable', cost_amount=null, cost_currency=null where id='req_unknown'")
+        .execute(&db.pool).await.unwrap();
+    let mut first = quota(now - TimeDelta::minutes(10), reset, 10.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut first)
+        .await
+        .unwrap();
+    let partial = first.windows[0].estimated_quota.as_ref().unwrap();
+    assert_eq!(partial.total_usd, "100.00");
+    assert_eq!(partial.missing_cost_count, 1);
+    assert_eq!(partial.request_count, 2);
+    assert!(
+        first.windows[0]
+            .estimate_hint
+            .as_ref()
+            .unwrap()
+            .contains("估值可能偏低")
+    );
+    sqlx::query("update model_requests set cost_source='calculated', cost_amount=10, cost_currency='USD' where id='req_unknown'")
+        .execute(&db.pool).await.unwrap();
+    sqlx::query("update account_quota_estimate_samples set state=state-'last_attempt_at'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut first)
+        .await
+        .unwrap();
+    let complete = first.windows[0].estimated_quota.clone().unwrap();
+    assert_eq!(complete.total_usd, "200.00");
+    assert_eq!(complete.missing_cost_count, 0);
+    sqlx::query("update model_requests set cost_source='unavailable', cost_amount=null, cost_currency=null where id='req_unknown'")
+        .execute(&db.pool).await.unwrap();
+    let mut next = quota(now - TimeDelta::minutes(5), reset, 11.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut next)
+        .await
+        .unwrap();
+    assert_eq!(next.windows[0].estimated_quota.as_ref(), Some(&complete));
+    assert!(
+        next.windows[0]
+            .estimate_hint
+            .as_ref()
+            .unwrap()
+            .starts_with("保留上次估算")
+    );
+    // Expired cycles never show the retained result as current.
+    let mut expired = quota(
+        now - TimeDelta::minutes(1),
+        now - TimeDelta::seconds(1),
+        12.0,
+    );
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut expired)
+        .await
+        .unwrap();
+    assert!(expired.windows[0].estimated_quota.is_none());
+    db.close().await;
+}
