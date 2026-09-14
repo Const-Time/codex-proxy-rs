@@ -465,6 +465,8 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
         "acct_websocket_busy_replay",
         "acct_websocket_metadata_close",
         "acct_websocket_turn_state",
+        "acct_ws_quota_a",
+        "acct_ws_quota_b",
     ]
     .into_iter()
     .map(|id| {
@@ -3122,6 +3124,60 @@ async fn downstream_websocket_new_chain_should_override_session_and_attempt_http
         );
     }
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn websocket_opening_account_rejection_keeps_replay_safe_without_transport_retry() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_ws_quota_a").await;
+    create_account(&store, "acct_ws_quota_b").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut opening, _) = listener.accept().await.unwrap();
+        let request = capture_http_request(&mut opening).await;
+        assert!(String::from_utf8_lossy(&request).starts_with("GET /codex/responses"));
+        // 额度耗尽拒绝通常携带小时级的 retry-after；同账号重试注定再次命中。
+        let body = r#"{"error":{"message":"You have reached your usage limit.","type":"rate_limit_error"}}"#;
+        opening
+            .write_all(
+                format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 129600\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let provider = provider_with_base_url(&store, base_url);
+    let mut stream = provider
+        .execute(
+            planned_request("openai", generate_operation()),
+            context("req_ws_quota_rotation", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare quota-rejected stream");
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("quota rejection must surface as a terminal error"),
+        }
+    };
+    server.await.expect("upstream server");
+
+    assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+    assert_eq!(error.upstream_status(), Some(429));
+    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+    assert!(
+        error.replay_is_safe(),
+        "before-payload rejection is replay safe"
+    );
+    // 回放安全的账号级拒绝必须把换号决策留给 Core，不得钉死同账号传输重试
+    // （旧行为会携带小时级 retry-after 的同账号重试标记，请求必然超时）。
+    assert_eq!(error.pre_delivery_retry(), None);
 }
 
 #[tokio::test]
