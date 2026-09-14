@@ -1,8 +1,10 @@
 use gateway_protocol::openai::sse::{
     DONE_SSE_FRAME, MAX_SSE_EVENT_BUFFER_BYTES, SseError, SseEvent, SseEventDecoder,
-    encode_sse_event, encode_sse_event_with_metadata, parse_sse_events, response_failed_sse_event,
+    encode_sse_event, encode_sse_event_with_metadata, parse_sse_events,
+    response_failed_sse_data_from_error_event, response_failed_sse_event,
     response_failed_sse_event_with_id, sse_frame_end, sse_frame_is_done,
 };
+use serde_json::json;
 
 fn sse_body_has_done(body: &str) -> bool {
     body.trim_end_matches(['\r', '\n'])
@@ -384,6 +386,57 @@ fn response_failed_event_should_preserve_existing_response_id() {
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("generated event JSON");
 
     assert_eq!(data["response"]["id"], "resp_existing");
+}
+
+#[test]
+fn response_failed_projection_should_preserve_response_error_and_event_metadata() {
+    let response = json!({
+        "id": "resp_existing",
+        "model": "gpt-test",
+        "status": "in_progress",
+        "future_response_field": {"keep": true}
+    });
+    let error_event = json!({
+        "type": "error",
+        "error": {
+            "type": "service_unavailable_error",
+            "code": "server_is_overloaded",
+            "message": "overloaded",
+            "param": null,
+            "future_error_field": {"keep": true}
+        },
+        "sequence_number": 2,
+        "future_event_field": {"keep": true}
+    });
+
+    let projected = response_failed_sse_data_from_error_event(
+        Some(&response),
+        Some("ignored_fallback"),
+        &error_event,
+    )
+    .expect("wrapped error event should project");
+
+    assert_eq!(
+        projected,
+        json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_existing",
+                "model": "gpt-test",
+                "status": "failed",
+                "error": {
+                    "type": "service_unavailable_error",
+                    "code": "server_is_overloaded",
+                    "message": "overloaded",
+                    "param": null,
+                    "future_error_field": {"keep": true}
+                },
+                "future_response_field": {"keep": true}
+            },
+            "sequence_number": 2,
+            "future_event_field": {"keep": true}
+        })
+    );
 }
 
 #[test]

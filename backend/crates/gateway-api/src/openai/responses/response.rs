@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use gateway_core::event::{GatewayEvent, ProtocolWireEvent, ProviderEvent};
-use gateway_protocol::openai::sse::encode_sse_event_with_metadata;
+use gateway_protocol::openai::sse::{
+    encode_sse_event_with_metadata, response_failed_sse_data_from_error_event,
+};
 use serde_json::Value;
 
 use super::error::ResponseEncodeError;
@@ -17,6 +19,7 @@ const OPENAI_PROTOCOL: &str = "openai";
 #[derive(Debug, Default)]
 pub struct OpenAiResponsesEncoder {
     response_id: Option<String>,
+    response_snapshot: Option<Value>,
     wire_terminal: Option<Value>,
     wire_failure: bool,
 }
@@ -27,6 +30,7 @@ impl OpenAiResponsesEncoder {
     pub const fn new() -> Self {
         Self {
             response_id: None,
+            response_snapshot: None,
             wire_terminal: None,
             wire_failure: false,
         }
@@ -39,6 +43,22 @@ impl OpenAiResponsesEncoder {
             return Vec::new();
         };
         self.observe_wire(wire);
+        // 当前 Codex 不消费 Responses `error` event，会在 EOF 时丢失失败原因。
+        // 在客户端 SSE 边界统一投影成它能识别的 `response.failed`。
+        if wire.event_type() == Some("error")
+            && let Some(data) = response_failed_sse_data_from_error_event(
+                self.response_snapshot.as_ref(),
+                self.response_id.as_deref(),
+                wire.data(),
+            )
+        {
+            return vec![Bytes::from(encode_sse_event_with_metadata(
+                "response.failed",
+                &data.to_string(),
+                wire.sse_id(),
+                wire.sse_retry(),
+            ))];
+        }
         if let Some(raw_sse_frame) = wire.raw_sse_frame() {
             return vec![raw_sse_frame.clone()];
         }
@@ -110,6 +130,16 @@ impl OpenAiResponsesEncoder {
         let effective_type = wire
             .event_type()
             .or_else(|| wire.data().get("type").and_then(Value::as_str));
+        if matches!(
+            effective_type,
+            Some("response.created" | "response.in_progress" | "response.queued")
+        ) && let Some(response) = wire
+            .data()
+            .get("response")
+            .filter(|value| value.is_object())
+        {
+            self.response_snapshot = Some(response.clone());
+        }
         if matches!(
             effective_type,
             Some("response.completed" | "response.incomplete")
