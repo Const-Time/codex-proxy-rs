@@ -102,6 +102,8 @@ pub enum CodexFailureCategory {
     InvalidRequest,
     PermissionDenied,
     Timeout,
+    /// 模型容量暂时不足，只影响当前请求，不证明账号健康异常。
+    CapacityUnavailable,
     Unavailable,
     Transport,
 }
@@ -240,6 +242,7 @@ impl CodexUpstreamFailure {
                     | CodexFailureCategory::QuotaExhausted
                     | CodexFailureCategory::CloudflareChallenge
                     | CodexFailureCategory::CloudflarePathBlocked
+                    | CodexFailureCategory::CapacityUnavailable
             ),
         }
     }
@@ -402,6 +405,15 @@ fn classify_upstream_failure(
     let message = fields.message.to_ascii_lowercase();
     let body = body.to_ascii_lowercase();
 
+    // 容量拒绝可能带 400/429/503；仅用结构化错误字段识别，不能扫描任意正文。
+    if is_capacity_error(
+        fields.code.as_deref(),
+        fields.error_type.as_deref(),
+        fields.client_message.as_deref(),
+    ) {
+        return CodexFailureCategory::CapacityUnavailable;
+    }
+
     // 与官方 Codex HTTP/WS 路径一致：429 只有结构化
     // `error.type=usage_limit_reached` 才能确认额度窗口耗尽；其余 429 都是临时限流。
     // SSE `response.failed` 的结构化字段形态不同，保留其 code/type 语义单独分类。
@@ -496,9 +508,6 @@ fn classify_upstream_failure(
     }
     if status == Some(StatusCode::TOO_MANY_REQUESTS) {
         return CodexFailureCategory::RateLimited;
-    }
-    if is_upstream_overload(&code) || is_upstream_overload(&message) {
-        return CodexFailureCategory::Unavailable;
     }
     match status.map(|status| status.as_u16()) {
         Some(status) => match status {
@@ -636,6 +645,40 @@ fn is_cloudflare_challenge(value: &str) -> bool {
         || value.contains("just a moment")
 }
 
-fn is_upstream_overload(value: &str) -> bool {
-    matches!(value, "server_is_overloaded" | "slow_down") || value.contains("server_overloaded")
+pub(crate) fn is_capacity_error(
+    code: Option<&str>,
+    error_type: Option<&str>,
+    message: Option<&str>,
+) -> bool {
+    let code = normalized(code);
+    let error_type = normalized(error_type);
+    // 明确额度窗口/账号错误保留原分类，不能被描述中的容量词覆盖。
+    if !matches!(
+        error_type.as_str(),
+        "" | "server_error"
+            | "service_unavailable_error"
+            | "invalid_request_error"
+            | "rate_limit_error"
+            | "server_is_overloaded"
+            | "slow_down"
+    ) {
+        return false;
+    }
+    if matches!(code.as_str(), "server_is_overloaded" | "slow_down") {
+        return true;
+    }
+    if !matches!(
+        code.as_str(),
+        "" | "server_error" | "service_unavailable_error"
+    ) {
+        return false;
+    }
+    if matches!(error_type.as_str(), "server_is_overloaded" | "slow_down") {
+        return true;
+    }
+    let message = normalized(message);
+    matches!(message.as_str(), "server_is_overloaded" | "slow_down")
+        || message.contains("selected model is at capacity")
+        || message.contains("server is overloaded")
+        || message.contains("server_overloaded")
 }

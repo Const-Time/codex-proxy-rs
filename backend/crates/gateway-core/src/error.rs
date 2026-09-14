@@ -46,6 +46,8 @@ pub enum ProviderErrorKind {
     Protocol,
     /// Provider 暂不可用。
     Unavailable,
+    /// 上游明确拒绝当前请求的模型容量；不证明整个 Provider 的基础设施故障。
+    UpstreamCapacityUnavailable,
     /// 请求被取消。
     Cancelled,
     /// 进程终止后由恢复流程收敛。
@@ -71,6 +73,7 @@ impl ProviderErrorKind {
             Self::Transport => "transport",
             Self::Protocol => "protocol",
             Self::Unavailable => "unavailable",
+            Self::UpstreamCapacityUnavailable => "upstream_capacity_unavailable",
             Self::Cancelled => "cancelled",
             Self::ProcessTerminated => "process_terminated",
         }
@@ -105,6 +108,15 @@ pub enum ContinuationRecoveryDisposition {
 pub enum PreDeliveryRetry {
     /// 排除本次账号，按普通调度策略重新选号。
     AccountRotation,
+    /// 上游明确拒绝后的同账号退避；耗尽后仍由普通安全重放规则决定是否换号。
+    SameAccountTransientRetry {
+        /// 每个账号在本请求中的重试上限，同时受总路由预算约束。
+        max_retries: NonZeroU32,
+        /// 指数退避的起始间隔。
+        initial_delay: Duration,
+        /// 单次等待上限，避免上游提示把请求拖入长时间等待。
+        max_delay: Duration,
+    },
     /// 固定本次账号，并按 Provider 给出的序号重试当前传输。
     SameAccountTransportRetry {
         /// Provider-owned 传输重试序号，从 1 开始。
@@ -409,7 +421,7 @@ pub struct ProviderError {
     continuation_recovery_disposition: Option<ContinuationRecoveryDisposition>,
     failure_observation: Option<Box<ProviderErrorFailureObservation>>,
     replay_safe: bool,
-    pre_delivery_retry: Option<PreDeliveryRetry>,
+    pre_delivery_retry: Option<Box<PreDeliveryRetry>>,
     credential_recovery_required: bool,
     retry_same_account: bool,
     sensitive_context_redacted: bool,
@@ -557,8 +569,8 @@ impl ProviderError {
     /// Provider 选择了“客户端无感恢复优先”的传输策略。Core 在 continuation、
     /// 指定账号或下游已经进入提交状态时必须忽略它。
     #[must_use]
-    pub const fn with_pre_delivery_retry(mut self) -> Self {
-        self.pre_delivery_retry = Some(PreDeliveryRetry::AccountRotation);
+    pub fn with_pre_delivery_retry(mut self) -> Self {
+        self.pre_delivery_retry = Some(Box::new(PreDeliveryRetry::AccountRotation));
         self
     }
 
@@ -567,14 +579,14 @@ impl ProviderError {
     /// 与普通换号恢复相同，Core 仍会拒绝 continuation、指定账号、预算耗尽或
     /// 下游已提交后的隐藏重放。
     #[must_use]
-    pub const fn with_pre_delivery_transport_fallback(mut self) -> Self {
+    pub fn with_pre_delivery_transport_fallback(mut self) -> Self {
         self.set_pre_delivery_transport_fallback();
         self
     }
 
     /// 原地设置同账号备用传输恢复，保留当前错误携带的原客户端响应。
-    pub const fn set_pre_delivery_transport_fallback(&mut self) {
-        self.pre_delivery_retry = Some(PreDeliveryRetry::SameAccountTransportFallback);
+    pub fn set_pre_delivery_transport_fallback(&mut self) {
+        self.pre_delivery_retry = Some(Box::new(PreDeliveryRetry::SameAccountTransportFallback));
     }
 
     /// 允许 Core 在首个客户端事件前固定原账号并重试当前 Provider 传输。
@@ -582,7 +594,7 @@ impl ProviderError {
     /// 重试预算和退避策略由 Provider 所属协议定义；Core 只负责同账号钉选、
     /// deadline/取消边界以及下游 commit barrier。
     #[must_use]
-    pub const fn with_pre_delivery_transport_retry(
+    pub fn with_pre_delivery_transport_retry(
         mut self,
         retry_index: NonZeroU32,
         delay: Duration,
@@ -592,19 +604,33 @@ impl ProviderError {
     }
 
     /// 原地设置同账号当前传输重试，保留当前错误携带的原客户端响应。
-    pub const fn set_pre_delivery_transport_retry(
-        &mut self,
-        retry_index: NonZeroU32,
-        delay: Duration,
-    ) {
-        self.pre_delivery_retry =
-            Some(PreDeliveryRetry::SameAccountTransportRetry { retry_index, delay });
+    pub fn set_pre_delivery_transport_retry(&mut self, retry_index: NonZeroU32, delay: Duration) {
+        self.pre_delivery_retry = Some(Box::new(PreDeliveryRetry::SameAccountTransportRetry {
+            retry_index,
+            delay,
+        }));
     }
 
     /// 要求 Core 在账号凭据已恢复后仅对原账号重放一次。
     #[must_use]
     pub const fn with_same_account_retry(mut self) -> Self {
         self.retry_same_account = true;
+        self
+    }
+
+    /// 请求有界同账号退避；该意图本身不提供安全重放证据。
+    #[must_use]
+    pub fn with_transient_retry(
+        mut self,
+        max_retries: NonZeroU32,
+        initial_delay: Duration,
+        max_delay: Duration,
+    ) -> Self {
+        self.pre_delivery_retry = Some(Box::new(PreDeliveryRetry::SameAccountTransientRetry {
+            max_retries,
+            initial_delay,
+            max_delay,
+        }));
         self
     }
 
@@ -748,7 +774,10 @@ impl ProviderError {
     /// 返回下游提交前由 Provider 选择的隐藏恢复方式。
     #[must_use]
     pub const fn pre_delivery_retry(&self) -> Option<PreDeliveryRetry> {
-        self.pre_delivery_retry
+        match self.pre_delivery_retry.as_ref() {
+            Some(retry) => Some(**retry),
+            None => None,
+        }
     }
 
     /// 返回 Provider 是否已完成凭据恢复并要求原账号重放。
@@ -822,7 +851,7 @@ impl Clone for ProviderError {
             continuation_recovery_disposition: self.continuation_recovery_disposition,
             failure_observation: self.failure_observation.clone(),
             replay_safe: self.replay_safe,
-            pre_delivery_retry: self.pre_delivery_retry,
+            pre_delivery_retry: self.pre_delivery_retry.clone(),
             credential_recovery_required: self.credential_recovery_required,
             retry_same_account: self.retry_same_account,
             sensitive_context_redacted: self.sensitive_context_redacted,
@@ -1064,6 +1093,7 @@ impl GatewayError {
             ProviderErrorKind::Transport
             | ProviderErrorKind::Protocol
             | ProviderErrorKind::Unavailable
+            | ProviderErrorKind::UpstreamCapacityUnavailable
             | ProviderErrorKind::ProcessTerminated => Self::new(
                 GatewayErrorKind::UpstreamUnavailable,
                 "upstream service is unavailable",

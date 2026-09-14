@@ -45,17 +45,21 @@ fn deliver_error_with_openai_feedback(
 }
 
 #[test]
-fn account_score_failure_filter_should_include_server_overload_as_a_regular_reason() {
-    let error = sent_error(ProviderErrorKind::Unavailable, Some("server_is_overloaded"));
-
-    assert!(openai_failure_affects_account_score(&error));
+fn account_score_failure_filter_should_exclude_request_scoped_capacity_errors() {
+    for code in ["server_is_overloaded", "slow_down", "server_error"] {
+        let error = sent_error(ProviderErrorKind::Unavailable, Some(code))
+            .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                "Selected model is at capacity. Please try a different model.",
+                Some("server_error".to_owned()),
+                Some("server_error".to_owned()),
+            ));
+        assert!(!openai_failure_affects_account_score(&error));
+    }
 }
 
 #[test]
 fn account_score_failure_filter_should_accept_the_closed_reason_list() {
     for code in [
-        "server_is_overloaded",
-        "slow_down",
         "rate_limit_exceeded",
         "rate_limit_error",
         "server_error",
@@ -181,7 +185,7 @@ fn openai_feedback_should_not_amplify_repeated_client_configuration_errors() {
 }
 
 #[test]
-fn openai_feedback_should_score_server_overload_as_one_regular_failure() {
+fn openai_feedback_should_not_penalize_an_account_for_server_overload() {
     let feedback = Arc::new(AccountFeedbackStats::default());
     let provider = ProviderKind::new("openai").expect("provider");
     let account = ProviderAccountId::new("acct_overloaded").expect("account");
@@ -193,8 +197,5 @@ fn openai_feedback_should_score_server_overload_as_one_regular_failure() {
         sent_error(ProviderErrorKind::Unavailable, Some("server_is_overloaded")),
     );
 
-    assert_eq!(
-        feedback.scheduling_signals(&provider, &account).0,
-        Some(2_000)
-    );
+    assert_eq!(feedback.scheduling_signals(&provider, &account).0, None);
 }

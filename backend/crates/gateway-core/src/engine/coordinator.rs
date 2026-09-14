@@ -3,7 +3,7 @@
 use crate::diagnostics::TraceContext;
 use serde_json::json;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -193,7 +193,8 @@ where
             excluded_accounts: BTreeSet::new(),
             credential_recovery_attempted_accounts: BTreeSet::new(),
             recovery_account: None,
-            transport_recovery: None,
+            pending_retry: None,
+            transient_retry_counts: BTreeMap::new(),
             current: None,
             send_state_watermark: UpstreamSendState::NotSent,
             downstream_committed_at: None,
@@ -225,6 +226,7 @@ struct CurrentAttempt {
     stream: ProviderStream,
     metadata: ProviderCallMetadata,
     trigger: AttemptTrigger,
+    transport: AttemptTransport,
     index: NonZeroU32,
     started_at: SystemTime,
     send_observed: bool,
@@ -243,10 +245,11 @@ struct FailureFinalization {
 }
 
 #[derive(Debug, Clone)]
-struct PendingTransportRecovery {
+struct PendingAttemptRetry {
     account: crate::account::ProviderAccountId,
     transport: AttemptTransport,
     delay: Duration,
+    transport_recovery: bool,
 }
 
 /// API 可逐事件消费的 Core 执行会话。
@@ -285,9 +288,10 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     /// attempt 建立时即被消费，后续可重试错误仍可换号消耗剩余重试预算。
     /// 与 `required_account`（外部指定、贯穿整个请求）语义不同，不可合并。
     recovery_account: Option<crate::account::ProviderAccountId>,
-    /// 上游传输在提交边界前失败后的一次性同账号重试或备用传输钉选。
-    /// 与凭据恢复分开保存，避免把 transport recovery 误记为 OAuth 恢复。
-    transport_recovery: Option<PendingTransportRecovery>,
+    /// 提交前同账号退避/传输恢复共用的等待与钉选状态；业务重试消耗路由预算。
+    pending_retry: Option<PendingAttemptRetry>,
+    /// 请求内按账号累计的瞬时拒绝重试次数，不能跨请求污染账号健康状态。
+    transient_retry_counts: BTreeMap<crate::account::ProviderAccountId, u32>,
     current: Option<CurrentAttempt>,
     /// 请求级发送状态水位；跨 attempt 单调不降，终态写回不得低于此档。
     send_state_watermark: UpstreamSendState,
@@ -672,11 +676,14 @@ where
     }
 
     async fn prepare_attempt(&mut self) -> Result<Option<PullOutcome>, EngineError> {
-        let transport_recovery = self.transport_recovery.take();
-        if transport_recovery.is_none() && self.routing_attempts >= self.plan.max_attempts().get() {
+        let pending_retry = self.pending_retry.take();
+        let is_transport_recovery = pending_retry
+            .as_ref()
+            .is_some_and(|retry| retry.transport_recovery);
+        if !is_transport_recovery && self.routing_attempts >= self.plan.max_attempts().get() {
             return Err(EngineError::EmptyRoutingPlan);
         }
-        if let Some(recovery) = transport_recovery.as_ref()
+        if let Some(recovery) = pending_retry.as_ref()
             && !recovery.delay.is_zero()
         {
             match poll_retry_delay(recovery.delay, self.cancellation.clone(), self.deadline).await {
@@ -716,8 +723,7 @@ where
             .ok_or(EngineError::EmptyRoutingPlan)?;
         // 请求局部恢复钉选在此被一次性消费，只绑定本次 replay attempt；
         // 外部 required_account 每次 attempt 都重新生效。
-        let is_transport_recovery = transport_recovery.is_some();
-        let (pinned_account, attempt_transport) = if let Some(recovery) = transport_recovery {
+        let (pinned_account, attempt_transport) = if let Some(recovery) = pending_retry {
             (Some(recovery.account), recovery.transport)
         } else {
             match &self.account_selection {
@@ -1013,6 +1019,7 @@ where
             stream,
             metadata,
             trigger,
+            transport: attempt_transport,
             index: next_attempt,
             started_at: SystemTime::now(),
             send_observed: false,
@@ -1159,6 +1166,27 @@ where
             && attempt_send_state != UpstreamSendState::Ambiguous
             && provider_proved_replay_safe
             && self.routing_attempts < self.plan.max_attempts().get();
+        let transient_retry = match error.pre_delivery_retry() {
+            Some(crate::error::PreDeliveryRetry::SameAccountTransientRetry {
+                max_retries,
+                initial_delay,
+                max_delay,
+            }) if ordinary_retry => {
+                let retries = self
+                    .transient_retry_counts
+                    .entry(current.metadata.provider_account_id().clone())
+                    .or_default();
+                if *retries < max_retries.get() {
+                    let multiplier = 1_u32.checked_shl(*retries).unwrap_or(u32::MAX);
+                    let delay = initial_delay.saturating_mul(multiplier).min(max_delay);
+                    *retries = retries.saturating_add(1);
+                    Some(delay)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
         let same_account_retry = error.retries_same_account()
             && provider_proved_replay_safe
             && self.downstream_committed_at.is_none()
@@ -1178,7 +1206,8 @@ where
             "retryable": retryable, "continuationRetry": continuation_retry,
             "sameAccountRetry": same_account_retry, "accountRotationRetry": account_rotation_retry,
             "ordinaryRetry": ordinary_retry, "transportRecovery": transport_recovery.is_some(),
-            "delayMs": transport_recovery.map(|(_, delay)| duration_ms(delay)),
+            "transientRetry": transient_retry.is_some(),
+            "delayMs": transient_retry.or(transport_recovery.map(|(_, delay)| delay)).map(duration_ms),
             "downstreamCommitted": self.downstream_committed_at.is_some(),
             "sendState": format!("{attempt_send_state:?}"),
         }));
@@ -1198,11 +1227,19 @@ where
                 // 只钉住紧随其后的 replay attempt；replay 再遇可重试错误时，
                 // ordinary/continuation 重试门不受影响，仍可换号。
                 self.recovery_account = Some(account);
+            } else if let Some(delay) = transient_retry {
+                self.pending_retry = Some(PendingAttemptRetry {
+                    account: current.metadata.provider_account_id().clone(),
+                    transport: current.transport,
+                    delay,
+                    transport_recovery: false,
+                });
             } else if let Some((transport, delay)) = transport_recovery {
-                self.transport_recovery = Some(PendingTransportRecovery {
+                self.pending_retry = Some(PendingAttemptRetry {
                     account: current.metadata.provider_account_id().clone(),
                     transport,
                     delay,
+                    transport_recovery: true,
                 });
             } else if !continuation_retry {
                 self.excluded_accounts

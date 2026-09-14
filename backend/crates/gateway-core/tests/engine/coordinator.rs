@@ -3231,6 +3231,284 @@ fn provider_owned_transport_retries_keep_the_same_account_until_fallback() {
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
 }
 
+fn transient_rejection() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::UpstreamCapacityUnavailable,
+        UpstreamSendState::Sent,
+    )
+    .with_replay_safe()
+    .with_transient_retry(
+        NonZeroU32::new(3).expect("retry budget"),
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+}
+
+#[test]
+fn transient_retries_back_off_on_the_same_account_then_rotate_with_a_fresh_budget() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let mut scripts = (0..4)
+        .map(|_| Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(transient_rejection())],
+        })
+        .collect::<Vec<_>>();
+    scripts.push(Script::Stream {
+        account_id: "acct_second",
+        items: vec![Err(transient_rejection())],
+    });
+    scripts.push(Script::Stream {
+        account_id: "acct_second",
+        items: complete_stream(None),
+    });
+    let (coordinator, store, provider) = coordinator(scripts);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("start execution");
+    block_on(session.collect_uncommitted()).expect("second account succeeds");
+    block_on(session.commit_downstream(Some(200))).expect("commit");
+    let first = ProviderAccountId::new("acct_first").expect("account");
+    let second = ProviderAccountId::new("acct_second").expect("account");
+    let contexts = provider.contexts.lock().expect("contexts");
+    assert_eq!(contexts.len(), 6);
+    for context in &contexts[1..4] {
+        assert_eq!(context.required_account(), Some(&first));
+        assert!(!context.excluded_accounts().contains(&first));
+    }
+    assert_eq!(contexts[4].required_account(), None);
+    assert!(contexts[4].excluded_accounts().contains(&first));
+    assert_eq!(contexts[5].required_account(), Some(&second));
+    assert!(!contexts[5].excluded_accounts().contains(&second));
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.transport() == AttemptTransport::Default)
+    );
+    assert_eq!(
+        store.state.lock().expect("store").finalizations[0].attempt_count,
+        6
+    );
+}
+
+#[test]
+fn transient_retries_consume_the_total_routing_budget() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let max_attempts = route_plan.max_attempts();
+    let scripts = (0..max_attempts.get())
+        .map(|_| Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(transient_rejection().with_transient_retry(
+                max_attempts,
+                Duration::ZERO,
+                Duration::ZERO,
+            ))],
+        })
+        .collect();
+    let (coordinator, store, provider) = coordinator(scripts);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("start execution");
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::Provider(_))
+    ));
+    assert_eq!(
+        provider.contexts.lock().expect("contexts").len(),
+        max_attempts.get() as usize
+    );
+    assert_eq!(
+        store.state.lock().expect("store").finalizations[0].attempt_count,
+        max_attempts.get()
+    );
+}
+
+#[test]
+fn transient_retry_intent_does_not_supply_replay_proof_or_override_ambiguous_send() {
+    for (send_state, prove_safe) in [
+        (UpstreamSendState::Sent, false),
+        (UpstreamSendState::Ambiguous, true),
+    ] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let mut error = ProviderError::new(ProviderErrorKind::Unavailable, send_state)
+            .with_transient_retry(NonZeroU32::MIN, Duration::ZERO, Duration::ZERO);
+        if prove_safe {
+            error = error.with_replay_safe();
+        }
+        let (coordinator, _, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(error)],
+        }]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("start execution");
+        assert!(matches!(
+            block_on(session.collect_uncommitted()),
+            Err(EngineError::Provider(_))
+        ));
+        assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+    }
+}
+
+#[test]
+fn transient_backoff_obeys_request_deadline() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, _, provider) = coordinator(vec![Script::Stream {
+        account_id: "acct_first",
+        items: vec![Err(transient_rejection().with_transient_retry(
+            NonZeroU32::MIN,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ))],
+    }]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_millis(100)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("start execution");
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::Deadline)
+    ));
+    assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+}
+
+#[test]
+fn transient_retry_keeps_http_fallback_for_the_pinned_account() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, _, provider) = coordinator(vec![
+        Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(ProviderError::new(
+                ProviderErrorKind::Transport,
+                UpstreamSendState::NotSent,
+            )
+            .with_pre_delivery_transport_fallback())],
+        },
+        Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(transient_rejection())],
+        },
+        Script::Stream {
+            account_id: "acct_first",
+            items: complete_stream(None),
+        },
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("start execution");
+    block_on(session.collect_uncommitted()).expect("fallback succeeds after backoff");
+    let contexts = provider.contexts.lock().expect("contexts");
+    assert_eq!(contexts.len(), 3);
+    assert_eq!(contexts[2].transport(), AttemptTransport::Fallback);
+}
+
+#[test]
+fn transient_retry_is_suppressed_for_required_accounts_and_committed_output() {
+    for committed in [false, true] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let mut items = Vec::new();
+        if committed {
+            items.push(Ok(GatewayEvent::Started(ResponseMeta::new(
+                "response-visible",
+                "gpt-5",
+            ))));
+        }
+        items.push(Err(transient_rejection()));
+        let (coordinator, _, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_first",
+            items,
+        }]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            (!committed).then(|| ProviderAccountId::new("acct_first").expect("account")),
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("start execution");
+        if committed {
+            block_on(session.next_event())
+                .expect("first event")
+                .expect("visible event");
+            block_on(session.commit_downstream(Some(200))).expect("commit output");
+        }
+        assert!(matches!(
+            block_on(session.next_event()),
+            Err(EngineError::Provider(_))
+        ));
+        assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+    }
+}
+
+#[test]
+fn transient_backoff_can_be_cancelled_before_the_next_attempt() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, _, provider) = coordinator(vec![Script::Stream {
+        account_id: "acct_first",
+        items: vec![Err(transient_rejection().with_transient_retry(
+            NonZeroU32::MIN,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ))],
+    }]);
+    let cancellation = CancellationToken::new();
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        cancellation.clone(),
+    ))
+    .expect("start execution");
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        cancellation.cancel();
+    });
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::Cancelled)
+    ));
+    cancel.join().expect("cancel task");
+    assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+}
+
 #[test]
 fn final_capacity_exhaustion_returns_the_last_retryable_upstream_failure() {
     let operation = generate_operation();

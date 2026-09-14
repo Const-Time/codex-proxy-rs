@@ -20,6 +20,69 @@ fn classify(status: u16, body: &str) -> CodexFailureCategory {
     .category()
 }
 
+#[test]
+fn capacity_rejections_are_request_scoped_across_http_statuses() {
+    for status in [400, 429, 503] {
+        for body in [
+            r#"{"error":{"code":"server_is_overloaded","message":"busy"}}"#,
+            r#"{"error":{"code":"slow_down","type":"server_error"}}"#,
+            r#"{"error":{"type":"server_is_overloaded"}}"#,
+            r#"{"error":{"message":"slow_down"}}"#,
+            r#"{"error":{"type":"invalid_request_error","message":"Selected model is at capacity. Please try a different model."}}"#,
+        ] {
+            assert_eq!(
+                classify(status, body),
+                CodexFailureCategory::CapacityUnavailable
+            );
+            for (phase, safe) in [
+                (CodexUpstreamSendPhase::BeforePayload, true),
+                (CodexUpstreamSendPhase::AfterPayload, true),
+                (CodexUpstreamSendPhase::Ambiguous, false),
+            ] {
+                let failure = CodexUpstreamFailure::from_response(
+                    reqwest::StatusCode::from_u16(status).expect("status"),
+                    body,
+                    Some(129_600),
+                    &CodexUpstreamDiagnostics::default(),
+                    None,
+                    &[],
+                    &[],
+                    phase,
+                );
+                assert_eq!(failure.replay_is_safe(), safe);
+            }
+        }
+    }
+}
+
+#[test]
+fn capacity_words_do_not_override_quota_policy_or_arbitrary_body_fields() {
+    for (status, body, expected) in [
+        (
+            429,
+            r#"{"error":{"type":"usage_limit_reached","message":"Selected model is at capacity"}}"#,
+            CodexFailureCategory::UsageLimitExhausted,
+        ),
+        (
+            400,
+            r#"{"error":{"code":"cyber_policy","message":"Selected model is at capacity"}}"#,
+            CodexFailureCategory::InvalidRequest,
+        ),
+        (
+            400,
+            r#"{"error":{"message":"bad input"},"input":"Selected model is at capacity"}"#,
+            CodexFailureCategory::InvalidRequest,
+        ),
+        (
+            429,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"retry later"}}"#,
+            CodexFailureCategory::RateLimited,
+        ),
+    ] {
+        assert_eq!(classify(status, body), expected);
+    }
+}
+
 fn trace_header<'a>(diagnostics: &'a CodexUpstreamDiagnostics, name: &str) -> Option<&'a str> {
     diagnostics
         .trace_headers
