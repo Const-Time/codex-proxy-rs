@@ -25,7 +25,7 @@ export interface AccountQuotaWindow {
   limitReached: boolean
   localUsage?: unknown
   estimateHint?: string | null
-  estimatedQuota?: { billedUsedUsd?: string | null, billedTotalUsd?: string | null, usedUsd: string, totalUsd: string, percentDelta: number, sampleStart: string, sampleEnd: string } | null
+  estimatedQuota?: { cycleBased?: boolean, missingCostCount?: number, requestCount?: number, billedUsedUsd?: string | null, billedTotalUsd?: string | null, usedUsd: string, totalUsd: string, percentDelta: number, sampleStart: string, sampleEnd: string } | null
   resetAtDisplay: string
 }
 

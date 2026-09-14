@@ -188,6 +188,9 @@ pub(crate) fn quota_window_view(window: ProviderQuotaWindow) -> AccountQuotaWind
         local_usage: local_usage.as_ref().map(quota_local_usage),
         estimate_hint,
         estimated_quota: estimated_quota.map(|estimate| AccountQuotaEstimateView {
+            cycle_based: estimate.cycle_based,
+            missing_cost_count: estimate.missing_cost_count,
+            request_count: estimate.request_count,
             billed_used_usd: estimate.billed_used_usd,
             billed_total_usd: estimate.billed_total_usd,
             used_usd: estimate.used_usd,
