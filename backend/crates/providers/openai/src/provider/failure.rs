@@ -506,6 +506,27 @@ pub(super) fn apply_websocket_recovery_policy(
     failure: &mut MappedProviderFailure,
     context: WebSocketRecoveryContext<'_>,
 ) {
+    // 账号级上游拒绝（额度、限流、封禁等）没有可恢复的传输语义：同账号重试只会
+    // 命中同一拒绝，而上游 retry-after 通常是小时级的额度窗口。保留账号失败记录
+    // 让健康度立即生效，并把回放安全证据随错误交给 Core 换号恢复，与 HTTP 路径
+    // 的调度语义保持一致。
+    if failure.account_failure.is_some() && failure.error.replay_is_safe() {
+        tracing::warn!(
+            request_id = context.request_id,
+            attempt_index = context.attempt_index,
+            account_id = context.account_id,
+            websocket_failure_kind = failure.error.kind().as_str(),
+            websocket_failure_code = failure
+                .error
+                .upstream_code()
+                .map_or("", OpaqueUpstreamValue::as_str),
+            upstream_status_code = failure.error.upstream_status().unwrap_or_default(),
+            upstream_status_code_present = failure.error.upstream_status().is_some(),
+            transport_requirement = context.requirement.as_str(),
+            "OpenAI upstream WebSocket rejected by an account-level failure; deferring to account rotation"
+        );
+        return;
+    }
     let session_budget_exhausted = context.session_affinity_key.is_some_and(|key| {
         context
             .session_transport_recovery
