@@ -8,6 +8,40 @@ function text(value: unknown) {
   return typeof value === 'string' && value.length > 0 ? value : '—'
 }
 
+export function proxyDetectionTime(value: unknown, timezone: unknown) {
+  if (typeof value !== 'string' || !value.trim())
+    return '—'
+  if (typeof timezone !== 'string' || !timezone.trim())
+    return `${value}（原始时间；未记录代理时区）`
+  // PostgreSQL timestamps include microseconds and may use a short offset (+00).
+  // Require an explicit offset so the browser never interprets the value as local time.
+  const normalized = value.trim().replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00').replace(/([+-]\d{2})(\d{2})$/, '$1:$2')
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized))
+    return `${value}（原始时间；缺少 UTC 偏移）`
+  const date = new Date(normalized)
+  if (!Number.isFinite(date.getTime()))
+    return `${value}（原始时间；时间格式不可识别）`
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'longOffset',
+    })
+    const parts = Object.fromEntries(formatter.formatToParts(date).map(part => [part.type, part.value]))
+    const offset = parts.timeZoneName === 'GMT' ? 'UTC+00:00' : parts.timeZoneName?.replace('GMT', 'UTC')
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}（${timezone}，${offset}）`
+  }
+  catch {
+    return `${value}（原始时间；代理时区不可识别）`
+  }
+}
+
 const modeLabels: Record<string, string> = { auto: '自动检测', manual: '手动指定', passthrough: '透传客户端' }
 const transportLabels: Record<string, string> = { http_sse: 'HTTP SSE', http_json: 'HTTP JSON', websocket: 'WebSocket' }
 const headerLabels: Record<string, string> = {
@@ -42,7 +76,7 @@ export function requestProfiles(events: RequestTraceEvent[]) {
       { label: '代理 ID', value: text(proxy.proxyId), mono: true },
       { label: '地区策略', value: modeLabels[text(proxy.mode)] ?? (data.viaProxy ? '未记录来源' : '保留客户端') },
       { label: '上次检测出口 IP', value: text(proxy.detectedIp), mono: true },
-      { label: '出口检测时间', value: text(proxy.detectedAt), mono: true },
+      { label: '出口检测时间', value: proxyDetectionTime(proxy.detectedAt, location.timezone), mono: true },
       { label: '代理提供的地区', value: [location.country, location.region, location.city].filter(value => typeof value === 'string').join(' / ') || '无覆盖值' },
       { label: '代理提供的时区', value: text(location.timezone), mono: true },
       { label: '实际改写', value: applied ? `环境信息 ${Number(changes.environmentChanged) || 0} 处；搜索位置 ${Number(changes.searchChanged) || 0} 处` : '此调用未记录地区改写' },
