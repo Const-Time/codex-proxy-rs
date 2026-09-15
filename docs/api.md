@@ -174,6 +174,9 @@ OpenAI 路径保留客户端 Responses wire 语义：请求 body 的未知字段
 `x-codex-turn-metadata` 在移除客户端账号身份并按当前 lease 重写 installation ID 后转发；上游账号
 Authorization、Cookie、account ID、originator 和 User-Agent 均由代理安全重建。xAI 是 Grok wire 与
 Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
+客户端错误事件适配是上述透传规则的例外：SSE 边界将上游 `error` 转为 `response.failed`，
+保留错误字段与已知 response 身份；WebSocket 边界仅转换客户端无法消费的裸 `error`。
+带非 2xx `status`/`status_code` 或内置续接错误码的 WebSocket 错误帧继续原样交付。
 上游结构化错误的 message/code/type 会透传给客户端，其中内嵌的账号指纹 UUID 已脱敏。模型映射是
 全局精确映射，未命中时模型名原样交给候选 Provider；分组只限定账号集合，不参与模型改名。
 
@@ -465,6 +468,8 @@ OAuth start 使用：
 - OpenAI 已耗尽账号每 30 分钟主动复核一次，也会在最早未恢复窗口的 `resetAt + 2 分钟` 到期后
   提前复核。后台每 30 秒检查触发条件；同一重置边界复核后仍未恢复时回到 30 分钟重试，
   避免旧 reset 持续触发请求。各窗口独立确认恢复，时间到期本身不会直接解除账号耗尽。
+  重置时间前进且用量低于 10% 可解除对应窗口；重置时间未变时，需要连续两次上游查询明确报告
+  用量低于 100% 且未触顶。缺失百分比、缺失或更旧的重置时间不会构成同窗口恢复证据。
 - `POST /accounts/recover` 是管理员对本地事实的强制恢复：它清除 Redis cooldown 和已保存的额度/错误，
   把账号重新启用并恢复为可调度 credential；它不验证上游账号是否已经恢复，下一次真实请求仍可重新写入
   失败事实。

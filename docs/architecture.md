@@ -176,6 +176,8 @@ Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 ca
 
 - OpenAI 是透明边界。Responses 请求保留未知字段和字段顺序；SSE、WebSocket、Images 与 standalone
   Search 的业务正文按原始字节转发。canonical facts 从同一数据旁路提取，只用于路由、观测和计费。
+- API 的客户端事件适配将 SSE 上游 `error` 和 WS 客户端无法消费的裸错误转为 `response.failed`，
+  复用 Protocol 的错误投影；保留结构化错误与 response 身份，不改写 Provider 的调度或计费事实。
 - Responses 的业务扩展头保留原始多值字节；传输与反代请求头分类由 `gateway-protocol` 统一定义，
   API 入站与 OpenAI Provider 编码共同使用。下游链路元数据和压缩协商不跨越该边界，
   上游认证、请求画像与传输字段仍由 Provider 生成；响应方向的诊断头不受请求过滤规则影响。

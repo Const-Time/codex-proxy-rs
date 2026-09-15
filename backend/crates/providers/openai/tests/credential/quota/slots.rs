@@ -690,6 +690,83 @@ async fn monthly_and_arbitrary_periods_use_the_same_recovery_rule() {
 }
 
 #[tokio::test]
+async fn same_window_recovery_rejects_missing_or_older_quota_evidence() {
+    for case in ["missing_percent", "missing_reset", "older_reset"] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_incomplete_recovery").await;
+        let account = store.account("acct_incomplete_recovery").expect("account");
+        let server = MockServer::start().await;
+        let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
+        let mut exhausted = usage((0, SHORT_RESET), (100, WEEK_RESET));
+        exhausted["rate_limit"]["allowed"] = json!(false);
+        mount_usage(&server, exhausted).await;
+        let seeded = service
+            .refresh_account(account.id())
+            .await
+            .expect("seed exhaustion");
+        assert!(seeded.quota().is_exhausted());
+        // One valid candidate followed by incomplete evidence must break the
+        // consecutive-observation chain, including after it is persisted.
+        mount_usage(&server, usage((0, SHORT_RESET), (40, WEEK_RESET))).await;
+        assert!(
+            service
+                .refresh_account(account.id())
+                .await
+                .unwrap()
+                .quota()
+                .is_exhausted()
+        );
+        let mut incomplete = usage((0, SHORT_RESET), (40, WEEK_RESET));
+        let weekly = incomplete["rate_limit"]["secondary_window"]
+            .as_object_mut()
+            .unwrap();
+        match case {
+            "missing_percent" => {
+                weekly.remove("used_percent");
+            }
+            "missing_reset" => {
+                weekly.remove("reset_at");
+            }
+            _ => {
+                weekly.insert("reset_at".into(), json!(WEEK_RESET - 60));
+            }
+        }
+        mount_usage(&server, incomplete).await;
+        for _ in 0..2 {
+            assert!(
+                service
+                    .refresh_account(account.id())
+                    .await
+                    .unwrap()
+                    .quota()
+                    .is_exhausted(),
+                "{case}"
+            );
+        }
+        mount_usage(&server, usage((0, SHORT_RESET), (40, WEEK_RESET))).await;
+        assert!(
+            service
+                .refresh_account(account.id())
+                .await
+                .unwrap()
+                .quota()
+                .is_exhausted(),
+            "{case}"
+        );
+        assert_eq!(
+            service
+                .refresh_account(account.id())
+                .await
+                .unwrap()
+                .quota()
+                .access(),
+            QuotaAccessState::Allowed,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn arbitrary_periods_keep_their_identity_when_roles_change() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_generic_roles").await;
