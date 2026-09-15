@@ -2,3 +2,4 @@
 
 mod backup;
 mod provider_credentials;
+mod quota_forecast_sampling;

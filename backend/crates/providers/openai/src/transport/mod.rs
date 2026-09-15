@@ -8,6 +8,7 @@ mod client_sse;
 pub mod diagnostics;
 pub mod endpoints;
 pub mod headers;
+pub mod location;
 pub mod profile;
 pub mod profile_avatar;
 pub mod profile_statistics;

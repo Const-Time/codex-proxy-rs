@@ -54,6 +54,7 @@ mod endpoints;
 mod headers;
 mod http_client;
 mod latency;
+mod location;
 mod profile;
 mod profile_avatar;
 mod profile_contract;

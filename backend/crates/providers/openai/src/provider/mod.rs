@@ -468,6 +468,14 @@ impl Provider for CodexProvider {
         {
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
+        crate::transport::location::apply_request_location(
+            upstream_request.body_mut(),
+            lease
+                .account()
+                .outbound_proxy()
+                .and_then(gateway_core::account::OutboundProxy::location),
+            chrono::Utc::now(),
+        );
         scope_request_to_account(
             &mut upstream_request,
             lease.installation_id(),

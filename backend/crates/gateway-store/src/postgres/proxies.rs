@@ -28,7 +28,8 @@ use crate::{
 };
 
 const ENTITY: &str = "outbound proxy";
-const SELECT: &str = "select p.*,
+const SELECT: &str =
+    "select p.*, (select config_revision from runtime_settings where id=1) as config_revision,
     (select count(*) from provider_accounts a where a.outbound_proxy_id = p.id) as account_count
     from outbound_proxies p";
 
@@ -97,7 +98,26 @@ fn record(row: PgRow) -> StoreResult<ProxyRecord> {
     let success: Option<bool> = row.try_get("last_test_success").map_err(|_| invalid())?;
     let ip: Option<String> = row.try_get("last_test_ip").map_err(|_| invalid())?;
     let latency: Option<i64> = row.try_get("last_test_latency_ms").map_err(|_| invalid())?;
+    let location = row
+        .try_get::<Option<sqlx::types::Json<gateway_core::account::RequestLocation>>, _>(
+            "last_test_location",
+        )
+        .map_err(|_| invalid())?
+        .map(|value| value.0);
     Ok(ProxyRecord {
+        location_policy: row
+            .try_get::<sqlx::types::Json<ProxyLocationPolicy>, _>("location_policy")
+            .map_err(|_| invalid())?
+            .0,
+        config_revision: AdminRevision::new(
+            u64::try_from(
+                row.try_get::<i64, _>("config_revision")
+                    .map_err(|_| invalid())?,
+            )
+            .map_err(|_| invalid())?,
+        )
+        .map_err(|_| invalid())?,
+
         id: row.try_get("id").map_err(|_| invalid())?,
         name: row.try_get("name").map_err(|_| invalid())?,
         proxy: OutboundProxy::parse(
@@ -119,6 +139,7 @@ fn record(row: PgRow) -> StoreResult<ProxyRecord> {
         last_test: success
             .map(|success| -> StoreResult<_> {
                 Ok(ProxyTestResult {
+                    location,
                     success,
                     latency_ms: u64::try_from(latency.ok_or_else(invalid)?)
                         .map_err(|_| invalid())?,
@@ -489,12 +510,18 @@ impl ProxyStore for PgProxyRepository {
         if !created {
             return Err(store_error(conflict(&id)));
         }
+        sqlx::query("update outbound_proxies set location_policy=$2 where id=$1")
+            .bind(&id)
+            .bind(sqlx::types::Json(&command.location_policy))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| store_error(unavailable()))?;
         audit(
             &mut transaction,
             context,
             "create",
             &id,
-            &["name", "proxy_url"],
+            &["name", "proxy_url", "location_policy"],
             revision,
         )
         .await
@@ -547,10 +574,13 @@ impl ProxyStore for PgProxyRepository {
              last_test_success = case when $4 is not null and $4 <> proxy_url then null else last_test_success end,
              last_test_latency_ms = case when $4 is not null and $4 <> proxy_url then null else last_test_latency_ms end,
              last_test_ip = case when $4 is not null and $4 <> proxy_url then null else last_test_ip end,
-             last_test_message = case when $4 is not null and $4 <> proxy_url then null else last_test_message end
+             last_test_message = case when $4 is not null and $4 <> proxy_url then null else last_test_message end,
+             last_test_location = case when $4 is not null and $4 <> proxy_url then null else last_test_location end,
+             location_policy = coalesce($5, location_policy)
              where id = $1 and revision = $2")
             .bind(&command.id).bind(i64::try_from(command.revision.get()).map_err(|_| store_error(invalid()))?)
             .bind(&command.name).bind(command.proxy.as_ref().map(OutboundProxy::expose_url))
+            .bind(command.location_policy.as_ref().map(sqlx::types::Json))
             .execute(&mut *transaction).await.map_err(|_| store_error(unavailable()))?;
         if changed.rows_affected() != 1 {
             return Err(store_error(conflict(&command.id)));
@@ -562,7 +592,7 @@ impl ProxyStore for PgProxyRepository {
             context,
             "update",
             &command.id,
-            &["name", "proxy_url"],
+            &["name", "proxy_url", "location_policy"],
             revision,
         )
         .await
@@ -644,20 +674,17 @@ impl ProxyStore for PgProxyRepository {
         exclude_active_imports(&mut transaction, id)
             .await
             .map_err(store_error)?;
-        let updated = sqlx::query("update outbound_proxies set last_test_at = now(), last_test_success = $3, last_test_latency_ms = $4, last_test_ip = $5, last_test_message = $6 where id = $1 and revision = $2")
+        let updated = sqlx::query("update outbound_proxies set last_test_at = now(), last_test_success = $3, last_test_latency_ms = $4, last_test_ip = $5, last_test_message = $6, last_test_location = $7 where id = $1 and revision = $2")
             .bind(id).bind(i64::try_from(revision.get()).map_err(|_| store_error(invalid()))?)
             .bind(result.success).bind(i64::try_from(result.latency_ms).map_err(|_| store_error(invalid()))?)
             .bind(result.exit_ip.map(|ip| ip.to_string())).bind(result.message)
+            .bind(result.location.map(sqlx::types::Json))
             .execute(&mut *transaction).await.map_err(|_| store_error(unavailable()))?;
         if updated.rows_affected() != 1 {
             return Err(store_error(conflict(id)));
         }
-        let current: i64 =
-            sqlx::query_scalar("select config_revision from runtime_settings where id = 1")
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(|_| store_error(unavailable()))?;
-        let current = Revision::new(u64::try_from(current).map_err(|_| store_error(invalid()))?)
+        let current = bump_config_revision_in_transaction(&mut transaction)
+            .await
             .map_err(store_error)?;
         audit(
             &mut transaction,

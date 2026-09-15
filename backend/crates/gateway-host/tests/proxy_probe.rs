@@ -25,6 +25,48 @@ async fn proxy_probe_sends_authentication_through_explicit_proxy() {
 }
 
 #[tokio::test]
+async fn proxy_location_matches_tested_ip_and_failure_preserves_connectivity() {
+    use wiremock::matchers::path;
+    for (location, valid) in [
+        (
+            json!({"success":true,"ip":"203.0.113.8","country_code":"US","region":"California","city":"Los Angeles","timezone":{"id":"America/Los_Angeles"}}),
+            true,
+        ),
+        (
+            json!({"success":true,"ip":"203.0.113.9","country_code":"US","region":"California","city":"Los Angeles","timezone":{"id":"America/Los_Angeles"}}),
+            false,
+        ),
+        (
+            json!({"success":true,"ip":"203.0.113.8","country_code":"US","region":"California","city":"Los Angeles","timezone":{"id":"invalid/timezone"}}),
+            false,
+        ),
+        (json!({"success":false}), false),
+        (json!({"oversized":"x".repeat(8193)}), false),
+    ] {
+        let proxy_server = MockServer::start().await;
+        Mock::given(path("/ip"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ip":"203.0.113.8"})))
+            .expect(1)
+            .mount(&proxy_server)
+            .await;
+        Mock::given(path("/geo/203.0.113.8"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(location))
+            .expect(1)
+            .mount(&proxy_server)
+            .await;
+        let result = HttpProxyProbe::new("http://unresolvable.invalid/ip")
+            .with_location_endpoint("http://unresolvable.invalid/geo/")
+            .test(&OutboundProxy::parse(&proxy_server.uri()).unwrap())
+            .await;
+        assert!(result.success);
+        assert_eq!(result.location.is_some(), valid);
+        if let Some(location) = result.location {
+            assert_eq!(location.timezone, "America/Los_Angeles");
+        }
+    }
+}
+
+#[tokio::test]
 async fn proxy_probe_rejects_auth_errors_redirects_and_invalid_or_oversized_responses() {
     for response in [
         ResponseTemplate::new(407),

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { OutboundProxyRecord } from '@/api'
+import type { OutboundProxyRecord, ProxyLocationPolicy } from '@/api'
 import { Activity, LockKeyhole, Pencil, Plus, RefreshCw, Search, Trash2, Users, Wifi } from '@lucide/vue'
 import { watchDebounced } from '@vueuse/core'
 import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
@@ -33,6 +33,7 @@ const pagination = computed(() => ({ currentPage: query.page.value, pageSize: qu
 const columns = defineTableColumns<OutboundProxyRecord>([
   { key: 'identity', label: '代理', kind: 'identity' },
   { key: 'exitIp', label: '出口 IP', kind: 'custom' },
+  { key: 'location', label: '请求地区 / 时区', kind: 'custom' },
   { key: 'latency', label: '耗时', kind: 'custom', size: 'sm' },
   { key: 'accounts', label: '关联账号', kind: 'custom', size: 'sm' },
   { key: 'testedAt', label: '测试时间', kind: 'datetime' },
@@ -40,7 +41,7 @@ const columns = defineTableColumns<OutboundProxyRecord>([
 ])
 const showForm = shallowRef(false)
 const editing = shallowRef<OutboundProxyRecord | null>(null)
-const form = reactive({ name: '', proxyUrl: '' })
+const form = reactive({ name: '', proxyUrl: '', locationPolicy: { mode: 'auto' } as ProxyLocationPolicy })
 const saveAction = useAsyncAction()
 const { loading: saving } = saveAction
 const deleteAction = useAsyncAction()
@@ -57,6 +58,10 @@ function openForm(proxy: OutboundProxyRecord | null = null) {
   editing.value = proxy
   form.name = proxy?.name ?? ''
   form.proxyUrl = ''
+  const policy = proxy?.locationPolicy ?? { mode: 'auto' as const }
+  form.locationPolicy = policy.mode === 'manual'
+    ? { mode: 'manual', location: { ...policy.location } }
+    : { mode: policy.mode }
   showForm.value = true
 }
 
@@ -92,8 +97,8 @@ async function save(testAfter: boolean) {
   await saveAction.run(async () => {
     // 编辑时留空保留已保存的地址和认证，不能用脱敏地址覆盖原连接。
     const result = editing.value
-      ? await updateProxy({ id: editing.value.id, revision: editing.value.revision, name, proxyUrl: proxyUrl || undefined })
-      : await createProxy({ name, proxyUrl })
+      ? await updateProxy({ id: editing.value.id, revision: editing.value.revision, name, proxyUrl: proxyUrl || undefined, locationPolicy: form.locationPolicy })
+      : await createProxy({ name, proxyUrl, locationPolicy: form.locationPolicy })
     showForm.value = false
     form.proxyUrl = ''
     toast.success('代理已保存')
@@ -192,6 +197,17 @@ onMounted(() => void query.execute())
               <span v-else-if="row.lastTest" class="text-cp-error" :title="`${row.lastTest.message}（耗时 ${row.lastTest.latencyMs} ms）`">失败</span>
               <span v-else class="text-cp-text-quaternary">未测试</span>
             </template>
+            <template #location="{ row }">
+              <div v-if="row.locationPolicy.mode === 'manual'" class="grid gap-1 text-cp-xs">
+                <span>{{ row.locationPolicy.location.country }} / {{ row.locationPolicy.location.city }} · 手动</span>
+                <span class="text-cp-text-tertiary">{{ row.locationPolicy.location.timezone }}</span>
+              </div>
+              <div v-else-if="row.locationPolicy.mode === 'auto' && row.lastTest?.success && row.lastTest.location" class="grid gap-1 text-cp-xs">
+                <span>{{ row.lastTest.location.country }} / {{ row.lastTest.location.city }} · 自动</span>
+                <span class="text-cp-text-tertiary">{{ row.lastTest.location.timezone }}</span>
+              </div>
+              <span v-else class="text-cp-xs text-cp-text-tertiary">{{ row.locationPolicy.mode === 'auto' ? '待识别 · 保留客户端' : '保留客户端' }}</span>
+            </template>
             <template #accounts="{ row }">
               <button type="button" class="inline-flex cursor-pointer items-center gap-1.5 rounded-sm border-0 bg-transparent p-0 text-cp-sm text-cp-text-secondary outline-none transition-colors hover:text-cp-primary-text focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container" :aria-label="`查看 ${row.name} 的 ${row.accountCount} 个关联账号`" @click="inspected = row; showAccounts = true">
                 <Users class="size-3.5" aria-hidden="true" />
@@ -227,6 +243,7 @@ onMounted(() => void query.execute())
       v-model="showForm"
       v-model:name="form.name"
       v-model:proxy-url="form.proxyUrl"
+      v-model:location-policy="form.locationPolicy"
       :proxy="editing"
       :saving="saving"
       @save="save"

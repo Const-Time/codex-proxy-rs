@@ -98,6 +98,8 @@ impl ProxyStore for MemoryProxies {
         _: &MutationContext,
     ) -> AdminStoreResult<ProxyMutation> {
         let record = ProxyRecord {
+            location_policy: command.location_policy,
+            config_revision: gateway_admin::model::Revision::new(1).unwrap(),
             id: "proxy_test".to_owned(),
             name: command.name,
             proxy: command.proxy,
@@ -122,6 +124,9 @@ impl ProxyStore for MemoryProxies {
         let mut stored = self.0.lock().unwrap();
         let record = stored.as_mut().ok_or_else(missing)?;
         record.name = command.name;
+        if let Some(policy) = command.location_policy {
+            record.location_policy = policy;
+        }
         if let Some(proxy) = command.proxy {
             record.proxy = proxy;
         }
@@ -182,6 +187,7 @@ impl ProxyProbe for SuccessfulProbe {
             "http://test-user:private-password@proxy.example:8080/"
         );
         ProxyTestResult {
+            location: None,
             success: true,
             latency_ms: 15,
             exit_ip: Some("203.0.113.2".parse().unwrap()),
@@ -319,6 +325,43 @@ async fn proxy_routes_save_reload_test_rename_and_delete_without_exposing_creden
     assert_eq!(status, StatusCode::OK);
     let (_, listed) = request(&fixture, "/api/admin/proxies", None, true).await;
     assert_eq!(listed["data"]["page"]["total"], 0);
+}
+
+#[tokio::test]
+async fn proxy_location_api_validates_manual_fields_and_preserves_omitted_policy() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let policy = json!({"mode":"manual","location":{
+        "country":"US","region":"California","city":"Los Angeles","timezone":"America/Los_Angeles"
+    }});
+    for invalid in [
+        json!({"mode":"unknown"}),
+        json!({"mode":"manual","location":{"country":"US","region":"CA","city":"LA","timezone":"invalid/zone"}}),
+        json!({"mode":"manual","location":{"country":"USA","region":"CA","city":"LA","timezone":"UTC"}}),
+        json!({"mode":"manual","location":{"country":"US","region":"CA","city":"","timezone":"UTC"}}),
+    ] {
+        let (status, _) = request(&fixture, "/api/admin/proxies/create",
+            Some(json!({"name":"Example", "proxyUrl":"http://127.0.0.1:8888","locationPolicy":invalid})), true).await;
+        assert!(status.is_client_error());
+    }
+    let (status, created) = request(
+        &fixture,
+        "/api/admin/proxies/create",
+        Some(json!({"name":"Example", "proxyUrl":"http://127.0.0.1:8888","locationPolicy":policy})),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["data"]["record"]["locationPolicy"], policy);
+    let (status, changed) = request(
+        &fixture,
+        "/api/admin/proxies/update",
+        Some(json!({"id":"proxy_test", "revision":1,"name":"Renamed"})),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["data"]["record"]["locationPolicy"], policy);
 }
 
 #[tokio::test]

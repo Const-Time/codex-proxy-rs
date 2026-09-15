@@ -1,7 +1,17 @@
 import type { AccountGroupRef } from './account-groups'
 import request from '../request'
 
+export interface ProxyRequestLocation {
+  country: string
+  region: string
+  city: string
+  timezone: string
+}
+
+export type ProxyLocationPolicy = { mode: 'auto' | 'passthrough' } | { mode: 'manual', location: ProxyRequestLocation }
+
 export interface OutboundProxyTest {
+  location: ProxyRequestLocation | null
   success: boolean
   latencyMs: number
   exitIp: string | null
@@ -9,6 +19,7 @@ export interface OutboundProxyTest {
 }
 
 export interface OutboundProxyRecord {
+  locationPolicy: ProxyLocationPolicy
   id: string
   name: string
   endpoint: string
@@ -72,7 +83,7 @@ export function getProxies(params: { page: number, pageSize: number, search?: st
   })
 }
 
-export function createProxy(data: { name: string, proxyUrl: string }) {
+export function createProxy(data: { name: string, proxyUrl: string, locationPolicy?: ProxyLocationPolicy }) {
   return request<ProxyMutation>({
     url: '/api/admin/proxies/create',
     method: 'POST',
@@ -80,7 +91,7 @@ export function createProxy(data: { name: string, proxyUrl: string }) {
   })
 }
 
-export function updateProxy(data: { id: string, revision: number, name: string, proxyUrl?: string }) {
+export function updateProxy(data: { id: string, revision: number, name: string, proxyUrl?: string, locationPolicy?: ProxyLocationPolicy }) {
   return request<ProxyMutation>({
     url: '/api/admin/proxies/update',
     method: 'POST',

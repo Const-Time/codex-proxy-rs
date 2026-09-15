@@ -12,6 +12,7 @@ pub mod observability;
 pub mod operations;
 pub mod provider_credentials;
 pub mod proxies;
+pub mod quota_forecast_sampling;
 pub mod settings;
 pub mod system;
 pub mod users;

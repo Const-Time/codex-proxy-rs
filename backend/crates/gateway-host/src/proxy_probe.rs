@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 pub struct HttpProxyProbe {
     endpoint: String,
+    location_endpoint: Option<String>,
     targets: Vec<(String, String)>,
     websocket: Option<Arc<dyn ProxyWebSocketProbe>>,
     build_client: Arc<ProxyClientBuilder>,
@@ -27,7 +28,7 @@ type ProxyClientBuilder =
 
 impl Default for HttpProxyProbe {
     fn default() -> Self {
-        Self::new("https://api.ipify.org?format=json")
+        Self::new("https://api.ipify.org?format=json").with_location_endpoint("https://ipwho.is/")
     }
 }
 
@@ -36,6 +37,7 @@ impl HttpProxyProbe {
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
+            location_endpoint: None,
             targets: [
                 ("OpenAI API", "https://api.openai.com/v1/models"),
                 ("Anthropic", "https://api.anthropic.com/v1/messages"),
@@ -55,6 +57,63 @@ impl HttpProxyProbe {
             websocket: None,
             build_client: Arc::new(|builder| builder.build().map_err(|_| "无法创建代理连接")),
         }
+    }
+
+    /// Trusted composition only; query URLs are never accepted from admin requests.
+    #[must_use]
+    pub fn with_location_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.location_endpoint = Some(endpoint.into());
+        self
+    }
+
+    async fn request_location(
+        &self,
+        proxy: &OutboundProxy,
+        ip: IpAddr,
+    ) -> Option<gateway_core::account::RequestLocation> {
+        let endpoint = self.location_endpoint.as_ref()?;
+        let client = self.client(proxy).ok()?;
+        let mut response = client
+            .get(format!("{endpoint}{ip}"))
+            .query(&[("fields", "success,ip,country_code,region,city,timezone.id")])
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if body.len() + chunk.len() > 8192 {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        #[derive(Deserialize)]
+        struct Zone {
+            id: String,
+        }
+        #[derive(Deserialize)]
+        struct Location {
+            success: bool,
+            ip: IpAddr,
+            country_code: String,
+            region: String,
+            city: String,
+            timezone: Zone,
+        }
+        let data: Location = serde_json::from_slice(&body).ok()?;
+        if !data.success || data.ip != ip {
+            return None;
+        }
+        let location = gateway_core::account::RequestLocation {
+            country: data.country_code,
+            region: data.region,
+            city: data.city,
+            timezone: data.timezone.id,
+        };
+        gateway_admin::model::proxies::validate_request_location(&location).ok()?;
+        Some(location)
     }
 
     /// 由组合根注入与 Provider 请求一致的证书信任策略。
@@ -229,11 +288,27 @@ impl ProxyProbe for HttpProxyProbe {
         let started = Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(15), self.exit_ip(proxy)).await;
         let result = result.unwrap_or(Err("代理连接超时"));
+        let location = if let Ok(ip) = &result {
+            tokio::time::timeout(Duration::from_secs(5), self.request_location(proxy, *ip))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let message = if result.is_ok() && self.location_endpoint.is_some() && location.is_none() {
+            "连接成功，地区识别暂不可用；可重试或手动设置".to_owned()
+        } else {
+            result
+                .as_ref()
+                .map_or_else(|message| (*message).to_owned(), |_| "连接成功".to_owned())
+        };
         ProxyTestResult {
+            location,
             success: result.is_ok(),
             latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             exit_ip: result.as_ref().ok().copied(),
-            message: result.map_or_else(str::to_owned, |_| "连接成功".to_owned()),
+            message,
         }
     }
 }

@@ -776,19 +776,20 @@ pub struct ProviderQuotaWindow {
 /// Display-only extrapolation from consumption between two quota observations.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QuotaIntervalEstimate {
-    /// Cycle start is eligible only when this account was already registered then.
-    #[serde(default)]
     pub cycle_based: bool,
-    #[serde(default)]
     pub missing_cost_count: u64,
-    #[serde(default)]
     pub request_count: u64,
-    #[serde(default)]
     pub billed_used_usd: Option<String>,
-    #[serde(default)]
     pub billed_total_usd: Option<String>,
-    pub used_usd: String,
-    pub total_usd: String,
+    pub used_usd: Option<String>,
+    pub total_usd: Option<String>,
+    pub estimated_tokens: Option<u64>,
+    pub remaining_tokens: Option<u64>,
+    pub remaining_usd: Option<String>,
+    pub remaining_billed_usd: Option<String>,
+    pub block_count: usize,
+    pub low_sample: bool,
+    pub incomplete_tokens: bool,
     pub percent_delta: f64,
     pub sample_start: DateTime<Utc>,
     pub sample_end: DateTime<Utc>,

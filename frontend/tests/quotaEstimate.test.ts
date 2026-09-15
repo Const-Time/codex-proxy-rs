@@ -27,3 +27,21 @@ test('partial and retained estimates disclose missing facts and the old timestam
   assert.equal(quotaEstimatePresentation(null, '无有效快照').basis, '无有效快照')
   assert.match(quotaEstimatePresentation({ ...estimate, billedUsedUsd: '0.00' }).basis, /计费 \$0.00/)
 })
+
+test('paired blocks describe nullable costs without making missing prices look free', () => {
+  const view = quotaEstimatePresentation({
+    ...estimate,
+    usedUsd: null,
+    billedUsedUsd: null,
+    percentDelta: 15,
+    blockCount: 3,
+    lowSample: false,
+    missingCostCount: 2,
+    requestCount: 50,
+  })
+  assert.match(view.basis, /原始 待补算 · 计费 待补算/)
+  assert.match(view.basis, /3 个完整分段/)
+  assert.match(view.warning, /费用估算等待补齐/)
+  assert.doesNotMatch(view.warning, /样本较少/)
+  assert.doesNotMatch(view.basis, /\$0/)
+})

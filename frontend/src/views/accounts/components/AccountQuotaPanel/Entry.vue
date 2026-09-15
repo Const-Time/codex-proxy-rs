@@ -45,12 +45,14 @@ const items = computed(() => props.windows.map((window) => {
     localUsageDisplay: quotaWindowLocalUsageDisplay(window),
     resetAtDisplay: window.resetAtDisplay,
     showEstimate: Boolean(window.localUsage),
-    estimateDisplay: window.estimatedQuota
+    estimateDisplay: window.estimatedQuota?.totalUsd != null
       ? Number(window.estimatedQuota.totalUsd).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
       : '待估算',
     estimateBilledDisplay: window.estimatedQuota?.billedTotalUsd != null
       ? Number(window.estimatedQuota.billedTotalUsd).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
       : '待估算',
+    estimateTokens: window.estimatedQuota?.estimatedTokens != null ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(window.estimatedQuota.estimatedTokens) : '待估算',
+    remainingTokens: window.estimatedQuota?.remainingTokens != null ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(window.estimatedQuota.remainingTokens) : '—',
     estimateTitle: estimate.title,
     estimateBasis: estimate.basis,
     estimateLabel: estimate.label,
@@ -161,6 +163,10 @@ const items = computed(() => props.windows.map((window) => {
             <div class="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
               <span class="text-cp-text-tertiary">倍率后计费</span>
               <strong class="font-mono tabular-nums text-cp-green-text">{{ item.estimateBilledDisplay }}</strong>
+            </div>
+            <div class="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+              <span class="text-cp-text-tertiary">预计 Token / 剩余</span>
+              <strong class="font-mono tabular-nums text-cp-text">{{ item.estimateTokens }} / {{ item.remainingTokens }}</strong>
             </div>
             <span class="text-[10px] text-cp-text-tertiary">{{ item.estimateBasis }}</span>
             <span v-if="item.estimateWarning" class="text-[10px] text-cp-text-tertiary">{{ item.estimateWarning }}</span>
