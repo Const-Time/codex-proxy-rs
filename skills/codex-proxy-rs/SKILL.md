@@ -48,6 +48,8 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
 
 - 数据面公开 Responses JSON/SSE/WS（含 Codex 子代理语义）、Images generation/edit、standalone Search 和模型目录；不提供 Chat Completions。
 - OpenAI Responses/Images/Search 保持业务 wire 透明；xAI 在 Provider 内完成 Grok/Responses 转换。
+- 客户端错误终态适配由 API/Protocol 负责：SSE `error` 和 WS 不可消费的裸错误投影为
+  `response.failed`；已可消费的 WS 包装错误与续接错误继续原样交付。
 - Images 固定走 OpenAI Provider 自有端点，不要求模型，也不参与文本模型映射。
 - Codex 生图模板保留代理密钥 `auth.json`，使用服务端托管认证标记；该标记不能代替 Bearer 鉴权，
   并在 API 与 Provider 层被过滤。客户端 WebSocket 开关与上游传输策略相互独立。
@@ -65,7 +67,7 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
 - `frontend/src/api` 只保留 wire DTO 与请求函数；页面查询、缓存和交互状态留在对应 view/composable。
 - 修改页面前先检查共享组件和相邻调用方；复用既有视觉语言，保持紧凑、低噪声和键盘可访问。
 - 上游查询不得由列表渲染或隐藏轮询意外触发。不可逆动作需要明确确认、loading 和不确定结果恢复路径。
-- 当前不维护前端测试代码或独立测试命令，使用 lint、类型检查、构建和必要的界面核验。
+- 前端已有原生 Node 测试命令 `pnpm --dir frontend test`，与 lint、类型检查、构建和必要的界面核验一起使用。
 
 ## 验证
 

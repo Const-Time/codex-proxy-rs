@@ -33,7 +33,7 @@ use gateway_core::event::{
 };
 use gateway_core::operation::{Operation, OperationKind};
 use gateway_core::routing::PublicModelId;
-use gateway_core::upstream::{OpaqueUpstreamValue, UpstreamSendState};
+use gateway_core::upstream::UpstreamSendState;
 use gateway_protocol::openai::sse::{encode_sse_event, parse_sse_events};
 use serde_json::{Value, json};
 

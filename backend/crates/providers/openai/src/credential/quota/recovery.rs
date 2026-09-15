@@ -86,10 +86,12 @@ impl QuotaRecovery {
                 // 成立，滑动窗口的正常用量也长期高于低用量阈值；以上游连续
                 // 两次观测都报告未触顶为解除证据。单次观测无法排除耗尽后
                 // 立刻拉到的旧快照（reset 未滚动、用量尚未触顶）。
-                let rolled_forward = window
-                    .reset_at()
-                    .is_some_and(|current| Some(current) > previous_reset);
-                if !rolled_forward && !window.limit_reached() {
+                // Missing or older window data is not evidence of same-window
+                // recovery. Only an explicit measured percentage can confirm it.
+                if window.reset_at() == previous_reset
+                    && window.used_percent().is_some_and(|used| used < 100.0)
+                    && !window.limit_reached()
+                {
                     if self.candidates.contains_key(key) {
                         self.pending.remove(key);
                     } else {
