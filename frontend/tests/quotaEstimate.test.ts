@@ -22,6 +22,8 @@ test('partial and retained estimates disclose missing facts and the old timestam
   const retained = quotaEstimatePresentation(estimate, '保留上次估算：新采样暂无可用费用')
   assert.match(retained.label, /上次结果/)
   assert.match(retained.warning, /2026-09-14T11:00:00/)
+  assert.match(retained.warning, /样本较少/)
+  assert.match(partial.warning, /样本较少/)
   assert.equal(quotaEstimatePresentation(null, '无有效快照').basis, '无有效快照')
   assert.match(quotaEstimatePresentation({ ...estimate, billedUsedUsd: '0.00' }).basis, /计费 \$0.00/)
 })
