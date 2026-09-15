@@ -236,7 +236,10 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
                 v-for="column in mobileColumns"
                 :key="column.key"
                 class="cp-record-field"
-                :class="['actions', 'selection', 'expander'].includes(column.kind) ? 'cp-record-field--wide' : ''"
+                :class="[
+                  ['actions', 'selection', 'expander'].includes(column.kind) ? 'cp-record-field--wide' : '',
+                  column.mobileFullWidth ? 'cp-record-field--full' : '',
+                ]"
               >
                 <dt class="text-cp-sm text-cp-text-secondary" :class="column.kind === 'actions' ? 'sr-only' : ''">
                   <span v-if="column.kind === 'selection'">选择</span>

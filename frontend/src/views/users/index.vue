@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { User } from '@/api/modules/users'
-import { Search } from '@lucide/vue'
+import { Pencil, Power, Search, Trash2 } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { createUser, deleteUser, getUsers, setUserEnabled, updateUser } from '@/api/modules/users'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
@@ -8,10 +8,13 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
+import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
+import { defineTableColumns } from '@/components/base/BaseTable/columns'
+import BaseTable from '@/components/base/BaseTable/index.vue'
 import {
   toast,
 } from '@/components/base/BaseToast'
@@ -27,6 +30,14 @@ const {
   loadGroups,
 } = useAccountGroupCatalog()
 const users = ref<User[]>([])
+const columns = defineTableColumns<User>([
+  { key: 'identity', label: '用户 / 邮箱', kind: 'identity' },
+  { key: 'role', label: '角色', kind: 'meta', size: 'md' },
+  { key: 'status', label: '状态', kind: 'status' },
+  { key: 'groups', label: '授权分组', kind: 'custom', size: '2xl' },
+  { key: 'limits', label: '并发 / RPM', kind: 'numeric', size: 'lg' },
+  { key: 'actions', label: '操作', kind: 'actions', size: 'lg' },
+])
 const auth = useAuthStore()
 const loading = ref(false)
 const saving = ref(false)
@@ -155,70 +166,54 @@ onMounted(load)
     <p v-if="error" role="alert" class="text-cp-error">
       {{ error }}
     </p>
-    <BaseCard class="cp-mobile-table-host">
-      <div class="overflow-x-auto">
-        <table class="cp-mobile-record-table w-full text-left text-cp-sm">
-          <thead class="text-cp-text-secondary">
-            <tr>
-              <th class="p-3">
-                登录邮箱
-              </th><th class="p-3">
-                角色
-              </th><th class="p-3">
-                状态
-              </th><th class="p-3">
-                授权分组
-              </th><th class="p-3">
-                并发 / RPM
-              </th><th class="p-3">
-                操作
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="user in visibleUsers" :key="user.id" class="border-t border-cp-border">
-              <td data-label="用户 / 邮箱" class="p-3 font-medium">
-                <div>
-                  {{ user.email }}
-                  <div v-if="user.username" class="text-cp-xs text-cp-text-secondary">
-                    {{ user.username }}
-                  </div>
-                </div>
-              </td>
-              <td data-label="角色" class="p-3">
-                {{ user.role === 'admin' ? '管理员' : '普通用户' }}
-              </td>
-              <td data-label="状态" class="p-3">
-                {{ user.enabled ? '已启用' : '已禁用' }}
-              </td>
-              <td data-label="授权分组" class="max-w-md p-3">
-                {{ groupNames(user) }}
-              </td>
-              <td data-label="并发 / RPM" class="p-3 font-mono">
-                {{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}
-              </td>
-              <td class="cp-mobile-actions p-3">
-                <div class="flex items-center gap-2 whitespace-nowrap">
-                  <BaseButton v-if="user.role !== 'admin' || user.id === auth.user?.id" variant="secondary" :disabled="busy" @click="edit(user)">
-                    编辑
-                  </BaseButton>
-                  <BaseButton v-if="user.role !== 'admin'" variant="secondary" :disabled="busy" @click="requestAction(user, 'status')">
-                    {{ user.enabled ? '禁用' : '启用' }}
-                  </BaseButton>
-                  <BaseButton v-if="user.role !== 'admin'" variant="destructive" :disabled="busy" @click="requestAction(user, 'delete')">
-                    删除
-                  </BaseButton>
-                </div>
-              </td>
-            </tr>
-            <tr v-if="!loading && !visibleUsers.length">
-              <td colspan="6" class="p-6 text-center text-cp-text-secondary">
-                没有匹配的用户
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+    <BaseCard class="cp-mobile-table-host min-w-0">
+      <BaseTable class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="visibleUsers" empty-text="没有匹配的用户">
+        <template #identity="{ row: user }">
+          <div class="min-w-0 py-2">
+            <div class="truncate font-emphasis" :title="user.email">
+              {{ user.email }}
+            </div>
+            <div v-if="user.username" class="mt-1 truncate text-cp-xs text-cp-text-secondary" :title="user.username">
+              {{ user.username }}
+            </div>
+          </div>
+        </template>
+        <template #role="{ row: user }">
+          <div class="min-w-0 py-2">
+            {{ user.role === 'admin' ? '管理员' : '普通用户' }}
+          </div>
+        </template>
+        <template #status="{ row: user }">
+          <div class="min-w-0 py-2">
+            <span class="inline-flex items-center gap-1.5 text-cp-sm font-emphasis" :class="user.enabled ? 'text-cp-success' : 'text-cp-text-tertiary'"><span class="size-1.5 rounded-full bg-current" aria-hidden="true" />{{ user.enabled ? '已启用' : '已禁用' }}</span>
+          </div>
+        </template>
+        <template #groups="{ row: user }">
+          <div class="min-w-0 py-2 break-words text-cp-sm text-cp-text-secondary">
+            {{ groupNames(user) }}
+          </div>
+        </template>
+        <template #limits="{ row: user }">
+          <div class="min-w-0 py-2">
+            {{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}
+          </div>
+        </template>
+        <template #actions="{ row: user }">
+          <div class="min-w-0 py-2">
+            <div class="flex items-center gap-1">
+              <BaseIconButton v-if="user.role !== 'admin' || user.id === auth.user?.id" size="sm" label="编辑用户" :disabled="busy" @click="edit(user)">
+                <Pencil class="size-3.5 text-cp-link" />
+              </BaseIconButton>
+              <BaseIconButton v-if="user.role !== 'admin'" size="sm" :label="user.enabled ? '禁用用户' : '启用用户'" :disabled="busy" @click="requestAction(user, 'status')">
+                <Power class="size-3.5" :class="user.enabled ? 'text-cp-warning' : 'text-cp-success'" />
+              </BaseIconButton>
+              <BaseIconButton v-if="user.role !== 'admin'" size="sm" label="删除用户" :disabled="busy" @click="requestAction(user, 'delete')">
+                <Trash2 class="size-3.5 text-cp-error" />
+              </BaseIconButton>
+            </div>
+          </div>
+        </template>
+      </BaseTable>
     </BaseCard>
     <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!busy && !selfReset" size="md">
       <div class="grid gap-5">
