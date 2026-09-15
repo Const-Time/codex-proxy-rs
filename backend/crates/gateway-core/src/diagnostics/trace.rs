@@ -312,6 +312,8 @@ impl TraceContext {
                     !matches!(
                         state.events[*index].stage,
                         "attempt.started"
+                            | "upstream.location.applied"
+                            | "upstream.request.profile"
                             | "account.selection"
                             | "account.selected"
                             | "attempt.failed"

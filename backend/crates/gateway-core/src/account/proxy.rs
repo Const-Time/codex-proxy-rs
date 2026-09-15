@@ -3,8 +3,36 @@
 use std::{fmt, sync::Arc};
 use url::Url;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct OutboundProxy(Url, Option<Arc<RequestLocation>>);
+#[derive(Clone)]
+pub struct OutboundProxy(
+    Url,
+    Option<Arc<RequestLocation>>,
+    Option<Arc<ProxyRequestContext>>,
+);
+
+impl PartialEq for OutboundProxy {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.1 == other.1
+    }
+}
+impl Eq for OutboundProxy {}
+impl std::hash::Hash for OutboundProxy {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.0, state);
+        std::hash::Hash::hash(&self.1, state);
+    }
+}
+
+/// Snapshot of the selected proxy policy and its last probe, never credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRequestContext {
+    pub proxy_id: String,
+    pub mode: String,
+    pub detected_ip: Option<String>,
+    pub detected_at: Option<String>,
+    pub location: Option<RequestLocation>,
+}
 
 /// Effective request metadata for this egress, resolved by the proxy store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -35,7 +63,7 @@ impl OutboundProxy {
         {
             return Err(InvalidOutboundProxy);
         }
-        Ok(Self(url, None))
+        Ok(Self(url, None, None))
     }
 
     #[must_use]
@@ -46,12 +74,28 @@ impl OutboundProxy {
     #[must_use]
     pub fn with_location(mut self, location: Option<RequestLocation>) -> Self {
         self.1 = location.map(Arc::new);
+        self.2 = None;
         self
     }
 
     #[must_use]
     pub fn location(&self) -> Option<&RequestLocation> {
         self.1.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_request_context(mut self, context: Option<ProxyRequestContext>) -> Self {
+        self.1 = context
+            .as_ref()
+            .and_then(|value| value.location.clone())
+            .map(Arc::new);
+        self.2 = context.map(Arc::new);
+        self
+    }
+
+    #[must_use]
+    pub fn request_context(&self) -> Option<&ProxyRequestContext> {
+        self.2.as_deref()
     }
 
     #[must_use]

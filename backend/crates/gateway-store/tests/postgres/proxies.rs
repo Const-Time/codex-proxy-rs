@@ -97,6 +97,17 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
         Some(&location)
     );
     let mut manual = location.clone();
+    let provenance = loaded
+        .summary
+        .outbound_proxy
+        .as_ref()
+        .unwrap()
+        .request_context()
+        .unwrap();
+    assert_eq!(provenance.mode, "auto");
+    assert_eq!(provenance.proxy_id, initial.id);
+    assert_eq!(provenance.detected_ip.as_deref(), Some("203.0.113.5"));
+    assert!(provenance.detected_at.is_some());
     manual.timezone = "America/New_York".to_owned();
     let changed = store
         .update(
@@ -122,6 +133,17 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
     assert_eq!(
         loaded.summary.outbound_proxy.as_ref().unwrap().location(),
         Some(&manual)
+    );
+    assert_eq!(
+        loaded
+            .summary
+            .outbound_proxy
+            .as_ref()
+            .unwrap()
+            .request_context()
+            .unwrap()
+            .mode,
+        "manual"
     );
     let changed = store
         .update(
@@ -184,6 +206,16 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
         loaded.summary.outbound_proxy.as_ref().unwrap().expose_url(),
         "http://127.0.0.1:9999/"
     );
+    let provenance = loaded
+        .summary
+        .outbound_proxy
+        .as_ref()
+        .unwrap()
+        .request_context()
+        .unwrap();
+    assert_eq!(provenance.mode, "auto");
+    assert!(provenance.detected_ip.is_none());
+    assert!(provenance.detected_at.is_none());
     assert_eq!(
         store
             .record_test(

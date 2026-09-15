@@ -320,6 +320,17 @@ async fn codex_backend_http_sse_should_capture_structured_rate_limit_event_updat
     );
     let snapshot = trace.snapshot().unwrap();
     let events = snapshot["events"].as_array().unwrap();
+    let profile = events
+        .iter()
+        .find(|event| event["stage"] == "upstream.request.profile")
+        .unwrap();
+    assert_eq!(profile["data"]["transport"], "http_sse");
+    assert_eq!(profile["data"]["compression"], "zstd");
+    assert!(profile["data"]["headers"]["user-agent"].as_str().is_some());
+    assert_eq!(
+        profile["data"]["sensitiveFieldsPresent"]["authorization"],
+        true
+    );
     assert!(
         events
             .iter()

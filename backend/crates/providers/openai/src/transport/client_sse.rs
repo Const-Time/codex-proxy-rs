@@ -109,6 +109,16 @@ impl CodexBackendClient {
                 .map(|(name, value)| (name.as_str(), value.as_bytes())),
         );
         trace.capture("upstream.request.body", &body);
+        super::request_profile::record_request_profile(
+            &trace,
+            "http_sse",
+            "zstd",
+            self.outbound_proxy.as_ref(),
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
+            Some(&upstream_body),
+        );
         let body = zstd::stream::encode_all(std::io::Cursor::new(body), 3)
             .map_err(CodexClientError::RequestCompression)?;
         let response = self
@@ -245,6 +255,18 @@ impl CodexBackendClient {
         )
         .map_err(CodexClientError::WebSocketEncode)?;
         websocket_create.connection.outbound_proxy = self.outbound_proxy.clone();
+        super::request_profile::record_request_profile(
+            &context.trace.cloned().unwrap_or_default(),
+            "websocket",
+            "permessage-deflate_requested",
+            self.outbound_proxy.as_ref(),
+            websocket_create
+                .connection()
+                .headers()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
+            Some(websocket_request.body()),
+        );
         context.trace.cloned().unwrap_or_default().headers(
             "upstream.request.headers",
             serde_json::json!({"transport": "websocket", "phase": "prepared_opening"}),

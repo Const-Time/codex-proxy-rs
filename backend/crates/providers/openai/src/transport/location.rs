@@ -10,15 +10,23 @@ struct CodexRequestLocation {
     city: String,
     timezone: chrono_tz::Tz,
 }
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocationApplication {
+    pub environment_changed: usize,
+    pub search_changed: usize,
+}
 /// None means preserve the client payload, including missing fields.
 pub fn apply_request_location(
     body: &mut Map<String, Value>,
     location: Option<&RequestLocation>,
     now: DateTime<Utc>,
-) {
-    let Some(location) = location else { return };
+) -> LocationApplication {
+    let Some(location) = location else {
+        return LocationApplication::default();
+    };
     let Ok(timezone) = location.timezone.parse() else {
-        return;
+        return LocationApplication::default();
     };
     let location = CodexRequestLocation {
         country: location.country.clone(),
@@ -26,13 +34,14 @@ pub fn apply_request_location(
         city: location.city.clone(),
         timezone,
     };
-    align_structured_location_fields(body, now, &location);
+    align_structured_location_fields(body, now, &location)
 }
 fn align_structured_location_fields(
     body: &mut Map<String, Value>,
     now: DateTime<Utc>,
     location: &CodexRequestLocation,
-) {
+) -> LocationApplication {
+    let mut report = LocationApplication::default();
     // 只改写带环境标记的日期和时区；epoch 时间戳保持绝对时间原值。
     let current_date = now
         .with_timezone(&location.timezone)
@@ -40,22 +49,24 @@ fn align_structured_location_fields(
         .to_string();
     if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
         for item in input {
-            align_environment_context(item, &current_date, location.timezone.name());
+            report.environment_changed +=
+                align_environment_context(item, &current_date, location.timezone.name());
         }
     }
     if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
         for tool in tools {
-            align_web_search_location(tool, location);
+            report.search_changed += usize::from(align_web_search_location(tool, location));
         }
     }
+    report
 }
 
-fn align_environment_context(item: &mut Value, current_date: &str, timezone: &str) {
+fn align_environment_context(item: &mut Value, current_date: &str, timezone: &str) -> usize {
     let Some(item) = item.as_object_mut() else {
-        return;
+        return 0;
     };
     if item.get("role").and_then(Value::as_str) != Some("user") {
-        return;
+        return 0;
     }
     let content_kinds = item
         .get("internal_chat_message_metadata_passthrough")
@@ -69,8 +80,9 @@ fn align_environment_context(item: &mut Value, current_date: &str, timezone: &st
                 .collect::<Vec<_>>()
         });
     let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) else {
-        return;
+        return 0;
     };
+    let mut changed = 0;
     for (index, part) in content.iter_mut().enumerate() {
         if content_kinds
             .as_ref()
@@ -90,9 +102,11 @@ fn align_environment_context(item: &mut Value, current_date: &str, timezone: &st
             continue;
         };
         if let Some(aligned) = aligned_environment_context(text, current_date, timezone) {
+            changed += usize::from(*text != aligned);
             *text = aligned;
         }
     }
+    changed
 }
 
 fn aligned_environment_context(text: &str, current_date: &str, timezone: &str) -> Option<String> {
@@ -129,24 +143,24 @@ fn aligned_environment_context(text: &str, current_date: &str, timezone: &str) -
     Some(aligned)
 }
 
-fn align_web_search_location(tool: &mut Value, location: &CodexRequestLocation) {
+fn align_web_search_location(tool: &mut Value, location: &CodexRequestLocation) -> bool {
     let Some(tool) = tool.as_object_mut() else {
-        return;
+        return false;
     };
     let Some(tool_type) = tool.get("type").and_then(Value::as_str) else {
-        return;
+        return false;
     };
     if tool_type != "web_search" && !tool_type.starts_with("web_search_") {
-        return;
+        return false;
     }
-    tool.insert(
-        "user_location".to_owned(),
-        json!({
-            "type": "approximate",
-            "country": location.country,
-            "region": location.region,
-            "city": location.city,
-            "timezone": location.timezone.name(),
-        }),
-    );
+    let value = json!({
+        "type": "approximate",
+        "country": location.country,
+        "region": location.region,
+        "city": location.city,
+        "timezone": location.timezone.name(),
+    });
+    let changed = tool.get("user_location") != Some(&value);
+    tool.insert("user_location".to_owned(), value);
+    changed
 }

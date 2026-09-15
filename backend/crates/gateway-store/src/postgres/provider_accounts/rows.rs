@@ -380,7 +380,7 @@ impl ProviderAccountStateUpdate {
     }
 }
 
-pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_request_location(outbound_proxy_id) as request_location, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
+pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
@@ -388,7 +388,7 @@ pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_request_location(
             credential_observed_at, quota_observed_at, created_at, updated_at
      from provider_accounts where id = $1";
 
-pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_request_location(outbound_proxy_id) as request_location, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
+pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
@@ -398,7 +398,7 @@ pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_request_lo
      where id = any($1::text[]) and provider_kind = $2
      order by id";
 
-pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_request_location(outbound_proxy_id) as request_location, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
+pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
@@ -531,17 +531,15 @@ pub(crate) fn account_summary_from_row(
         .ok()
         .and_then(AccountWeight::new)
         .ok_or_else(|| invalid("invalid weight"))?;
-    let request_location =
-        get::<Option<sqlx::types::Json<gateway_core::account::RequestLocation>>>(
-            &row,
-            "request_location",
-        )?
-        .map(|value| value.0);
+    let request_context = get::<
+        Option<sqlx::types::Json<gateway_core::account::ProxyRequestContext>>,
+    >(&row, "request_context")?
+    .map(|value| value.0);
     Ok(ProviderAccountSummary {
         outbound_proxy: get::<Option<String>>(&row, "outbound_proxy_url")?
             .map(|url| {
                 gateway_core::account::OutboundProxy::parse(&url)
-                    .map(|proxy| proxy.with_location(request_location.clone()))
+                    .map(|proxy| proxy.with_request_context(request_context.clone()))
                     .map_err(|_| invalid("invalid outbound proxy"))
             })
             .transpose()?,

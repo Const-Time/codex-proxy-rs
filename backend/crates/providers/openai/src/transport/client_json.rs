@@ -52,6 +52,16 @@ impl CodexBackendClient {
                 .map(|(name, value)| (name.as_str(), value.as_bytes())),
         );
         trace.capture("upstream.request.body", &body);
+        super::request_profile::record_request_profile(
+            &trace,
+            "http_json",
+            "identity",
+            self.outbound_proxy.as_ref(),
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
+            None,
+        );
         let headers_started_at = Instant::now();
         let response = self
             .client
