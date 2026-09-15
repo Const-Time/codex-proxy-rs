@@ -1,20 +1,34 @@
 <script setup lang="ts">
 import type { OperationLog } from '@/api/modules/operations'
-import { Search, ShieldCheck } from '@lucide/vue'
+import { Eye, Search, ShieldCheck } from '@lucide/vue'
 import { onMounted, reactive, ref } from 'vue'
 import { getOperationLogs } from '@/api/modules/operations'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseFilterPanel from '@/components/base/BaseFilterPanel.vue'
 import FormItem from '@/components/base/BaseForm/FormItem.vue'
+import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
+import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
+import { defineTableColumns } from '@/components/base/BaseTable/columns'
+import BaseTable from '@/components/base/BaseTable/index.vue'
 import { errorMessage } from '@/utils/async'
+import { formatDateTime as date } from '@/utils/date'
 
 const filters = reactive({ email: '', action: '', ip: '', method: '', authMethod: '', result: '', days: '7' })
 const items = ref<OperationLog[]>([])
+const columns = defineTableColumns<OperationLog>([
+  { key: 'time', label: '时间', kind: 'datetime' },
+  { key: 'actor', label: '操作者', kind: 'identity', size: 'xl' },
+  { key: 'action', label: '动作', kind: 'custom', size: '3xl' },
+  { key: 'result', label: '结果', kind: 'status', size: 'sm' },
+  { key: 'duration', label: '耗时', kind: 'numeric', size: 'sm' },
+  { key: 'source', label: '来源 IP', kind: 'custom', size: '2xl' },
+  { key: 'actions', label: '操作', kind: 'actions', size: 'sm' },
+])
 const total = ref(0)
 const page = ref(1)
 const loading = ref(false)
@@ -23,7 +37,6 @@ const detail = ref<OperationLog | null>(null)
 const detailOpen = ref(false)
 let applied: Record<string, string | number | undefined> = {}
 let revision = 0
-const date = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const authName = (method: string) => ({ session: '登录会话', api_key: '管理密钥', anonymous: '未认证' }[method] ?? method)
 async function load() {
   const current = ++revision
@@ -107,78 +120,69 @@ onMounted(search)
     <p v-if="error" role="alert" class="text-cp-error">
       {{ error }}
     </p>
-    <BaseCard class="cp-mobile-table-host">
-      <div class="overflow-x-auto">
-        <table class="cp-mobile-record-table w-full whitespace-nowrap text-left text-cp-sm">
-          <thead class="bg-cp-fill-quaternary text-cp-text-secondary">
-            <tr>
-              <th class="p-3">
-                时间
-              </th><th class="p-3">
-                操作者
-              </th><th class="p-3">
-                动作
-              </th><th class="p-3">
-                结果
-              </th><th class="p-3">
-                耗时
-              </th><th class="p-3">
-                来源 IP
-              </th><th class="p-3">
-                操作
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in items" :key="item.id" class="border-b border-cp-border">
-              <td data-label="时间" class="p-3">
-                {{ date(item.occurredAt) }}
-              </td><td data-label="操作者" class="p-3">
-                <div>
-                  <div>{{ item.username || item.email || authName(item.authMethod) }}</div><div class="mt-1 text-cp-xs text-cp-text-secondary">
-                    {{ item.username ? item.email : authName(item.authMethod) }}
-                  </div>
-                </div>
-              </td><td data-label="动作" class="max-w-md truncate p-3 font-mono" :title="`${item.method} ${item.path}`">
-                {{ item.method }} {{ item.path }}
-              </td><td data-label="结果" class="p-3">
-                <span class="rounded-full px-2 py-1 text-cp-xs" :class="item.status < 400 ? 'bg-cp-success-container text-cp-success' : 'bg-cp-error-container text-cp-error'">{{ item.status }}</span>
-              </td><td data-label="耗时" class="p-3 font-mono">
-                {{ item.durationMs }} ms
-              </td><td data-label="来源 IP" class="p-3 font-mono">
-                <div>
-                  <div :title="item.forwardedIp ? '代理请求头上报的地址，未经可信代理验证' : '应用直接连接的对端地址，可能是 Docker 网桥或反向代理'">
-                    {{ item.forwardedIp || item.clientIp || '未记录' }}
-                  </div>
-                  <div v-if="item.forwardedIp" class="mt-1 font-sans text-cp-xs text-cp-text-tertiary">
-                    代理上报 · 未验证
-                  </div>
-                  <div class="mt-1 text-cp-xs text-cp-text-secondary">
-                    {{ item.forwardedIp ? `连接 ${item.clientIp || '未记录'}` : '直连 · 未上报代理来源' }}
-                  </div>
-                </div>
-              </td><td class="cp-mobile-actions p-3">
-                <BaseButton size="sm" @click="detail = item; detailOpen = true">
-                  详情
-                </BaseButton>
-              </td>
-            </tr><tr v-if="!items.length">
-              <td colspan="7" class="p-6 text-center text-cp-text-tertiary">
-                {{ loading ? '加载中…' : '暂无匹配日志' }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="cp-mobile-pagination mt-4 flex flex-wrap items-center justify-between gap-3 text-cp-sm">
-        <span>共 {{ total }} 条 · 每页 50 条</span><div class="flex items-center gap-3">
-          <BaseButton :disabled="loading || page <= 1" @click="changePage(page - 1)">
-            上一页
-          </BaseButton><span>{{ page }} / {{ Math.max(1, Math.ceil(total / 50)) }}</span><BaseButton :disabled="loading || page * 50 >= total" @click="changePage(page + 1)">
-            下一页
-          </BaseButton>
-        </div>
-      </div>
+    <BaseCard class="cp-mobile-table-host min-w-0">
+      <BaseTable class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="items" empty-text="暂无匹配日志">
+        <template #time="{ row: item }">
+          <div class="min-w-0 py-2">
+            {{ date(item.occurredAt) }}
+          </div>
+        </template>
+        <template #actor="{ row: item }">
+          <div class="min-w-0 py-2">
+            <div>
+              <div class="truncate font-emphasis" :title="item.username || item.email || authName(item.authMethod)">
+                {{ item.username || item.email || authName(item.authMethod) }}
+              </div><div class="mt-1 truncate text-cp-xs text-cp-text-secondary" :title="item.email || undefined">
+                {{ item.username ? item.email : authName(item.authMethod) }}
+              </div>
+            </div>
+          </div>
+        </template>
+        <template #action="{ row: item }">
+          <div class="min-w-0 py-2">
+            <div class="min-w-0" :title="`${item.method} ${item.path}`">
+              <div class="truncate font-mono text-cp-sm">
+                {{ item.path }}
+              </div><div class="mt-1 font-mono text-cp-xs text-cp-text-tertiary">
+                {{ item.method }}
+              </div>
+            </div>
+          </div>
+        </template>
+        <template #result="{ row: item }">
+          <div class="min-w-0 py-2">
+            <span class="rounded-full px-2 py-1 text-cp-xs" :class="item.status < 400 ? 'bg-cp-success-container text-cp-success' : 'bg-cp-error-container text-cp-error'">{{ item.status }}</span>
+          </div>
+        </template>
+        <template #duration="{ row: item }">
+          <div class="min-w-0 py-2">
+            {{ item.durationMs }} ms
+          </div>
+        </template>
+        <template #source="{ row: item }">
+          <div class="min-w-0 py-2">
+            <div class="break-all font-mono text-cp-sm">
+              <div :title="item.forwardedIp ? '代理请求头上报的地址，未经可信代理验证' : '应用直接连接的对端地址，可能是 Docker 网桥或反向代理'">
+                {{ item.forwardedIp || item.clientIp || '未记录' }}
+              </div>
+              <div v-if="item.forwardedIp" class="mt-1 font-sans text-cp-xs text-cp-text-tertiary">
+                代理上报 · 未验证
+              </div>
+              <div class="mt-1 text-cp-xs text-cp-text-secondary">
+                {{ item.forwardedIp ? `连接 ${item.clientIp || '未记录'}` : '直连 · 未上报代理来源' }}
+              </div>
+            </div>
+          </div>
+        </template>
+        <template #actions="{ row: item }">
+          <div class="min-w-0 py-2">
+            <BaseIconButton size="sm" label="查看操作详情" @click="detail = item; detailOpen = true">
+              <Eye class="size-3.5 text-cp-link" />
+            </BaseIconButton>
+          </div>
+        </template>
+      </BaseTable>
+      <BaseTablePagination :pagination="{ currentPage: page, pageSize: 50, total, pageSizes: [50] }" :loading="loading" @page-change="changePage" />
     </BaseCard>
     <BaseModal v-model="detailOpen" title="操作详情" size="md">
       <div v-if="detail" class="grid gap-4 text-cp-sm">

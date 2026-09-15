@@ -28,6 +28,7 @@ export interface BaseTableColumn<Row extends TableRow = TableRow> {
   sortable?: boolean | string
   format?: (value: unknown, row: Row) => unknown
   emptyText?: string
+  mobileFullWidth?: boolean
 }
 
 export interface BaseTableSort {

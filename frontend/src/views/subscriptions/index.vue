@@ -10,12 +10,24 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
+import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
+import { defineTableColumns } from '@/components/base/BaseTable/columns'
+import BaseTable from '@/components/base/BaseTable/index.vue'
 import { toast } from '@/components/base/BaseToast'
 import QuotaUsage from '@/components/quota/QuotaUsage.vue'
 import { errorMessage } from '@/utils/async'
+import { formatDateTime } from '@/utils/date'
 import { generateRequestId } from '@/utils/requestId'
 
 const records = ref<Subscription[]>([])
+const columns = defineTableColumns<Subscription>([
+  { key: 'selection', kind: 'selection' },
+  { key: 'identity', label: '用户 / 邮箱', kind: 'identity' },
+  { key: 'group', label: '分组', kind: 'custom', size: 'lg' },
+  { key: 'multiplier', label: '额度倍率', kind: 'numeric' },
+  { key: 'quota', label: '分组额度 · 已用 / 限额', kind: 'custom', size: '4xl', mobileFullWidth: true },
+  { key: 'reset', label: '最近重置', kind: 'datetime' },
+])
 const loading = ref(false)
 const resetting = ref(false)
 const error = ref('')
@@ -42,7 +54,7 @@ watch([search, groupId], () => {
   page.value = 1
   selected.value = []
 })
-const date = (value: string | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未开始'
+const date = (value: string | null) => value ? formatDateTime(value) : '尚未开始'
 const reason = (value: string | null) => ({ manual: '管理员重置', upstream_manual: '账号主动重置', upstream_window: '上游窗口重置', upstream_recovery: '上游额度恢复' }[value ?? ''] ?? '—')
 async function load() {
   loading.value = true
@@ -105,81 +117,57 @@ onMounted(load)
     <p v-if="error" role="alert" class="text-cp-error">
       {{ error }}
     </p>
-    <BaseCard class="cp-mobile-table-host">
-      <div class="mb-3 flex items-center gap-2 sm:hidden">
-        <BaseCheckbox label="选择当前页订阅" :model-value="pageSelected" :indeterminate="!pageSelected && visible.some(item => selected.includes(rowKey(item)))" :disabled="loading || !visible.length" @update:model-value="togglePage" />
-        <span class="text-cp-sm text-cp-text-secondary">选择当前页订阅</span>
-      </div>
-      <div class="overflow-x-auto">
-        <table class="cp-mobile-record-table w-full whitespace-nowrap text-left text-cp-sm">
-          <thead class="text-cp-text-secondary">
-            <tr>
-              <th class="p-3">
-                <BaseCheckbox label="选择当前页订阅" :model-value="pageSelected" :indeterminate="!pageSelected && visible.some(item => selected.includes(rowKey(item)))" :disabled="loading || !visible.length" @update:model-value="togglePage" />
-              </th>
-              <th class="p-3">
-                用户
-              </th><th class="p-3">
-                分组
-              </th><th class="p-3">
-                额度倍率
-              </th><th class="p-3">
-                分组额度 · 已用 / 限额
-              </th><th class="p-3">
-                最近重置
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in visible" :key="`${item.userId}:${item.groupId}`" class="border-t border-cp-border">
-              <td data-label="选择" class="p-3">
-                <BaseCheckbox :label="`选择 ${item.username || item.email} / ${item.groupName}`" :model-value="selected.includes(rowKey(item))" @update:model-value="checked => selected = checked ? [...selected, rowKey(item)] : selected.filter(key => key !== rowKey(item))" />
-              </td>
-              <td data-label="用户" class="p-3">
-                <div class="font-medium">
-                  {{ item.username || item.email }}
-                  <div v-if="item.username" class="mt-1 text-cp-xs text-cp-text-secondary">
-                    {{ item.email }}
-                  </div>
-                </div>
-              </td>
-              <td data-label="分组" class="p-3">
-                <div>
-                  {{ item.groupName }} <span v-if="!item.enabled">· 已停用</span>
-                </div>
-              </td>
-              <td data-label="额度倍率" class="p-3 font-mono">
-                {{ Number(item.quotaMultiplier) }}x
-              </td>
-              <td data-label="分组额度 · 已用 / 限额" class="cp-mobile-wide min-w-84 p-3 xl:w-2/5">
-                <QuotaUsage :budget="item" :label="`${item.username || item.email} / ${item.groupName}`" />
-              </td>
-              <td data-label="最近重置" class="p-3">
-                <div>
-                  <div>{{ item.lastResetAt ? date(item.lastResetAt) : '—' }}</div><div class="mt-1 text-cp-text-secondary">
-                    {{ reason(item.lastResetReason) }}
-                  </div>
-                </div>
-              </td>
-            </tr>
-            <tr v-if="!visible.length">
-              <td colspan="6" class="p-6 text-center text-cp-text-secondary">
-                {{ loading ? '加载中…' : '没有匹配的订阅' }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="cp-mobile-pagination mt-4 flex items-center justify-between gap-3 text-cp-sm">
-        <span>共 {{ filtered.length }} 条 · 每页 20 条</span>
-        <div class="flex items-center gap-3">
-          <BaseButton variant="secondary" :disabled="page <= 1" @click="page--">
-            上一页
-          </BaseButton><span>{{ page }} / {{ pageCount }}</span><BaseButton variant="secondary" :disabled="page >= pageCount" @click="page++">
-            下一页
-          </BaseButton>
-        </div>
-      </div>
+    <BaseCard class="cp-mobile-table-host min-w-0">
+      <BaseTable class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="visible" :row-key="rowKey" :selected-row-keys="selected" empty-text="没有匹配的订阅">
+        <template #header-selection>
+          <BaseCheckbox label="选择当前页订阅" :model-value="pageSelected" :indeterminate="!pageSelected && visible.some(item => selected.includes(rowKey(item)))" :disabled="loading || !visible.length" @update:model-value="togglePage" />
+        </template>
+        <template #selection="{ row: item }">
+          <div class="min-w-0 py-2">
+            <BaseCheckbox :label="`选择 ${item.username || item.email} / ${item.groupName}`" :model-value="selected.includes(rowKey(item))" @update:model-value="checked => selected = checked ? [...selected, rowKey(item)] : selected.filter(key => key !== rowKey(item))" />
+          </div>
+        </template>
+        <template #identity="{ row: item }">
+          <div class="min-w-0 py-2">
+            <div class="truncate font-emphasis" :title="item.username || item.email">
+              {{ item.username || item.email }}
+            </div>
+            <div v-if="item.username" class="mt-1 truncate text-cp-xs text-cp-text-secondary" :title="item.email">
+              {{ item.email }}
+            </div>
+          </div>
+        </template>
+        <template #group="{ row: item }">
+          <div class="min-w-0 py-2">
+            <div class="truncate" :title="item.groupName">
+              {{ item.groupName }}
+            </div>
+            <div v-if="!item.enabled" class="mt-1 text-cp-xs text-cp-text-tertiary">
+              已停用
+            </div>
+          </div>
+        </template>
+        <template #multiplier="{ row: item }">
+          <div class="min-w-0 py-2">
+            {{ Number(item.quotaMultiplier) }}x
+          </div>
+        </template>
+        <template #quota="{ row: item }">
+          <div class="min-w-0 py-3">
+            <QuotaUsage class="w-full" :budget="item" :label="`${item.username || item.email} / ${item.groupName}`" />
+          </div>
+        </template>
+        <template #reset="{ row: item }">
+          <div class="min-w-0 py-2">
+            <div>
+              <div>{{ item.lastResetAt ? date(item.lastResetAt) : '—' }}</div><div class="mt-1 font-sans text-cp-xs text-cp-text-tertiary">
+                {{ reason(item.lastResetReason) }}
+              </div>
+            </div>
+          </div>
+        </template>
+      </BaseTable>
+      <BaseTablePagination :pagination="{ currentPage: page, pageSize: 20, total: filtered.length, pageSizes: [20] }" :loading="loading" @page-change="page = $event" />
     </BaseCard>
     <BaseModal v-model="confirmOpen" title="重置选中订阅" :dismissible="!resetting">
       <p class="text-cp-sm leading-relaxed">
