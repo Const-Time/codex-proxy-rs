@@ -3,7 +3,7 @@
 mod error;
 mod model;
 mod proxy;
-pub use proxy::{InvalidOutboundProxy, OutboundProxy, RequestLocation};
+pub use proxy::{InvalidOutboundProxy, OutboundProxy, ProxyRequestContext, RequestLocation};
 pub mod scope;
 mod selection;
 mod store;

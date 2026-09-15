@@ -36,6 +36,39 @@ fn bounded_history_preserves_start_failure_and_final_result() {
 }
 
 #[test]
+fn prepared_request_profiles_survive_routine_stream_event_eviction() {
+    let trace = TraceContext::new("req_profile");
+    for _ in 0..12 {
+        trace.record("setup", json!({}));
+    }
+    trace.attempt(1).record(
+        "upstream.location.applied",
+        json!({"changes": {"environmentChanged": 1}}),
+    );
+    trace.attempt(1).record(
+        "upstream.request.profile",
+        json!({"transport": "websocket"}),
+    );
+    for index in 0..500 {
+        trace.record("upstream.event", json!({"index": index}));
+    }
+    let snapshot = trace.snapshot().unwrap();
+    let events = snapshot["events"].as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["stage"] == "upstream.location.applied")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["stage"] == "upstream.request.profile")
+    );
+    assert!(snapshot["droppedEvents"].as_u64().unwrap() > 0);
+    assert!(snapshot.to_string().len() < 64 * 1024);
+}
+
+#[test]
 fn shared_attempts_and_exchanges_coalesce_delta_without_losing_metadata() {
     let trace = TraceContext::new("req_trace");
     let ws = trace.attempt(1).exchange("websocket");

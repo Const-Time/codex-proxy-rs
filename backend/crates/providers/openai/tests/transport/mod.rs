@@ -60,6 +60,7 @@ mod profile_avatar;
 mod profile_contract;
 mod protocol;
 mod request;
+mod request_profile;
 mod reset_credits;
 mod tls;
 mod usage;

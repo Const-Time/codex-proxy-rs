@@ -468,7 +468,7 @@ impl Provider for CodexProvider {
         {
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
-        crate::transport::location::apply_request_location(
+        let location_application = crate::transport::location::apply_request_location(
             upstream_request.body_mut(),
             lease
                 .account()
@@ -476,6 +476,14 @@ impl Provider for CodexProvider {
                 .and_then(gateway_core::account::OutboundProxy::location),
             chrono::Utc::now(),
         );
+        context.trace().record("upstream.location.applied", serde_json::json!({
+            "accountId": lease.account_id().as_str(),
+            "proxy": lease.account().outbound_proxy().and_then(gateway_core::account::OutboundProxy::request_context),
+            "viaProxy": lease.account().outbound_proxy().is_some(),
+            "effectiveLocation": lease.account().outbound_proxy().and_then(gateway_core::account::OutboundProxy::location),
+            "changes": location_application,
+            "phase": "prepared_payload",
+        }));
         scope_request_to_account(
             &mut upstream_request,
             lease.installation_id(),

@@ -320,7 +320,11 @@ const {
                   @account-updated="replaceAccount"
                   @refresh-quota="handleRefreshQuota"
                 />
-                <AccountUsagePanel :account="row" />
+                <AccountUsagePanel
+                  :account="row"
+                  :refreshing="refreshingQuotaAccountIds.has(row.id)"
+                  @refresh-quota="handleRefreshQuota"
+                />
               </div>
             </template>
           </BaseTable>

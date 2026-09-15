@@ -7,6 +7,7 @@ import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useDownload } from '@/composables/useDownload'
 import { useRequestDiagnostics } from '../composables/useRequestDiagnostics'
+import RequestProfilePanel from './RequestProfilePanel.vue'
 import RequestTransportFailure from './RequestTransportFailure.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 
@@ -93,6 +94,7 @@ function download() {
         </BaseButton>
       </div>
       <RequestTransportFailure :events="trace?.events ?? []" :metadata="selectedId === requestId ? metadata : undefined" />
+      <RequestProfilePanel :events="trace?.events ?? []" />
       <p v-if="!trace" class="text-cp-sm text-cp-text-secondary">
         这条记录没有保存诊断时间线。旧记录无法补回当时未采集的事件。
       </p>
