@@ -497,9 +497,31 @@ async fn quota_partial_costs_are_disclosed_and_late_costs_repair_the_same_cycle(
         .attach_quota_estimates(id, &mut next)
         .await
         .unwrap();
-    assert_eq!(next.windows[0].estimated_quota.as_ref(), Some(&complete));
+    let current = next.windows[0].estimated_quota.clone().unwrap();
+    assert_eq!(current.total_usd, "90.91");
+    assert_eq!(current.percent_delta, 11.0);
+    assert_eq!(current.missing_cost_count, 1);
     assert!(
         next.windows[0]
+            .estimate_hint
+            .as_ref()
+            .unwrap()
+            .contains("估值可能偏低")
+    );
+    // Only a completely unusable interval retains the last result.
+    sqlx::query("update model_requests set cost_source='unavailable', cost_amount=null, cost_currency=null where id='req_known'")
+        .execute(&db.pool).await.unwrap();
+    let mut unavailable = quota(now - TimeDelta::minutes(2), reset, 12.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut unavailable)
+        .await
+        .unwrap();
+    assert_eq!(
+        unavailable.windows[0].estimated_quota.as_ref(),
+        Some(&current)
+    );
+    assert!(
+        unavailable.windows[0]
             .estimate_hint
             .as_ref()
             .unwrap()
@@ -516,5 +538,102 @@ async fn quota_partial_costs_are_disclosed_and_late_costs_repair_the_same_cycle(
         .await
         .unwrap();
     assert!(expired.windows[0].estimated_quota.is_none());
+    db.close().await;
+}
+
+#[tokio::test]
+async fn quota_estimates_replace_frozen_one_point_result_even_with_missing_costs() {
+    let Some(db) = TestDatabase::create("quota_unfreeze_partial").await else {
+        return;
+    };
+    let id = "acct_frozen";
+    PgProviderAccountRepository::new(db.pool.clone())
+        .insert_provider_account(account(id, "frozen-user"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let start = now - TimeDelta::hours(3);
+    let first_end = start + TimeDelta::hours(1);
+    let end = start + TimeDelta::hours(2);
+    let reset = now + TimeDelta::days(3);
+    // Persist the exact v3.8.2 state shape: current snapshot at 46%, but
+    // the visible complete estimate still covers only the first 1% rise.
+    sqlx::query("insert into account_quota_estimate_samples(account_id,window_key,observed_at,state) values($1,'weekly',$2,$3)")
+        .bind(id).bind(end).bind(json!({
+            "version":2,"cycle_based":false,"reset_at":reset,"seconds":604800,
+            "start_at":start,"start_percent":30.0,"observed_at":end,"percent":46.0,
+            "estimate":{
+                "cycle_based":false,"missing_cost_count":0,"request_count":1,
+                "used_usd":"0.56","total_usd":"56.37","billed_used_usd":"0.85",
+                "billed_total_usd":"84.86","percent_delta":1.0,
+                "sample_start":start,"sample_end":first_end
+            },
+            "pending_reason":"保留上次估算：新采样有 4 笔费用缺失",
+            "pending_end":end
+        })).execute(&db.pool).await.unwrap();
+    for (request_id, amount, started_at) in [
+        ("req_frozen_known", "679.12", start + TimeDelta::minutes(30)),
+        ("req_frozen_after", "9000", end + TimeDelta::minutes(10)),
+        ("req_frozen_missing1", "1", start + TimeDelta::minutes(40)),
+        ("req_frozen_missing2", "1", start + TimeDelta::minutes(41)),
+        ("req_frozen_missing3", "1", start + TimeDelta::minutes(42)),
+        ("req_frozen_missing4", "1", start + TimeDelta::minutes(43)),
+    ] {
+        seed_model_request(
+            &db.pool,
+            ModelRequestSeed {
+                request_id,
+                account_id: id,
+                provider_kind: "openai",
+                model: "test-model",
+                total_tokens: 100,
+                cost_amount: amount,
+                started_at,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    sqlx::query("update model_requests set billing_multiplier=1.5 where provider_account_ref=$1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update model_requests set cost_source='unavailable',cost_amount=null,cost_currency=null where id like 'req_frozen_missing%'")
+        .execute(&db.pool).await.unwrap();
+    // A cached observation repairs the old state without another percentage rise.
+    let mut snapshot = quota(end, reset, 46.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut snapshot)
+        .await
+        .unwrap();
+    let result = snapshot.windows[0].estimated_quota.as_ref().unwrap();
+    assert_eq!(result.percent_delta, 16.0);
+    assert_eq!(result.used_usd, "679.12");
+    assert_eq!(result.total_usd, "4244.50");
+    assert_eq!(result.billed_total_usd.as_deref(), Some("6366.75"));
+    assert_eq!(result.missing_cost_count, 4);
+    assert_eq!(result.request_count, 5);
+    assert_eq!(result.sample_end, end);
+    assert!(
+        snapshot.windows[0]
+            .estimate_hint
+            .as_ref()
+            .unwrap()
+            .contains("4 / 5 笔费用缺失")
+    );
+    // A later unchanged quota snapshot still excludes consumption after the
+    // paired endpoint; the larger result is not obtained by moving boundaries.
+    sqlx::query("update account_quota_estimate_samples set state=state-'last_attempt_at'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let expected = result.clone();
+    let mut plateau = quota(now, reset, 46.0);
+    admin_account_store(&db.pool)
+        .attach_quota_estimates(id, &mut plateau)
+        .await
+        .unwrap();
+    assert_eq!(plateau.windows[0].estimated_quota.as_ref(), Some(&expected));
     db.close().await;
 }

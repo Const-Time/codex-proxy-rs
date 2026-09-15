@@ -182,22 +182,12 @@ pub(super) async fn attach(
                 )
             });
             if let Some(estimate) = estimate {
-                if estimate.missing_cost_count > 0
-                    && sample
-                        .estimate
-                        .as_ref()
-                        .is_some_and(|old| old.missing_cost_count == 0)
-                {
-                    sample.pending_reason = Some(format!(
-                        "保留上次估算：新采样有 {} 笔费用缺失",
-                        estimate.missing_cost_count
-                    ));
-                    sample.pending_end = Some(estimate_end);
-                } else {
-                    sample.estimate = Some(estimate);
-                    sample.pending_reason = None;
-                    sample.pending_end = None;
-                }
+                // Known costs from the current interval must replace an old estimate.
+                // Missing rows are disclosed on the result, not a reason to freeze
+                // an early one-point estimate for the rest of the quota cycle.
+                sample.estimate = Some(estimate);
+                sample.pending_reason = None;
+                sample.pending_end = None;
             } else {
                 // Keep the baseline so late completion can repair this same interval.
                 sample.pending_reason = Some(if sample.estimate.is_some() {
