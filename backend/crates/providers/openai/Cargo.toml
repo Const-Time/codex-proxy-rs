@@ -8,6 +8,7 @@ rust-version.workspace = true
 autotests = false
 
 [dependencies]
+chrono-tz = "0.10"
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 base64 = "0.23.0"

@@ -189,6 +189,14 @@ pub(crate) fn quota_window_view(window: ProviderQuotaWindow) -> AccountQuotaWind
         estimate_hint,
         estimated_quota: estimated_quota.map(|estimate| AccountQuotaEstimateView {
             cycle_based: estimate.cycle_based,
+            estimated_tokens: estimate.estimated_tokens,
+            remaining_tokens: estimate.remaining_tokens,
+            remaining_usd: estimate.remaining_usd,
+            remaining_billed_usd: estimate.remaining_billed_usd,
+            block_count: estimate.block_count,
+            low_sample: estimate.low_sample,
+            incomplete_tokens: estimate.incomplete_tokens,
+
             missing_cost_count: estimate.missing_cost_count,
             request_count: estimate.request_count,
             billed_used_usd: estimate.billed_used_usd,

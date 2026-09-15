@@ -289,14 +289,14 @@ All endpoints require admin authentication and redact proxy credentials from res
 | `GET` | `/api/admin/proxies` | `page`、`pageSize`（1-200）、`search`（名称） | `{ items, page }` |
 | `GET` | `/api/admin/proxies/accounts` | `proxyId`、`page`、`pageSize`（1-200）、`search`（账号名称或邮箱） | `{ items, page }` |
 | `POST` | `/api/admin/proxies/accounts/remove` | `{ proxyId, accountId }` | `{ configRevision }` |
-| `POST` | `/api/admin/proxies/create` | `{ name, proxyUrl }` | `201 { record, configRevision }` |
-| `POST` | `/api/admin/proxies/update` | `{ id, revision, name, proxyUrl? }` | `{ record, configRevision }` |
+| `POST` | `/api/admin/proxies/create` | `{ name, proxyUrl, locationPolicy? }` | `201 { record, configRevision }` |
+| `POST` | `/api/admin/proxies/update` | `{ id, revision, name, proxyUrl?, locationPolicy? }` | `{ record, configRevision }` |
 | `POST` | `/api/admin/proxies/test` | `{ id, revision }` | 最新代理记录 / Proxy record with test result |
 | `POST` | `/api/admin/proxies/quality-test` | `{ id, revision }` | 分项质量报告（当前结果，不写入历史） |
 | `POST` | `/api/admin/proxies/delete` | `{ id, revision }` | `{ configRevision }` |
 
 `record` 包含 `id`、`name`、`endpoint`、`hasAuthentication`、`revision`、`accountCount`、
-`lastTestAt`、`lastTest: { success, latencyMs, exitIp, message }`、`createdAt`、`updatedAt`。
+`locationPolicy`、`lastTestAt`、`lastTest: { success, latencyMs, exitIp, message, location }`、`createdAt`、`updatedAt`。
 未测试时 `lastTestAt` / `lastTest` 为 `null`。连通性失败返回 HTTP 200 和 `lastTest.success=false`；
 记录版本过期、重复 URL、删除已绑定的代理返回 409，并发测试满载返回 429。
 
@@ -324,6 +324,18 @@ Omit `proxyUrl` to preserve credentials. Connection changes invalidate the previ
 Tests persist only when the requested revision still matches. Connectivity failures use HTTP 200 with
 `lastTest.success=false`; stale revisions, duplicate URLs and deleting an in-use proxy return 409.
 The test concurrency limit returns 429.
+
+`locationPolicy` 创建时默认 `{"mode":"auto"}`，更新省略时保留原值。支持：
+
+- `auto`：测试代理时经该代理查询出口 IP 和地区，缓存识别结果。识别失败不影响连通性测试结果，
+  `lastTest.location=null`，后续请求保留客户端地区；连接地址改变会清除旧结果。
+- `manual`：`{"mode":"manual","location":{"country":"US","region":"California","city":"Los Angeles","timezone":"America/Los_Angeles"}}`。
+  国家代码为两位大写字母；地区、城市及 IANA 时区必填，最多 128 字节；拒绝控制字符和无效时区。
+- `passthrough`：保留客户端地区和时区。
+
+绑定同一代理的账号共用该设置。仅改写 OpenAI Responses 内有明确环境标记的日期/时区，以及
+`web_search*` 工具的 `user_location`；普通消息、绝对时间戳和其他工具保持原值。
+普通请求不调用地区查询服务；测试结果落库后更新运行时配置，后续请求使用新位置。
 
 测试固定经代理访问 `https://api.ipify.org?format=json`，超时 15 秒，每进程最多同时测试 4 条。
 探测器复用 OpenAI 的证书信任配置：优先读取非空的 `CODEX_CA_CERTIFICATE`，
@@ -489,6 +501,21 @@ OAuth start 使用：
 - 账号页没有定时静默轮询。手工额度刷新只替换响应中的账号行并同步状态汇总，不触发整页 loading；若
   新状态不符合当前筛选，该行从当前页移除。请求驱动或后台任务产生的状态变化，需要下一次显式查询账号
   列表后才会显示。
+
+### 账号额度估算
+
+额度窗口的 `estimatedQuota` 为只读估算。优先配对同一套餐、同一重置周期的历史额度观测与已完成用量，
+形成至少 5 个百分点的连续分段，使用最近三个完整分段及尾段。不足时，仅对周期开始前接入的账号允许
+周期累计估算；中途接入、跨周期或比例明显回退后需重新积累有效样本。每次读取重新计算，不保留旧低估值。
+`generate=false` 的 OpenAI 预热不计入推理用量，但其额度观测可以参与配对；普通推理不能通过标记
+`request_kind=prewarm` 绕过用量统计。
+
+`estimatedQuota` 返回 `totalUsd` / `billedTotalUsd`、`estimatedTokens`、`remainingTokens`、
+`remainingUsd` / `remainingBilledUsd`，以及采样起止、`percentDelta`、`blockCount`、
+`lowSample`、`missingCostCount` 和 `incompleteTokens`。总量 = 样本用量 × 100 / 百分点增量，
+剩余量 = 样本用量 × (100 − 当前已用百分比) / 百分点增量。金额使用请求入账时的原始费用及历史倍率后
+计费；缺失费用时金额字段为 `null`，仍可独立返回 Token 估算。小于 10 个百分点或不足两个完整分段
+标记初步估算。所有值仅反映本服务已记录的使用组合，不代表上游承诺额度，也无法覆盖站外使用。
 
 ### OpenAI 官方个人资料统计
 

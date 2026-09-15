@@ -2,6 +2,8 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+mod forecast;
+
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use futures::StreamExt as _;
@@ -195,11 +197,7 @@ impl DefaultAccountsService {
                     Ok(mut quota) => {
                         // Sample persisted provider observations without querying upstream or
                         // waiting for an administrator to load the account directory.
-                        if let Err(error) = self
-                            .accounts
-                            .attach_quota_estimates(&item.account.id, &mut quota)
-                            .await
-                        {
+                        if let Err(error) = self.attach_quota_estimates(item, &mut quota).await {
                             tracing::warn!(account_id = %item.account.id, %error, "background quota estimate unavailable; will retry");
                         }
                         if !item.account.groups.is_empty()
@@ -308,11 +306,7 @@ impl DefaultAccountsService {
                 }
             }
             // Estimation must never make the account directory unavailable.
-            if let Err(error) = self
-                .accounts
-                .attach_quota_estimates(&item.account.id, quota)
-                .await
-            {
+            if let Err(error) = self.attach_quota_estimates(item, quota).await {
                 tracing::warn!(account_id = %item.account.id, %error, "quota estimate unavailable");
                 for window in &mut quota.windows {
                     if window.local_usage_attribution == QuotaLocalUsageAttribution::AccountWide {

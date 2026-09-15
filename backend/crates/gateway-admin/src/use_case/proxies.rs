@@ -181,6 +181,7 @@ impl ProxiesService for DefaultProxiesService {
         context: &MutationContext,
     ) -> Result<ProxyMutation, AdminError> {
         command.name = validate_name(&command.name)?;
+        command.location_policy.validate()?;
         let result = self
             .store
             .create(command, context)
@@ -196,6 +197,9 @@ impl ProxiesService for DefaultProxiesService {
         context: &MutationContext,
     ) -> Result<ProxyMutation, AdminError> {
         command.name = validate_name(&command.name)?;
+        if let Some(policy) = &command.location_policy {
+            policy.validate()?;
+        }
         let result = self
             .store
             .update(command, context)
@@ -238,10 +242,12 @@ impl ProxiesService for DefaultProxiesService {
             return Err(AdminError::conflict("代理已被修改，请刷新后重新测试"));
         }
         let report = self.probe.quality(&record.proxy).await;
-        self.store
+        let stored = self
+            .store
             .record_test(id, revision, report.basic.clone(), context)
             .await
             .map_err(|error| map_store_error(error, "proxy"))?;
+        publish_committed(self.snapshot.as_ref(), stored.config_revision).await?;
         Ok(report)
     }
 
@@ -263,10 +269,13 @@ impl ProxiesService for DefaultProxiesService {
             return Err(AdminError::conflict("代理已被修改，请刷新后重新测试"));
         }
         let result = self.probe.test(&record.proxy).await;
-        self.store
+        let stored = self
+            .store
             .record_test(id, revision, result, context)
             .await
-            .map_err(|error| map_store_error(error, "proxy"))
+            .map_err(|error| map_store_error(error, "proxy"))?;
+        publish_committed(self.snapshot.as_ref(), stored.config_revision).await?;
+        Ok(stored)
     }
 }
 

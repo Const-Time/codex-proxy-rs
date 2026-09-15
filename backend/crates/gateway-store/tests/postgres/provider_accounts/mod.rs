@@ -45,7 +45,7 @@ use serde_json::json;
 
 use super::{TestDatabase, admin_account_store};
 
-mod quota_estimate;
+mod quota_forecast;
 
 #[derive(sqlx::FromRow)]
 struct RecoveredAccountRow {
@@ -1732,6 +1732,7 @@ async fn authorization_import_rejects_a_saved_proxy_changed_during_oauth() {
     let saved = proxies
         .create(
             NewProxy {
+                location_policy: Default::default(),
                 name: "OAuth".to_owned(),
                 proxy: original.clone(),
             },
@@ -1741,6 +1742,7 @@ async fn authorization_import_rejects_a_saved_proxy_changed_during_oauth() {
         .unwrap()
         .record;
     let success = ProxyTestResult {
+        location: None,
         success: true,
         latency_ms: 1,
         exit_ip: Some("203.0.113.5".parse().unwrap()),
@@ -1754,6 +1756,7 @@ async fn authorization_import_rejects_a_saved_proxy_changed_during_oauth() {
     let edited = proxies
         .update(
             UpdateProxy {
+                location_policy: None,
                 id: saved.id.clone(),
                 revision: saved.revision,
                 name: saved.name,

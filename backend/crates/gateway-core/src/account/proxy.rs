@@ -1,10 +1,20 @@
 //! Explicit account egress. Credentials never appear in Debug or ordinary admin projections.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 use url::Url;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct OutboundProxy(Url);
+pub struct OutboundProxy(Url, Option<Arc<RequestLocation>>);
+
+/// Effective request metadata for this egress, resolved by the proxy store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestLocation {
+    pub country: String,
+    pub region: String,
+    pub city: String,
+    pub timezone: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("invalid outbound proxy; expected http, https, socks5 or socks5h URL with a host and port")]
@@ -25,12 +35,23 @@ impl OutboundProxy {
         {
             return Err(InvalidOutboundProxy);
         }
-        Ok(Self(url))
+        Ok(Self(url, None))
     }
 
     #[must_use]
     pub fn expose_url(&self) -> &str {
         self.0.as_str()
+    }
+
+    #[must_use]
+    pub fn with_location(mut self, location: Option<RequestLocation>) -> Self {
+        self.1 = location.map(Arc::new);
+        self
+    }
+
+    #[must_use]
+    pub fn location(&self) -> Option<&RequestLocation> {
+        self.1.as_deref()
     }
 
     #[must_use]

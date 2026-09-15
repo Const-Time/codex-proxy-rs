@@ -5,6 +5,48 @@ use gateway_core::account::OutboundProxy;
 
 use super::{PageSize, Revision, account_groups::AccountGroupRef};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ProxyLocationPolicy {
+    #[default]
+    Auto,
+    Passthrough,
+    Manual {
+        location: gateway_core::account::RequestLocation,
+    },
+}
+
+impl ProxyLocationPolicy {
+    pub fn validate(&self) -> Result<(), super::AdminError> {
+        if let Self::Manual { location } = self {
+            validate_request_location(location)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_request_location(
+    location: &gateway_core::account::RequestLocation,
+) -> Result<(), super::AdminError> {
+    if location.country.len() != 2
+        || !location
+            .country
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+        || [&location.region, &location.city, &location.timezone]
+            .iter()
+            .any(|value| {
+                value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+            })
+        || location.timezone.parse::<chrono_tz::Tz>().is_err()
+    {
+        return Err(super::AdminError::invalid(
+            "请填写两位大写国家代码、地区、城市和有效的 IANA 时区",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountProxySelection {
     Direct,
@@ -57,6 +99,7 @@ pub struct ProxyAccountPage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyTestResult {
+    pub location: Option<gateway_core::account::RequestLocation>,
     pub success: bool,
     pub latency_ms: u64,
     pub exit_ip: Option<std::net::IpAddr>,
@@ -65,6 +108,8 @@ pub struct ProxyTestResult {
 
 #[derive(Debug, Clone)]
 pub struct ProxyRecord {
+    pub location_policy: ProxyLocationPolicy,
+    pub config_revision: Revision,
     pub id: String,
     pub name: String,
     pub proxy: OutboundProxy,
@@ -86,12 +131,14 @@ pub struct ProxyPage {
 
 #[derive(Debug, Clone)]
 pub struct NewProxy {
+    pub location_policy: ProxyLocationPolicy,
     pub name: String,
     pub proxy: OutboundProxy,
 }
 
 #[derive(Debug, Clone)]
 pub struct UpdateProxy {
+    pub location_policy: Option<ProxyLocationPolicy>,
     pub id: String,
     pub revision: Revision,
     pub name: String,

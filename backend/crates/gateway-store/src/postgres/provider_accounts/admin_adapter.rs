@@ -365,12 +365,11 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
-    async fn attach_quota_estimates(
+    async fn load_quota_forecast_history(
         &self,
-        account_id: &str,
-        quota: &mut gateway_admin::model::provider_credentials::ProviderQuota,
-    ) -> AdminStoreResult<()> {
-        super::quota_estimate::attach(self, &self.pool, account_id, quota).await
+        window: &AccountUsageWindowQuery,
+    ) -> AdminStoreResult<gateway_admin::model::quota_forecast_sampling::QuotaForecastHistory> {
+        super::quota_forecast::load_history(&self.pool, &self.query_budget, window).await
     }
     async fn observe_subscription_quota(
         &self,

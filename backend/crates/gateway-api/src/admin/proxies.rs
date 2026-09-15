@@ -46,6 +46,8 @@ struct RemoveAccountRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateRequest {
+    #[serde(default)]
+    location_policy: gateway_admin::model::proxies::ProxyLocationPolicy,
     name: String,
     proxy_url: AccountProxyUpdate,
 }
@@ -53,6 +55,7 @@ struct CreateRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateRequest {
+    location_policy: Option<gateway_admin::model::proxies::ProxyLocationPolicy>,
     id: String,
     revision: u64,
     name: String,
@@ -69,6 +72,7 @@ struct IdRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyTestView {
+    location: Option<gateway_core::account::RequestLocation>,
     success: bool,
     latency_ms: u64,
     exit_ip: Option<String>,
@@ -92,6 +96,7 @@ struct ProxyAccountView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyView {
+    location_policy: gateway_admin::model::proxies::ProxyLocationPolicy,
     id: String,
     name: String,
     endpoint: String,
@@ -108,6 +113,7 @@ impl From<ProxyRecord> for ProxyView {
     fn from(record: ProxyRecord) -> Self {
         let endpoint = record.proxy.endpoint();
         Self {
+            location_policy: record.location_policy,
             id: record.id,
             name: record.name,
             has_authentication: record.proxy.expose_url() != endpoint,
@@ -116,6 +122,7 @@ impl From<ProxyRecord> for ProxyView {
             account_count: record.account_count,
             last_test_at: record.last_test_at.map(|at| at.to_rfc3339()),
             last_test: record.last_test.map(|result| ProxyTestView {
+                location: result.location,
                 success: result.success,
                 latency_ms: result.latency_ms,
                 exit_ip: result.exit_ip.map(|ip| ip.to_string()),
@@ -293,6 +300,7 @@ where
         .proxies()
         .create(
             NewProxy {
+                location_policy: request.location_policy,
                 name: request.name,
                 proxy,
             },
@@ -351,6 +359,7 @@ where
         .proxies()
         .update(
             UpdateProxy {
+                location_policy: request.location_policy,
                 id: request.id,
                 revision: revision(request.revision)?,
                 name: request.name,

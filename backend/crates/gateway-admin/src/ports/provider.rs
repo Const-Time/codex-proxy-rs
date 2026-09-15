@@ -166,6 +166,14 @@ pub trait ProviderAdmin: Send + Sync {
         command: PrepareCredentialRefresh,
     ) -> Result<PreparedCredentialRotation, ProviderAdminError>;
 
+    fn quota_forecast_observation(
+        &self,
+        _document: &crate::model::provider_credentials::ProviderDocument,
+        _window: &crate::model::provider_credentials::ProviderQuotaWindow,
+    ) -> Option<crate::model::quota_forecast_sampling::QuotaForecastObservation> {
+        None
+    }
+
     async fn quota(
         &self,
         request: ProviderQuotaRequest,

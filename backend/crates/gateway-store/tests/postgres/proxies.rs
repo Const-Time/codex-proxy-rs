@@ -25,11 +25,182 @@ fn context() -> MutationContext {
 
 fn success() -> ProxyTestResult {
     ProxyTestResult {
+        location: None,
         success: true,
         latency_ms: 10,
         exit_ip: Some("203.0.113.5".parse().unwrap()),
         message: "Connected".to_owned(),
     }
+}
+
+#[tokio::test]
+async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
+    use gateway_core::account::RequestLocation;
+    let Some(database) = TestDatabase::create("proxy_locations").await else {
+        return;
+    };
+    let store = PgProxyRepository::new(database.pool.clone());
+    let accounts = PgProviderAccountRepository::new(database.pool.clone());
+    accounts
+        .insert_provider_account(account("acct_location", "location-user"))
+        .await
+        .unwrap();
+    let context = context();
+    let initial = store
+        .create(
+            NewProxy {
+                name: "Location".to_owned(),
+                proxy: OutboundProxy::parse("http://127.0.0.1:8888").unwrap(),
+                location_policy: ProxyLocationPolicy::Auto,
+            },
+            &context,
+        )
+        .await
+        .unwrap()
+        .record;
+    let location = RequestLocation {
+        country: "US".to_owned(),
+        region: "California".to_owned(),
+        city: "Los Angeles".to_owned(),
+        timezone: "America/Los_Angeles".to_owned(),
+    };
+    let observed = store
+        .record_test(
+            &initial.id,
+            initial.revision,
+            ProxyTestResult {
+                location: Some(location.clone()),
+                ..success()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    assert!(observed.config_revision.get() > initial.config_revision.get());
+    admin_account_store(&database.pool)
+        .update_account(
+            update(
+                "acct_location",
+                AccountProxySelection::Saved(initial.id.clone()),
+            ),
+            &context,
+        )
+        .await
+        .unwrap();
+    let loaded = accounts
+        .load_provider_account("acct_location")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.summary.outbound_proxy.as_ref().unwrap().location(),
+        Some(&location)
+    );
+    let mut manual = location.clone();
+    manual.timezone = "America/New_York".to_owned();
+    let changed = store
+        .update(
+            UpdateProxy {
+                id: initial.id.clone(),
+                revision: observed.revision,
+                name: "Manual".to_owned(),
+                proxy: None,
+                location_policy: Some(ProxyLocationPolicy::Manual {
+                    location: manual.clone(),
+                }),
+            },
+            &context,
+        )
+        .await
+        .unwrap()
+        .record;
+    let loaded = accounts
+        .load_provider_account("acct_location")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.summary.outbound_proxy.as_ref().unwrap().location(),
+        Some(&manual)
+    );
+    let changed = store
+        .update(
+            UpdateProxy {
+                id: changed.id,
+                revision: changed.revision,
+                name: "Keep client".to_owned(),
+                proxy: None,
+                location_policy: Some(ProxyLocationPolicy::Passthrough),
+            },
+            &context,
+        )
+        .await
+        .unwrap()
+        .record;
+    let loaded = accounts
+        .load_provider_account("acct_location")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        loaded
+            .summary
+            .outbound_proxy
+            .as_ref()
+            .unwrap()
+            .location()
+            .is_none()
+    );
+    let changed = store
+        .update(
+            UpdateProxy {
+                id: changed.id,
+                revision: changed.revision,
+                name: "New egress".to_owned(),
+                proxy: Some(OutboundProxy::parse("http://127.0.0.1:9999").unwrap()),
+                location_policy: Some(ProxyLocationPolicy::Auto),
+            },
+            &context,
+        )
+        .await
+        .unwrap()
+        .record;
+    assert!(changed.last_test.is_none());
+    let loaded = accounts
+        .load_provider_account("acct_location")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        loaded
+            .summary
+            .outbound_proxy
+            .as_ref()
+            .unwrap()
+            .location()
+            .is_none()
+    );
+    assert_eq!(
+        loaded.summary.outbound_proxy.as_ref().unwrap().expose_url(),
+        "http://127.0.0.1:9999/"
+    );
+    assert_eq!(
+        store
+            .record_test(
+                &initial.id,
+                initial.revision,
+                ProxyTestResult {
+                    location: Some(location),
+                    ..success()
+                },
+                &context
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        AdminStoreErrorKind::Conflict
+    );
+    database.close().await;
 }
 
 fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
@@ -53,6 +224,7 @@ async fn proxy_account_removal_preserves_settings_and_rejects_changed_bindings()
     let saved = store
         .create(
             NewProxy {
+                location_policy: Default::default(),
                 name: "解绑测试".to_owned(),
                 proxy: OutboundProxy::parse("http://user:secret@127.0.0.1:17890").unwrap(),
             },
@@ -197,6 +369,7 @@ async fn proxy_accounts_paginate_thousands_of_accounts_and_search_without_loadin
     let saved = store
         .create(
             NewProxy {
+                location_policy: Default::default(),
                 name: "分页测试".to_owned(),
                 proxy: OutboundProxy::parse("http://127.0.0.1:17890").unwrap(),
             },
@@ -208,6 +381,7 @@ async fn proxy_accounts_paginate_thousands_of_accounts_and_search_without_loadin
     let empty = store
         .create(
             NewProxy {
+                location_policy: Default::default(),
                 name: "无关联账号".to_owned(),
                 proxy: OutboundProxy::parse("http://127.0.0.1:17891").unwrap(),
             },
@@ -349,6 +523,7 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
     let saved = store
         .create(
             NewProxy {
+                location_policy: Default::default(),
                 name: "导入出口".to_owned(),
                 proxy: OutboundProxy::parse("http://127.0.0.1:8080").unwrap(),
             },
@@ -364,6 +539,7 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
         .unwrap();
     let reservation = store.reserve_import(&saved.id).await.unwrap();
     let replacement = UpdateProxy {
+        location_policy: None,
         id: saved.id.clone(),
         revision: saved.revision,
         name: saved.name,
@@ -387,6 +563,7 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
                 &saved.id,
                 saved.revision,
                 ProxyTestResult {
+                    location: None,
                     success: false,
                     ..success()
                 },
@@ -461,6 +638,7 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let created = store
         .create(
             NewProxy {
+                location_policy: Default::default(),
                 name: "Office".to_owned(),
                 proxy: old_proxy.clone(),
             },
@@ -474,6 +652,7 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
         store
             .create(
                 NewProxy {
+                    location_policy: Default::default(),
                     name: "Duplicate".to_owned(),
                     proxy: old_proxy.clone()
                 },
@@ -531,6 +710,7 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let renamed = store
         .update(
             UpdateProxy {
+                location_policy: None,
                 id: created.id.clone(),
                 revision: created.revision,
                 name: "Renamed".to_owned(),
@@ -548,6 +728,7 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let edited = store
         .update(
             UpdateProxy {
+                location_policy: None,
                 id: created.id.clone(),
                 revision: renamed.revision,
                 name: renamed.name,
