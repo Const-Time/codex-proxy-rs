@@ -4,8 +4,8 @@ import { computed } from 'vue'
 import { requestProfiles } from '../utils/requestProfile'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
 
-const props = defineProps<{ events: RequestTraceEvent[] }>()
-const profiles = computed(() => requestProfiles(props.events))
+const props = defineProps<{ events: RequestTraceEvent[], requestCreatedAt?: string }>()
+const profiles = computed(() => requestProfiles(props.events, props.requestCreatedAt))
 </script>
 
 <template>

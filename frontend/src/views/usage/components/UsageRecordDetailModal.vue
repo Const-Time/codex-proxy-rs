@@ -319,7 +319,7 @@ const tokenDonutOption = computed<EChartsOption>(() => {
 
           <div class="col-span-2 min-w-0 lg:col-span-1">
             <dt :class="fieldLabelClass">
-              时间
+              请求时间（UTC+8）
             </dt>
             <dd :class="fieldValueClass(true)" :title="displayValue(record.createdAtDisplay)">
               {{ displayValue(record.createdAtDisplay) }}

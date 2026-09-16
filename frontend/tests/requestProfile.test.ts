@@ -2,7 +2,7 @@ import type { RequestTraceEvent } from '../src/api/modules/usage.ts'
 import assert from 'node:assert/strict'
 // eslint-disable-next-line test/no-import-node-test -- Use the existing native Node test runner.
 import test from 'node:test'
-import { proxyDetectionTime, requestProfiles } from '../src/views/usage/utils/requestProfile.ts'
+import { proxyLocalTime, requestProfiles } from '../src/views/usage/utils/requestProfile.ts'
 
 function event(sequence: number, attemptIndex: number, stage: string, data: Record<string, unknown>, exchangeId: number | null = null): RequestTraceEvent {
   return { sequence, lastSequence: sequence, elapsedMs: sequence * 10, lastElapsedMs: sequence * 10, attemptIndex, exchangeId, stage, count: 1, data }
@@ -41,22 +41,39 @@ test('proxy detection time uses the recorded timezone across midnight without mu
   const data = { ...profile, proxy: { ...profile.proxy, detectedAt: '2026-09-15 15:34:13.541689+00' }, effectiveLocation: { timezone: 'Asia/Tokyo' } }
   const original = JSON.stringify(data)
   const [row] = requestProfiles([event(1, 1, 'upstream.request.profile', data)])
-  assert.equal(row!.items.find(item => item.label === '出口检测时间')!.value, '2026-09-16 00:34:13（Asia/Tokyo，UTC+09:00）')
+  assert.equal(row!.items.find(item => item.label === '上次出口检测时间')!.value, '2026-09-16 00:34:13（Asia/Tokyo，UTC+09:00）')
   assert.equal(JSON.stringify(data), original)
-  assert.equal(proxyDetectionTime('2026-09-16T00:34:13+09:00', 'Asia/Tokyo'), '2026-09-16 00:34:13（Asia/Tokyo，UTC+09:00）')
+  assert.equal(proxyLocalTime('2026-09-16T00:34:13+09:00', 'Asia/Tokyo'), '2026-09-16 00:34:13（Asia/Tokyo，UTC+09:00）')
 })
 
 test('offset labels follow daylight saving and fractional timezone offsets', () => {
-  assert.equal(proxyDetectionTime('2026-07-15T12:00:00Z', 'America/New_York'), '2026-07-15 08:00:00（America/New_York，UTC-04:00）')
-  assert.equal(proxyDetectionTime('2026-01-15T12:00:00Z', 'America/New_York'), '2026-01-15 07:00:00（America/New_York，UTC-05:00）')
-  assert.equal(proxyDetectionTime('2026-09-15T12:00:00Z', 'Asia/Kolkata'), '2026-09-15 17:30:00（Asia/Kolkata，UTC+05:30）')
-  assert.equal(proxyDetectionTime('2026-09-15T12:00:00Z', 'UTC'), '2026-09-15 12:00:00（UTC，UTC+00:00）')
+  assert.equal(proxyLocalTime('2026-07-15T12:00:00Z', 'America/New_York'), '2026-07-15 08:00:00（America/New_York，UTC-04:00）')
+  assert.equal(proxyLocalTime('2026-01-15T12:00:00Z', 'America/New_York'), '2026-01-15 07:00:00（America/New_York，UTC-05:00）')
+  assert.equal(proxyLocalTime('2026-09-15T12:00:00Z', 'Asia/Kolkata'), '2026-09-15 17:30:00（Asia/Kolkata，UTC+05:30）')
+  assert.equal(proxyLocalTime('2026-09-15T12:00:00Z', 'UTC'), '2026-09-15 12:00:00（UTC，UTC+00:00）')
+})
+
+test('request time is distinct from detection time and follows each attempt snapshot', () => {
+  const rows = requestProfiles([
+    event(1, 1, 'upstream.request.profile', {
+      ...profile,
+      proxy: { ...profile.proxy, detectedAt: '2026-09-15 15:34:13.541689+00' },
+      effectiveLocation: { timezone: 'Asia/Tokyo' },
+    }),
+    event(2, 2, 'upstream.request.profile', profile),
+  ], '2026-09-16T01:17:23Z')
+  const field = (index: number, label: string) => rows[index]!.items.find(item => item.label === label)?.value
+  assert.equal(field(0, '请求时间（代理时区）'), '2026-09-16 10:17:23（Asia/Tokyo，UTC+09:00）')
+  assert.equal(field(0, '上次出口检测时间'), '2026-09-16 00:34:13（Asia/Tokyo，UTC+09:00）')
+  assert.equal(field(1, '请求时间（代理时区）'), '2026-09-15 18:17:23（America/Los_Angeles，UTC-07:00）')
+  const [missing] = requestProfiles([event(1, 1, 'upstream.request.profile', profile)])
+  assert.equal(missing!.items.find(item => item.label === '请求时间（代理时区）')!.value, '—')
 })
 
 test('missing or invalid timestamps and timezones never invent a local time', () => {
-  assert.equal(proxyDetectionTime(null, 'Asia/Tokyo'), '—')
-  assert.equal(proxyDetectionTime('2026-09-15 15:34:13+00', null), '2026-09-15 15:34:13+00（原始时间；未记录代理时区）')
-  assert.equal(proxyDetectionTime('2026-09-15 15:34:13+00', 'invalid/zone'), '2026-09-15 15:34:13+00（原始时间；代理时区不可识别）')
-  assert.equal(proxyDetectionTime('2026-09-15 15:34:13', 'Asia/Tokyo'), '2026-09-15 15:34:13（原始时间；缺少 UTC 偏移）')
-  assert.match(proxyDetectionTime('invalidZ', 'Asia/Tokyo'), /时间格式不可识别/)
+  assert.equal(proxyLocalTime(null, 'Asia/Tokyo'), '—')
+  assert.equal(proxyLocalTime('2026-09-15 15:34:13+00', null), '2026-09-15 15:34:13+00（原始时间；未记录代理时区）')
+  assert.equal(proxyLocalTime('2026-09-15 15:34:13+00', 'invalid/zone'), '2026-09-15 15:34:13+00（原始时间；代理时区不可识别）')
+  assert.equal(proxyLocalTime('2026-09-15 15:34:13', 'Asia/Tokyo'), '2026-09-15 15:34:13（原始时间；缺少 UTC 偏移）')
+  assert.match(proxyLocalTime('invalidZ', 'Asia/Tokyo'), /时间格式不可识别/)
 })

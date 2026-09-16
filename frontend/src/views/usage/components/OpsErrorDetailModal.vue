@@ -49,7 +49,7 @@ const errorFields = computed(() => visibleFields([
 
 const requestFields = computed(() => visibleFields([
   { label: '账号', value: accountLabel.value, mono: true },
-  { label: '时间', value: props.record?.createdAtDisplay, mono: true },
+  { label: '请求时间（UTC+8）', value: props.record?.createdAtDisplay, mono: true },
   { label: '请求 ID', value: props.record?.requestId, mono: true },
   { label: '客户端 Key ID', value: props.record?.clientApiKeyId, mono: true },
   { label: '客户端 IP', value: props.record?.clientIp, mono: true },

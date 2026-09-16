@@ -8,7 +8,7 @@ function text(value: unknown) {
   return typeof value === 'string' && value.length > 0 ? value : '—'
 }
 
-export function proxyDetectionTime(value: unknown, timezone: unknown) {
+export function proxyLocalTime(value: unknown, timezone: unknown) {
   if (typeof value !== 'string' || !value.trim())
     return '—'
   if (typeof timezone !== 'string' || !timezone.trim())
@@ -54,7 +54,7 @@ const headerLabels: Record<string, string> = {
   'content-encoding': '内容编码',
 }
 
-export function requestProfiles(events: RequestTraceEvent[]) {
+export function requestProfiles(events: RequestTraceEvent[], requestCreatedAt?: string) {
   const profiles = events.filter(event => event.stage === 'upstream.request.profile')
   return profiles.map((event, index) => {
     const data = event.data
@@ -76,11 +76,12 @@ export function requestProfiles(events: RequestTraceEvent[]) {
       { label: '代理 ID', value: text(proxy.proxyId), mono: true },
       { label: '地区策略', value: modeLabels[text(proxy.mode)] ?? (data.viaProxy ? '未记录来源' : '保留客户端') },
       { label: '上次检测出口 IP', value: text(proxy.detectedIp), mono: true },
-      { label: '出口检测时间', value: proxyDetectionTime(proxy.detectedAt, location.timezone), mono: true },
+      { label: '上次出口检测时间', value: proxyLocalTime(proxy.detectedAt, location.timezone), mono: true },
       { label: '代理提供的地区', value: [location.country, location.region, location.city].filter(value => typeof value === 'string').join(' / ') || '无覆盖值' },
       { label: '代理提供的时区', value: text(location.timezone), mono: true },
       { label: '实际改写', value: applied ? `环境信息 ${Number(changes.environmentChanged) || 0} 处；搜索位置 ${Number(changes.searchChanged) || 0} 处` : '此调用未记录地区改写' },
       { label: '请求压缩方式', value: text(data.compression), mono: true },
+      { label: '请求时间（代理时区）', value: proxyLocalTime(requestCreatedAt, location.timezone), mono: true, fullWidth: true },
     ]
     if (data.truncated === true)
       items.unshift({ label: '采集状态', value: '快照超过保存上限，仅保留摘要', fullWidth: true })
