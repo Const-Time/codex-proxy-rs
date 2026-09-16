@@ -362,7 +362,7 @@ async fn weekly_error_reset_identifies_the_slot_before_display_reaches_one_hundr
 }
 
 #[tokio::test]
-async fn recovery_retains_reset_baseline_until_usage_is_below_ten() {
+async fn recovery_retains_reset_baseline_until_new_window_is_confirmed() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_baseline").await;
     let account = store.account("acct_baseline").expect("account");
@@ -375,7 +375,8 @@ async fn recovery_retains_reset_baseline_until_usage_is_below_ten() {
         .refresh_account(account.id())
         .await
         .expect("seed exhausted quota");
-    for used in [98, 10, 9] {
+    // 单次高用量不能恢复；新窗口连续两次未触顶可以恢复，无需等待 <10%。
+    for (used, exhausted) in [(98, true), (10, false), (9, false)] {
         mount_usage(
             &server,
             usage((used, SHORT_RESET + 18_000), (45, WEEK_RESET)),
@@ -385,7 +386,7 @@ async fn recovery_retains_reset_baseline_until_usage_is_below_ten() {
             .refresh_account(account.id())
             .await
             .expect("refresh quota");
-        assert_eq!(snapshot.quota().is_exhausted(), used >= 10);
+        assert_eq!(snapshot.quota().is_exhausted(), exhausted);
     }
 }
 
@@ -495,6 +496,7 @@ async fn stored_weekly_exhaustion_ignores_the_old_primary_only_account_reset() {
     old["rate_limit"]["allowed"] = json!(false);
     store
         .compare_and_swap_quota(gateway_core::account::QuotaObservation {
+            plan_type: None,
             account_id: account.id().clone(),
             expected_revision: account.revision(),
             quota: gateway_core::account::OpaqueProviderData::new(

@@ -3,6 +3,49 @@
 use super::*;
 
 #[tokio::test]
+async fn advanced_reset_with_nonzero_usage_recovers_after_two_observations() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_advanced_reset").await;
+    let account = store.account("acct_advanced_reset").expect("account");
+    let server = MockServer::start().await;
+    let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
+    for (reset, used, exhausted) in [
+        (1_900_000_000, 100, true),
+        (1_900_018_000, 25, true),
+        (1_900_018_000, 30, false),
+    ] {
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "rate_limit": {
+                    "allowed": used < 100,
+                    "limit_reached": used >= 100,
+                    "primary_window": {
+                        "used_percent": used, "reset_at": reset,
+                        "limit_window_seconds": 18_000
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let snapshot = service
+            .refresh_account(account.id())
+            .await
+            .expect("refresh");
+        assert_eq!(snapshot.quota().is_exhausted(), exhausted);
+        assert_eq!(
+            store
+                .account("acct_advanced_reset")
+                .unwrap()
+                .quota()
+                .is_exhausted(),
+            exhausted
+        );
+    }
+}
+
+#[tokio::test]
 async fn quota_refresh_updates_access_fact_without_recovering_credential_error() {
     let store = Arc::new(MemoryAccountStore::default());
     let account_id = "acct_independent_quota_and_credential";

@@ -280,17 +280,19 @@ impl DefaultAccountsService {
                 quota
                     .windows
                     .iter()
+                    .filter(|window| window.local_usage.is_none())
                     .filter_map(|window| quota_usage_window(&item.account.id, window))
             })
             .collect::<Vec<_>>();
-        if windows.is_empty() {
-            return Ok(());
-        }
-        let usage_by_window = self
-            .accounts
-            .load_account_usage_by_windows(&windows)
-            .await
-            .map_err(|error| map_store_error(error, "quota window usage"))?
+        let usage = if windows.is_empty() {
+            Vec::new()
+        } else {
+            self.accounts
+                .load_account_usage_by_windows(&windows)
+                .await
+                .map_err(|error| map_store_error(error, "quota window usage"))?
+        };
+        let usage_by_window = usage
             .into_iter()
             .map(|result| ((result.account_id, result.key), result.usage))
             .collect::<BTreeMap<_, _>>();
@@ -898,9 +900,9 @@ fn quota_usage_window(
     account_id: &str,
     window: &ProviderQuotaWindow,
 ) -> Option<AccountUsageWindowQuery> {
-    if window.local_usage.is_some()
-        || window.local_usage_attribution != QuotaLocalUsageAttribution::AccountWide
-    {
+    // Window boundaries are shared by usage display and forecast sampling.
+    // Already attached display usage must not disable the independent forecast.
+    if window.local_usage_attribution != QuotaLocalUsageAttribution::AccountWide {
         return None;
     }
     let reset_at = window.reset_at?;

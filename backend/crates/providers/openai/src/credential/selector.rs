@@ -352,7 +352,20 @@ impl CodexCredentialSelector {
         model_catalog_eligibility: ModelCatalogEligibility<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let diagnostic = request.attempt.is_diagnostic_required_account();
-        let accounts = self.repository.list_for_provider().await?;
+        let mut accounts = self.repository.list_for_provider().await?;
+        // 正常调度列表不含停用账号；仅管理端固定账号诊断允许补回。
+        if diagnostic
+            && let Some(required) = request.attempt.required_account()
+            && !accounts.iter().any(|account| account.id() == required)
+            && let Some(account) = self
+                .repository
+                .store()
+                .get_account(required)
+                .await
+                .map_err(|_| CredentialSelectionError::Store)?
+        {
+            accounts.push(account);
+        }
         let accounts = accounts
             .into_iter()
             .filter(|account| {

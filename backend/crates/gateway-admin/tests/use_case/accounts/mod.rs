@@ -195,6 +195,7 @@ impl FakeProviderAdmin {
                 name: account.name.clone(),
                 email: account.email.clone(),
                 plan_type: account.plan_type.clone(),
+                preserve_profile: false,
                 provider_material: document(),
                 has_refresh_token: account.has_refresh_token,
                 access_token_expires_at: account
@@ -219,7 +220,10 @@ impl ProviderAdmin for FakeProviderAdmin {
             gateway_admin::model::quota_forecast_sampling::QuotaForecastObservation {
                 used_percent: fields.get("percent")?.as_f64()?,
                 reset_at: serde_json::from_value(fields.get("resetAt")?.clone()).ok()?,
-                plan_type: fields.get("plan")?.as_str().map(str::to_owned),
+                plan_type: fields
+                    .get("plan")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
             },
         )
     }
@@ -2536,6 +2540,13 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
     let store = FakeAccountStore::new("openai", events());
     let quota = forecast_quota(observed, 46.0);
     provider.set_quota(quota.clone());
+    // Production returns local usage before estimation; an empty fake response hid
+    // the bug where the shared window helper then skipped every populated window.
+    store.set_quota_window_usage(vec![AccountUsageWindowResult {
+        account_id: "acct_test".to_owned(),
+        key: quota.windows[0].key.clone(),
+        usage: quota_local_usage("acct_test", 120_000),
+    }]);
     // Mid-cycle imports can forecast from paired points, never from an assumed 0% baseline.
     let mut account = account_record("openai");
     account.created_at = observed - TimeDelta::days(1);
@@ -2592,7 +2603,15 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
         let estimate = page.items[0].quota.windows[0]
             .estimated_quota
             .as_ref()
-            .unwrap();
+            .expect("populated local usage must not suppress quota estimation");
+        assert_eq!(
+            page.items[0].quota.windows[0]
+                .local_usage
+                .as_ref()
+                .unwrap()
+                .total_tokens,
+            Some(120_000)
+        );
         assert!(!estimate.cycle_based);
         assert_eq!(estimate.percent_delta, 10.0);
         assert_eq!(estimate.estimated_tokens, Some(200_000));
@@ -2606,6 +2625,55 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
             assert_eq!(estimate.remaining_billed_usd.as_deref(), Some("216.00"));
         }
     }
+    // Optional plan headers must not discard paired samples, for either 5h or weekly quotas.
+    for (seconds, percent, prefilled) in [
+        (18_000, 46.0, false),
+        (18_000, 100.0, true),
+        (604_800, 46.0, true),
+    ] {
+        for (current_plan, historical_plan, estimated) in [
+            (Some("business"), None, true),
+            (None, Some("business"), true),
+            (None, None, true),
+            (Some("business"), Some("BUSINESS"), true),
+            (Some("business"), Some("pro"), false),
+        ] {
+            let mut current = quota.clone();
+            current.plan_type = current_plan.map(str::to_owned);
+            current.windows[0].window_seconds = Some(seconds);
+            current.windows[0].used_percent = Some(percent);
+            current.windows[0].limit_reached = percent >= 100.0;
+            if prefilled {
+                current.windows[0].local_usage = Some(quota_local_usage("acct_test", 120_000));
+            }
+            current.windows[0].reset_at = Some(observed + TimeDelta::seconds((seconds / 2) as i64));
+            provider.set_quota(current.clone());
+            history.points[0].provider_observation = ProviderDocument::new(OpaqueProviderData::new(
+                json!({"percent": 36.0, "resetAt": current.windows[0].reset_at, "plan": historical_plan})
+                    .as_object().unwrap().clone(),
+            ));
+            *store.forecast_history.lock().unwrap() = history.clone();
+            let page = services
+                .accounts()
+                .list(AccountListQuery {
+                    page: 1,
+                    page_size: gateway_admin::model::PageSize::new(20).unwrap(),
+                    provider_kind: None,
+                    group_filter: None,
+                    search: None,
+                    status: None,
+                    sort: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                page.items[0].quota.windows[0].estimated_quota.is_some(),
+                estimated,
+                "seconds={seconds}, percent={percent}, current={current_plan:?}, history={historical_plan:?}"
+            );
+        }
+    }
+    provider.set_quota(quota.clone());
     // Changing the reset boundary invalidates old paired points; a mid-cycle import must wait.
     history.points[0].provider_observation = ProviderDocument::new(OpaqueProviderData::new(
         json!({"percent": 36.0, "resetAt": observed + TimeDelta::days(4), "plan": "pro"})

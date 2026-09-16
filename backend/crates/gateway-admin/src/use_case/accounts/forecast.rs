@@ -57,12 +57,14 @@ impl DefaultAccountsService {
                 else {
                     continue;
                 };
-                let same_plan = quota
+                // 响应头中的套餐字段是可选的；缺失不代表发生套餐变更。
+                // 只有两端都明确报告套餐且不同，才切断配对样本。
+                let changed_plan = quota
                     .plan_type
                     .as_deref()
                     .zip(fact.plan_type.as_deref())
-                    .is_some_and(|(current, previous)| current.eq_ignore_ascii_case(previous));
-                if !same_plan || (fact.reset_at - reset_at).abs() > Duration::seconds(2) {
+                    .is_some_and(|(current, previous)| !current.eq_ignore_ascii_case(previous));
+                if changed_plan || (fact.reset_at - reset_at).abs() > Duration::seconds(2) {
                     points.clear();
                     interrupted = true;
                     continue;

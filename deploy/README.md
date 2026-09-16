@@ -418,12 +418,17 @@ docker compose -f deploy/compose.yaml build codex-proxy-rs
 
 ### 管理端在线更新
 
+二进制归档部署时，将 `api.asset_directory` 设为指向归档内静态资源的路径（例如
+`../web/dist`，相对于配置文件目录）。在线更新与回滚默认使用同一目录；若显式设置
+`host.system_update.web_dist_dir`，请确保它与实际页面目录一致。
+
 Compose 已显式装配正式发布构建所需的运行参数：
 
 - `CPR_UPDATE_REPOSITORY`：只接受 `owner/repository`；默认 `Const-Time/codex-proxy-rs`。
 - `CPR_GITHUB_API_BASE`：正式环境必须为 `https://api.github.com/repos`。
 - `CPR_UPDATE_CHANNEL`：`stable` 会拒绝 prerelease。
-- `CPR_UPDATE_EXE_PATH`、`CPR_WEB_DIST_DIR`：分别指向容器内二进制和前端静态目录。
+- `CPR_UPDATE_EXE_PATH`、`CPR_WEB_DIST_DIR`：分别指向容器内二进制和前端静态目录；
+  `CPR_WEB_DIST_DIR` 同时供页面服务与默认更新目录使用，相对路径以配置文件所在目录为基准。
 - 更新临时目录、状态文件和锁文件默认由 `host.runtime_data_dir` 派生；
   `CPR_UPDATE_TEMP_DIR`、`CPR_UPDATE_STATE_FILE`、`CPR_UPDATE_LOCK_FILE` 仅用于显式覆盖。
 - `CPR_ENABLE_SELF_RESTART=true`：更新或回滚完成后允许管理端请求重启；Docker 进程退出后由

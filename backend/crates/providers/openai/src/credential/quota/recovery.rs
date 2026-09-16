@@ -19,9 +19,10 @@ pub(super) struct QuotaRecovery {
     exhausted_at_micros: i64,
     pending: BTreeMap<String, Option<DateTime<Utc>>>,
     // 已连续观测到"未触顶"的待解除窗口；第二次确认后解除。旧文档没有该
-    // 字段时反序列化为空集，从当前耗尽事实重新积累证据。
+    // 字段时反序列化为空集；旧版 null 候选仍可读取，但需重新确认 reset。
+    // 记录候选的 reset，防止不同窗口的两次观测被误当作连续确认。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    candidates: BTreeMap<String, ()>,
+    candidates: BTreeMap<String, Option<DateTime<Utc>>>,
 }
 
 impl QuotaRecovery {
@@ -88,14 +89,19 @@ impl QuotaRecovery {
                 // 立刻拉到的旧快照（reset 未滚动、用量尚未触顶）。
                 // Missing or older window data is not evidence of same-window
                 // recovery. Only an explicit measured percentage can confirm it.
-                if window.reset_at() == previous_reset
+                // 新窗口已经消耗 >=10% 时仍需允许连续确认；不能永久要求
+                // reset 等于耗尽时的旧基线。倒退或缺失的 reset 仍不算证据。
+                if window
+                    .reset_at()
+                    .zip(previous_reset)
+                    .is_some_and(|(now, old)| now >= old)
                     && window.used_percent().is_some_and(|used| used < 100.0)
                     && !window.limit_reached()
                 {
-                    if self.candidates.contains_key(key) {
+                    if self.candidates.get(key) == Some(&window.reset_at()) {
                         self.pending.remove(key);
                     } else {
-                        candidates.insert(key.to_owned(), ());
+                        candidates.insert(key.to_owned(), window.reset_at());
                     }
                 }
             } else if window.limit_reached() {
@@ -120,7 +126,7 @@ fn window_reset_recovered(window: &CodexQuotaWindow, previous: Option<DateTime<U
         return false;
     }
     // reset 前进说明已进入新窗口，新窗口用量应接近零；高用量说明 reset 基线
-    // 不可信（例如滑动窗口），保持锁定，等待"同窗口用量回落"的连续观测解除。
+    // 不可信（例如滑动窗口），保持锁定，等待同一个窗口的连续观测解除。
     window
         .used_percent()
         .is_some_and(|used| used < RESET_RECOVERY_MAX_USED_PERCENT)
@@ -128,7 +134,7 @@ fn window_reset_recovered(window: &CodexQuotaWindow, previous: Option<DateTime<U
 
 /// 统一手动刷新和 worker 的恢复规则。已耗尽窗口的解除有两条证据路径：
 /// reset 前进且用量低于低用量阈值（窗口已滚动），或同一窗口内连续两次观测
-/// 都未触顶（滑动窗口的用量回落，reset 不滚动）。后者防止账号被钉在旧
+/// 都未触顶（reset 不早于耗尽基线）。后者防止账号被钉在旧
 /// reset 日期上；连续两次的要求排除耗尽后立刻拉到的旧快照。
 pub(super) fn reconcile_refresh(
     current: QuotaState,

@@ -128,3 +128,64 @@ async fn periodic_checks_continue_when_reset_is_unknown_or_far_in_the_future() {
         assert_eq!(server.received_requests().await.expect("requests").len(), 1);
     }
 }
+
+#[tokio::test]
+async fn overdue_reset_retries_and_recovers_without_waiting_thirty_minutes() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_overdue_confirmation").await;
+    let account = store.account("acct_overdue_confirmation").expect("account");
+    let server = MockServer::start().await;
+    let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
+    let reset = Utc::now().timestamp() - 180;
+    let usage = |used, reset| {
+        json!({"rate_limit": {
+            "allowed": used < 100,
+            "primary_window": {
+                "used_percent": used, "reset_at": reset, "limit_window_seconds": 18_000,
+            },
+        }})
+    };
+    mount_usage(&server, usage(100, reset)).await;
+    service
+        .refresh_account(account.id())
+        .await
+        .expect("seed exhaustion");
+    mount_usage(&server, usage(25, reset + 18_000)).await;
+    assert_eq!(
+        service
+            .synchronize()
+            .await
+            .expect("first confirmation")
+            .exhausted,
+        1
+    );
+    service
+        .synchronize()
+        .await
+        .expect("throttled immediate retry");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    // 调度使用 std::time::Instant；真实等待验证公共服务路径，不添加生产测试钩子。
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert_eq!(
+        service
+            .synchronize()
+            .await
+            .expect("second confirmation")
+            .updated,
+        1
+    );
+    assert_eq!(
+        store
+            .account("acct_overdue_confirmation")
+            .unwrap()
+            .quota()
+            .access(),
+        QuotaAccessState::Allowed
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    service
+        .synchronize()
+        .await
+        .expect("allowed account is no longer polled");
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}

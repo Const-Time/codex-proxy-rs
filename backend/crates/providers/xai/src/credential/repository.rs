@@ -338,6 +338,17 @@ impl GrokCredentialRepository {
         Self { store }
     }
 
+    /// 按 id 读取账号事实，不做 enabled 过滤；诊断选择用它回补停用账号候选。
+    pub(crate) async fn account_by_id(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<Option<ProviderAccount>, GrokCredentialRepositoryError> {
+        self.store
+            .get_account(account_id)
+            .await
+            .map_err(map_store_error)
+    }
+
     pub(crate) async fn list_refresh_candidates(
         &self,
         query: gateway_core::account::ProviderRefreshQuery,
@@ -543,6 +554,7 @@ impl GrokCredentialRepository {
         let outcome = self
             .store
             .compare_and_swap_quota(QuotaObservation {
+                plan_type: None,
                 account_id,
                 expected_revision,
                 quota: OpaqueProviderData::new(document),

@@ -28,7 +28,8 @@ type ProxyClientBuilder =
 
 impl Default for HttpProxyProbe {
     fn default() -> Self {
-        Self::new("https://api.ipify.org?format=json").with_location_endpoint("https://ipwho.is/")
+        // 双栈出口探测，保留本分支独立的位置探测。
+        Self::new("https://api64.ipify.org?format=json").with_location_endpoint("https://ipwho.is/")
     }
 }
 

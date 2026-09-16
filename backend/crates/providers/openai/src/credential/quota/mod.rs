@@ -59,6 +59,7 @@ pub(crate) const QUOTA_SCHEDULING_TTL: Duration = Duration::from_secs(10 * 60);
 const QUOTA_HYDRATION_FAILURE_TTL: Duration = Duration::from_secs(5);
 const EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const EXHAUSTED_QUOTA_RESET_GRACE: Duration = Duration::from_secs(2 * 60);
+const EXHAUSTED_QUOTA_RESET_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// 首次 OAuth 异步观察失败时，由既有 quota worker 兜底重试的单轮上限。
 const INITIAL_QUOTA_SYNC_BATCH: usize = 100;
 // 5xx 上游拒绝的短退避重试预算；指数退避 1s/2s，吞掉瞬时抖动。
@@ -405,7 +406,8 @@ impl CodexQuotaSchedulingProjection {
 
         // 正常账号只由真实请求的响应头和 `codex.rate_limits` 被动同步。
         // 已耗尽账号每 30 分钟复核，不能等待旧 reset：官方活动可能提前重置额度。
-        // reset + 2 分钟可提前触发一次复核，给上游重置留出传播时间。
+        // reset + 2 分钟触发复核；过期窗口每分钟重试，以完成连续观测确认
+        // 或容忍上游延迟传播，不能再让恢复确认等待完整的 30 分钟。
         let mut reserved = Vec::new();
         for account in candidates {
             if !periodic_quota_refresh_due(
@@ -446,12 +448,16 @@ fn periodic_quota_refresh_due(
         .last_periodic_refresh_at
         .get(account_id)
         .is_none_or(|last| {
+            let reset_due =
+                reset_at.and_then(|reset| reset.checked_add(EXHAUSTED_QUOTA_RESET_GRACE));
             monotonic_now.saturating_duration_since(last.monotonic_at)
                 >= EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL
-                || reset_at
-                    .and_then(|reset| reset.checked_add(EXHAUSTED_QUOTA_RESET_GRACE))
-                    // 已在该边界之后复核过时回到周期重试，避免过期 reset 每轮触发。
-                    .is_some_and(|due_at| last.wall_at < due_at && due_at <= now)
+                || reset_due.is_some_and(|due_at| {
+                    due_at <= now
+                        && (last.wall_at < due_at
+                            || monotonic_now.saturating_duration_since(last.monotonic_at)
+                                >= EXHAUSTED_QUOTA_RESET_RETRY_INTERVAL)
+                })
         })
 }
 
@@ -824,6 +830,7 @@ impl CodexCredentialQuotaService {
         let outcome = self
             .store
             .compare_and_swap_quota(QuotaObservation {
+                plan_type: observed_account_plan(account.plan_type(), snapshot.plan_type()),
                 account_id: account.id().clone(),
                 expected_revision: account.revision(),
                 quota: OpaqueProviderData::new(object),
@@ -885,6 +892,17 @@ impl CodexCredentialQuotaService {
         let existing = existing
             .map(|observation| observation.quota.into_inner())
             .unwrap_or_default();
+        // 只用本次响应明确携带的套餐更新账号，不能把合并前的旧快照重新当作新证据。
+        let observed_plan = rate_limits
+            .iter()
+            .rev()
+            .filter_map(|observation| {
+                observation.plan_type.as_deref().filter(|plan| {
+                    !plan.trim().is_empty() && !plan.trim().eq_ignore_ascii_case("unknown")
+                })
+            })
+            .next();
+        let plan_type = observed_account_plan(account.plan_type(), observed_plan);
         // 套餐、credits 等元数据可以更新，但没有额度窗口事实时必须保留旧观察时刻，
         // 也不能借旧快照重新推导 quota state。
         if !has_quota_facts {
@@ -894,6 +912,7 @@ impl CodexCredentialQuotaService {
             let outcome = self
                 .store
                 .compare_and_swap_quota(QuotaObservation {
+                    plan_type,
                     account_id: account.id().clone(),
                     expected_revision: account.revision(),
                     quota: OpaqueProviderData::new(merge_passive_quota(existing, rate_limits)),
@@ -916,6 +935,7 @@ impl CodexCredentialQuotaService {
         let outcome = self
             .store
             .compare_and_swap_quota(QuotaObservation {
+                plan_type,
                 account_id: account.id().clone(),
                 expected_revision: account.revision(),
                 quota: OpaqueProviderData::new(quota),
@@ -1144,6 +1164,7 @@ impl CodexCredentialQuotaService {
         if self
             .store
             .compare_and_swap_quota(QuotaObservation {
+                plan_type: observed_account_plan(account.plan_type(), snapshot.plan_type()),
                 account_id: account.id().clone(),
                 expected_revision: account.revision(),
                 quota: OpaqueProviderData::new(object),
@@ -1376,6 +1397,27 @@ async fn fetch_usage_with_5xx_retry(
         );
         tokio::time::sleep(delay).await;
     }
+}
+
+/// 上游额度可确认套餐变更；同族泛化值不能丢弃 JWT 已给出的具体 SKU。
+fn observed_account_plan(current: Option<&str>, observed: Option<&str>) -> Option<String> {
+    let plan = observed?.trim().to_ascii_lowercase();
+    if plan.is_empty() || plan == "unknown" {
+        return None;
+    }
+    // 套餐族沿用官方 codex_protocol::account::PlanType 的分类。
+    let current = current.unwrap_or_default().trim().to_ascii_lowercase();
+    let generalized = matches!(
+        (plan.as_str(), current.as_str()),
+        (
+            "team",
+            "self_serve_business_prolite" | "self_serve_business_usage_based"
+        ) | (
+            "business",
+            "ent26" | "enterprise_cbp_automation" | "enterprise_cbp_usage_based"
+        ) | ("edu" | "education", "edu_plus" | "edu_pro")
+    );
+    (!generalized).then_some(plan)
 }
 
 fn eligible_periodic_quota_refresh(account: &ProviderAccount, now: SystemTime) -> bool {

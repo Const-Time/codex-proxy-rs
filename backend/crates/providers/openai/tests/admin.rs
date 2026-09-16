@@ -649,6 +649,102 @@ async fn openai_admin_provider_projects_cached_quota_models_and_canonical_export
 }
 
 #[tokio::test]
+async fn manual_token_refresh_preserves_profile_at_commit() {
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: "acct_manual_plan".to_owned(),
+            name: "manual plan".to_owned(),
+            secret: secret("manual-plan-token"),
+            verified_account: profile("chatgpt-manual-plan"),
+            next_refresh_at: None,
+            enabled: true,
+        })
+        .await;
+    let account = store.account("acct_manual_plan").unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "new-access-token", "expires_in": 3600
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut config = valid_config();
+    config.config.auth.oauth_token_endpoint = format!("{}/oauth/token", server.uri());
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with_leases(
+            store.clone(),
+            Arc::new(TestOAuthPending::default()),
+            Arc::new(TestCatalogCache::default()),
+            Arc::new(ManualRefreshLeases),
+        ),
+    )
+    .await
+    .unwrap();
+    let prepared = bundle
+        .admin_provider()
+        .prepare_refresh(PrepareCredentialRefresh {
+            account: account_record(&account),
+        })
+        .await
+        .unwrap();
+    assert!(prepared.facts().preserve_profile);
+    // 准备只交换 Token，不提前改写账号资料或凭据版本。
+    assert_eq!(store.account("acct_manual_plan").unwrap(), account);
+}
+
+#[tokio::test]
+async fn openai_admin_quota_refresh_updates_the_account_plan() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let mut verified_account = profile("chatgpt-upgraded-plan");
+    verified_account.plan_type = Some("plus".to_owned());
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: "acct_upgraded_plan".to_owned(),
+            name: "upgraded plan".to_owned(),
+            secret: secret("upgraded-plan-test-token"),
+            verified_account,
+            next_refresh_at: None,
+            enabled: true,
+        })
+        .await;
+    let account = store.account("acct_upgraded_plan").unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "plan_type": "pro", "rate_limit": {"allowed": true, "primary_window": {"used_percent": 1}}
+        })))
+        .expect(1).mount(&server).await;
+    let mut config = valid_config();
+    config.config.api.base_url = server.uri();
+    let bundle = provider_openai::initialize(
+        config.config,
+        provider_ports_with(store.clone(), Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .unwrap();
+    for refresh in [true, false] {
+        let quota = bundle
+            .admin_provider()
+            .quota(ProviderQuotaRequest {
+                account_id: account.id().clone(),
+                refresh,
+                rolling_usage: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(quota.plan_type.as_deref(), Some("pro"));
+        assert_eq!(
+            store.account("acct_upgraded_plan").unwrap().plan_type(),
+            Some("pro")
+        );
+    }
+}
+
+#[tokio::test]
 async fn openai_admin_projects_free_plan_from_cached_quota_when_account_claims_omit_it() {
     let store = Arc::new(MemoryAccountStore::default());
     let mut verified_account = profile("chatgpt-free-plan");
@@ -667,6 +763,7 @@ async fn openai_admin_projects_free_plan_from_cached_quota_when_account_claims_o
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            plan_type: None,
             account_id: account.id().clone(),
             expected_revision: account.revision(),
             quota: OpaqueProviderData::new(
@@ -780,6 +877,7 @@ async fn openai_admin_provider_projects_official_codex_quota_and_independent_buc
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            plan_type: None,
             account_id: account.id().clone(),
             expected_revision: account.revision(),
             quota: OpaqueProviderData::new(raw.as_object().expect("quota object").clone()),
@@ -880,6 +978,7 @@ async fn openai_admin_keeps_confirmed_exhaustion_separate_from_raw_usage_display
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            plan_type: None,
             account_id: account.id().clone(),
             expected_revision: account.revision(),
             quota: OpaqueProviderData::new(
@@ -1213,9 +1312,56 @@ fn provider_ports_with_catalog(
     pending: Arc<TestOAuthPending>,
     catalog_cache: Arc<TestCatalogCache>,
 ) -> ProviderStorePorts {
+    provider_ports_with_leases(
+        accounts,
+        pending,
+        catalog_cache,
+        Arc::new(TestLeaseCoordinator::default()),
+    )
+}
+
+struct ManualRefreshLeases;
+
+impl gateway_core::provider_ports::ProviderLeasePort for ManualRefreshLeases {
+    fn load_state<'a>(
+        &'a self,
+        _: &'a ClientApiKeyId,
+        _: &'a ProviderKind,
+        _: &'a [ProviderAccountId],
+    ) -> BoxFuture<
+        'a,
+        Result<gateway_core::provider_ports::ProviderSchedulingState, ProviderStoreError>,
+    > {
+        Box::pin(async { panic!("manual refresh must not load scheduling state") })
+    }
+
+    fn try_acquire(
+        &self,
+        request: gateway_core::provider_ports::ProviderLeaseRequest,
+    ) -> BoxFuture<
+        '_,
+        Result<gateway_core::provider_ports::ProviderLeaseAcquisition, ProviderStoreError>,
+    > {
+        use gateway_core::provider_ports::{ProviderLeaseAcquisition, ProviderLeaseRequest};
+        Box::pin(async move {
+            assert!(matches!(
+                request,
+                ProviderLeaseRequest::RefreshCapacity(_) | ProviderLeaseRequest::Refresh(_)
+            ));
+            Ok(ProviderLeaseAcquisition::Acquired(Box::new(())))
+        })
+    }
+}
+
+fn provider_ports_with_leases(
+    accounts: Arc<MemoryAccountStore>,
+    pending: Arc<TestOAuthPending>,
+    catalog_cache: Arc<TestCatalogCache>,
+    leases: Arc<dyn gateway_core::provider_ports::ProviderLeasePort>,
+) -> ProviderStorePorts {
     ProviderStorePorts::new(
         accounts,
-        Arc::new(TestLeaseCoordinator::default()),
+        leases,
         Arc::new(MemorySessionAffinity::default()),
         Arc::new(MemorySessionExclusions::default()),
         catalog_cache,

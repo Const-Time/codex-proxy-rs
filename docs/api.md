@@ -268,6 +268,8 @@ OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足�
 账号视图和 Dashboard 账号概览中的 `planType` 保留原始套餐值；`planTypeDisplay` 由后端先按 Provider 解析名称，
 再统一为大驼峰格式，前端直接展示该字段，例如 `Free`、`SuperGrokPro`、`EduPlus`。
 OpenAI 的 `self_serve_business_prolite` 等 Team 套餐显示为 `Business`；新套餐也使用相同格式。
+OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号，支持升级与降级；
+空值或 `unknown` 不覆盖已有套餐，同族泛化值（如 `team`）保留已知的具体套餐子类型。
 账号套餐为空或 `unknown` 时，后端优先用已保存的上游额度响应
 中的明确套餐值补全 `planType` 和 `planTypeDisplay`；两处均无套餐信息时才显示“未知套餐”。
 
@@ -337,7 +339,8 @@ The test concurrency limit returns 429.
 `web_search*` 工具的 `user_location`；普通消息、绝对时间戳和其他工具保持原值。
 普通请求不调用地区查询服务；测试结果落库后更新运行时配置，后续请求使用新位置。
 
-测试固定经代理访问 `https://api.ipify.org?format=json`，超时 15 秒，每进程最多同时测试 4 条。
+测试固定经代理访问双栈端点 `https://api64.ipify.org?format=json`，返回本次连接实际使用的
+IPv4 或 IPv6 出口地址，不分别验证两种地址族。超时 15 秒，每进程最多同时测试 4 条。
 探测器复用 OpenAI 的证书信任配置：优先读取非空的 `CODEX_CA_CERTIFICATE`，
 其次读取 `SSL_CERT_FILE`，并保留系统根证书；证书配置错误不会回退为不验证证书。
 出口测试通过不表示 Provider 账号权限或额度可用；账号可用性使用账号连接测试。
@@ -346,7 +349,8 @@ The test concurrency limit returns 429.
 避免已轮换的凭据因代理状态变化而丢失。完成导入或请求取消后自动释放保护。
 OAuth 等待回调期间不持有保护；提交仍拒绝已删除、连接配置改变或测试失败的代理。
 
-Tests reach `https://api.ipify.org?format=json` through the configured proxy, with a 15-second timeout
+Tests reach the dual-stack endpoint `https://api64.ipify.org?format=json` through the configured proxy,
+reporting the IPv4 or IPv6 address actually used (not testing both families), with a 15-second timeout
 and four concurrent tests per process. Provider access still requires the account connection test.
 Imports accept a top-level `outboundProxyId` as the default exit before token exchange; explicit per-account
 settings in the document take precedence. Credential imports reserve their selected proxy until commit;

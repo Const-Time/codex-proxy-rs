@@ -363,6 +363,9 @@ credential 与 quota 是两组独立事实：credential refresh 不等于 quota 
 - 新账号导入和首次 OAuth 在 credential 提交后尽力读取一次额度；失败只留下观测，不回滚账号事务。
 - quota refresh、正常推理返回的 rate-limit headers 和后台健康任务汇入同一额度事实；套餐只用于展示与
   目录 cache 隔离，不创建套餐专属状态机。
+  OpenAI 明确报告的套餐与额度原子提交，共用凭据版本和观察时间保护；空值和 `unknown`
+  不覆盖已有套餐，同族泛化值保留具体子类型。Token 刷新保留提交时的账号资料，
+  避免覆盖刷新期间由额度观测更新的套餐。
 
 主动额度重置是 OpenAI Provider 的不可逆上游操作：列表查询和消费都直接使用当前 Desktop 请求画像；
 卡片不写 PostgreSQL/Redis。消费请求携带调用方生成的 UUIDv4 幂等键，同一账号的消费在进程内串行；

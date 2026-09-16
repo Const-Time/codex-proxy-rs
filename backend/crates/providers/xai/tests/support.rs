@@ -296,9 +296,10 @@ impl ProviderAccountStore for MemoryProviderAccountStore {
         if self.fail_provider_listing.load(Ordering::SeqCst) {
             return Err(invalid());
         }
+        // 与 Postgres 实现的调度列表语义一致：停用账号不进入常规候选。
         Ok(lock(&self.accounts)
             .values()
-            .filter(|stored| stored.account.provider() == provider)
+            .filter(|stored| stored.account.provider() == provider && stored.account.enabled())
             .map(|stored| stored.account.clone())
             .collect())
     }
@@ -357,6 +358,7 @@ impl ProviderAccountStore for MemoryProviderAccountStore {
             account_id,
             expected_revision,
             profile,
+            preserve_profile,
             credential,
             has_refresh_token,
             access_token_expires_at,
@@ -394,9 +396,21 @@ impl ProviderAccountStore for MemoryProviderAccountStore {
                 enabled: stored.account.enabled(),
                 has_refresh_token,
                 next_refresh_at,
-                name: profile.name,
-                email: profile.email,
-                plan_type: profile.plan_type,
+                name: if preserve_profile {
+                    stored.account.name().to_owned()
+                } else {
+                    profile.name
+                },
+                email: if preserve_profile {
+                    stored.account.email().map(str::to_owned)
+                } else {
+                    profile.email
+                },
+                plan_type: if preserve_profile {
+                    stored.account.plan_type().map(str::to_owned)
+                } else {
+                    profile.plan_type
+                },
             },
         );
         stored.credential = credential;

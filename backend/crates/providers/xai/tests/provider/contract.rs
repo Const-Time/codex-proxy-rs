@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use futures::{StreamExt, stream};
 use gateway_core::account::{
-    AccountFeedbackStats, AccountSelectionPolicy, CredentialRevision, ProviderAccountStore,
-    RotationStrategy,
+    AccountFeedbackStats, AccountRuntimeSignals, AccountSelectionPolicy, CredentialRevision,
+    CredentialState, ProviderAccountStore, RotationStrategy,
 };
 use gateway_core::engine::continuation::{
     ContinuationBinding, NativeContinuationPin, PreviousResponseId,
@@ -25,6 +25,11 @@ use gateway_core::lifecycle::CancellationToken;
 use gateway_core::operation::{
     Feature, GenerateRequest, Operation, OperationKind, ProtocolPayload, ProviderSessionState,
 };
+use gateway_core::policy::ClientApiKeyId;
+use gateway_core::provider_ports::{
+    ProviderLeaseAcquisition, ProviderLeasePort, ProviderLeaseRequest, ProviderSchedulingState,
+    ProviderStoreError,
+};
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ProviderKind,
     ProviderModel, PublicModelId, RoutingContext, RuntimeAccount, RuntimeAccountDirectory,
@@ -32,6 +37,8 @@ use gateway_core::routing::{
 };
 use gateway_core::upstream::UpstreamSendState;
 use provider_xai::{
+    GrokAccountSessionSelector, GrokBillingRequest, GrokBillingTransport,
+    GrokBillingTransportError, GrokBillingTransportErrorKind, GrokBillingTransportFuture,
     GrokBuildProvider, GrokCredentialCatalogCache, GrokCredentialFailure,
     GrokCredentialFeedbackFuture, GrokCredentialRecovery, GrokCredentialRecoveryOutcome,
     GrokCredentialRepository, GrokInferenceClientCacheStatus, GrokInferenceDnsObservation,
@@ -41,12 +48,13 @@ use provider_xai::{
     GrokModelCatalogTransportError, GrokModelCatalogTransportErrorKind,
     GrokModelCatalogTransportFuture, GrokModelCatalogTransportResponse, GrokSessionBinding,
     GrokSessionSelection, GrokSessionSelector, GrokSessionSelectorError, GrokSessionSelectorFuture,
-    SecretValue, SelectedGrokSession,
+    SecretValue, SelectedGrokSession, UpdateGrokCredentialState,
 };
 use serde_json::{Map, Value, json};
 
 use crate::support::{
-    MemoryGrokCatalogCache, MemoryProviderAccountStore, account_id, create_input, seed_input,
+    MemoryCooldownPort, MemoryGrokCatalogCache, MemoryProviderAccountStore, account_id,
+    create_input, seed_input,
 };
 
 const MODEL: &str = "grok-4.5";
@@ -1032,6 +1040,156 @@ async fn execute_successfully(provider: &GrokBuildProvider, operation: Operation
         .expect("provider stream");
     let events = stream.by_ref().collect::<Vec<_>>().await;
     assert!(events.iter().all(Result::is_ok));
+}
+
+/// 与 Postgres 调度列表一致：常规选择不返回停用账号，只有诊断能取回。
+struct DiagnosticLeasePort;
+
+impl ProviderLeasePort for DiagnosticLeasePort {
+    fn load_state<'a>(
+        &'a self,
+        _: &'a ClientApiKeyId,
+        _: &'a ProviderKind,
+        account_ids: &'a [gateway_core::account::ProviderAccountId],
+    ) -> futures::future::BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
+        Box::pin(async move {
+            Ok(ProviderSchedulingState::new(
+                account_ids
+                    .iter()
+                    .cloned()
+                    .map(|account_id| {
+                        (
+                            account_id,
+                            AccountRuntimeSignals {
+                                in_flight: 0,
+                                last_started_at: None,
+                                quota_reset_at: None,
+                                quota_remaining_rank: None,
+                                rate_limited_until: None,
+                                failure_rate_basis_points: None,
+                                first_output_latency_ms: None,
+                            },
+                        )
+                    })
+                    .collect(),
+                0,
+            ))
+        })
+    }
+
+    fn try_acquire(
+        &self,
+        request: ProviderLeaseRequest,
+    ) -> futures::future::BoxFuture<'_, Result<ProviderLeaseAcquisition, ProviderStoreError>> {
+        Box::pin(async move {
+            let ProviderLeaseRequest::Scheduling(_) = request else {
+                panic!("expected scheduling lease request");
+            };
+            Ok(ProviderLeaseAcquisition::Acquired(Box::new(())))
+        })
+    }
+}
+
+struct UnavailableBillingTransport;
+
+impl GrokBillingTransport for UnavailableBillingTransport {
+    fn execute(&self, _: GrokBillingRequest) -> GrokBillingTransportFuture<'_> {
+        Box::pin(async {
+            Err(GrokBillingTransportError::new(
+                GrokBillingTransportErrorKind::Unavailable,
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn disabled_account_diagnostic_selects_the_pinned_account_without_state_writes() {
+    let store = MemoryProviderAccountStore::shared();
+    let account_store: Arc<dyn ProviderAccountStore> = store.clone();
+    let repository = GrokCredentialRepository::new(account_store);
+    let input = create_input("disabled-diagnostic", "subject-disabled-diagnostic");
+    seed_input(&store, &input).await.expect("seed account");
+    repository
+        .update_state(&UpdateGrokCredentialState {
+            account_id: input.account_id.clone(),
+            expected_revision: CredentialRevision::new(1).expect("revision"),
+            credential_state: CredentialState::Ready,
+            error_reason: None,
+            error_message: None,
+            observed_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("ready account");
+    store
+        .set_enabled(&input.account_id, false)
+        .await
+        .expect("disable account");
+
+    let cache: Arc<dyn GrokCredentialCatalogCache> = MemoryGrokCatalogCache::shared();
+    let quota = Arc::new(crate::support::grok_quota_service(
+        repository.clone(),
+        Arc::new(UnavailableBillingTransport),
+    ));
+    let selector = GrokAccountSessionSelector::new(
+        ProviderKind::new("xai").expect("provider"),
+        repository.clone(),
+        cache,
+        quota,
+        Arc::new(DiagnosticLeasePort),
+        Arc::new(MemoryCooldownPort::default()),
+        Arc::new(AccountFeedbackStats::default()),
+    );
+    let provider = GrokBuildProvider::new(
+        Arc::new(selector),
+        StubInferenceTransport::success(),
+        Arc::new(crate::support::grok_catalog_service(
+            repository,
+            Arc::new(StaticCatalogTransport),
+            MemoryGrokCatalogCache::shared(),
+        )),
+        StubRecovery::new(GrokCredentialRecoveryOutcome::Unavailable),
+        Arc::new(AccountFeedbackStats::default()),
+        crate::support::xai_wire_profile(),
+    )
+    .expect("official xAI provider configuration");
+
+    let mut stream = provider
+        .execute(
+            provider_request_with_operation("xai", operation()),
+            diagnostic_context("req_disabled_diagnostic", "disabled-diagnostic"),
+        )
+        .await
+        .expect("disabled diagnostic prepares a fixed-account stream");
+    let mut completed = false;
+    while let Some(event) = stream.next().await {
+        let event = event.expect("disabled diagnostic upstream response");
+        completed |= event
+            .canonical_facts()
+            .iter()
+            .any(|event| matches!(event, GatewayEvent::Completed(_)));
+    }
+    assert!(completed);
+
+    let account = store
+        .account(&input.account_id)
+        .expect("disabled account after diagnostic");
+    assert!(!account.enabled());
+    assert_eq!(account.credential_state(), CredentialState::Ready);
+}
+
+fn diagnostic_context(request_id: &str, account_suffix: &str) -> AttemptContext {
+    AttemptContext::new(
+        gateway_core::engine::RequestAttemptContext::new(
+            ModelRequestId::new(request_id).expect("request id"),
+            ClientApiKeyId::new("key_xai_contract").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        selection_policy(),
+        AccountAttemptContext::diagnostic(BTreeSet::new(), account_id(account_suffix), None),
+        None,
+        CancellationToken::new(),
+    )
 }
 
 #[tokio::test]
