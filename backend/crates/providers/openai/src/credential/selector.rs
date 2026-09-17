@@ -379,6 +379,11 @@ impl CodexCredentialSelector {
                         || match model_catalog_eligibility {
                             ModelCatalogEligibility::NotApplicable => true,
                             ModelCatalogEligibility::Required(upstream_model) => {
+                                if !request.attempt.account_scope().is_some_and(|scope| {
+                                    scope.allows_model(account.id(), upstream_model)
+                                }) {
+                                    return false;
+                                }
                                 let observed_support =
                                     self.catalog.observed_model_support(account, upstream_model);
                                 matches!(observed_support, Ok(None | Some(true)))

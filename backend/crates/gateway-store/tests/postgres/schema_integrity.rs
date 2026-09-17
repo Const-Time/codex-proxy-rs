@@ -26,6 +26,66 @@ fn assert_check_rejected(error: &sqlx::Error) {
 }
 
 #[tokio::test]
+async fn model_access_migration_preserves_existing_accounts_and_defaults_to_unrestricted() {
+    let Some(db) = TestDatabase::create_at_version("model_access_upgrade", 19).await else {
+        return;
+    };
+    sqlx::query(
+        "insert into provider_accounts (id, provider_kind, name, authentication_kind,
+           provider_credentials_json, has_refresh_token, credential_observed_at,
+           created_at, updated_at, enabled, weight, concurrency_limit, outbound_proxy_url)
+         values ('acct_upgrade', 'openai', 'upgrade fixture', 'oauth', '{}', false,
+           now(), now(), now(), false, 17, 3, 'http://127.0.0.1:1080')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("seed version 19 account");
+    let before: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(a) from provider_accounts a where id='acct_upgrade'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    super::TEST_MIGRATOR
+        .run(&db.pool)
+        .await
+        .expect("upgrade to 20");
+    let after: serde_json::Value = sqlx::query_scalar(
+        "select to_jsonb(a) - 'model_access_json' from provider_accounts a where id='acct_upgrade'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        before, after,
+        "migration must not alter existing account facts"
+    );
+    let policy: serde_json::Value = sqlx::query_scalar(
+        "select model_access_json from provider_accounts where id='acct_upgrade'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(policy, serde_json::json!({"mode":"all","models":[]}));
+    for invalid in [
+        serde_json::json!({"mode":"all","models":["x"]}),
+        serde_json::json!({"mode":"allowlist","models":[]}),
+        serde_json::json!({"mode":"denylist","models":[12]}),
+        serde_json::json!({"mode":"other","models":["x"]}),
+        serde_json::json!({"mode":"all"}),
+    ] {
+        let error = sqlx::query(
+            "update provider_accounts set model_access_json=$1 where id='acct_upgrade'",
+        )
+        .bind(sqlx::types::Json(invalid))
+        .execute(&db.pool)
+        .await
+        .expect_err("invalid policy must be rejected");
+        assert_check_rejected(&error);
+    }
+    db.close().await;
+}
+
+#[tokio::test]
 async fn request_fact_groups_reject_partial_writes_and_accept_complete_observations() {
     let Some(db) = TestDatabase::create("fact_groups").await else {
         return;

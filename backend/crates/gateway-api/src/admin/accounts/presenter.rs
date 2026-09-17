@@ -106,6 +106,7 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
         used_slots,
         total_slots,
         weight: account.weight.get(),
+        model_access: account.model_access,
         outbound_proxy_endpoint: account
             .outbound_proxy
             .as_ref()

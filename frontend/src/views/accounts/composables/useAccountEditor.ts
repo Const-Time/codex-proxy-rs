@@ -1,10 +1,11 @@
 import type { Ref } from 'vue'
-import type { getAccounts } from '@/api'
+import type { AccountModelAccess, getAccounts } from '@/api'
 
 import { computed, ref, shallowRef, watch } from 'vue'
 import { updateAccount } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
+import { accountModelAccessError } from '../utils/modelAccess'
 import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
@@ -19,6 +20,7 @@ export function useAccountEditor(options: {
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
+  const modelAccess = ref<AccountModelAccess | undefined>()
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
   const selectedGroupIds = ref<string[]>([])
@@ -38,6 +40,7 @@ export function useAccountEditor(options: {
     schedulingEnabled.value = account.enabled
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
     weight.value = String(account.weight)
+    modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
     selectedGroupIds.value = account.groups.map(group => group.id)
     showEditModal.value = true
   }
@@ -46,6 +49,11 @@ export function useAccountEditor(options: {
     const accountId = editingAccountId.value
     if (!accountId || saving.value)
       return
+    const modelError = accountModelAccessError(modelAccess.value)
+    if (modelError) {
+      toast.warning(modelError)
+      return
+    }
     const scheduling = parseAccountSchedulingForm(concurrencyLimit.value, weight.value)
     if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
       toast.warning('请选择已通过测试的代理')
@@ -63,6 +71,7 @@ export function useAccountEditor(options: {
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
         weight: scheduling.values.weight,
+        modelAccess: modelAccess.value,
         groupIds: [...new Set(selectedGroupIds.value)],
       })
       showEditModal.value = false
@@ -80,6 +89,7 @@ export function useAccountEditor(options: {
     schedulingEnabled.value = true
     concurrencyLimit.value = ''
     weight.value = '1'
+    modelAccess.value = undefined
     selectedGroupIds.value = []
   })
 
@@ -89,6 +99,7 @@ export function useAccountEditor(options: {
     schedulingEnabled,
     concurrencyLimit,
     weight,
+    modelAccess,
     proxyMode,
     proxyId,
     selectedGroupIds,

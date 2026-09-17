@@ -226,6 +226,11 @@ impl PgAdminAccountStore {
             .collect::<StoreResult<Vec<_>>>()
             .map_err(|error| admin_store_error(ENTITY, error))?;
         let mut changed_fields = vec!["credentials".to_owned()];
+        if settings.as_ref().is_some_and(|s| s.model_access.is_some())
+            || accounts.iter().any(|a| a.model_access.is_some())
+        {
+            changed_fields.push("model_access".to_owned());
+        }
         if settings.is_some() {
             changed_fields
                 .extend(["enabled", "concurrency_limit", "weight", "group_ids"].map(str::to_owned));
@@ -762,6 +767,9 @@ impl AccountStore for PgAdminAccountStore {
             "weight".to_owned(),
             "groups".to_owned(),
         ];
+        if command.model_access.is_some() {
+            changed_fields.push("model_access".to_owned());
+        }
         if command.outbound_proxy.is_some() {
             changed_fields.push("outbound_proxy".to_owned());
         }
@@ -769,10 +777,11 @@ impl AccountStore for PgAdminAccountStore {
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: vec![command.account_id.clone()],
-                enabled: command.enabled,
-                concurrency_limit: command.concurrency_limit,
-                weight: command.weight,
-                group_ids: command.group_ids,
+                enabled: Some(command.enabled),
+                concurrency_limit: Some(command.concurrency_limit),
+                weight: Some(command.weight),
+                model_access: command.model_access,
+                group_ids: Some(command.group_ids),
                 outbound_proxy: command.outbound_proxy,
                 audit: mutation_audit(
                     context,
@@ -849,12 +858,20 @@ impl AccountStore for PgAdminAccountStore {
         } else {
             "provider_accounts".to_owned()
         };
-        let mut changed_fields = vec![
-            "enabled".to_owned(),
-            "concurrency_limit".to_owned(),
-            "weight".to_owned(),
-            "groups".to_owned(),
-        ];
+        let mut changed_fields = Vec::new();
+        for (changed, field) in [
+            (command.enabled.is_some(), "enabled"),
+            (command.concurrency_limit.is_some(), "concurrency_limit"),
+            (command.weight.is_some(), "weight"),
+            (command.group_ids.is_some(), "groups"),
+        ] {
+            if changed {
+                changed_fields.push(field.to_owned());
+            }
+        }
+        if command.model_access.is_some() {
+            changed_fields.push("model_access".to_owned());
+        }
         if command.outbound_proxy.is_some() {
             changed_fields.push("outbound_proxy".to_owned());
         }
@@ -865,6 +882,7 @@ impl AccountStore for PgAdminAccountStore {
                 enabled: command.enabled,
                 concurrency_limit: command.concurrency_limit,
                 weight: command.weight,
+                model_access: command.model_access,
                 group_ids: command.group_ids,
                 outbound_proxy: command.outbound_proxy,
                 audit: mutation_audit(

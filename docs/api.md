@@ -243,8 +243,8 @@ OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足�
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 管理员显式清除该账号的本地错误/额度/cooldown 事实并重新启用，不访问上游 |
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 手工替换 OpenAI OAuth token |
-| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
-| `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled, concurrencyLimit, weight, groupIds, outboundProxyId?, outboundProxyUrl? }` | 一次事务统一更新所选账号的调度字段、完整分组集合与可选代理 |
+| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
+| `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务仅更新提供的账号设置，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
 | `POST` | `/api/admin/accounts/quota/refresh` | `{ accountId }` | 访问 Provider 并刷新额度，同时同步额度所属状态 |
@@ -280,6 +280,32 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 指定代理后，推理、OAuth 服务端交换/刷新及账号辅助请求使用同一出口；代理失败不会退回直连。
 浏览器打开的第三方 OAuth 授权页仍使用浏览器自身网络。
 账号出口与连接隔离见 [架构说明](architecture.md#账号出站代理)。
+
+### 账号模型限制
+
+移植自上游 PR #105。本分支新增迁移 `0020_account_model_access.sql`，已有迁移文件及编号保持不变，旧账号默认不限制。
+
+账号列表和详情返回 `modelAccess: { mode, models }`，模型 ID 区分大小写并精确匹配：
+
+| `mode` | `models` | 含义 |
+| --- | --- | --- |
+| `all` | `[]` | 不额外限制模型，默认值 |
+| `allowlist` | 非空 ID 数组 | 仅允许指定模型 |
+| `denylist` | 非空 ID 数组 | 排除指定模型 |
+
+最多 256 项，每个 ID 最多 256 字节；重复 ID 去重，不接受空白、控制字符、`__` 前缀或 `*` 通配符。
+允许保存当前上游目录尚未返回的 ID。限制按全局模型映射后的上游 ID 判断，不扩大账号本身的上游权限。
+例如 Plus 设置 `allowlist` 并选中 luna 的实际 ID，Pro 设置 `denylist` 并选中同一 ID，即可严格分流；
+Pro 使用 `all` 时也能参与 luna 调度。套餐名称不自动生成或修改规则。
+
+单账号更新或批量更新省略 `modelAccess` 时保留原值，显式提交 `{ "mode": "all", "models": [] }` 清除限制。
+批量接口的调度、分组、模型与代理字段均可省略；省略的字段保持各账号原值。
+提供 `groupIds` 时替换完整分组集合，提供 `concurrencyLimit: null` 时恢复继承运行参数。
+
+限制适用于 Responses HTTP、WebSocket 及其带压缩触发的请求选号，包括重试、亲和和换号；没有合规账号时沿用
+无可用账号错误，不会回退到被禁止的账号。已开始请求使用冻结的政策，新请求使用已发布的新配置。
+Images、独立 Search 及管理员连接测试不受该文本模型限制；连接测试成功只证明指定账号的上游能力。
+`/v1/models` 和单模型查询按当前 Key 范围内账号政策过滤，不修改当前分支的目录协议。
 
 ### 独立代理管理 / Managed Proxies
 
@@ -415,7 +441,7 @@ concurrent proxy mutations return 409. OAuth commits still reject a deleted, cha
 
 RT-only 使用同一形状，只提交 `refreshToken`。不得把真实 token 写入日志、issue、fixture 或文档。
 
-账号导入与首次 OAuth complete 可附带 `settings: { enabled, concurrencyLimit, weight, groupIds }`。
+账号导入与首次 OAuth complete 可附带 `settings: { enabled, concurrencyLimit, weight, groupIds, modelAccess? }`。
 提供 `settings` 时四项均必填，`concurrencyLimit: null` 继承运行参数，否则为 1–4294967295 的整数；
 `weight` 为 1–100，`groupIds` 为完整分组集合。设置应用于本次导入的全部账号，包括匹配到的已有账号，
 与凭据在同一事务内提交；分组不存在时整次回滚。省略 `settings` 时新账号使用默认设置并保持未分组，
@@ -425,7 +451,10 @@ RT-only 使用同一形状，只提交 `refreshToken`。不得把真实 token �
 旧 OAuth 链接失效。文件中显式的出站配置优先于表单代理，未指定时使用表单代理。
 账号列表的每个 item 返回轻量 `groups: [{ id, name, enabled }]`。
 
-OpenAI 的 CPR 导出保持 OAuth 账号的既有 token 与过期时间字段。
+OpenAI 的 CPR 导出保持 OAuth 账号的既有 token 与过期时间字段。OpenAI 与 xAI 的 CPR 账号条目均包含
+`modelAccess`，重新导入时恢复；导入 `settings.modelAccess` 显式提供时覆盖条目中的政策。
+旧文档不带此字段时，新账号默认 `all`，已有账号保留原值；凭据刷新、重新授权和目录刷新均保留政策。
+sub2api 的 `credentials.model_mapping` 不转换为本项目的账号模型限制。
 
 OpenAI rotation 请求字段为：
 
