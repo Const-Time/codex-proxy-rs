@@ -281,9 +281,20 @@ impl CodexCredentialCatalogService {
             .ok_or(CodexCredentialCatalogError::NoEligibleCredential)?;
         let scope = CodexCatalogScope::for_account(&account)?;
         let mut candidates =
-            catalog_candidates_by_scope(self.repository.list_for_provider().await?)?
-                .remove(&scope)
-                .unwrap_or_default();
+            match catalog_candidates_by_scope(self.repository.list_for_provider().await?) {
+                Ok(mut groups) => groups.remove(&scope).unwrap_or_default(),
+                // 全部账号都被调度列表过滤时按空候选处理，让下方目标账号补回继续生效。
+                Err(CodexCredentialCatalogError::NoEligibleCredential) => Vec::new(),
+                Err(error) => return Err(error),
+            };
+        // 常规调度列表不含停用账号；管理端按账号查询模型要对停用账号返回真实上游
+        // 结果，这里把不在候选里的目标账号本身补回，仍按优先顺序先试目标账号。
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.id() == account_id)
+        {
+            candidates.push(account.clone());
+        }
         if candidates.is_empty() {
             return Err(CodexCredentialCatalogError::NoEligibleCredential);
         }

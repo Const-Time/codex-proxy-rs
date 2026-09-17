@@ -119,6 +119,7 @@ flowchart LR
 
 `engine::observation` 统一维护单次响应的用量、费用、时间和响应 ID，并负责重试前清理；协调器继续
 独占发送、提交、重试和终结顺序。Provider 上报费用优先于本地估算，丢弃的 attempt 不得污染最终计量。
+Provider 本地估算按当前 attempt 实际发送的上游模型查价，响应声明的模型只作观测；费用明细复用同一口径。
 Client Key 费用账本独立累计各次 attempt 的实际费用，不能因请求重试而清空已产生的费用或未知计费状态。
 
 ## 4. 数据面请求生命周期
@@ -175,7 +176,10 @@ Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 ca
 类型。Provider 独占 credential schema、OAuth、账号选择、模型目录、额度投影和上游 transport。
 
 - OpenAI 是透明边界。Responses 请求保留未知字段和字段顺序；SSE、WebSocket、Images 与 standalone
-  Search 的业务正文按原始字节转发。canonical facts 从同一数据旁路提取，只用于路由、观测和计费。
+  Search 的业务正文按原始字节转发，原生续写额度恢复遵循下述 continuation 例外。
+  canonical facts 从同一数据旁路提取，用于路由、恢复判断、观测和计费。
+  Responses 在现有 `transport/request.rs` 正文编码边界为缺失的顶层 `store` 补齐 `false`，
+  不覆盖显式值或嵌套业务字段；HTTP/SSE 与 WebSocket 共用该边界。
 - API 的客户端事件适配将 SSE 上游 `error` 和 WS 客户端无法消费的裸错误转为 `response.failed`，
   复用 Protocol 的错误投影；保留结构化错误与 response 身份，不改写 Provider 的调度或计费事实。
 - Responses 的业务扩展头保留原始多值字节；传输与反代请求头分类由 `gateway-protocol` 统一定义，
@@ -243,7 +247,8 @@ Proxy changes advance the runtime configuration revision without invalidating in
 错误信息按用途分成三层，不能用同一个 `message` 同时承担协议、界面和诊断职责：
 
 1. **数据面协议错误**：`/v1/*` 继续遵守 OpenAI/xAI wire 合同。可交付原始上游响应时保留其状态、headers、
-   content type 和 body；本地 fallback 使用数据面稳定机器码与安全英文，不受管理端中文化影响。
+   content type 和 body；原生续写额度恢复由 Provider 单独投影客户端响应，真实上游事实仍用于诊断和记账。
+   本地 fallback 使用数据面稳定机器码与安全英文，不受管理端中文化影响。
 2. **控制面展示错误**：`/api/admin/*` 由 API 统一 HTTP 状态与数值业务码，由 Admin/API owner 提供安全中文
    文案。extractor rejection、namespace 404 和 method 405 也使用同一 JSON 信封；任意 Store、Serde、
    Provider `Display` 不得直接跨越 HTTP 边界。
@@ -275,6 +280,9 @@ Client Key 与账号分组形成授权范围：
 Continuation 仍受原请求的 Client Key、账号范围、Provider 和发送/交付边界约束：
 
 - native continuation 固定创建它的 Provider 与账号；
+- OpenAI 在交付前收到可安全重放的明确额度拒绝时，先隔离账号，再投影 `ClientReplayRequired`；
+  丢弃未交付的原错误帧，由客户端提交完整历史开启新链，不把原增量输入交给其他账号。
+  真实错误分类、状态码、发送状态和上游诊断保持不变，客户端合同见 [Responses API](api.md#3-openai-数据面与模型目录)；
 - OpenAI 按 native → replay owner → replay any 推进，并保留官方 `previous_response_id` 语义；
 - xAI 使用客户端提交的完整历史作为重放输入；
 - scope 外账号、跨 Key 复用或不明确发送结果均 fail closed。

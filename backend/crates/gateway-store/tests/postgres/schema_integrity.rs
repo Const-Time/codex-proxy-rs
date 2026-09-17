@@ -212,3 +212,89 @@ async fn backup_completion_cannot_precede_its_start() {
     assert_check_rejected(&error);
     db.close().await;
 }
+
+#[tokio::test]
+async fn response_model_migration_backfills_only_explicit_valid_openai_reports() {
+    use serde_json::{Value, json};
+    let Some(db) = TestDatabase::create_at_version("response_model_upgrade", 20).await else {
+        return;
+    };
+    let fixtures = [
+        (
+            "valid",
+            "openai",
+            json!({"upstreamReportedModel":" gpt-returned "}),
+            Some("gpt-returned"),
+        ),
+        ("missing", "openai", json!({}), None),
+        (
+            "null",
+            "openai",
+            json!({"upstreamReportedModel":null}),
+            None,
+        ),
+        (
+            "number",
+            "openai",
+            json!({"upstreamReportedModel":123}),
+            None,
+        ),
+        (
+            "empty",
+            "openai",
+            json!({"upstreamReportedModel":"   "}),
+            None,
+        ),
+        (
+            "control",
+            "openai",
+            json!({"upstreamReportedModel":"gpt\nsecret"}),
+            None,
+        ),
+        (
+            "long",
+            "openai",
+            json!({"upstreamReportedModel":"x".repeat(257)}),
+            None,
+        ),
+        (
+            "other",
+            "xai",
+            json!({"upstreamReportedModel":"grok-returned"}),
+            None,
+        ),
+    ];
+    for (id, provider, metadata, _) in &fixtures {
+        sqlx::query("insert into model_requests (id, client_api_key_ref, config_revision, protocol, operation, endpoint, client_transport, started_at, deadline_at, outcome, completed_at, routing_scope, provider_kind, requested_model_id, upstream_model_id, provider_observation_json, cost_source, cost_amount, cost_currency) values ($1, 'deleted_key', 1, 'openai', 'responses', '/v1/responses', 'http_sse', now(), now() + interval '1 hour', 'failed', now(), 'all', $2, 'client-model', 'sent-model', $3, 'calculated', 1.23, 'USD')")
+            .bind(id).bind(provider).bind(sqlx::types::Json(metadata)).execute(&db.pool).await.unwrap();
+    }
+    let before: Vec<Value> =
+        sqlx::query_scalar("select to_jsonb(mr) from model_requests mr order by id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    super::TEST_MIGRATOR
+        .run(&db.pool)
+        .await
+        .expect("upgrade to 21");
+    let after: Vec<Value> = sqlx::query_scalar(
+        "select to_jsonb(mr) - 'upstream_response_model' from model_requests mr order by id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        before, after,
+        "migration must preserve costs, models and other historical facts"
+    );
+    for (id, _, _, expected) in fixtures {
+        let model: Option<String> =
+            sqlx::query_scalar("select upstream_response_model from model_requests where id=$1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(model.as_deref(), expected, "{id}");
+    }
+    db.close().await;
+}

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use gateway_core::engine::execution::StartedExecution;
 use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError};
-use gateway_core::error::{GatewayError, GatewayErrorKind};
+use gateway_core::error::{ContinuationRecoveryDisposition, GatewayError, GatewayErrorKind};
 use gateway_core::operation::ProviderSessionState;
 use tokio::time::Instant;
 
@@ -259,6 +259,41 @@ async fn send_initial_engine_error(
     error: &EngineError,
     request_id: &Arc<str>,
 ) -> ForwardOutcome {
+    // A safe continuation replay is a client projection, not a replacement of the
+    // original quota failure used for isolation and accounting. Use its status
+    // and headers instead of re-deriving 429 from the underlying error kind.
+    if let EngineError::Provider(provider) = error
+        && provider.continuation_recovery_disposition()
+            == Some(ContinuationRecoveryDisposition::ClientReplayRequired)
+        && let Some(projected) = provider.client_visible_upstream_response()
+        && let Some(detail) = provider.client_visible_upstream_error()
+    {
+        let metadata: serde_json::Value =
+            serde_json::from_str(&response_metadata_event(request_id, projected.headers()))
+                .expect("metadata encoder produces JSON");
+        let frame = serde_json::json!({
+            "type": "error",
+            "status": projected.status(),
+            "error": {
+                "type": detail.error_type(),
+                "code": detail.code(),
+                "message": detail.message(),
+            },
+            "headers": metadata["headers"],
+        });
+        return if connection
+            .send_text(
+                frame.to_string(),
+                WriteContext::request(request_id, FramePhase::Error),
+            )
+            .await
+            .is_ok()
+        {
+            ForwardOutcome::Continue
+        } else {
+            ForwardOutcome::Disconnect
+        };
+    }
     let response_headers = execution
         .session_mut()
         .map(|session| session.response_headers().to_vec())

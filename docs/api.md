@@ -167,8 +167,9 @@ Codex 专用目录中的 `context_window` 与 `max_context_window` 分别表示�
 
 OpenAI 路径保留客户端 Responses wire 语义：请求 body 的未知字段和字段顺序保持不变（受控模型
 映射除外），HTTP SSE 与 WebSocket 的上游业务事件字节原样转发，response ID 按 opaque 值处理而不
-假设 UUID 或固定长度；OpenAI 上游错误 envelope 和允许下发的 opaque header 值也不由 canonical
-观测结果重写。Images 请求不读取或重建 JSON，也不要求或映射模型字段；它固定使用 OpenAI Provider，
+假设 UUID 或固定长度；除下述原生续写额度恢复外，OpenAI 上游错误 envelope 和允许下发的 opaque
+header 值也不由 canonical 观测结果重写。Images 请求不读取或重建 JSON，也不要求或映射模型字段；
+它固定使用 OpenAI Provider，
 只在原始字节之外完成账号选择、鉴权头替换和端点路由，成功与失败响应正文同样保持原始字节。
 `/v1/alpha/search` 使用相同的 OpenAI Provider 原生端点边界：body（包括 `model`）不解析、不映射，
 `x-codex-turn-metadata` 在移除客户端账号身份并按当前 lease 重写 installation ID 后转发；上游账号
@@ -187,6 +188,19 @@ OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足�
 最终交付的上游错误仍按上述透明边界保留原始状态码、错误码和正文。
 明确额度耗尽继续走现有账号隔离与安全换号流程，
 包括 WebSocket 握手返回的 429；不会因其长 `Retry-After` 而转入同账号传输恢复等待。
+
+带 `previous_response_id` 的 OpenAI 原生续写仍绑定原账号。若明确额度耗尽，且请求可安全重放、
+没有语义输出且尚未提交下游，网关先隔离账号，再向客户端投影 HTTP `400`（WebSocket 为
+`status: 400`）和 `previous_response_not_found`，移除额度窗口的 `Retry-After`。
+支持该协议的客户端应去掉旧 ID、携带完整历史重试，再由正常调度选择允许该模型的可用账号。
+网关不会把原增量输入转发到其他账号；普通限流、容量不足、发送结果不明或交付后失败不触发转换。
+真实上游错误分类、状态和诊断仍用于隔离与记账，不会被客户端恢复提示覆盖。
+
+Responses 编码时仅为缺失的顶层 `store` 补齐 `false`；显式提供的值、嵌套同名字段和其他未知
+字段保持原样。HTTP/SSE 与 WebSocket 共用此规则，Images 与独立 Search 不受影响。
+
+管理员按账号刷新 OpenAI / xAI 模型目录时，会优先使用被指定账号自身的凭据，即使该账号已停用。
+此例外只服务于管理端目录查询与连接测试，不允许停用账号参与普通客户端调度或后台目录发现。
 
 ## 4. 用户认证与授权
 
@@ -847,6 +861,14 @@ Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`
 `usageWindow` 复用账号额度窗口合同，缺失额度事实时为 `null`；窗口标签、百分比、触顶状态、重置时间
 和本地用量由 Provider/Admin 投影。前端不得从套餐缺失推断免费套餐，也不得从显示时舍入的百分比推断
 触顶。滚动窗口使用相应时间范围的本地用量，独立于 Dashboard 的今日统计范围。
+
+请求列表与详情新增可空的 `upstreamResponseModel`，记录上游明确报告的返回模型，不用请求模型
+补出未知值。客户端请求 A、模型映射后发送 B、上游返回 C 时，本地模型估价使用 B 的价格和实际
+用量；Provider 明确上报的已计费金额仍优先，B 无定价则保持费用未知，不借用 C 的价格。
+该变更只调整模型选价，不改变本分支已有的服务档位、用户倍率、额度估算与账本规则，也不重算历史费用。
+模型列以蓝色箭头表示发送模型映射，以橙色箭头表示与客户端请求不同的返回模型；两者相同时合并展示。
+返回模型仅代表上游声明，不证明模型真实性。迁移 `0021` 仅回填历史 OpenAI 记录中已保存的合法
+`upstreamReportedModel`，其余旧记录保持空值。
 
 OpenAI 的 `serviceTier` 只接受上游响应生命周期事件确认的实际 `response.service_tier`；请求里的
 期望档位只保留在 request summary，不能冒充响应事实。计费展示把 `priority`/`fast` 映射为 `Fast`，

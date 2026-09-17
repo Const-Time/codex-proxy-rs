@@ -8,11 +8,12 @@ use gateway_core::error::{GatewayError, GatewayErrorKind, ProviderConnectionObse
 use gateway_core::metering::{CalculatedCost, CostEstimate, Usage};
 use gateway_core::upstream::UpstreamSendState;
 use gateway_store::postgres::{
-    ModelRequestAttemptStart, ModelRequestRepository, NewModelRequest, ObservabilityRepository,
-    PgExecutionStore,
+    ModelRequestAttemptStart, ModelRequestRepository, NewModelRequest, ObservabilityPageSize,
+    ObservabilityRange, ObservabilityRepository, PgExecutionStore, UsageRecordFilter,
+    UsageRecordQuery,
 };
 
-use super::TestDatabase;
+use super::{TestDatabase, observability_repository};
 
 #[test]
 fn postgres_execution_adapter_implements_core_port() {
@@ -346,8 +347,10 @@ async fn core_adapter_should_persist_calculated_cost_exactly() {
     let repository = PgExecutionStore::new(database.pool.clone());
 
     let mut finalization = successful_core_finalization("req_calculated_cost");
+    finalization.downstream_committed_at = Some(std::time::SystemTime::now());
     finalization.websocket_pool = Some("reuse".to_owned());
     finalization.service_tier = Some("priority".to_owned());
+    finalization.upstream_response_model = Some("grok-4.6-build".to_owned());
     finalization.cost = CalculatedCost::from_usd_ticks(12_345)
         .expect("calculated cost")
         .into_estimate();
@@ -382,6 +385,37 @@ async fn core_adapter_should_persist_calculated_cost_exactly() {
             "reuse".to_owned(),
             Some("priority".to_owned()),
         )
+    );
+    let observation = observability_repository(&database.pool);
+    let detail = observation
+        .usage_record_detail("req_calculated_cost", None)
+        .await
+        .expect("request detail");
+    assert_eq!(
+        detail.request.upstream_model_id.as_deref(),
+        Some("grok-4.5")
+    );
+    assert_eq!(
+        detail.request.upstream_response_model.as_deref(),
+        Some("grok-4.6-build")
+    );
+    let page = observation
+        .list_usage_records(UsageRecordQuery {
+            range: ObservabilityRange::new(
+                Utc::now() - Duration::hours(1),
+                Utc::now() + Duration::hours(1),
+            )
+            .unwrap(),
+            filter: UsageRecordFilter::default(),
+            current_page: 1,
+            page_size: ObservabilityPageSize::new(10).unwrap(),
+        })
+        .await
+        .expect("request list");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].upstream_response_model.as_deref(),
+        Some("grok-4.6-build")
     );
     database.close().await;
 }
@@ -484,6 +518,7 @@ fn successful_core_finalization(id: &str) -> CoreModelRequestFinalization {
         upstream_transport: Some("websocket".to_owned()),
         http_version: Some("HTTP/2".to_owned()),
         websocket_pool: None,
+        upstream_response_model: None,
         service_tier: None,
         provider_metadata_json: None,
         error: None,

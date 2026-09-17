@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{TimeZone as _, Utc};
 use futures::executor::block_on;
-use gateway_core::account::{ProviderAccount, ProviderAccountId};
+use gateway_core::account::{ProviderAccount, ProviderAccountId, ProviderAccountStore};
 use gateway_core::provider_ports::ProviderCatalogCachePort;
 use provider_openai::OFFICIAL_CODEX_BASE_URL;
 use provider_openai::credential::{
@@ -148,6 +148,39 @@ async fn missing_account_refresh_fails_before_network_io() {
         error,
         CodexCredentialCatalogError::NoEligibleCredential
     ));
+}
+
+#[tokio::test]
+async fn disabled_account_refresh_discovers_models_with_the_pinned_account() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account = seed_account(&store, "acct_disabled_models").await;
+    store
+        .set_enabled(account.id(), false)
+        .await
+        .expect("disable account");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/codex/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(
+                    br#"{"models":[{"slug":"gpt-5.4","display_name":"GPT-5.4"}]}"#.to_vec(),
+                    "application/json",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+
+    let catalog = service
+        .refresh_account_catalog(account.id())
+        .await
+        .expect("disabled account refresh still discovers models");
+
+    assert_eq!(catalog.models(), ["gpt-5.4"]);
+    server.verify().await;
 }
 
 #[tokio::test]

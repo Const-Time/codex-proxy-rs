@@ -276,6 +276,7 @@ fn response_create_should_reject_non_boolean_stream_without_disclosing_body_valu
 
 #[derive(Default)]
 struct AtomicFailureTrace {
+    initial_error: Mutex<Option<ProviderError>>,
     starts: AtomicUsize,
     next_calls: AtomicUsize,
     committed: AtomicBool,
@@ -292,6 +293,9 @@ struct AtomicFailureSession {
 impl ExecutionSession for AtomicFailureSession {
     fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>> {
         Box::pin(async move {
+            if let Some(error) = self.trace.initial_error.lock().unwrap().take() {
+                return Err(EngineError::Provider(error));
+            }
             let next_call = self.trace.next_calls.fetch_add(1, Ordering::AcqRel);
             if self.fail_before_first_event && next_call == 0 {
                 return Err(EngineError::Provider(ProviderError::new(
@@ -882,4 +886,76 @@ async fn websocket_upgrade_should_reject_malformed_handshakes() {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+}
+
+#[tokio::test]
+async fn quota_replay_projection_survives_the_downstream_websocket_boundary() {
+    use gateway_core::error::{
+        ClientVisibleUpstreamError, ClientVisibleUpstreamResponse, ContinuationRecoveryDisposition,
+    };
+    let detail = json!({"message":"Previous response was not found. Retrying the full request.","code":"previous_response_not_found","type":"invalid_request_error"});
+    let error = ProviderError::new(ProviderErrorKind::QuotaExhausted, UpstreamSendState::Sent)
+        .with_status(429)
+        .with_retry_after(Duration::from_secs(129600))
+        .with_continuation_recovery_disposition(
+            ContinuationRecoveryDisposition::ClientReplayRequired,
+        )
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            detail["message"].as_str().unwrap(),
+            Some("previous_response_not_found".to_owned()),
+            Some("invalid_request_error".to_owned()),
+        ))
+        .with_client_visible_upstream_response(
+            ClientVisibleUpstreamResponse::new(
+                400,
+                Some(b"application/json".to_vec()),
+                Bytes::from(json!({"error":detail}).to_string()),
+            )
+            .with_headers(vec![
+                ProviderResponseHeader::new(
+                    "x-request-id",
+                    Bytes::from_static(b"req-quota-upstream"),
+                ),
+                ProviderResponseHeader::new("authorization", Bytes::from_static(b"must-not-leak")),
+            ]),
+        );
+    let trace = Arc::new(AtomicFailureTrace::default());
+    *trace.initial_error.lock().unwrap() = Some(error);
+    let execution = Arc::new(AtomicFailureExecution {
+        client: authenticated_client("sk_ws_atomic"),
+        trace,
+        response_headers: vec![ProviderResponseHeader::new(
+            "retry-after",
+            Bytes::from_static(b"129600"),
+        )],
+        fail_before_first_event: false,
+    });
+    let app = api_router(execution).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut request = format!("ws://{address}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert(AUTHORIZATION, "Bearer sk_ws_atomic".parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    socket.send(ClientMessage::Text(json!({"type":"response.create","model":"model-a","input":"continue","previous_response_id":"resp_previous"}).to_string().into())).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["status"], 400);
+    assert_eq!(value["error"], detail);
+    assert_eq!(value["headers"]["x-request-id"], "req-quota-upstream");
+    assert!(value["headers"].get("retry-after").is_none());
+    assert!(value["headers"].get("authorization").is_none());
+    socket.close(None).await.unwrap();
+    server.abort();
 }

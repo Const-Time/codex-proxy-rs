@@ -14,6 +14,8 @@ import type {
 import { isRecord } from '@/utils/object'
 import { formatDuration } from './format'
 
+export { usageModelDisplay } from './modelDisplay'
+
 // Usage 记录的规范化 view model：组件只消费这个形状。
 export interface UsageViewModel {
   id: string
@@ -29,6 +31,7 @@ export interface UsageViewModel {
   model: string | null
   requestedModel: string | null
   upstreamModel: string | null
+  upstreamResponseModel: string | null
   serviceTier: string | null
   statusCode: number | null
   clientTransport: string
@@ -96,6 +99,7 @@ export function normalizeUsageRecord(record: UsageRecordDetail): UsageViewModel 
     model: record.model,
     requestedModel: record.requestedModel,
     upstreamModel: record.upstreamModel,
+    upstreamResponseModel: record.upstreamResponseModel,
     serviceTier: record.serviceTier,
     statusCode: record.statusCode,
     clientTransport: record.clientTransport,
@@ -203,21 +207,6 @@ export function usageIsReview(record: UsageCommonRecord) {
 
 export function usageIsCompact(record: UsageCommonRecord) {
   return record.compact === true
-}
-
-export function usageModelDisplay(record: UsageCommonRecord) {
-  const requestedModel = record.requestedModel || ''
-  const upstreamModel = record.upstreamModel || ''
-  const storedModel = record.model || ''
-  const primary = requestedModel || storedModel || upstreamModel || '—'
-  const secondary
-    = upstreamModel && upstreamModel !== primary
-      ? upstreamModel
-      : requestedModel && storedModel && storedModel !== requestedModel
-        ? storedModel
-        : ''
-
-  return { primary, secondary }
 }
 
 export function usageTokenDetails(record: UsageCommonRecord) {

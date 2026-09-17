@@ -1,6 +1,7 @@
 use gateway_core::operation::{GenerateRequest, ProtocolPayload};
 use serde_json::{Map, Value, json};
 
+use super::*;
 use provider_openai::encode_generate_request;
 
 fn request(body: Map<String, Value>) -> GenerateRequest {
@@ -47,7 +48,7 @@ fn encoder_should_preserve_openai_wire_fields_without_deriving_accountless_pool_
 
     assert_eq!(encoded.body().get("model"), Some(&json!("gpt-routed")));
     assert!(encoded.body().get("stream").is_none());
-    assert!(encoded.body().get("store").is_none());
+    assert_eq!(encoded.body().get("store"), Some(&json!(false)));
     assert_eq!(encoded.body().get("tool_choice"), Some(&json!("auto")));
     assert_eq!(
         encoded.body().get("future_official_field"),
@@ -126,6 +127,7 @@ fn encoder_should_remove_unsupported_fields_from_upstream_body() {
             "model": "gpt-test",
             "input": "hello",
             "max_tokens": 256,
+            "store": false,
         })
     );
 }
@@ -572,4 +574,129 @@ fn observability_semantics_should_use_the_transparent_openai_payload() {
 
     assert_eq!(semantics.reasoning_preset, Some("ultra"));
     assert!(semantics.compact);
+}
+
+#[test]
+fn encoder_should_preserve_explicit_store_values() {
+    for store in [json!(false), json!(true), Value::Null, json!("false")] {
+        let body = json!({"model": "gpt-test", "input": "hello", "store": store});
+        let encoded = encode_downstream_request(body.clone());
+
+        assert_eq!(Value::Object(encoded.body().clone()), body);
+    }
+}
+
+#[test]
+fn default_store_keeps_unknown_fields_and_nested_store_values_unchanged() {
+    let mut body = json!({
+        "model": "gpt-test",
+        "input": "store is a business field",
+        "future_options": {"store": "keep"},
+        "client_metadata": {"store": true},
+        "tools": [{"type":"function","name":"save","parameters":{"properties":{"store":{"type":"string"}}}}],
+    });
+    let encoded = encode_downstream_request(body.clone());
+    body["store"] = json!(false);
+    assert_eq!(Value::Object(encoded.body().clone()), body);
+}
+
+#[tokio::test]
+async fn backend_http_should_send_default_store_for_downstream_request() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind HTTP server");
+    let address = listener.local_addr().expect("HTTP server address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept HTTP client");
+        let raw = read_http_request_with_body(&mut stream).await;
+        write_completed_sse_response(&mut stream).await;
+        let head_end = raw
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("HTTP head terminator")
+            + 4;
+        let body = zstd::stream::decode_all(&raw[head_end..]).expect("decode request body");
+        serde_json::from_slice::<Value>(&body).expect("HTTP request JSON")
+    });
+    let mut request = encode_downstream_request(json!({"model": "gpt-test", "input": "hello"}));
+    request.force_http_sse = true;
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("HTTP client"),
+        format!("http://{address}"),
+        test_wire_profile(),
+    );
+
+    client
+        .create_response(
+            &request,
+            request_context("req_default_store_http", Some("test-account")),
+        )
+        .await
+        .expect("HTTP response");
+
+    assert_eq!(
+        server.await.expect("HTTP server task"),
+        json!({
+            "model": "gpt-test", "input": "hello", "store": false, "stream": true
+        })
+    );
+}
+
+#[tokio::test]
+async fn backend_websocket_should_send_default_store_for_downstream_request() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WebSocket server");
+    let address = listener.local_addr().expect("WebSocket server address");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept WebSocket client");
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        let message = websocket
+            .next()
+            .await
+            .expect("response.create")
+            .expect("valid frame");
+        let body = serde_json::from_str::<Value>(message.to_text().expect("text frame"))
+            .expect("WebSocket request JSON");
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_default_store", 1, 1).into(),
+            ))
+            .await
+            .expect("send terminal event");
+        body
+    });
+    let mut request = encode_downstream_request(json!({"model": "gpt-test", "input": "hello"}));
+    request.use_websocket = true;
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("HTTP client"),
+        format!("http://{address}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::new(CodexWebSocketPool::new(Duration::from_mins(1))));
+
+    client
+        .create_response(
+            &request,
+            request_context("req_default_store_ws", Some("test-account")),
+        )
+        .await
+        .expect("WebSocket response");
+
+    let body = server.await.expect("WebSocket server task");
+    assert_eq!(body.get("store"), Some(&json!(false)));
+}
+
+fn encode_downstream_request(body: Value) -> CodexResponsesRequest {
+    let payload =
+        ProtocolPayload::json_object("openai", body.as_object().expect("request object").clone())
+            .expect("OpenAI payload");
+    encode_generate_request(&GenerateRequest::from_protocol_payload(payload), "gpt-test")
+        .expect("encode downstream request")
 }

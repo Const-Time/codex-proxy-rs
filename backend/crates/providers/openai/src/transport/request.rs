@@ -110,6 +110,8 @@ pub fn encode_generate_request(
 
 fn adapt_codex_responses_body(body: &mut Map<String, Value>, upstream_model: &str) {
     body.insert("model".to_owned(), Value::String(upstream_model.to_owned()));
+    // Only default absent store; explicit values and nested business fields are preserved.
+    body.entry("store").or_insert(Value::Bool(false));
     for field in UNSUPPORTED_CODEX_RESPONSES_FIELDS {
         body.remove(*field);
     }

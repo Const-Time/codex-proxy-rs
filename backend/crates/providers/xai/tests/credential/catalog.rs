@@ -313,6 +313,27 @@ async fn single_account_catalog_refresh_and_read_use_provider_cache_boundary() {
 }
 
 #[tokio::test]
+async fn disabled_account_refresh_discovers_models_with_the_pinned_account() {
+    let (store, repository) =
+        repository_with_accounts(&[("disabled-models", "subject-disabled-models")]).await;
+    store
+        .set_enabled(&account_id("disabled-models"), false)
+        .await
+        .expect("disable account");
+    let service = crate::support::grok_catalog_service(
+        repository,
+        QueueCatalogTransport::from_bodies([OFFICIAL_FIXTURE.to_vec()]),
+        MemoryGrokCatalogCache::shared(),
+    );
+
+    let refreshed = service
+        .refresh_account_catalog(&account_id("disabled-models"))
+        .await
+        .expect("disabled account refresh still discovers models");
+    assert_eq!(refreshed.seed().models(), ["grok-4.5"]);
+}
+
+#[tokio::test]
 async fn single_account_catalog_read_miss_does_not_call_upstream() {
     let (store, repository) =
         repository_with_accounts(&[("account-models-miss", "subject-models")]).await;
