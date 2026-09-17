@@ -1143,6 +1143,86 @@ async fn initialized_provider_reports_a_safe_pat_format_error_before_network_acc
 }
 
 #[tokio::test]
+async fn file_reauthorization_preserves_target_and_rejects_other_accounts() {
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: "acct_file_reauth".to_owned(),
+            name: "keep existing name".to_owned(),
+            secret: secret("old-access"),
+            verified_account: profile("chatgpt-file"),
+            next_refresh_at: None,
+            enabled: true,
+        })
+        .await;
+    let account = store.account("acct_file_reauth").expect("stored account");
+    let record = account_record(&account);
+    let config = valid_config();
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with(store, Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .expect("bundle");
+    let token = |id: &str| {
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "exp": 2_000_000_000,
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": id,
+                    "chatgpt_user_id": format!("user-{id}")
+                }
+            }))
+            .unwrap(),
+        );
+        format!("header.{payload}.signature")
+    };
+    let valid = token("chatgpt-file");
+    for document in [
+        json!({"accessToken": valid, "refreshToken": "new-refresh"}),
+        json!({"tokens": {"access_token": valid, "refresh_token": "new-refresh"}}),
+        json!({"accounts": [{"accessToken": valid, "name": "do not overwrite"}]}),
+    ] {
+        let prepared = bundle
+            .admin_provider()
+            .prepare_file_reauthorization(PrepareCredentialRotation {
+                account: record.clone(),
+                provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                    document.as_object().unwrap().clone(),
+                )),
+            })
+            .await
+            .expect("same account file");
+        assert_eq!(prepared.facts().account_id, *account.id());
+        assert!(prepared.facts().preserve_profile);
+        assert!(prepared.facts().replacement_identity.is_none());
+        assert_eq!(prepared.facts().name, record.name);
+        assert_eq!(
+            prepared.facts().expected_credential_revision,
+            record.credential_revision
+        );
+    }
+    for document in [
+        json!({"accessToken": token("wrong-account")}),
+        json!({"accessToken": token("wrong-account"), "idToken": valid}),
+        json!({"accounts": [{"accessToken": valid}, {"accessToken": valid}]}),
+        json!({"accessToken": "not-a-jwt"}),
+    ] {
+        let error = bundle
+            .admin_provider()
+            .prepare_file_reauthorization(PrepareCredentialRotation {
+                account: record.clone(),
+                provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                    document.as_object().unwrap().clone(),
+                )),
+            })
+            .await
+            .expect_err("reject invalid target/file");
+        assert_eq!(error.kind(), ProviderAdminErrorKind::Invalid);
+    }
+}
+
+#[tokio::test]
 async fn openai_rotation_preserves_the_new_access_token_jwt_expiration() {
     let store = Arc::new(MemoryAccountStore::default());
     store

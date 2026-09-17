@@ -676,6 +676,47 @@ impl ProviderAdmin for XaiAdminProvider {
         prepared_rotation(prepared, command.account.provider_kind)
     }
 
+    async fn prepare_file_reauthorization(
+        &self,
+        command: PrepareCredentialRotation,
+    ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        validate_account_record(&command.account, &self.provider_kind)?;
+        let account_id = ProviderAccountId::new(command.account.id.clone())
+            .map_err(|_| provider_error(ProviderAdminErrorKind::Invalid))?;
+        let current = self
+            .accounts
+            .load_current_credential(&account_id)
+            .await
+            .map_err(map_store_error)?;
+        if !account_matches_record(&current.account, &command.account) {
+            return Err(provider_error(ProviderAdminErrorKind::Conflict));
+        }
+        let document = serde_json::to_vec(&Value::Object(
+            command.provider_material.into_provider_data().into_inner(),
+        ))
+        .map_err(|_| provider_error(ProviderAdminErrorKind::Invalid))?;
+        let entries = GrokOAuthImportDocument::parse_single_json(&document)
+            .map_err(|_| provider_error(ProviderAdminErrorKind::Invalid))?
+            .into_entries();
+        let [entry]: [_; 1] = entries
+            .try_into()
+            .map_err(|_| provider_error(ProviderAdminErrorKind::Invalid))?;
+        // 文件中的代理和调度配置不能覆盖目标账号；身份仍由 OAuth 验证。
+        let oauth = self
+            .oauth
+            .with_outbound_proxy(current.account.outbound_proxy().cloned());
+        let discovery = oauth.discover().await.map_err(map_oauth_error)?;
+        let tokens = oauth
+            .verify_imported_credential(&discovery, entry.into_candidate())
+            .await
+            .map_err(|error| map_failure_class(error.class()))?;
+        if current.account.upstream_user_id() != Some(tokens.evidence().subject()) {
+            return Err(provider_error(ProviderAdminErrorKind::Conflict));
+        }
+        let prepared = verified_rotation(current, tokens)?;
+        prepared_rotation(prepared, command.account.provider_kind)
+    }
+
     async fn quota(
         &self,
         request: ProviderQuotaRequest,

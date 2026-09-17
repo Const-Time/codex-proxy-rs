@@ -130,6 +130,21 @@ impl OpenAiService for DefaultOpenAiService {
         &self,
         command: ImportCredentials,
     ) -> Result<CredentialImportResult, AdminError> {
+        if command.account_id.is_some() {
+            let request_id = command.context.request_id.clone();
+            let result = super::reauthorize_account_file(
+                self.accounts.as_ref(),
+                self.provider.as_ref(),
+                command,
+            )
+            .await?;
+            self.provider
+                .account_facts_changed(&result.credential_ids)
+                .await;
+            publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+            self.observe_initial_quotas(&result.credential_ids, &request_id);
+            return Ok(result);
+        }
         let context = command.context;
         let proxy_reservation = super::import_proxy_binding(
             self.proxies.as_ref(),

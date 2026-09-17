@@ -163,6 +163,19 @@ pub struct GrokOAuthImportDocument {
 }
 
 impl GrokOAuthImportDocument {
+    /// 重新授权须在过滤、去重或任何远程验证之前拒绝多账号文档。
+    pub(crate) fn parse_single_json(document: &[u8]) -> Result<Self, GrokOAuthImportError> {
+        if document.is_empty() || document.len() > MAX_IMPORT_DOCUMENT_BYTES {
+            return Err(GrokOAuthImportError::InvalidField("document"));
+        }
+        let wire: Value = serde_json::from_slice(document)
+            .map_err(|_| GrokOAuthImportError::InvalidField("document"))?;
+        if import_accounts(&wire)?.len() != 1 {
+            return Err(GrokOAuthImportError::InvalidField("document"));
+        }
+        Self::parse_json(document)
+    }
+
     /// 从外部 JSON 提取 xAI OAuth 认证字段。
     ///
     /// 独立代理 URL 随账号导入；其他展示 metadata 不参与认证。

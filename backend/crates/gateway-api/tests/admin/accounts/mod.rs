@@ -543,6 +543,24 @@ mod actions {
 
     #[test]
     fn account_import_should_use_provider_and_opaque_data_fields() {
+        let target = json!({
+            "provider": "openai", "accountId": "acct_existing", "data": {}
+        });
+        let request: AccountImportRequest = serde_json::from_value(target.clone()).unwrap();
+        assert!(request.validate().is_ok());
+        for extra in [
+            json!({"accountId": ""}),
+            json!({"outboundProxyId": "proxy_other"}),
+            json!({"settings": {"enabled": true, "concurrencyLimit": null, "weight": 1, "groupIds": []}}),
+        ] {
+            let mut invalid = target.clone();
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let request: AccountImportRequest = serde_json::from_value(invalid).unwrap();
+            assert!(request.validate().is_err());
+        }
         let valid: AccountImportRequest = serde_json::from_value(json!({
             "provider": "openai",
             "data": {

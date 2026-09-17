@@ -58,14 +58,14 @@ export function useAccountOnboarding(options: {
     await creatingAccountAction.run(
       async () => {
         const proxyError = accountProxyError(createForm.value)
-        if (proxyError)
+        if (!reauthorizingAccount.value && proxyError)
           throw new Error(proxyError)
         const message = createForm.value.provider === 'batch'
           ? await importMixedAccountDocument()
           : await importAccountDocument()
         await finishCreate(message)
       },
-      { errorText: '导入失败' },
+      { errorText: reauthorizingAccount.value ? '文件重新授权失败' : '导入失败' },
     )
   }
 
@@ -154,7 +154,6 @@ export function useAccountOnboarding(options: {
       mode: 'oauth',
     }
     showCreateModal.value = true
-    void handleAuthorizeOAuth()
   }
 
   function newAccountInput() {
@@ -174,7 +173,21 @@ export function useAccountOnboarding(options: {
       provider,
       mode,
       createForm.value.importTexts[mode],
+      reauthorizingAccount.value !== null,
     )
+    const account = reauthorizingAccount.value
+    if (account) {
+      if (mode !== 'json' || provider !== account.provider || documents.length !== 1)
+        throw new Error('请选择当前账号所属平台的单账号文件')
+      const result = await importAccounts({
+        provider,
+        accountId: account.id,
+        data: documents[0]!.document,
+      })
+      if (result.accountIds.length !== 1 || result.accountIds[0] !== account.id)
+        throw new Error('重新授权结果与目标账号不一致，请刷新账号列表检查')
+      return '账号文件重新授权成功'
+    }
     let importedCount = 0
     for (const entry of documents) {
       const result = await importAccounts({
@@ -285,6 +298,7 @@ function accountImportDocuments(
   provider: ImportProvider,
   mode: string,
   value: string,
+  reauthorizing = false,
 ): MixedImportDocument[] {
   if (provider === 'openai' && isOpenAiTokenImportMode(mode)) {
     return [{
@@ -292,7 +306,13 @@ function accountImportDocuments(
       document: parseOpenAiTokenImport(value, mode),
     }]
   }
-  return providerImportDocuments(parseImportJson(value), provider)
+  const parsed: unknown = parseImportJson(value)
+  if (reauthorizing && isRecord(parsed) && Array.isArray(parsed.documents)) {
+    const documents = parseMixedImportDocuments(parsed)
+    if (documents.length !== 1 || documents[0]?.provider !== provider)
+      throw new Error('重新授权只接受当前平台的单账号文件，不支持批量账号包')
+  }
+  return providerImportDocuments(parsed, provider)
 }
 
 function parseOpenAiTokenImport(value: string, mode: OpenAiTokenImportMode) {

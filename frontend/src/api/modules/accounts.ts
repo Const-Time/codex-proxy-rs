@@ -340,6 +340,7 @@ interface AccountImportSettings {
 }
 
 interface AccountImportParam {
+  accountId?: string
   outboundProxyId?: string
   settings?: AccountImportSettings
   provider: string

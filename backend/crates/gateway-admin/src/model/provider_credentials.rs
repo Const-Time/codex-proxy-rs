@@ -108,6 +108,8 @@ pub struct CredentialDetails {
 
 /// Provider 正式文档批量导入命令。
 pub struct ImportCredentials {
+    /// 指定时仅更新该账号的凭据，禁止新增账号或修改设置。
+    pub account_id: Option<ProviderAccountId>,
     pub outbound_proxy_id: Option<String>,
     pub settings: Option<AccountImportSettings>,
     pub context: MutationContext,

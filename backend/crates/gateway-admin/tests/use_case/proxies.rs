@@ -211,6 +211,7 @@ async fn credential_import_keeps_proxy_reserved_until_commit_and_releases_on_err
                 .build()
                 .await;
             let command = ImportCredentials {
+                account_id: None,
                 outbound_proxy_id: Some("proxy_import".to_owned()),
                 settings: None,
                 context: context("reserved-import"),

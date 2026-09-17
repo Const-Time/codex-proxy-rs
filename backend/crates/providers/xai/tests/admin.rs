@@ -412,6 +412,19 @@ async fn xai_admin_provider_rejects_unprepared_mutations_before_store_commit() {
     .expect("xAI bundle");
     let admin = bundle.admin_provider();
 
+    for document in [json!({}), json!({"accounts": [{}, {}]})] {
+        let error = admin
+            .prepare_file_reauthorization(PrepareCredentialRotation {
+                account: record.clone(),
+                provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                    document.as_object().unwrap().clone(),
+                )),
+            })
+            .await
+            .expect_err("invalid file rejected before remote verification");
+        assert_eq!(error.kind(), ProviderAdminErrorKind::Invalid);
+    }
+
     let import_error = admin
         .prepare_import(PrepareCredentialImport {
             default_outbound_proxy: None,

@@ -161,6 +161,14 @@ pub trait ProviderAdmin: Send + Sync {
         command: PrepareCredentialRotation,
     ) -> Result<PreparedCredentialRotation, ProviderAdminError>;
 
+    /// 解析单账号文件并验证与目标账号的身份一致，复用凭据 CAS 提交通路。
+    async fn prepare_file_reauthorization(
+        &self,
+        _command: PrepareCredentialRotation,
+    ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
+
     async fn prepare_refresh(
         &self,
         command: PrepareCredentialRefresh,

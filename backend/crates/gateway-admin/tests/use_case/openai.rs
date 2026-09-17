@@ -41,6 +41,43 @@ async fn openai_delete_should_commit_then_release_provider_resources() {
 }
 
 #[tokio::test]
+async fn file_reauthorization_rotates_existing_account_without_importing_settings() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider.clone(), store.clone()).await;
+    let result = services
+        .openai()
+        .import_document(ImportCredentials {
+            account_id: Some(ProviderAccountId::new("acct_test").unwrap()),
+            outbound_proxy_id: None,
+            settings: None,
+            context: context("file-reauth"),
+            document: document(),
+        })
+        .await
+        .expect("reauthorize existing account");
+    await_quota_requests(&provider, 1).await;
+    assert_eq!(
+        result.credential_ids,
+        [ProviderAccountId::new("acct_test").unwrap()]
+    );
+    assert_eq!(
+        recorded(&events),
+        [
+            "store.credential_details",
+            "provider.prepare_file_reauthorization",
+            "store.commit_rotation",
+            "guard.finish",
+            "provider.account_facts_changed",
+            "provider.quota",
+        ]
+    );
+    assert!(store.import_settings().is_empty());
+    assert_eq!(store.audit_requests(), ["file-reauth"]);
+}
+
+#[tokio::test]
 async fn openai_import_should_prepare_before_atomic_store_commit() {
     let events = events();
     let provider = FakeProviderAdmin::new("openai", events.clone());
@@ -50,6 +87,7 @@ async fn openai_import_should_prepare_before_atomic_store_commit() {
     services
         .openai()
         .import_document(ImportCredentials {
+            account_id: None,
             outbound_proxy_id: None,
             settings: Some(super::accounts::import_settings()),
             context: context("import-openai"),
@@ -108,6 +146,7 @@ async fn openai_import_should_expose_only_explicit_public_errors_without_committ
         let error = services
             .openai()
             .import_document(ImportCredentials {
+                account_id: None,
                 outbound_proxy_id: None,
                 settings: None,
                 context: context("import-openai-pat-failure"),
@@ -134,6 +173,7 @@ async fn openai_import_should_refresh_quota_for_every_imported_account() {
     let result = services
         .openai()
         .import_document(ImportCredentials {
+            account_id: None,
             outbound_proxy_id: None,
             settings: None,
             context: context("import-openai-batch"),
@@ -179,6 +219,7 @@ async fn openai_import_should_remain_successful_when_quota_refresh_fails() {
     let result = services
         .openai()
         .import_document(ImportCredentials {
+            account_id: None,
             outbound_proxy_id: None,
             settings: None,
             context: context("import-openai-quota-failure"),
@@ -352,6 +393,7 @@ async fn openai_import_provider_error_should_not_touch_store_transaction() {
     services
         .openai()
         .import_document(ImportCredentials {
+            account_id: None,
             outbound_proxy_id: None,
             settings: None,
             context: context("import-openai-error"),

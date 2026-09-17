@@ -83,6 +83,19 @@ impl XaiService for DefaultXaiService {
         &self,
         command: ImportCredentials,
     ) -> Result<CredentialImportResult, AdminError> {
+        if command.account_id.is_some() {
+            let result = super::reauthorize_account_file(
+                self.accounts.as_ref(),
+                self.provider.as_ref(),
+                command,
+            )
+            .await?;
+            self.provider
+                .account_facts_changed(&result.credential_ids)
+                .await;
+            publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+            return Ok(result);
+        }
         let context = command.context;
         let proxy_reservation = super::import_proxy_binding(
             self.proxies.as_ref(),

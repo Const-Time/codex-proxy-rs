@@ -42,7 +42,7 @@ const view = computed(() => resolveAccountCreatePresentation({
 const mode = computed({
   get: () => form.value.mode,
   set: (value: string) => {
-    if (!props.reauthorizing && view.value.modeOptions.some(option => option.value === value))
+    if (view.value.modeOptions.some(option => option.value === value))
       form.value.mode = value as AccountImportMode
   },
 })
@@ -90,9 +90,9 @@ function continueToImport() {
       </p>
       <template v-if="!view.configuring">
         <BaseSegmented
-          v-if="!reauthorizing && !view.isBatch"
+          v-if="!view.isBatch"
           v-model="mode"
-          label="账号添加方式"
+          :label="reauthorizing ? '重新授权方式' : '账号添加方式'"
           :options="view.modeOptions"
           :disabled="busy"
           class="w-full"

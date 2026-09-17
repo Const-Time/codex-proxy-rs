@@ -427,6 +427,32 @@ impl ProviderAdmin for OpenAiAdminProvider {
         prepared_rotation(prepared, command.account.provider_kind)
     }
 
+    async fn prepare_file_reauthorization(
+        &self,
+        command: PrepareCredentialRotation,
+    ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        validate_account_record(&command.account, &self.provider_kind)?;
+        let account_id = ProviderAccountId::new(command.account.id.clone())
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let current = self
+            .accounts
+            .load_current_credential(&account_id)
+            .await
+            .map_err(map_store_error)?;
+        if !account_matches_record(&current.account, &command.account) {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Conflict));
+        }
+        let prepared = self
+            .credentials
+            .prepare_file_reauthorization(
+                current,
+                Value::Object(command.provider_material.into_provider_data().into_inner()),
+            )
+            .await
+            .map_err(map_credential_admin_error)?;
+        prepared_rotation(prepared, command.account.provider_kind)
+    }
+
     async fn prepare_refresh(
         &self,
         command: PrepareCredentialRefresh,

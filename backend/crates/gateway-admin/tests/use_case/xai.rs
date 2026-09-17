@@ -20,6 +20,7 @@ async fn xai_import_should_prepare_before_atomic_store_commit() {
     services
         .xai()
         .import_document(ImportCredentials {
+            account_id: None,
             outbound_proxy_id: None,
             settings: Some(super::accounts::import_settings()),
             context: context("import-xai"),
@@ -62,6 +63,7 @@ async fn xai_import_should_refresh_quota_for_every_imported_account() {
     services
         .xai()
         .import_document(ImportCredentials {
+            account_id: None,
             outbound_proxy_id: None,
             settings: None,
             context: context("import-xai-batch"),
@@ -98,6 +100,7 @@ async fn xai_import_should_remain_successful_when_quota_refresh_fails() {
     let result = services
         .xai()
         .import_document(ImportCredentials {
+            account_id: None,
             outbound_proxy_id: None,
             settings: None,
             context: context("import-xai-quota-failure"),

@@ -32,7 +32,7 @@ export function resolveAccountCreatePresentation(input: AccountCreatePresentatio
     configuring,
     isXai: provider === 'xai',
     isBatch: provider === 'batch',
-    modeOptions: resolveModeOptions(provider),
+    modeOptions: resolveModeOptions(provider).filter(option => !input.reauthorizing || option.value === 'oauth' || option.value === 'json'),
     modal: resolveModal(input, provider, configuring),
     oauth: resolveOAuth(provider, oauthAuthUrl),
     importInput: resolveImportInput(form, provider),
@@ -65,7 +65,7 @@ function resolveModal(
     const providerName = provider === 'xai' ? 'xAI' : 'OpenAI'
     return {
       title: '重新授权账号',
-      description: `${input.account?.email || input.account?.name || providerName} · 完成授权后更新账号凭据`,
+      description: `${input.account?.email || input.account?.name || providerName} · ${input.form.mode === 'json' ? '仅上传该账号的单账号文件，保留原有配置' : '完成授权后更新账号凭据'}`,
       tone: 'info' as const,
       size: 'md' as const,
     }

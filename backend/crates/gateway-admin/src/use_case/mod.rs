@@ -193,6 +193,53 @@ fn validate_prepared_import(
     Ok(())
 }
 
+async fn reauthorize_account_file(
+    accounts: &dyn AccountStore,
+    provider: &dyn ProviderAdmin,
+    command: crate::model::provider_credentials::ImportCredentials,
+) -> Result<crate::model::provider_credentials::CredentialImportResult, AdminError> {
+    let account_id = command
+        .account_id
+        .ok_or_else(|| AdminError::invalid("请选择重新授权的账号"))?;
+    if command.settings.is_some() || command.outbound_proxy_id.is_some() {
+        return Err(AdminError::invalid("重新授权不能修改账号设置或代理"));
+    }
+    let account = required_credential(
+        accounts,
+        provider.provider_kind(),
+        &account_id,
+        "file reauthorization",
+    )
+    .await?
+    .credential;
+    let prepared = provider
+        .prepare_file_reauthorization(
+            crate::model::provider_credentials::PrepareCredentialRotation {
+                account: account.clone(),
+                provider_material: command.document,
+            },
+        )
+        .await
+        .map_err(|error| map_provider_error(error, "file reauthorization"))?;
+    validate_prepared_rotation(&account, &prepared, "file reauthorization")?;
+    let (mut facts, guard) = prepared.into_parts();
+    if facts.expected_credential_revision != account.credential_revision
+        || facts.replacement_identity.is_some()
+    {
+        return Err(AdminError::conflict("账号凭据已变更，请刷新后重试"));
+    }
+    // 文件只能替换凭据；提交期间的并发资料编辑也不能被旧快照覆盖。
+    facts.preserve_profile = true;
+    let prepared = PreparedCredentialRotation::new(facts, guard);
+    let result =
+        commit_credential_rotation(accounts, prepared, &command.context, "file reauthorization")
+            .await?;
+    Ok(crate::model::provider_credentials::CredentialImportResult {
+        config_revision: result.config_revision,
+        credential_ids: vec![result.account_id],
+    })
+}
+
 fn validate_prepared_rotation(
     account: &crate::model::accounts::AccountRecord,
     prepared: &PreparedCredentialRotation,

@@ -834,6 +834,60 @@ impl CodexCredentialAdminService {
         self.prepare_import_document_with_proxy(payload, None).await
     }
 
+    /// 文件重新授权只接受一个账号；文件内的身份标签、设置与代理不参与更新。
+    pub(crate) async fn prepare_file_reauthorization(
+        &self,
+        current: LoadedCredential,
+        payload: Value,
+    ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
+        let payload = payload
+            .get("data")
+            .filter(|data| data.get("accounts").is_some())
+            .unwrap_or(&payload);
+        let values = import_account_values(payload)?;
+        if values.len() != 1 || !is_openai_oauth_candidate(values[0]) {
+            return Err(CodexCredentialAdminError::InvalidInput);
+        }
+        let candidate = parse_oauth_import_account(values[0])?;
+        let (secret, expires_at) = self
+            .resolve_import_tokens(
+                current.account.id(),
+                candidate.authentication.access_token,
+                candidate.authentication.refresh_token,
+                candidate.authentication.id_token,
+                current.account.outbound_proxy(),
+            )
+            .await?;
+        // 与普通导入相同，从 token 读取身份而不是信任文件里的 account_id/email。
+        // 每一份声明都必须与目标一致；不能拿原账号的旧 ID token 遮盖错误的新 AT。
+        let mut user_id = None;
+        let mut account_id = None;
+        for token in std::iter::once(&secret.access_token).chain(secret.id_token.iter()) {
+            let claims = parse_chatgpt_jwt_claims(token.expose_secret())
+                .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+            if claims
+                .chatgpt_user_id
+                .as_deref()
+                .is_some_and(|id| current.account.upstream_user_id() != Some(id))
+                || claims
+                    .chatgpt_account_id
+                    .as_deref()
+                    .is_some_and(|id| current.account.upstream_account_id() != Some(id))
+            {
+                return Err(CodexCredentialAdminError::InvalidCredential);
+            }
+            user_id = claims.chatgpt_user_id.or(user_id);
+            account_id = claims.chatgpt_account_id.or(account_id);
+        }
+        if account_id.is_none()
+            || account_id.as_deref() != current.account.upstream_account_id()
+            || user_id.as_deref() != current.account.upstream_user_id()
+        {
+            return Err(CodexCredentialAdminError::InvalidCredential);
+        }
+        CodexCredentialAdmin.prepare_refreshed_oauth_rotation(current, secret, expires_at, None)
+    }
+
     pub async fn prepare_import_document_with_proxy(
         &self,
         payload: Value,

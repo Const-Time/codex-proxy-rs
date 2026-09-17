@@ -367,6 +367,15 @@ impl ProviderAdmin for FakeProviderAdmin {
         Ok(self.prepared_rotation(&command.account))
     }
 
+    async fn prepare_file_reauthorization(
+        &self,
+        command: PrepareCredentialRotation,
+    ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        self.record("provider.prepare_file_reauthorization");
+        self.require_available()?;
+        Ok(self.prepared_rotation(&command.account))
+    }
+
     async fn prepare_refresh(
         &self,
         command: PrepareCredentialRefresh,

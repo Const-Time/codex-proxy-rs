@@ -55,6 +55,7 @@ impl AccountImportSettingsRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountImportRequest {
+    pub account_id: Option<String>,
     pub outbound_proxy_id: Option<String>,
     pub settings: Option<AccountImportSettingsRequest>,
     pub provider: String,
@@ -63,6 +64,12 @@ pub struct AccountImportRequest {
 
 impl AccountImportRequest {
     pub fn validate(&self) -> Result<(), WireValidationError> {
+        if let Some(id) = &self.account_id {
+            require_account_id(id, "accountId")?;
+            if self.settings.is_some() || self.outbound_proxy_id.is_some() {
+                return Err(WireValidationError::new("accountId"));
+            }
+        }
         if let Some(id) = &self.outbound_proxy_id {
             require_wire_id(id, "outboundProxyId")?;
         }
@@ -88,6 +95,11 @@ impl AccountImportRequest {
         Ok((
             provider,
             ImportCredentials {
+                account_id: self
+                    .account_id
+                    .map(ProviderAccountId::new)
+                    .transpose()
+                    .map_err(|_| WireValidationError::new("accountId"))?,
                 outbound_proxy_id: self.outbound_proxy_id,
                 settings: self
                     .settings
