@@ -497,6 +497,7 @@ pub struct DashboardObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
     pub turn_state: Option<String>,
+    pub turn_state_source: Option<String>,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub username: Option<String>,

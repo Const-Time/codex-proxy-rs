@@ -96,13 +96,18 @@ async fn usage_turn_state_round_trips_response_metadata_and_preserves_missing_va
         page_size: ObservabilityPageSize::new(10).unwrap(),
     };
     let token = format!("gAAAA{}", "b".repeat(307));
-    for expected in [None, Some(token.as_str())] {
+    for (expected, source) in [
+        (None, None),
+        (Some(token.as_str()), None),
+        (Some(token.as_str()), Some("response")),
+        (Some(token.as_str()), Some("request")),
+    ] {
         sqlx::query(
             "update model_requests set provider_observation_json = $1
              where id = 'req_observe_success'",
         )
         .bind(sqlx::types::Json(
-            serde_json::json!({ "turnState": expected }),
+            serde_json::json!({ "turnState": expected, "turnStateSource": source }),
         ))
         .execute(&database.pool)
         .await
@@ -110,6 +115,7 @@ async fn usage_turn_state_round_trips_response_metadata_and_preserves_missing_va
         let records = repository.list_usage_records(query()).await.unwrap();
         assert_eq!(records.items.len(), 1);
         assert_eq!(records.items[0].turn_state.as_deref(), expected);
+        assert_eq!(records.items[0].turn_state_source.as_deref(), source);
         let detail = repository
             .usage_record_detail("req_observe_success", None)
             .await
@@ -118,6 +124,7 @@ async fn usage_turn_state_round_trips_response_metadata_and_preserves_missing_va
             serde_json::from_str(detail.request.provider_metadata_json.as_deref().unwrap())
                 .unwrap();
         assert_eq!(metadata["turnState"].as_str(), expected);
+        assert_eq!(metadata["turnStateSource"].as_str(), source);
     }
     database.close().await;
 }

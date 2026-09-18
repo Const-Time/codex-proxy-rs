@@ -368,10 +368,10 @@ const tokenDonutOption = computed<EChartsOption>(() => {
 
       <section v-if="!personal" :class="panelClass">
         <h3 :class="panelTitleClass">
-          Turn-state · 上游返回
+          Turn-state
         </h3>
         <div class="mt-3 min-w-0">
-          <UsageTurnStateCell :value="record.turnState" />
+          <UsageTurnStateCell :value="record.turnState" :source="record.turnStateSource" />
         </div>
       </section>
 

@@ -123,7 +123,7 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
     </template>
 
     <template #turnState="{ row }">
-      <UsageTurnStateCell :value="row.turnState" />
+      <UsageTurnStateCell :value="row.turnState" :source="row.turnStateSource" />
     </template>
 
     <template v-if="$slots.actions" #actions="scope">

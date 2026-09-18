@@ -19,6 +19,7 @@ export { usageModelDisplay } from './modelDisplay'
 // Usage 记录的规范化 view model：组件只消费这个形状。
 export interface UsageViewModel {
   turnState: string | null
+  turnStateSource: string | null
   id: string
   requestId: string
   clientApiKeyId: string | null
@@ -88,6 +89,7 @@ export function normalizeUsageRecord(record: UsageRecordDetail): UsageViewModel 
 
   return {
     turnState: typeof metadata.turnState === 'string' ? metadata.turnState : null,
+    turnStateSource: typeof metadata.turnStateSource === 'string' ? metadata.turnStateSource : null,
     id: record.id,
     requestId: record.requestId,
     clientApiKeyId: record.clientApiKeyId,

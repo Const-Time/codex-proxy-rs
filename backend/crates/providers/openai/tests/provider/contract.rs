@@ -6857,6 +6857,9 @@ async fn connection_limit_rejection_requests_one_provider_retry_and_reconnects_i
 #[tokio::test]
 async fn usage_turn_state_should_preserve_complete_response_values_and_bound_invalid_headers() {
     let token = format!("gAAAA{}", "a".repeat(307));
+    let token_292 = format!("gAAAA{}", "a".repeat(287));
+    let token_332 = format!("gAAAA{}", "a".repeat(327));
+    let token_356 = format!("gAAAA{}", "a".repeat(351));
     for (header, expected) in [
         (None, None),
         (Some(String::new()), None),
@@ -6864,6 +6867,9 @@ async fn usage_turn_state_should_preserve_complete_response_values_and_bound_inv
         (Some("state with spaces".to_owned()), None),
         (Some("a".repeat(4097)), None),
         (Some(token.clone()), Some(token.as_str())),
+        (Some(token_292.clone()), Some(token_292.as_str())),
+        (Some(token_332.clone()), Some(token_332.as_str())),
+        (Some(token_356.clone()), Some(token_356.as_str())),
     ] {
         let store = Arc::new(MemoryAccountStore::default());
         create_account(&store, "acct_provider_contract").await;
@@ -6910,7 +6916,240 @@ async fn usage_turn_state_should_preserve_complete_response_values_and_bound_inv
         }
         let metadata = metadata.expect("persistable provider observation");
         assert_eq!(metadata["turnState"].as_str(), expected);
+        assert_eq!(
+            metadata["turnStateSource"].as_str(),
+            expected.map(|_| "response")
+        );
     }
+}
+
+#[tokio::test]
+async fn usage_turn_state_falls_back_only_to_the_scoped_http_request() {
+    let sent = format!("gAAAA{}", "s".repeat(287));
+    let returned = format!("gAAAA{}", "r".repeat(307));
+    for (same_account, raw_override, response_state) in [
+        (true, None, None),
+        (true, None, Some(returned.as_str())),
+        (true, Some("opaque-header-state"), None),
+        (true, Some("invalid state"), None),
+        (false, None, None),
+        (false, Some("opaque-header-state"), None),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(CAPTURE_COMPLETED_SSE);
+        if let Some(state) = response_state {
+            response = response.insert_header("x-codex-turn-state", state);
+        }
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut protocol_context = Map::from_iter([
+            ("use_websocket".to_owned(), json!(false)),
+            ("turn_state".to_owned(), json!(sent)),
+        ]);
+        if let Some(state) = raw_override {
+            protocol_context.insert(
+                "opaque_request_headers".to_owned(),
+                json!([["x-codex-turn-state", STANDARD.encode(state)]]),
+            );
+        }
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            json!({"model":"gpt-5.4","input":"hello"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+        .with_context(protocol_context);
+        let mut stream = provider_with_base_url(&store, server.uri())
+            .execute(
+                planned_request(
+                    "openai",
+                    Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                ),
+                context_with_state_owner(
+                    "req_usage_request_state",
+                    if same_account {
+                        "acct_provider_contract"
+                    } else {
+                        "acct_other"
+                    },
+                ),
+            )
+            .await
+            .expect("prepare stream");
+        let mut metadata = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("provider event");
+            if let Some(observation) = event.response_observation() {
+                // A request fallback must never be projected as an upstream response header.
+                if response_state.is_none() {
+                    assert!(!observation.client_headers().iter().any(|header| {
+                        header.name().eq_ignore_ascii_case("x-codex-turn-state")
+                    }));
+                }
+                if let Some(value) = observation.provider_metadata() {
+                    metadata = Some(serde_json::from_str::<Value>(value.as_json()).unwrap());
+                }
+            }
+        }
+        let requests = server.received_requests().await.unwrap();
+        let expected_sent = same_account.then(|| raw_override.unwrap_or(&sent));
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-codex-turn-state")
+                .map(|value| value.to_str().unwrap()),
+            expected_sent
+        );
+        let expected = response_state
+            .or_else(|| expected_sent.filter(|value| value.bytes().all(|b| b.is_ascii_graphic())));
+        let metadata = metadata.expect("persistable metadata");
+        assert_eq!(metadata["turnState"].as_str(), expected);
+        assert_eq!(
+            metadata["turnStateSource"].as_str(),
+            expected.map(|_| if response_state.is_some() {
+                "response"
+            } else {
+                "request"
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn usage_turn_state_observes_each_websocket_request_and_prefers_response_updates() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(socket).await;
+        for (index, length) in [Some(292), Some(332), Some(356), None]
+            .into_iter()
+            .enumerate()
+        {
+            let frame = websocket.next().await.unwrap().unwrap();
+            let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(
+                request
+                    .pointer("/client_metadata/x-codex-turn-state")
+                    .and_then(Value::as_str),
+                length
+                    .map(|length| format!("gAAAA{}", "s".repeat(length - 5)))
+                    .as_deref(),
+            );
+            if index == 1 {
+                websocket
+                    .send(Message::Text(
+                        json!({
+                            "type": "response.metadata",
+                            "headers": { "x-codex-turn-state": format!("gAAAA{}", "r".repeat(307)) }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            websocket.send(Message::Text(json!({
+                "type":"response.completed",
+                "response":{"id":format!("resp_state_{index}"),"model":"gpt-5.4","status":"completed",
+                    "output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}
+            }).to_string().into())).await.unwrap();
+        }
+    });
+    let provider = provider_with_base_url(&store, base_url);
+    for (index, length) in [Some(292), Some(332), Some(356), None]
+        .into_iter()
+        .enumerate()
+    {
+        let sent = length.map(|length| format!("gAAAA{}", "s".repeat(length - 5)));
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            json!({"model":"gpt-5.4","input":"hello",
+                "client_metadata":{"x-codex-turn-state":sent}})
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap()
+        .with_context(Map::from_iter([
+            ("use_websocket".to_owned(), json!(true)),
+            ("session_id".to_owned(), json!("usage-state-session")),
+            ("turn_id".to_owned(), json!("usage-state-turn")),
+        ]));
+        let generation = GenerateRequest::from_protocol_payload(payload)
+            .with_provider_session_state(
+                ProviderSessionState::new(
+                    "openai",
+                    Map::from_iter([
+                        ("account_id".to_owned(), json!("acct_provider_contract")),
+                        (
+                            "conversation_id".to_owned(),
+                            json!("usage-state-conversation"),
+                        ),
+                        ("client_turn_id".to_owned(), json!("usage-state-turn")),
+                        ("continuation_scope".to_owned(), json!("persisted")),
+                    ]),
+                )
+                .unwrap(),
+            );
+        let mut stream = provider
+            .execute(
+                planned_request("openai", Operation::Generate(generation)),
+                context_with_state_owner(
+                    &format!("req_usage_ws_state_{index}"),
+                    "acct_provider_contract",
+                ),
+            )
+            .await
+            .unwrap();
+        let mut snapshots = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.expect("provider event");
+            if let Some(value) = event
+                .response_observation()
+                .and_then(|o| o.provider_metadata())
+            {
+                snapshots.push(serde_json::from_str::<Value>(value.as_json()).unwrap());
+            }
+        }
+        assert_eq!(
+            snapshots.first().unwrap()["turnState"].as_str(),
+            sent.as_deref()
+        );
+        assert_eq!(
+            snapshots.first().unwrap()["turnStateSource"].as_str(),
+            sent.as_ref().map(|_| "request")
+        );
+        let final_metadata = snapshots.last().unwrap();
+        if index != 1 {
+            assert_eq!(final_metadata["turnState"].as_str(), sent.as_deref());
+            assert_eq!(
+                final_metadata["turnStateSource"].as_str(),
+                sent.as_ref().map(|_| "request")
+            );
+        } else {
+            assert_eq!(
+                final_metadata["turnState"],
+                format!("gAAAA{}", "r".repeat(307))
+            );
+            assert_eq!(final_metadata["turnStateSource"], "response");
+        }
+    }
+    server
+        .await
+        .expect("same WebSocket handled all requests without stale state");
 }
 
 #[tokio::test]

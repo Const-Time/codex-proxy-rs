@@ -6,3 +6,14 @@ export function turnStateDisplay(value: unknown) {
     length: Array.from(token).length,
   }
 }
+
+/** v3.9.4 记录只有返回值、没有来源标记；未知来源不误标成请求。 */
+export function turnStateSourceDisplay(source: unknown) {
+  if (source === 'request') {
+    return { label: '请求', description: '本次出站请求携带的状态；上游未返回有效的新值' }
+  }
+  if (source == null || source === 'response') {
+    return { label: '返回', description: '本次上游响应返回的状态' }
+  }
+  return { label: '未知', description: '此记录未识别的 turn-state 来源' }
+}

@@ -268,6 +268,7 @@ pub(crate) fn usage_list_record_view(record: domain::UsageListRecord) -> UsageLi
         .or_else(|| record.requested_model_id.clone());
     UsageListRecordView {
         turn_state: record.turn_state,
+        turn_state_source: record.turn_state_source,
         user_id: record.user_id,
         user_email: record.user_email,
         username: record.username,

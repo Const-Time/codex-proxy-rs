@@ -945,6 +945,7 @@ fn total_record(
 ) -> UsageListRecord {
     UsageListRecord {
         turn_state: None,
+        turn_state_source: None,
         user_id: None,
         user_email: None,
         username: None,

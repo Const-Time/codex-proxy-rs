@@ -27,6 +27,7 @@ pub(super) struct OpenAiResponseObservationState {
     transport: CodexBackendTransport,
     diagnostics: CodexUpstreamDiagnostics,
     response_metadata: CodexResponseMetadata,
+    request_turn_state: Option<String>,
     metrics: CodexTransportMetrics,
     websocket_pool_decision: Option<crate::transport::WebSocketPoolDecision>,
     request_summary: Value,
@@ -74,6 +75,8 @@ impl OpenAiResponseObservationState {
             transport: response.transport,
             diagnostics: response.diagnostics.clone(),
             response_metadata: response.response_metadata.clone(),
+            request_turn_state: observed_request_turn_state(request, response.transport)
+                .map(str::to_owned),
             metrics: response.transport_metrics.clone(),
             websocket_pool_decision: response.websocket_pool_decision,
             request_summary: openai_response_request_summary(request, response.transport),
@@ -222,10 +225,19 @@ impl OpenAiResponseObservationState {
     pub(super) fn provider_metadata(&self) -> Option<ProviderResponseMetadata> {
         let mut metadata = Map::new();
         metadata.insert("schemaVersion".to_owned(), json!(2));
-        // 仅记录本次上游响应实际返回的值，不把出站注入值冒充响应。
+        // 响应未刷新状态时展示本次实际出站值，明确来源，不冒充上游返回。
+        // 只读取账号/turn 归属处理后的请求，不读取未发送的入站值或候选池。
         // 管理员使用明细需要原值供复制；个人记录由 API 白名单排除此字段。
-        if let Some(state) = observed_turn_state(&self.response_metadata.client_headers) {
+        let turn_state = observed_turn_state(&self.response_metadata.client_headers)
+            .map(|state| (state, "response"))
+            .or_else(|| {
+                self.request_turn_state
+                    .as_deref()
+                    .map(|state| (state, "request"))
+            });
+        if let Some((state, source)) = turn_state {
             metadata.insert("turnState".to_owned(), Value::String(state.to_owned()));
+            metadata.insert("turnStateSource".to_owned(), json!(source));
         }
         if let Some(model) = self
             .response_metadata
@@ -296,7 +308,31 @@ fn observed_turn_state(headers: &[(String, Bytes)]) -> Option<&str> {
     let (_, value) = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("x-codex-turn-state"))?;
-    let value = std::str::from_utf8(value).ok()?.trim();
+    validated_turn_state(std::str::from_utf8(value).ok()?)
+}
+
+fn observed_request_turn_state(
+    request: &CodexResponsesRequest,
+    transport: CodexBackendTransport,
+) -> Option<&str> {
+    if transport == CodexBackendTransport::WebSocket {
+        // 连接复用时没有本次握手；只记录实际投影到 response.create 的状态。
+        // 非对象 client_metadata 会阻止 transport 投影，不能据此宣称已发送。
+        if request
+            .client_metadata()
+            .is_some_and(|value| !value.is_object())
+        {
+            return None;
+        }
+    } else if let Some(value) = request.passthrough_headers.get("x-codex-turn-state") {
+        // HTTP 原始透传头会覆盖 request.turn_state 生成的头。
+        return validated_turn_state(value.to_str().ok()?);
+    }
+    validated_turn_state(request.turn_state.as_deref()?)
+}
+
+fn validated_turn_state(value: &str) -> Option<&str> {
+    let value = value.trim();
     (!value.is_empty() && value.len() <= 4096 && value.bytes().all(|b| b.is_ascii_graphic()))
         .then_some(value)
 }

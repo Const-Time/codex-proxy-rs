@@ -70,6 +70,7 @@ export interface UsageRecordMetadata {
 
 export interface UsageListRecord {
   turnState?: string | null
+  turnStateSource?: string | null
   id: string
   userId: string | null
   userEmail: string | null
