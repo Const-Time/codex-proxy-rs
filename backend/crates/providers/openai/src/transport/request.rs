@@ -471,6 +471,10 @@ pub(crate) fn scope_turn_metadata(
     // Codex 的 turn metadata 同时承载于 HTTP header 与 WS client_metadata。
     // 改写安装 ID 后仍须保持官方 to_ascii_json_string 的编码合同；普通
     // to_string 会把中文工作区路径还原成 UTF-8，触发上游 WS metadata 后 Close 1000。
+    encode_turn_metadata(&metadata)
+}
+
+pub(super) fn encode_turn_metadata(metadata: &Map<String, Value>) -> Option<String> {
     let mut bytes = Vec::new();
     metadata
         .serialize(&mut serde_json::Serializer::with_formatter(

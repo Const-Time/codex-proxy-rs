@@ -373,6 +373,15 @@ const tokenDonutOption = computed<EChartsOption>(() => {
         <div class="mt-3 min-w-0">
           <UsageTurnStateCell :value="record.turnState" :source="record.turnStateSource" />
         </div>
+        <div v-if="record.providerMetadata.turnStateSent" class="mt-4 min-w-0">
+          <p class="mb-2 text-cp-xs text-cp-text-tertiary">
+            本次实际发出（与上游返回分开记录）
+          </p>
+          <UsageTurnStateCell
+            :value="typeof record.providerMetadata.turnStateSent === 'string' ? record.providerMetadata.turnStateSent : null"
+            :source="typeof record.providerMetadata.turnStateSentSource === 'string' ? record.providerMetadata.turnStateSentSource : null"
+          />
+        </div>
       </section>
 
       <section class="grid min-w-0 gap-3 lg:grid-cols-2">

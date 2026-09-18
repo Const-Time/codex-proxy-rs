@@ -19,6 +19,7 @@ pub(crate) fn worker_contributions(
     quota_refresh_policy: CodexQuotaRefreshPolicy,
     oauth_refresh_enabled: bool,
     desktop_release: Arc<CodexDesktopReleaseService>,
+    turn_state: Option<Arc<crate::turn_state::StateManager>>,
 ) -> Result<Vec<WorkerContribution>, WorkerDefinitionError> {
     let refresh_id = WorkerId::try_new(WorkerKind::OAuthRefresh, PROVIDER_NAME)?;
     let quota_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, PROVIDER_NAME)?;
@@ -27,6 +28,13 @@ pub(crate) fn worker_contributions(
     let desktop_release_id =
         WorkerId::try_new(WorkerKind::QuotaCatalogHealth, DESKTOP_RELEASE_WORKER_OWNER)?;
     let mut contributions = Vec::new();
+    if let Some(manager) = turn_state {
+        contributions.push(WorkerContribution::Registration(scheduled_registration(
+            WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "openai-turn-state")?,
+            Duration::from_secs(5),
+            Box::new(crate::turn_state::StateRefreshTask(manager)),
+        )?));
+    }
     if oauth_refresh_enabled {
         contributions.push(WorkerContribution::Registration(scheduled_registration(
             refresh_id,

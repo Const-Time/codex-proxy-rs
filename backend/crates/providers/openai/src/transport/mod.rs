@@ -7,6 +7,7 @@ mod client_json;
 mod client_sse;
 pub mod diagnostics;
 pub mod endpoints;
+pub mod fingerprint;
 pub mod headers;
 pub mod location;
 pub mod profile;

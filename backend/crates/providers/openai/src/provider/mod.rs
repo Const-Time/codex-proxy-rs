@@ -136,6 +136,7 @@ pub enum CodexProviderConfigError {
 }
 
 pub struct CodexProvider {
+    turn_state: Option<Arc<crate::turn_state::StateManager>>,
     selector: Arc<CodexCredentialSelector>,
     catalog: Arc<CodexCredentialCatalogService>,
     quota: Arc<CodexCredentialQuotaService>,
@@ -176,6 +177,7 @@ impl CodexProvider {
         let client =
             CodexBackendClient::new(http, base_url, profile).with_websocket_pool(websocket_pool);
         Ok(Self {
+            turn_state: None,
             selector,
             catalog,
             quota,
@@ -193,6 +195,14 @@ impl CodexProvider {
 
     pub(crate) fn with_session_identity(mut self, identity: CodexSessionIdentity) -> Self {
         self.session_identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn with_turn_state(
+        mut self,
+        manager: Option<Arc<crate::turn_state::StateManager>>,
+    ) -> Self {
+        self.turn_state = manager;
         self
     }
 }
@@ -489,6 +499,18 @@ impl Provider for CodexProvider {
             lease.installation_id(),
             account_scope,
         );
+        // 本地 turn/affinity 保持原客户端身份；只在最终账号确定后做 wire 投影。
+        let original_client_turn_id = upstream_request.client_turn_id.clone();
+        if let Some(manager) = &self.turn_state {
+            manager
+                .guard_request(lease.account(), &mut upstream_request)
+                .await;
+            manager.converge(
+                &mut upstream_request,
+                lease.account_id().as_str(),
+                context.client_api_key_ref().as_str(),
+            );
+        }
         let requirement = transport_requirement(&upstream_request);
         let requested_transport = selected_transport(&upstream_request);
         let session_http_fallback = requirement.allows_pre_send_http_fallback()
@@ -503,6 +525,39 @@ impl Provider for CodexProvider {
             requested_transport
         };
         apply_transport(&mut upstream_request, transport);
+        // 自动接管不改变传输选择，绝不污染 WS 逐帧状态或同轮/native continuation。
+        let same_turn = previous_session.as_ref().is_some_and(|previous| {
+            same_client_turn(
+                previous.client_turn_id.as_deref(),
+                original_client_turn_id.as_deref(),
+            )
+        });
+        if transport == CodexProviderTransport::HttpOnly
+            && !continuation_requested
+            && !same_turn
+            && upstream_request.previous_response_id().is_none()
+            && let Some(manager) = &self.turn_state
+            && let Some(token) = manager
+                .select(lease.account(), upstream_model.as_str())
+                .await
+        {
+            // 显式覆盖优先级：清掉可覆盖生成头的原始值，不改业务 input。
+            upstream_request
+                .passthrough_headers
+                .remove("x-codex-turn-state");
+            for key in ["turnState", "turn_state", "x-codex-turn-state"] {
+                upstream_request.body_mut().remove(key);
+                if let Some(metadata) = upstream_request
+                    .body_mut()
+                    .get_mut("client_metadata")
+                    .and_then(Value::as_object_mut)
+                {
+                    metadata.remove(key);
+                }
+            }
+            upstream_request.turn_state = Some(token);
+            upstream_request.managed_turn_state = true;
+        }
         let metadata = ProviderCallMetadata::new(
             provider_kind,
             upstream_model.clone(),
@@ -521,7 +576,7 @@ impl Provider for CodexProvider {
                 account_id: lease.account_id().as_str().to_owned(),
                 conversation_id: upstream_request.local_conversation_id.clone(),
                 turn_state: upstream_request.turn_state.clone(),
-                client_turn_id: upstream_request.client_turn_id.clone(),
+                client_turn_id: original_client_turn_id,
                 response_store,
                 continuation_scope: None,
             });
@@ -535,6 +590,7 @@ impl Provider for CodexProvider {
             AttemptTransport::Default | AttemptTransport::Fallback => 0,
         };
         let events = cold_response_stream(ColdResponse {
+            turn_state: self.turn_state.clone(),
             client: self.client.for_account(lease.account()).map_err(|_| {
                 provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
             })?,

@@ -86,6 +86,7 @@ mod operations;
 mod proxies;
 mod settings;
 mod system;
+mod turn_state;
 mod wire;
 
 pub(super) struct AdminTestFixture {

@@ -132,6 +132,9 @@ impl CodexBackendClient {
             HeaderName::from_static("openai-beta"),
             HeaderValue::from_static("responses_websockets=2026-02-06"),
         );
+        if request.fingerprint_convergence {
+            headers.remove("x-codex-turn-state");
+        }
         Ok(headers)
     }
 
@@ -209,6 +212,15 @@ impl CodexBackendClient {
             headers.remove(name);
             for value in request.passthrough_headers.get_all(name) {
                 headers.append(name.clone(), value.clone());
+            }
+        }
+        if request.fingerprint_convergence {
+            headers.remove("x-codex-installation-id");
+            if request.force_http_sse && headers.contains_key("x-codex-inference-call-id") {
+                headers.insert(
+                    HeaderName::from_static("x-codex-inference-call-id"),
+                    HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())?,
+                );
             }
         }
         Ok(headers)

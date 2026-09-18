@@ -150,6 +150,7 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    turn_state: Option<Arc<dyn ports::turn_state::TurnStateService>>,
     proxies: Arc<dyn ProxiesService>,
     auth: Arc<dyn AuthService>,
     accounts: Arc<dyn AccountsService>,
@@ -165,6 +166,20 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    #[must_use]
+    pub fn with_turn_state(
+        mut self,
+        service: Option<Arc<dyn ports::turn_state::TurnStateService>>,
+    ) -> Self {
+        self.turn_state = service;
+        self
+    }
+
+    pub fn turn_state(&self) -> Result<&dyn ports::turn_state::TurnStateService, AdminError> {
+        self.turn_state
+            .as_deref()
+            .ok_or_else(|| AdminError::unavailable("State 管理未初始化"))
+    }
     #[must_use]
     pub fn proxies(&self) -> &dyn ProxiesService {
         self.proxies.as_ref()
@@ -300,6 +315,7 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        turn_state: None,
         proxies: Arc::new(use_case::proxies::DefaultProxiesService::new(
             store.proxies(),
             proxy_probe,

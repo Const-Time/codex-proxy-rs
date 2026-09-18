@@ -4,6 +4,7 @@ mod admin;
 pub mod config;
 mod provider;
 mod session_transport;
+mod turn_state;
 
 use std::sync::Arc;
 
@@ -44,6 +45,7 @@ pub use transport::{
 
 /// OpenAI 初始化后交给组装根的最小能力集。
 pub struct ProviderBundle {
+    turn_state: Option<Arc<dyn gateway_admin::ports::turn_state::TurnStateService>>,
     core_provider: Arc<dyn Provider>,
     admin_provider: Arc<dyn ProviderAdmin>,
     worker_contributions: Vec<WorkerContribution>,
@@ -53,6 +55,23 @@ pub struct ProviderBundle {
 pub async fn initialize(
     config: OpenAiConfig,
     ports: ProviderStorePorts,
+) -> Result<ProviderBundle, OpenAiInitializeError> {
+    initialize_inner(config, ports, None).await
+}
+
+/// 组合根装配数据库中的页面配置；不增加启动配置文件字段。
+pub async fn initialize_with_turn_state(
+    config: OpenAiConfig,
+    ports: ProviderStorePorts,
+    store: Arc<dyn gateway_admin::ports::turn_state::TurnStateStore>,
+) -> Result<ProviderBundle, OpenAiInitializeError> {
+    initialize_inner(config, ports, Some(store)).await
+}
+
+async fn initialize_inner(
+    config: OpenAiConfig,
+    ports: ProviderStorePorts,
+    state_store: Option<Arc<dyn gateway_admin::ports::turn_state::TurnStateStore>>,
 ) -> Result<ProviderBundle, OpenAiInitializeError> {
     let provider_kind =
         ProviderKind::new("openai").map_err(|_| OpenAiInitializeError::InvalidProviderKind)?;
@@ -84,6 +103,22 @@ pub async fn initialize(
     let session_identity = config
         .session_identity()
         .map_err(|_| OpenAiInitializeError::SessionIdentity)?;
+    let state_manager = if let Some(store) = state_store {
+        Some(
+            turn_state::StateManager::load(
+                store,
+                Arc::clone(&accounts),
+                Arc::clone(&leases),
+                profile.clone(),
+                config.base_url().to_owned(),
+                session_identity.turn_state_key(),
+            )
+            .await
+            .map_err(|_| OpenAiInitializeError::TurnState)?,
+        )
+    } else {
+        None
+    };
     let http = build_reqwest_client().map_err(|_| OpenAiInitializeError::Transport)?;
     let desktop_release = Arc::new(CodexDesktopReleaseService::new(
         profile.clone(),
@@ -143,7 +178,8 @@ pub async fn initialize(
             config.stream_max_retries(),
         )
         .map_err(OpenAiInitializeError::Provider)?
-        .with_session_identity(session_identity),
+        .with_session_identity(session_identity)
+        .with_turn_state(state_manager.clone()),
     );
     let token_client = Arc::new(
         credential::token_client::openai_token_client(
@@ -204,10 +240,13 @@ pub async fn initialize(
         config.quota_refresh_policy(),
         config.oauth_refresh_enabled(),
         desktop_release,
+        state_manager.clone(),
     )
     .map_err(|_| OpenAiInitializeError::Worker)?;
 
     Ok(ProviderBundle {
+        turn_state: state_manager
+            .map(|s| s as Arc<dyn gateway_admin::ports::turn_state::TurnStateService>),
         core_provider,
         admin_provider,
         worker_contributions,
@@ -215,6 +254,11 @@ pub async fn initialize(
 }
 
 impl ProviderBundle {
+    pub fn turn_state_service(
+        &self,
+    ) -> Option<Arc<dyn gateway_admin::ports::turn_state::TurnStateService>> {
+        self.turn_state.clone()
+    }
     #[must_use]
     pub fn core_provider(&self) -> Arc<dyn Provider> {
         Arc::clone(&self.core_provider)
@@ -234,6 +278,8 @@ impl ProviderBundle {
 /// OpenAI 初始化失败的脱敏分类。
 #[derive(Debug, thiserror::Error)]
 pub enum OpenAiInitializeError {
+    #[error("OpenAI state storage or encryption key is unavailable")]
+    TurnState,
     #[error(transparent)]
     Config(OpenAiConfigError),
     #[error("OpenAI runtime policy is unavailable")]

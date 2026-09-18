@@ -15,6 +15,7 @@ pub mod proxies;
 pub mod quota_forecast_sampling;
 pub mod settings;
 pub mod system;
+pub mod turn_state;
 pub mod users;
 
 /// 管理用例对外返回的稳定错误分类。

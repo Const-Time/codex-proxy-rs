@@ -28,6 +28,7 @@ pub(super) struct OpenAiResponseObservationState {
     diagnostics: CodexUpstreamDiagnostics,
     response_metadata: CodexResponseMetadata,
     request_turn_state: Option<String>,
+    managed_turn_state: bool,
     metrics: CodexTransportMetrics,
     websocket_pool_decision: Option<crate::transport::WebSocketPoolDecision>,
     request_summary: Value,
@@ -77,6 +78,7 @@ impl OpenAiResponseObservationState {
             response_metadata: response.response_metadata.clone(),
             request_turn_state: observed_request_turn_state(request, response.transport)
                 .map(str::to_owned),
+            managed_turn_state: request.managed_turn_state,
             metrics: response.transport_metrics.clone(),
             websocket_pool_decision: response.websocket_pool_decision,
             request_summary: openai_response_request_summary(request, response.transport),
@@ -231,13 +233,31 @@ impl OpenAiResponseObservationState {
         let turn_state = observed_turn_state(&self.response_metadata.client_headers)
             .map(|state| (state, "response"))
             .or_else(|| {
-                self.request_turn_state
-                    .as_deref()
-                    .map(|state| (state, "request"))
+                self.request_turn_state.as_deref().map(|state| {
+                    (
+                        state,
+                        if self.managed_turn_state {
+                            "managed"
+                        } else {
+                            "request"
+                        },
+                    )
+                })
             });
         if let Some((state, source)) = turn_state {
             metadata.insert("turnState".to_owned(), Value::String(state.to_owned()));
             metadata.insert("turnStateSource".to_owned(), json!(source));
+        }
+        if let Some(sent) = &self.request_turn_state {
+            metadata.insert("turnStateSent".to_owned(), json!(sent));
+            metadata.insert(
+                "turnStateSentSource".to_owned(),
+                json!(if self.managed_turn_state {
+                    "managed"
+                } else {
+                    "request"
+                }),
+            );
         }
         if let Some(model) = self
             .response_metadata
@@ -301,6 +321,10 @@ impl OpenAiResponseObservationState {
             metadata.insert("eventStatusCode".to_owned(), json!(200_u16));
         }
         ProviderResponseMetadata::new(serde_json::to_string(&Value::Object(metadata)).ok()?)
+    }
+
+    pub(super) fn returned_turn_state(&self) -> Option<&str> {
+        observed_turn_state(&self.response_metadata.client_headers)
     }
 }
 

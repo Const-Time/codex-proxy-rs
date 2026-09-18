@@ -161,6 +161,7 @@ struct RawJsonEndpointRequest {
 }
 
 pub(super) struct ColdResponse {
+    pub(super) turn_state: Option<Arc<crate::turn_state::StateManager>>,
     pub(super) client: CodexBackendClient,
     pub(super) response_origin: Url,
     pub(super) request: CodexResponsesRequest,
@@ -545,6 +546,7 @@ fn image_response_metering(
 
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     let ColdResponse {
+        turn_state,
         client,
         response_origin,
         request,
@@ -594,6 +596,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         );
         let request_transport_requirement = transport_requirement(&request);
         let trace = context.trace();
+        if let Some(manager) = &turn_state
+            && let Some(token) = request.turn_state.as_deref()
+        {
+            manager.observe(active_account.id().as_str(), upstream_model.as_str(),
+                if request.managed_turn_state { "injected" } else { "request" }, token).await;
+        }
         let response = create_response_attempt(
             &client,
             &request,
@@ -910,6 +918,14 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 .any(|event| matches!(event, GatewayEvent::Completed(_)));
             let terminal_changed = completed
                 && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+            if completed && terminal_failure.is_none()
+                && let Some(manager) = &turn_state
+                && let Some(token) = observation_state.returned_turn_state()
+            {
+                manager.observe_response(&active_account, upstream_model.as_str(), token,
+                    response_transport != CodexBackendTransport::WebSocket && !request.managed_turn_state
+                        && !terminal_response_is_incomplete(&events), request.turn_state_generation).await;
+            }
             if response_transport == CodexBackendTransport::WebSocket
                 && completed && terminal_failure.is_none()
                 && let Some(key) = session_affinity_key.as_ref()
@@ -1052,6 +1068,14 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             .any(|event| matches!(event, GatewayEvent::Completed(_)));
         let terminal_changed = completed
             && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+        if completed && terminal_failure.is_none()
+            && let Some(manager) = &turn_state
+            && let Some(token) = observation_state.returned_turn_state()
+        {
+            manager.observe_response(&active_account, upstream_model.as_str(), token,
+                response_transport != CodexBackendTransport::WebSocket && !request.managed_turn_state
+                    && !terminal_response_is_incomplete(&events), request.turn_state_generation).await;
+        }
         if response_transport == CodexBackendTransport::WebSocket
             && completed && terminal_failure.is_none()
             && let Some(key) = session_affinity_key.as_ref()

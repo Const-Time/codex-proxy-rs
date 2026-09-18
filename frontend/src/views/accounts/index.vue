@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { AccountRow } from './constants'
 import { ChevronDown, Grid2X2 } from '@lucide/vue'
 import { ref } from 'vue'
 
@@ -14,6 +15,7 @@ import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import AccountBatchEditModal from './components/AccountBatchEditModal.vue'
+import AccountCodexPolicyModal from './components/AccountCodexPolicyModal.vue'
 import AccountConnectionTestModal from './components/AccountConnectionTestModal.vue'
 import AccountCreateModal from './components/AccountCreateModal/index.vue'
 import AccountEditModal from './components/AccountEditModal.vue'
@@ -35,6 +37,8 @@ import { useAccountsTable } from './composables/useAccountsTable'
 import { accountColumns, derivedAccountStatus } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
+const codexPolicyAccount = ref<AccountRow | null>(null)
+const showCodexPolicy = ref(false)
 const {
   loading,
   hasLoaded,
@@ -308,6 +312,7 @@ const {
                 :refreshing="refreshingAccountIds.has(row.id)"
                 :testing="testingConnectionIds.has(row.id)"
                 @edit="openAccountEdit"
+                @codex-policy="account => { codexPolicyAccount = account; showCodexPolicy = true }"
                 @delete="requestDeleteAccount"
                 @recover="handleRecover"
                 @refresh="handleRefresh"
@@ -374,6 +379,7 @@ const {
       @generate-oauth="handleAuthorizeOAuth"
     />
 
+    <AccountCodexPolicyModal v-model="showCodexPolicy" :account="codexPolicyAccount" />
     <AccountEditModal
       v-model="showEditModal"
       v-model:enabled="schedulingEnabled"

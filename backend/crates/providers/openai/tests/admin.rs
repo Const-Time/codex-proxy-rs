@@ -1316,7 +1316,10 @@ fn reset_credit_command(account_id: ProviderAccountId) -> ConsumeProviderResetCr
     }
 }
 
-fn initialized_provider_request(operation: Operation, account_id: &str) -> ProviderRequest {
+pub(crate) fn initialized_provider_request(
+    operation: Operation,
+    account_id: &str,
+) -> ProviderRequest {
     let provider = ProviderKind::new("openai").expect("provider");
     let upstream_model = UpstreamModelId::new("gpt-5.4").expect("upstream model");
     let public_model = PublicModelId::new(upstream_model.as_str()).expect("public model");
@@ -1362,7 +1365,7 @@ fn initialized_attempt_context(request_id: &str, account_id: &str) -> AttemptCon
     )
 }
 
-fn initialized_account_scope(account_id: &str) -> Arc<FrozenAccountScope> {
+pub(crate) fn initialized_account_scope(account_id: &str) -> Arc<FrozenAccountScope> {
     let provider = ProviderKind::new("openai").expect("provider");
     Arc::new(FrozenAccountScope::new(
         Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
@@ -1380,7 +1383,7 @@ fn provider_ports() -> ProviderStorePorts {
     )
 }
 
-fn provider_ports_with(
+pub(crate) fn provider_ports_with(
     accounts: Arc<MemoryAccountStore>,
     pending: Arc<TestOAuthPending>,
 ) -> ProviderStorePorts {
@@ -1484,12 +1487,12 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
     }
 }
 
-struct TestOpenAiConfig {
-    config: OpenAiConfig,
+pub(crate) struct TestOpenAiConfig {
+    pub(crate) config: OpenAiConfig,
     _runtime: TempDir,
 }
 
-fn valid_config() -> TestOpenAiConfig {
+pub(crate) fn valid_config() -> TestOpenAiConfig {
     let mut config = OpenAiConfig::default();
     config.wire_profile = CodexWireProfileConfig {
         originator: "Codex Desktop".to_owned(),
@@ -1709,7 +1712,7 @@ impl ProviderRuntimePolicyPort for TestRuntimePolicy {
 }
 
 #[derive(Default)]
-struct TestOAuthPending {
+pub(crate) struct TestOAuthPending {
     values: Mutex<BTreeMap<PendingKey, PendingValue>>,
 }
 

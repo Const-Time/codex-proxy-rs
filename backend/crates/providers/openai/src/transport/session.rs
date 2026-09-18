@@ -21,6 +21,9 @@ pub(crate) struct CodexSessionIdentity {
 }
 
 impl CodexSessionIdentity {
+    pub(crate) fn turn_state_key(&self) -> [u8; 32] {
+        hmac_sha256(&self.secret, &[b"codex-proxy-rs/turn-state-storage/v1"])
+    }
     pub(crate) fn load_or_create(path: &Path) -> Result<Self, CodexSessionIdentityError> {
         match read_secret(path)? {
             Some(secret) => Ok(Self { secret }),
@@ -99,7 +102,7 @@ fn read_secret(path: &Path) -> Result<Option<[u8; 32]>, CodexSessionIdentityErro
         .map_err(|_| CodexSessionIdentityError::InvalidSecret)
 }
 
-fn hmac_sha256(key: &[u8; 32], parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8; 32], parts: &[&[u8]]) -> [u8; 32] {
     const BLOCK_BYTES: usize = 64;
 
     let mut key_block = [0_u8; BLOCK_BYTES];

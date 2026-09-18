@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
-import { KeyRound, MoreHorizontal, Pencil, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
+import { KeyRound, MoreHorizontal, Pencil, RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Wifi } from '@lucide/vue'
 
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
@@ -21,6 +21,7 @@ const emit = defineEmits<{
   test: [account: AccountRow]
   refresh: [accountId: string]
   reauthorize: [account: AccountRow]
+  codexPolicy: [account: AccountRow]
 }>()
 </script>
 
@@ -54,6 +55,12 @@ const emit = defineEmits<{
 
       <template #default="{ close }">
         <div class="w-40 p-1.5">
+          <BaseMenuItem v-if="account.provider === 'openai'" @click.stop="(close(), emit('codexPolicy', account))">
+            <template #icon>
+              <SlidersHorizontal class="size-3.5 text-cp-text-quaternary" />
+            </template>
+            指纹 / Turn-state
+          </BaseMenuItem>
           <BaseMenuItem
             :loading="testing"
             :disabled="testing"

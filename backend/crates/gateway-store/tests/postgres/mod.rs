@@ -29,6 +29,7 @@ mod runtime_settings;
 mod schema_integrity;
 mod snapshot;
 mod snapshots;
+mod turn_state;
 mod users;
 
 static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -255,6 +256,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "runtime_settings",
             "subscription_quota_observations",
             "subscription_reset_events",
+            "turn_state_management",
             "user_account_groups",
             "user_group_budget_windows",
             "user_group_charge_events",

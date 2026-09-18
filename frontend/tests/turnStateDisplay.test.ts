@@ -19,6 +19,7 @@ test('character counts use the complete token, which remains available for copyi
 })
 
 test('request fallback is distinguished from returned and historical response values', () => {
+  assert.equal(turnStateSourceDisplay('managed').label, '接管')
   assert.equal(turnStateSourceDisplay('request').label, '请求')
   for (const source of ['response', null, undefined]) {
     assert.equal(turnStateSourceDisplay(source).label, '返回')

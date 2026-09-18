@@ -20,6 +20,7 @@ pub mod presenter;
 pub mod proxies;
 pub mod settings;
 pub mod system;
+pub mod turn_state;
 pub mod users;
 pub mod wire;
 
@@ -47,6 +48,7 @@ where
         .merge(observability::router::<S>())
         .merge(settings::router::<S>())
         .merge(system::router::<S>())
+        .merge(turn_state::router::<S>())
         .method_not_allowed_fallback(method_not_allowed)
         .route("/api/admin", any(admin_not_found))
         .route("/api/admin/{*path}", any(admin_not_found))

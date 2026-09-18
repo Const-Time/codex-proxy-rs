@@ -51,6 +51,7 @@ mod catalog;
 mod client;
 mod diagnostics;
 mod endpoints;
+mod fingerprint;
 mod headers;
 mod http_client;
 mod latency;
@@ -105,7 +106,7 @@ pub(crate) async fn accept_codex_test_websocket(
     .await
 }
 
-async fn accept_codex_test_websocket_with<F>(
+pub(crate) async fn accept_codex_test_websocket_with<F>(
     stream: TcpStream,
     callback: F,
 ) -> tokio_tungstenite::WebSocketStream<TcpStream>

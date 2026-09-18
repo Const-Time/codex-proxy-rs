@@ -57,6 +57,12 @@ pub struct CodexResponsesRequest {
     pub force_http_sse: bool,
     /// turn state 透传头。
     pub turn_state: Option<String>,
+    /// Provider-account policy, never serialized into the body.
+    pub fingerprint_convergence: bool,
+    /// True only when this attempt actually replaced the outgoing state from the managed pool.
+    pub managed_turn_state: bool,
+    /// Configuration generation at the account boundary; late responses cannot repopulate revoked pools.
+    pub turn_state_generation: Option<u64>,
     /// turn metadata 透传头。
     pub turn_metadata: Option<String>,
     /// beta features 透传头。
@@ -508,6 +514,9 @@ impl CodexResponsesRequest {
             use_websocket: false,
             force_http_sse: false,
             turn_state: None,
+            fingerprint_convergence: false,
+            managed_turn_state: false,
+            turn_state_generation: None,
             turn_metadata: None,
             beta_features: None,
             version: None,
