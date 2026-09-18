@@ -129,6 +129,7 @@ pub(crate) fn literal_prefix_pattern(value: &str) -> String {
 
 pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
     "select mr.id, mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
+            mr.provider_observation_json ->> 'turnState' as turn_state,
             mr.endpoint, mr.client_transport, mr.requested_model_id,
             mr.provider_kind, mr.provider_account_ref,
             mr.provider_account_name_snapshot as provider_account_name,

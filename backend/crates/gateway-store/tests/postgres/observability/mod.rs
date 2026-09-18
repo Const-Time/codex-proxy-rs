@@ -78,6 +78,51 @@ fn postgres_admin_observability_adapter_implements_terminal_port() {
 }
 
 #[tokio::test]
+async fn usage_turn_state_round_trips_response_metadata_and_preserves_missing_values() {
+    let Some(database) = TestDatabase::create("usage_turn_state").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&database.pool, now).await.unwrap();
+    let repository = observability_repository(&database.pool);
+    let query = || UsageRecordQuery {
+        range: ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1))
+            .unwrap(),
+        filter: UsageRecordFilter {
+            request_id: Some("req_observe_success".to_owned()),
+            ..UsageRecordFilter::default()
+        },
+        current_page: 1,
+        page_size: ObservabilityPageSize::new(10).unwrap(),
+    };
+    let token = format!("gAAAA{}", "b".repeat(307));
+    for expected in [None, Some(token.as_str())] {
+        sqlx::query(
+            "update model_requests set provider_observation_json = $1
+             where id = 'req_observe_success'",
+        )
+        .bind(sqlx::types::Json(
+            serde_json::json!({ "turnState": expected }),
+        ))
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let records = repository.list_usage_records(query()).await.unwrap();
+        assert_eq!(records.items.len(), 1);
+        assert_eq!(records.items[0].turn_state.as_deref(), expected);
+        let detail = repository
+            .usage_record_detail("req_observe_success", None)
+            .await
+            .unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(detail.request.provider_metadata_json.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(metadata["turnState"].as_str(), expected);
+    }
+    database.close().await;
+}
+
+#[tokio::test]
 async fn observability_preserves_and_filters_opaque_response_ids() {
     let Some(database) = TestDatabase::create("observability_opaque_response_id").await else {
         return;

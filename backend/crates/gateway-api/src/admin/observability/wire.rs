@@ -76,6 +76,7 @@ pub struct BillingView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageListRecordView {
+    pub turn_state: Option<String>,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub username: Option<String>,

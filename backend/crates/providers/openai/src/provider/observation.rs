@@ -222,6 +222,11 @@ impl OpenAiResponseObservationState {
     pub(super) fn provider_metadata(&self) -> Option<ProviderResponseMetadata> {
         let mut metadata = Map::new();
         metadata.insert("schemaVersion".to_owned(), json!(2));
+        // 仅记录本次上游响应实际返回的值，不把出站注入值冒充响应。
+        // 管理员使用明细需要原值供复制；个人记录由 API 白名单排除此字段。
+        if let Some(state) = observed_turn_state(&self.response_metadata.client_headers) {
+            metadata.insert("turnState".to_owned(), Value::String(state.to_owned()));
+        }
         if let Some(model) = self
             .response_metadata
             .effective_model
@@ -285,6 +290,15 @@ impl OpenAiResponseObservationState {
         }
         ProviderResponseMetadata::new(serde_json::to_string(&Value::Object(metadata)).ok()?)
     }
+}
+
+fn observed_turn_state(headers: &[(String, Bytes)]) -> Option<&str> {
+    let (_, value) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-codex-turn-state"))?;
+    let value = std::str::from_utf8(value).ok()?.trim();
+    (!value.is_empty() && value.len() <= 4096 && value.bytes().all(|b| b.is_ascii_graphic()))
+        .then_some(value)
 }
 
 pub(super) fn codex_response_observation(

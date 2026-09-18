@@ -944,6 +944,7 @@ fn total_record(
     now: DateTime<Utc>,
 ) -> UsageListRecord {
     UsageListRecord {
+        turn_state: None,
         user_id: None,
         user_email: None,
         username: None,

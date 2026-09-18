@@ -25,7 +25,7 @@ import { usageRecordColumns, usageTimeRangeOptions } from './constants'
 
 const props = defineProps<{ personal?: boolean }>()
 provide('personalUsage', computed(() => Boolean(props.personal)))
-const visibleColumns = computed(() => props.personal ? usageRecordColumns.filter(column => !['userEmail', 'accountEmail', 'upstreamTransport'].includes(column.key)) : usageRecordColumns)
+const visibleColumns = computed(() => props.personal ? usageRecordColumns.filter(column => !['userEmail', 'accountEmail', 'upstreamTransport', 'turnState'].includes(column.key)) : usageRecordColumns)
 
 const recordFilters = ref<UsageRecordFilters>({ clientApiKeyId: '', groupId: '', accountId: '', userId: '', model: '', clientTransport: '' })
 const recordFilterParams = computed(() => Object.fromEntries(Object.entries(recordFilters.value).map(([key, value]) => [key, value.trim() || undefined])))

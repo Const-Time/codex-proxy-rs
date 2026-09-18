@@ -31,6 +31,7 @@ import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
 import UsageStatusCodeBadge from './UsageStatusCodeBadge.vue'
+import UsageTurnStateCell from './UsageTurnStateCell.vue'
 
 const props = defineProps<{
   record: UsageViewModel | null
@@ -363,6 +364,15 @@ const tokenDonutOption = computed<EChartsOption>(() => {
           请求标识
         </h3>
         <UsageDetailFieldGrid :items="identifierItems" />
+      </section>
+
+      <section v-if="!personal" :class="panelClass">
+        <h3 :class="panelTitleClass">
+          Turn-state · 上游返回
+        </h3>
+        <div class="mt-3 min-w-0">
+          <UsageTurnStateCell :value="record.turnState" />
+        </div>
       </section>
 
       <section class="grid min-w-0 gap-3 lg:grid-cols-2">

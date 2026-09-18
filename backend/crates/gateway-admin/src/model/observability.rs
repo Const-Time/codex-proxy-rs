@@ -557,6 +557,8 @@ pub struct DashboardObservation {
 /// 使用记录表格的窄读模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    /// 本次上游响应的 turn-state；仅管理员可见。
+    pub turn_state: Option<String>,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub username: Option<String>,

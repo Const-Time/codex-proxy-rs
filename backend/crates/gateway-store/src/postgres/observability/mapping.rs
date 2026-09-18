@@ -459,6 +459,7 @@ pub(crate) fn admin_usage_list_record(
         }
     };
     Ok(admin_observability::UsageListRecord {
+        turn_state: record.turn_state,
         user_id: record.user_id,
         user_email: record.user_email,
         username: record.username,
@@ -815,6 +816,7 @@ pub(crate) fn usage_list_record_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<UsageListRecord> {
     Ok(UsageListRecord {
+        turn_state: get(row, "turn_state")?,
         user_id: get(row, "user_id")?,
         user_email: get(row, "user_email")?,
         username: get(row, "username")?,

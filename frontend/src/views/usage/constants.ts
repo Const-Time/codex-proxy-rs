@@ -29,6 +29,7 @@ export const usageRecordColumns = defineTableColumns<UsageDisplayRecord>([
   { key: 'billing', label: '费用', kind: 'numeric', size: 'lg' },
   { key: 'latency', label: '延迟', kind: 'numeric', size: 'xl' },
   { key: 'createdAtDisplay', label: '时间', kind: 'datetime' },
+  { key: 'turnState', label: 'TURN-STATE', kind: 'custom', size: '4xl' },
   { key: 'clientIp', label: 'IP', kind: 'custom', size: '3xl' },
   { key: 'userAgent', label: 'User-Agent', kind: 'custom', size: '4xl' },
   { key: 'actions', label: '操作', kind: 'actions', size: 'sm' },

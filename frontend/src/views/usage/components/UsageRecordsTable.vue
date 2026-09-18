@@ -19,6 +19,7 @@ import UsageModelCell from './UsageModelCell.vue'
 import UsageReasoningEffortCell from './UsageReasoningEffortCell.vue'
 import UsageTokenCell from './UsageTokenCell.vue'
 import UsageTransportBadge from './UsageTransportBadge.vue'
+import UsageTurnStateCell from './UsageTurnStateCell.vue'
 
 withDefaults(
   defineProps<{
@@ -119,6 +120,10 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 
     <template #latency="{ row }">
       <UsageLatencyCell :record="row" />
+    </template>
+
+    <template #turnState="{ row }">
+      <UsageTurnStateCell :value="row.turnState" />
     </template>
 
     <template v-if="$slots.actions" #actions="scope">

@@ -870,6 +870,7 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .lock()
         .expect("usage records")
         .push(UsageListRecord {
+            turn_state: Some("gAAAA-test-turn-state".to_owned()),
             user_id: Some("user_history".into()),
             user_email: Some("member@example.invalid".into()),
             username: Some("Member".into()),
@@ -989,6 +990,7 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         "upstreamModel",
         "upstreamTransport",
         "latencyDetails",
+        "turnState",
     ] {
         assert!(
             item.get(field).is_none(),
@@ -1024,6 +1026,10 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         "member@example.invalid"
     );
     assert_eq!(value["data"]["items"][0]["username"], "Member");
+    assert_eq!(
+        value["data"]["items"][0]["turnState"],
+        "gAAAA-test-turn-state"
+    );
     assert_eq!(
         value["data"]["items"][0]["billing"]["inputPriceDisplay"],
         "$10 / 1M Token"

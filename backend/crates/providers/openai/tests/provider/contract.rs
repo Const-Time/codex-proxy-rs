@@ -6855,6 +6855,65 @@ async fn connection_limit_rejection_requests_one_provider_retry_and_reconnects_i
 }
 
 #[tokio::test]
+async fn usage_turn_state_should_preserve_complete_response_values_and_bound_invalid_headers() {
+    let token = format!("gAAAA{}", "a".repeat(307));
+    for (header, expected) in [
+        (None, None),
+        (Some(String::new()), None),
+        (Some("  ".to_owned()), None),
+        (Some("state with spaces".to_owned()), None),
+        (Some("a".repeat(4097)), None),
+        (Some(token.clone()), Some(token.as_str())),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(CAPTURE_COMPLETED_SSE);
+        if let Some(value) = header {
+            response = response.insert_header("X-Codex-Turn-State", value);
+        }
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            json!({"model":"gpt-5.4","input":"hello"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+        .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))]));
+        let mut stream = provider_with_base_url(&store, server.uri())
+            .execute(
+                planned_request(
+                    "openai",
+                    Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                ),
+                context("req_usage_turn_state", CancellationToken::new()),
+            )
+            .await
+            .expect("prepare stream");
+        let mut metadata = None;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("provider event");
+            if let Some(observation) = event.response_observation()
+                && let Some(value) = observation.provider_metadata()
+            {
+                metadata = Some(serde_json::from_str::<Value>(value.as_json()).unwrap());
+            }
+        }
+        let metadata = metadata.expect("persistable provider observation");
+        assert_eq!(metadata["turnState"].as_str(), expected);
+    }
+}
+
+#[tokio::test]
 async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriting_it() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
@@ -6868,6 +6927,7 @@ async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriti
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", "gAAAA-http-observed-state")
                 .set_body_string(body),
         )
         .expect(1)
@@ -6895,6 +6955,7 @@ async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriti
     let mut observed = None;
     let mut returned = None;
     let mut costs = Vec::new();
+    let mut turn_state = None;
     while let Some(event) = stream.next().await {
         let event = event.expect("upstream response");
         for fact in event.canonical_facts() {
@@ -6904,6 +6965,11 @@ async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriti
         }
         if let Some(observation) = event.response_observation() {
             observed = observation.upstream_response_model().map(str::to_owned);
+            turn_state = observation.provider_metadata().and_then(|metadata| {
+                serde_json::from_str::<Value>(metadata.as_json()).ok()?["turnState"]
+                    .as_str()
+                    .map(str::to_owned)
+            });
         }
         if let Some(wire) = event.wire_event()
             && wire.data().get("type").and_then(Value::as_str) == Some("response.completed")
@@ -6920,6 +6986,7 @@ async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriti
     assert_eq!(costs, vec![3_437_500]);
     assert_eq!(observed.as_deref(), Some("gpt-6-sol"));
     assert_eq!(returned, observed);
+    assert_eq!(turn_state.as_deref(), Some("gAAAA-http-observed-state"));
 }
 
 #[tokio::test]
@@ -6938,7 +7005,7 @@ async fn websocket_bills_sent_model_and_observes_internal_model_report() {
             assert_eq!(request["model"], "gpt-5.4");
             for event in [
                 json!({"type":"response.created","response":{"id":"resp_model","model":"gpt-created"}}),
-                json!({"type":metadata_type,"headers":{"X-OpenAI-Model":["gpt-server-report"]}}),
+                json!({"type":metadata_type,"headers":{"X-OpenAI-Model":["gpt-server-report"],"X-Codex-Turn-State":"gAAAA-ws-observed-state"}}),
                 json!({"type":"response.completed","response":{"id":"resp_model","model":"gpt-6-astra","status":"completed","output":[],"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":25},"total_tokens":110}}}),
             ] {
                 websocket
@@ -6969,6 +7036,7 @@ async fn websocket_bills_sent_model_and_observes_internal_model_report() {
         let mut observed = None;
         let mut returned = None;
         let mut costs = Vec::new();
+        let mut turn_state = None;
         while let Some(event) = stream.next().await {
             let event = event.expect("provider event");
             for fact in event.canonical_facts() {
@@ -6978,6 +7046,11 @@ async fn websocket_bills_sent_model_and_observes_internal_model_report() {
             }
             if let Some(observation) = event.response_observation() {
                 observed = observation.upstream_response_model().map(str::to_owned);
+                turn_state = observation.provider_metadata().and_then(|metadata| {
+                    serde_json::from_str::<Value>(metadata.as_json()).ok()?["turnState"]
+                        .as_str()
+                        .map(str::to_owned)
+                });
             }
             if let Some(wire) = event.wire_event()
                 && wire.data().get("type").and_then(Value::as_str) == Some("response.completed")
@@ -6990,6 +7063,11 @@ async fn websocket_bills_sent_model_and_observes_internal_model_report() {
             }
         }
         server.await.expect("server task");
+        assert_eq!(
+            turn_state.as_deref(),
+            Some("gAAAA-ws-observed-state"),
+            "{metadata_type}"
+        );
         assert_eq!(costs, vec![3_437_500]);
         assert_eq!(
             observed.as_deref(),
