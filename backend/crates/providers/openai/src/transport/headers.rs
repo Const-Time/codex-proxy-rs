@@ -132,7 +132,9 @@ impl CodexBackendClient {
             HeaderName::from_static("openai-beta"),
             HeaderValue::from_static("responses_websockets=2026-02-06"),
         );
-        if request.fingerprint_convergence {
+        // Managed state belongs to this response.create, not to the socket.
+        // This also holds when fingerprint convergence is independently off.
+        if request.fingerprint_convergence || request.managed_turn_state {
             headers.remove("x-codex-turn-state");
         }
         Ok(headers)

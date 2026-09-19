@@ -536,14 +536,30 @@ impl Provider for CodexProvider {
             requested_transport
         };
         apply_transport(&mut upstream_request, transport);
-        // 自动接管不改变传输选择，绝不污染 WS 逐帧状态或同轮/native continuation。
+        // 每个 attempt 独立选择候选，不把接管标记或候选绑定到可复用的 WS 连接。
+        // 同轮/native continuation 沿用原有状态，绝不在续接中途从池中换票。
         let same_turn = previous_session.as_ref().is_some_and(|previous| {
             same_client_turn(
                 previous.client_turn_id.as_deref(),
                 original_client_turn_id.as_deref(),
             )
         });
-        if transport == CodexProviderTransport::HttpOnly
+        let can_project_state = transport == CodexProviderTransport::HttpOnly
+            || upstream_request
+                .client_metadata()
+                .is_none_or(Value::is_object);
+        // 有历史会话却缺少任一侧 turn ID 时，WS 无法证明这是新轮次。
+        // 宁可沿用既有处理，也不在未知的工具调用/重放边界重新注入候选。
+        let known_ws_turn = transport == CodexProviderTransport::HttpOnly
+            || previous_session.as_ref().is_none_or(|previous| {
+                previous
+                    .client_turn_id
+                    .as_deref()
+                    .zip(original_client_turn_id.as_deref())
+                    .is_some_and(|(previous, current)| !previous.is_empty() && !current.is_empty())
+            });
+        if can_project_state
+            && known_ws_turn
             && !continuation_requested
             && !same_turn
             && upstream_request.previous_response_id().is_none()
@@ -574,6 +590,8 @@ impl Provider for CodexProvider {
             }
             upstream_request.turn_state = Some(token);
             upstream_request.managed_turn_state = true;
+            // WS transport 在每次 response.create 序列化前把该值投影到
+            // client_metadata，覆盖旧值但保留其他 metadata；不能仅改握手头。
         }
         let metadata = ProviderCallMetadata::new(
             provider_kind,

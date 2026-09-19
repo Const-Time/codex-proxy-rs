@@ -9,6 +9,7 @@ import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import { errorMessage } from '@/utils/async'
 import { formatCompactNumber } from '@/utils/number'
+import { UNOWNED_USAGE_USER_LABEL } from '../utils/user'
 
 const props = defineProps<{ range: { startTime: string, endTime: string }, provider?: string, filters?: Record<string, string | undefined> }>()
 const items = ref<UsageDiagnosticItem[]>([])
@@ -24,7 +25,8 @@ const columns = defineTableColumns<UsageDiagnosticItem>([
 ])
 const userIndex = computed(() => new Map(users.value.map(user => [user.id, user])))
 const user = (id: string) => userIndex.value.get(id)
-const displayName = (item: UsageDiagnosticItem) => user(item.key)?.username || user(item.key)?.email || (item.key === 'unknown' ? '未关联用户' : item.name !== item.key ? item.name : `用户 ${item.key}`)
+// unknown 是聚合桶，可能同时包含维护探测和其他无归属请求，不能整体标为系统维护。
+const displayName = (item: UsageDiagnosticItem) => user(item.key)?.username || user(item.key)?.email || (item.key === 'unknown' ? UNOWNED_USAGE_USER_LABEL : item.name !== item.key ? item.name : `用户 ${item.key}`)
 const money = (value: string | null) => value === null ? '—' : `$${Number(value).toLocaleString('en-US', { maximumFractionDigits: 4 })}`
 let revision = 0
 async function load() {

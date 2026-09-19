@@ -112,10 +112,11 @@ onBeforeUnmount(() => {
         </p>
       </section>
       <section class="rounded-cp border border-cp-border p-4">
-        <BaseSwitch v-model="takeover" label="接管 turn-state" :show-label="true" :disabled="loading || saving || !view" />
+        <BaseSwitch v-model="takeover" label="HTTP / WS turn-state 接管" :show-label="true" :disabled="loading || saving || !view" />
         <p class="mt-3 text-cp-sm text-cp-text-secondary">
-          仅在 HTTP 非续接请求中使用本账号、精确模型下的有效候选替换状态。不会强制 WebSocket 改用 HTTP，
-          不改同轮或原生续接。关闭或无有效候选时保留原有安全透传逻辑。
+          HTTP 与 WS 的新轮次非续接请求使用本账号、精确模型下的有效候选替换状态。
+          WS 逐帧注入，不强制改用 HTTP；同轮或原生续接不重新选取候选。
+          关闭或无有效候选时保留原有安全透传逻辑。
         </p>
         <p class="mt-2 text-cp-xs text-cp-text-tertiary">
           候选最多 3 个 / 模型；过期停止使用，不因返回 312 或候选耗尽禁用账号。

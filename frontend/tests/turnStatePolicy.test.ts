@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
 // eslint-disable-next-line test/no-import-node-test -- Use the existing native Node test runner.
 import test from 'node:test'
-import { exactModels, remainingLabel, shapeLabel, waitReasonLabel } from '../src/views/turn-state/presenter.ts'
+import { exactModels, remainingLabel, shapeLabel, takeoverPolicyLabel, waitReasonLabel } from '../src/views/turn-state/presenter.ts'
+
+test('takeover policy labels describe HTTP and WS eligibility rather than per-request injection', () => {
+  assert.equal(takeoverPolicyLabel(true, true), 'HTTP / WS 接管已开启')
+  assert.equal(takeoverPolicyLabel(true, false), 'HTTP / WS 接管待全局启用')
+  assert.equal(takeoverPolicyLabel(false, true), 'HTTP / WS 接管已关闭')
+  assert.equal(takeoverPolicyLabel(false, false), 'HTTP / WS 接管已关闭')
+})
 
 test('state maintenance accepts personal and team candidate shapes without capability labels', () => {
   for (const [headerLength, blocks] of [[292, 10], [332, 12]]) {

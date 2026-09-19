@@ -13,7 +13,7 @@ export function turnStateSourceDisplay(source: unknown) {
     return { label: '维护', description: '系统维护探测在业务出口验证时发送的候选状态，不是用户请求' }
   }
   if (source === 'managed') {
-    return { label: '接管', description: '本次 HTTP 请求由账号级接管策略注入的候选状态；上游未返回有效的新值' }
+    return { label: '接管', description: '本次请求由账号级接管策略注入的候选状态（HTTP 请求头或 WS 请求帧）' }
   }
   if (source === 'request') {
     return { label: '请求', description: '本次出站请求携带的状态；上游未返回有效的新值' }

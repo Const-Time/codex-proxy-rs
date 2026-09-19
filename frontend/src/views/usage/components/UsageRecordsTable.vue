@@ -12,6 +12,7 @@ import {
   usageIsCompact,
   usageUserAgent,
 } from '../utils/records'
+import { usageUserDisplay } from '../utils/user'
 import UsageBillingCell from './UsageBillingCell.vue'
 import UsageClientIpCell from './UsageClientIpCell.vue'
 import UsageLatencyCell from './UsageLatencyCell.vue'
@@ -46,8 +47,8 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
   >
     <template #userEmail="{ row }">
       <div class="grid min-w-0 gap-1">
-        <span class="truncate text-cp-sm font-bold" :title="row.username || row.userEmail || row.userId || '未关联用户'">
-          {{ row.username || row.userEmail || row.userId || '未关联用户' }}
+        <span class="truncate text-cp-sm font-bold" :title="usageUserDisplay(row).description">
+          {{ usageUserDisplay(row).label }}
         </span>
         <span v-if="row.username && row.userEmail" class="truncate text-cp-xs text-cp-text-secondary" :title="row.userEmail">
           {{ row.userEmail }}

@@ -1,5 +1,6 @@
 mod lifecycle;
 mod maintenance;
+mod websocket;
 use crate::{
     admin::{
         TestOAuthPending, initialized_account_scope, initialized_provider_request,
@@ -25,7 +26,7 @@ use gateway_core::{
     account::ProviderAccountId,
     engine::{AccountAttemptContext, AttemptContext, ModelRequestId, RequestAttemptContext},
     lifecycle::CancellationToken,
-    operation::{GenerateRequest, Operation, ProtocolPayload},
+    operation::{GenerateRequest, Operation, ProtocolPayload, ProviderSessionState},
     policy::ClientApiKeyId,
     routing::ProviderKind,
 };
@@ -228,6 +229,14 @@ async fn execute(
     operation: Operation,
     account: &str,
 ) -> Value {
+    execute_with_session(bundle, operation, account).await.0
+}
+
+async fn execute_with_session(
+    bundle: &provider_openai::ProviderBundle,
+    operation: Operation,
+    account: &str,
+) -> (Value, Option<ProviderSessionState>) {
     let owner = ProviderAccountStateOwner::new(
         ProviderKind::new("openai").unwrap(),
         ProviderAccountId::new(account).unwrap(),
@@ -251,8 +260,12 @@ async fn execute(
         .await
         .unwrap();
     let mut metadata = Value::Null;
+    let mut session = None;
     while let Some(event) = stream.next().await {
         let event = event.expect("business request");
+        if let Some(update) = event.session_update() {
+            session = Some(update.clone());
+        }
         if let Some(value) = event
             .response_observation()
             .and_then(|o| o.provider_metadata())
@@ -260,7 +273,7 @@ async fn execute(
             metadata = serde_json::from_str(value.as_json()).unwrap();
         }
     }
-    metadata
+    (metadata, session)
 }
 
 #[tokio::test]
@@ -451,7 +464,7 @@ async fn http_takeover_marks_actual_source_and_does_not_invalidate_on_312() {
 }
 
 #[tokio::test]
-async fn websocket_is_not_taken_over_and_convergence_keeps_state_in_frame_only() {
+async fn websocket_takeover_with_convergence_sends_candidate_in_frame_not_handshake() {
     let http = MockServer::start().await;
     let candidate = token(10, 3);
     Mock::given(method("POST"))
@@ -487,6 +500,7 @@ async fn websocket_is_not_taken_over_and_convergence_keeps_state_in_frame_only()
             .candidate_count,
         1
     );
+    let expected = candidate.clone();
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let mut ws =
@@ -500,12 +514,13 @@ async fn websocket_is_not_taken_over_and_convergence_keeps_state_in_frame_only()
             .await;
         let frame = ws.next().await.unwrap().unwrap();
         let body: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-        assert_eq!(body["client_metadata"]["x-codex-turn-state"], "client-ws");
+        assert_eq!(body["client_metadata"]["x-codex-turn-state"], expected);
         ws.send(Message::Text(json!({"type":"response.completed","response":{"id":"resp_ws","status":"completed","model":"gpt-5.4","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}).to_string().into())).await.unwrap();
     });
     let metadata = execute(&second, operation(Some("client-ws"), true), "acct_state").await;
-    assert_eq!(metadata["turnStateSentSource"], "request");
-    assert_eq!(metadata["turnStateSent"], "client-ws");
+    assert_eq!(metadata["turnStateSentSource"], "managed");
+    assert_eq!(metadata["turnStateSource"], "managed");
+    assert_eq!(metadata["turnStateSent"], candidate);
     server.await.unwrap();
 }
 

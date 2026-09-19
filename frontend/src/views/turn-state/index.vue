@@ -14,7 +14,7 @@ import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import { toast } from '@/components/base/BaseToast'
 import { errorMessage } from '@/utils/async'
-import { exactModels, remainingLabel, shapeLabel, waitReasonLabel } from './presenter'
+import { exactModels, remainingLabel, shapeLabel, takeoverPolicyLabel, waitReasonLabel } from './presenter'
 
 const view = ref<TurnStateView | null>(null)
 const draft = ref<TurnStateSettings | null>(null)
@@ -47,7 +47,7 @@ const numericFields = [
   { key: 'retrySeconds', label: '失败冷却（秒）', min: 30, max: 3600 },
 ] as const
 const directions: Record<string, string> = { candidate: '探测候选', injected: '接管注入', request: '请求携带', returned: '上游返回', session: '会话状态' }
-const statuses: Record<string, string> = { paused: '已暂停', probing: '探测中', ready: '可用', expired: '已过期', empty: '等待获取' }
+const statuses: Record<string, string> = { paused: '已暂停', probing: '探测中', ready: '候选可用', expired: '已过期', empty: '等待获取' }
 let poll: ReturnType<typeof setInterval> | undefined
 let clock: ReturnType<typeof setInterval> | undefined
 let disposed = false
@@ -319,6 +319,11 @@ onBeforeUnmount(() => {
         </div>
       </BaseCard>
       <BaseCard title="运行状态与诊断" description="每 5 秒刷新。仅显示指纹和结构，不回显 state 原文；后台任务不会随页面关闭而终止。">
+        <p class="mb-3 text-cp-sm text-cp-text-secondary">
+          候选可用、开关开启不代表每条请求都已接管：HTTP 与 WS 的新轮次非续接请求可注入候选，
+          WS 通过请求帧传递，不降级为 HTTP；同轮及原生续接不重新选取候选。
+          请在请求详情中查看实际发送的 turn-state 及其来源。
+        </p>
         <p v-if="!view?.targets.length" class="text-cp-text-tertiary">
           保存维护项后将在这里展示状态。
         </p>
@@ -329,7 +334,7 @@ onBeforeUnmount(() => {
                 {{ accountName(target.accountId) }} · {{ target.model }}
               </h3>
               <p class="mt-2 text-cp-sm" :class="target.status === 'ready' ? 'text-cp-success' : 'text-cp-text-secondary'">
-                {{ statuses[target.status] }} · {{ remainingLabel(target.expiresAt, now) }} · 候选 {{ target.candidateCount }}/3 · 账号接管{{ target.takeover ? '开启' : '关闭' }}
+                {{ statuses[target.status] }} · {{ remainingLabel(target.expiresAt, now) }} · 候选 {{ target.candidateCount }}/3 · {{ takeoverPolicyLabel(target.takeover, view!.policy.enabled) }}
               </p>
             </div>
             <div class="flex flex-wrap gap-2">

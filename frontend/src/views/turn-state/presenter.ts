@@ -1,5 +1,11 @@
 import type { TurnStatePolicy, TurnStateShape } from '../../api/modules/turn-state'
 
+export function takeoverPolicyLabel(accountEnabled: boolean, maintenanceEnabled: boolean): string {
+  if (!accountEnabled)
+    return 'HTTP / WS 接管已关闭'
+  return maintenanceEnabled ? 'HTTP / WS 接管已开启' : 'HTTP / WS 接管待全局启用'
+}
+
 export function remainingLabel(expiresAt: number | null, now: number): string {
   if (expiresAt === null)
     return '暂无可用值'

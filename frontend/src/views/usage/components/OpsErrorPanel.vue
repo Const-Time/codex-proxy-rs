@@ -13,6 +13,7 @@ import { useOpsErrorsTable } from '../composables/useOpsErrorsTable'
 import { opsErrorColumns } from '../constants'
 import { opsErrorSummary } from '../utils/opsErrorPresentation'
 import { usageUserAgent } from '../utils/records'
+import { usageUserDisplay } from '../utils/user'
 import OpsErrorDetailModal from './OpsErrorDetailModal.vue'
 import UsageClientIpCell from './UsageClientIpCell.vue'
 
@@ -109,8 +110,8 @@ function upstreamSendStateText(value: string | null | undefined) {
       >
         <template #userEmail="{ row }">
           <div class="grid min-w-0 gap-1">
-            <span class="truncate text-cp-sm font-bold" :title="row.username || row.userEmail || row.userId || '未关联用户'">
-              {{ row.username || row.userEmail || row.userId || '未关联用户' }}
+            <span class="truncate text-cp-sm font-bold" :title="usageUserDisplay(row).description">
+              {{ usageUserDisplay(row).label }}
             </span>
             <span v-if="row.username && row.userEmail" class="truncate text-cp-xs text-cp-text-secondary" :title="row.userEmail">
               {{ row.userEmail }}
