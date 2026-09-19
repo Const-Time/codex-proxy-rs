@@ -403,7 +403,7 @@ onBeforeUnmount(() => {
           账号开关、小时预算与自动发现统一在本页「账号与模型」中设置；指纹收敛仍在账号管理中设置。
         </p>
       </BaseCard>
-      <BaseCard v-show="activeTab === 'settings' && settingsTab === 'proxies'" title="候选采集代理池" description="只用于采集，不修改账号业务出口。固定出口单次采集；轮换入口新连接不保证新 IP。">
+      <BaseCard v-show="activeTab === 'settings' && settingsTab === 'proxies'" title="候选采集代理池" description="只用于采集，不修改账号业务出口。候选未入选时，轮换入口下一次采集新建连接，API 模式重新提取；固定出口每周期只采集一次。轮换出口参考逐次检测，但新连接不保证新 IP；实际轮换由供应商控制，限流仍按冷却停止。">
         <template #actions>
           <BaseButton :disabled="busy || accountDirty || accountBusy || draft.pools.length >= 16" @click="addPool">
             添加代理池

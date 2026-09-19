@@ -13,7 +13,10 @@ impl StateManager {
         // Hash configuration, never store proxy credentials in diagnostic records.
         let key = fingerprint(proxy.map_or("direct", OutboundProxy::expose_url));
         let now = Utc::now().timestamp();
-        if !force
+        // A rotating/API endpoint is not an exit identity. Never reuse its
+        // independent detection across attempts (or let manual tests seed it).
+        if !rotating
+            && !force
             && let Some(snapshot) = self
                 .egress_cache
                 .lock()
@@ -21,9 +24,7 @@ impl StateManager {
                 .get(&key)
                 .filter(|s| now - s.detected_at < 60)
         {
-            let mut snapshot = snapshot.clone();
-            snapshot.rotating = rotating;
-            return Some(snapshot);
+            return Some(snapshot.clone());
         }
         // Telemetry is best effort and cannot turn a successful probe into a failure.
         let result = tokio::time::timeout(Duration::from_secs(6), detector.test_egress(proxy))
@@ -39,12 +40,14 @@ impl StateManager {
             source: "independent_proxy_test".to_owned(),
             rotating,
         };
-        let mut cache = self.egress_cache.lock().await;
-        cache.retain(|_, s| now - s.detected_at < 60);
-        if cache.len() >= 256 {
-            cache.clear();
+        if !rotating {
+            let mut cache = self.egress_cache.lock().await;
+            cache.retain(|_, s| now - s.detected_at < 60);
+            if cache.len() >= 256 {
+                cache.clear();
+            }
+            cache.insert(key, snapshot.clone());
         }
-        cache.insert(key, snapshot.clone());
         Some(snapshot)
     }
 }
