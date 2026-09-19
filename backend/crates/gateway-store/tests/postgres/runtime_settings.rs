@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use gateway_core::provider_ports::ProviderRuntimePolicyPort;
 use gateway_store::postgres::{
     PgRuntimeSettingsRepository, RuntimeSettingsRepository, RuntimeSettingsUpdate,
 };
@@ -32,6 +33,27 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
 fn runtime_settings_keep_account_rotation_global() {
     let settings = settings_with_margin(3_600);
     assert!(settings.validate().is_ok());
+}
+
+#[tokio::test]
+async fn maintenance_scheduling_policy_reads_current_shared_limits_and_interval() {
+    let Some(database) = TestDatabase::create("maintenance_scheduling_policy").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    for (limit, interval) in [(10, 250), (4, 0)] {
+        let mut update = settings_with_margin(3600);
+        update.max_concurrent_per_account = limit;
+        update.request_interval_ms = interval;
+        repository.update_runtime_settings(update).await.unwrap();
+        let policy = repository.load_account_selection_policy().await.unwrap();
+        assert_eq!(policy.max_concurrent_per_account().get(), limit);
+        assert_eq!(
+            policy.request_interval(),
+            std::time::Duration::from_millis(interval)
+        );
+    }
+    database.close().await;
 }
 
 #[tokio::test]

@@ -78,39 +78,25 @@ pub(super) fn gate(doc: &Document, target: &Target, now: i64) -> &'static str {
         return "budget";
     }
     if target.next_probe_at > now {
-        return "retry";
+        return match target.wait_reason.as_str() {
+            "account_busy" => "account_busy",
+            "storage_unavailable" => "storage_unavailable",
+            "network" => "network",
+            "protocol" => "protocol",
+            "upstream_failure" => "upstream_failure",
+            "state_missing" => "state_missing",
+            "state_structure" => "state_structure",
+            "state_shape_mismatch" => "state_shape_mismatch",
+            "state_future" => "state_future",
+            "state_ttl" => "state_ttl",
+            "state_duplicate" => "state_duplicate",
+            _ => "retry",
+        };
     }
     "queued"
 }
 
 impl StateManager {
-    /// Traffic is recorded even if the upstream never issues a state. Probes never call this.
-    pub(crate) async fn note_traffic(&self, account: &str, model: &str) {
-        let Ok(mut runtime) = self.runtime.try_lock() else {
-            return;
-        };
-        if runtime.document.policy.enabled && self.account_policy(account).takeover {
-            Self::discover(&mut runtime, account, model, Utc::now().timestamp());
-            self.changes.send_if_modified(|generation| {
-                if *generation == runtime.document.generation {
-                    false
-                } else {
-                    *generation = runtime.document.generation;
-                    true
-                }
-            });
-        }
-        if let Some(target) = runtime
-            .document
-            .targets
-            .iter_mut()
-            .find(|t| t.input.account_id == account && t.input.model == model)
-        {
-            target.last_traffic_at = Some(Utc::now().timestamp());
-            runtime.dirty = true;
-        }
-    }
-
     /// Reserve before sending. A crash/uncertain network error conservatively spends a slot.
     /// CAS makes this safe even if a stale worker temporarily overlaps the next lease holder.
     pub(super) async fn reserve_probe(&self, account: &str, generation: u64) -> Result<(), String> {
@@ -175,8 +161,8 @@ impl StateManager {
         Err(AdminError::unavailable("上游冷却保存失败"))
     }
 
-    pub(super) fn discover(runtime: &mut Runtime, account: &str, model: &str, now: i64) {
-        let policy = maintenance(&runtime.document, account);
+    pub(super) fn discover(doc: &mut Document, account: &str, model: &str, now: i64) -> bool {
+        let policy = maintenance(doc, account);
         if !policy.auto_models
             || model.starts_with("gpt-image-")
             || model.is_empty()
@@ -184,25 +170,21 @@ impl StateManager {
             || model
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control() || c == '*')
-            || runtime
-                .document
+            || doc
                 .targets
                 .iter()
                 .any(|t| t.input.account_id == account && t.input.model == model)
         {
-            return;
+            return false;
         }
-        let Some(pool_id) = policy.pool_id.filter(|id| {
-            runtime
-                .document
-                .pools
-                .iter()
-                .any(|p| &p.id == id && p.enabled)
-        }) else {
-            return;
+        let Some(pool_id) = policy
+            .pool_id
+            .filter(|id| doc.pools.iter().any(|p| &p.id == id && p.enabled))
+        else {
+            return false;
         };
         // Reclaim only idle, expired discoveries. Manual/paused targets are never evicted.
-        runtime.document.targets.retain(|t| {
+        doc.targets.retain(|t| {
             t.input.account_id != account
                 || !t.automatic
                 || !t.input.enabled
@@ -213,18 +195,17 @@ impl StateManager {
                     .chain(&t.alternatives)
                     .any(|c| c.expires_at > now)
         });
-        if runtime.document.targets.len() >= 128
-            || runtime
-                .document
+        if doc.targets.len() >= 128
+            || doc
                 .targets
                 .iter()
                 .filter(|t| t.automatic && t.input.account_id == account)
                 .count()
                 >= 8
         {
-            return;
+            return false;
         }
-        runtime.document.targets.push(Target {
+        doc.targets.push(Target {
             input: TurnStateTargetInput {
                 account_id: account.to_owned(),
                 model: model.to_owned(),
@@ -243,7 +224,7 @@ impl StateManager {
             refresh_requested: false,
         });
         // Prevent a stale settings form from deleting newly discovered targets.
-        runtime.document.generation += 1;
-        runtime.dirty = true;
+        doc.generation += 1;
+        true
     }
 }

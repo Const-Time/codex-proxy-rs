@@ -4,7 +4,7 @@ use gateway_core::task::{
     ScheduledTask, WorkerContribution, WorkerCycleContext, WorkerId, WorkerKind, WorkerRunnable,
 };
 
-fn worker(bundle: &mut provider_openai::ProviderBundle) -> Box<dyn ScheduledTask> {
+pub(super) fn worker(bundle: &mut provider_openai::ProviderBundle) -> Box<dyn ScheduledTask> {
     bundle
         .take_worker_contributions()
         .into_iter()
@@ -21,7 +21,7 @@ fn worker(bundle: &mut provider_openai::ProviderBundle) -> Box<dyn ScheduledTask
         .unwrap()
 }
 
-fn context(cancellation: CancellationToken) -> WorkerCycleContext {
+pub(super) fn context(cancellation: CancellationToken) -> WorkerCycleContext {
     WorkerCycleContext::new(
         WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "openai-turn-state").unwrap(),
         None,
@@ -29,7 +29,12 @@ fn context(cancellation: CancellationToken) -> WorkerCycleContext {
     )
 }
 
-async fn configure(service: &dyn TurnStateService, proxy: &str, models: &[&str], limit: u32) {
+pub(super) async fn configure(
+    service: &dyn TurnStateService,
+    proxy: &str,
+    models: &[&str],
+    limit: u32,
+) {
     service
         .configure(
             TurnStateSettingsInput {

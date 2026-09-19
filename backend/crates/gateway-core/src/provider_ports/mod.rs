@@ -861,6 +861,10 @@ fn invalid_refresh_policy(operation: &'static str) -> ProviderStoreError {
 }
 
 pub trait ProviderRuntimePolicyPort: Send + Sync {
+    fn load_account_selection_policy(
+        &self,
+    ) -> BoxFuture<'_, Result<crate::account::AccountSelectionPolicy, ProviderStoreError>>;
+
     fn load_refresh_policy(
         &self,
     ) -> BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>>;

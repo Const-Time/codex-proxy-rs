@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import type { Account } from '@/api/modules/accounts'
 import type { TurnStateSettings, TurnStateTarget, TurnStateView } from '@/api/modules/turn-state'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { getAccounts } from '@/api/modules/accounts'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { getAccountModels, getAccounts, refreshAccountModels } from '@/api/modules/accounts'
 import { getTurnState, saveTurnState, testTurnStatePool, turnStateAction } from '@/api/modules/turn-state'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
+import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
 import FormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
@@ -13,8 +14,9 @@ import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import { toast } from '@/components/base/BaseToast'
+import { useRequestState } from '@/composables/useRequestState'
 import { errorMessage } from '@/utils/async'
-import { exactModels, remainingLabel, shapeLabel, takeoverPolicyLabel, waitReasonLabel } from './presenter'
+import { maintenanceModels, remainingLabel, shapeLabel, takeoverPolicyLabel, waitReasonLabel } from './presenter'
 
 const view = ref<TurnStateView | null>(null)
 const draft = ref<TurnStateSettings | null>(null)
@@ -25,7 +27,18 @@ const loadError = ref('')
 const accounts = ref<Account[]>([])
 const accountSearch = ref('')
 const selectedAccount = ref('')
-const models = ref('')
+const selectedModels = ref<string[]>([])
+const modelCatalog = ref<Array<{ id: string, label: string }>>([])
+const modelSearch = ref('')
+const modelRequest = useRequestState()
+const { loading: loadingModels, error: modelsError } = modelRequest
+const modelOptions = computed(() => {
+  const account = accounts.value.find(a => a.id === selectedAccount.value)
+  return account ? maintenanceModels(modelCatalog.value, account.modelAccess) : []
+})
+const filteredModels = computed(() => modelOptions.value.filter(option =>
+  option.label.toLowerCase().includes(modelSearch.value.trim().toLowerCase()),
+))
 const selectedPool = ref('')
 const expanded = ref('')
 const confirmDiscard = ref(false)
@@ -46,7 +59,7 @@ const numericFields = [
   { key: 'timeoutSeconds', label: '单请求超时（秒）', min: 5, max: 60 },
   { key: 'retrySeconds', label: '失败冷却（秒）', min: 30, max: 3600 },
 ] as const
-const directions: Record<string, string> = { candidate: '探测候选', injected: '接管注入', request: '请求携带', returned: '上游返回', session: '会话状态' }
+const directions: Record<string, string> = { rejected: '候选未入选', candidate: '探测候选', injected: '接管注入', request: '请求携带', returned: '上游返回', session: '会话状态' }
 const statuses: Record<string, string> = { paused: '已暂停', probing: '探测中', ready: '候选可用', expired: '已过期', empty: '等待获取' }
 let poll: ReturnType<typeof setInterval> | undefined
 let clock: ReturnType<typeof setInterval> | undefined
@@ -97,6 +110,41 @@ async function searchAccounts() {
   }
 }
 
+async function loadModels(refresh = false) {
+  const accountId = selectedAccount.value
+  if (!accountId)
+    return
+  const requestId = modelRequest.start()
+  try {
+    const result = await (refresh ? refreshAccountModels : getAccountModels)({ accountId })
+    if (modelRequest.isCurrent(requestId) && selectedAccount.value === accountId) {
+      modelCatalog.value = result.models
+      selectedModels.value = selectedModels.value.filter(id => modelOptions.value.some(option => option.value === id))
+    }
+  }
+  catch (error) {
+    modelRequest.fail(requestId, error)
+  }
+  finally {
+    modelRequest.finish(requestId)
+  }
+}
+
+watch(selectedAccount, () => {
+  modelRequest.invalidate()
+  modelCatalog.value = []
+  selectedModels.value = []
+  modelSearch.value = ''
+  modelsError.value = ''
+  void loadModels()
+})
+
+function selectModel(model: string, selected: boolean) {
+  selectedModels.value = selected
+    ? [...new Set([...selectedModels.value, model])]
+    : selectedModels.value.filter(id => id !== model)
+}
+
 async function save() {
   if (!draft.value || busy.value)
     return
@@ -132,17 +180,21 @@ function addTargets() {
     toast.warning('请选择账号和代理池')
     return
   }
-  try {
-    for (const model of exactModels(models.value)) {
-      if (!draft.value.targets.some(t => t.accountId === selectedAccount.value && t.model === model)) {
-        draft.value.targets.push({ accountId: selectedAccount.value, model, poolId: selectedPool.value, enabled: true })
-      }
-    }
-    models.value = ''
+  if (busy.value || loadingModels.value || modelsError.value || !selectedModels.value.length) {
+    toast.warning('请先加载并选择该账号的可用模型')
+    return
   }
-  catch (error) {
-    toast.error(errorMessage(error, '模型名不合法'))
+  const models = selectedModels.value.filter(model =>
+    modelOptions.value.some(option => option.value === model)
+    && !draft.value!.targets.some(t => t.accountId === selectedAccount.value && t.model === model),
+  )
+  if (draft.value.targets.length + models.length > 128) {
+    toast.warning('维护项最多 128 条，请减少本次选择')
+    return
   }
+  for (const model of models)
+    draft.value.targets.push({ accountId: selectedAccount.value, model, poolId: selectedPool.value, enabled: true })
+  selectedModels.value = []
 }
 
 async function run(target: TurnStateTarget, action: 'refresh' | 'pause' | 'resume' | 'revoke') {
@@ -302,11 +354,41 @@ onBeforeUnmount(() => {
               搜索
             </BaseButton>
           </div>
-          <BaseSelect v-model="selectedAccount" :options="accountOptions" aria-label="选择账号" placeholder="选择账号" />
-          <BaseInput v-model="models" aria-label="精确上游模型" placeholder="精确上游模型，多模型用逗号分隔" />
+          <BaseSelect v-model="selectedAccount" :options="accountOptions" :disabled="busy" aria-label="选择账号" placeholder="选择账号" />
           <BaseSelect v-model="selectedPool" :options="poolOptions" aria-label="选择探测代理池" placeholder="选择探测代理池" />
         </div>
-        <BaseButton class="mt-3 self-start" :disabled="busy || draft.targets.length >= 128" @click="addTargets">
+        <div v-if="selectedAccount" class="mt-3 grid gap-3 rounded-cp border border-cp-border p-3">
+          <div class="flex gap-2">
+            <BaseInput v-model="modelSearch" aria-label="搜索账号可用模型" placeholder="搜索可用模型（可多选）" class="flex-1" />
+            <BaseButton :disabled="busy || loadingModels" :loading="loadingModels" @click="loadModels(true)">
+              从上游刷新模型
+            </BaseButton>
+          </div>
+          <p v-if="modelsError" role="alert" class="text-cp-sm text-cp-error">
+            模型加载失败：{{ modelsError }}。请重试，不会使用其他账号的模型。
+          </p>
+          <p v-else-if="loadingModels" role="status" class="text-cp-sm text-cp-text-secondary">
+            正在加载所选账号的模型…
+          </p>
+          <p v-else-if="!modelOptions.length" role="status" class="text-cp-sm text-cp-text-secondary">
+            暂无可用于维护的模型。可尝试从上游刷新，或检查账号的模型白名单 / 黑名单。
+          </p>
+          <p v-else-if="!filteredModels.length" class="text-cp-sm text-cp-text-secondary">
+            没有匹配搜索词的模型。
+          </p>
+          <div v-else class="grid max-h-64 gap-3 overflow-y-auto md:grid-cols-2">
+            <BaseCheckbox
+              v-for="option in filteredModels" :key="option.value"
+              :model-value="selectedModels.includes(option.value)" :label="option.label" :show-label="true"
+              :disabled="busy || loadingModels || !!modelsError || draft.targets.some(t => t.accountId === selectedAccount && t.model === option.value)"
+              @update:model-value="selectModel(option.value, $event)"
+            />
+          </div>
+          <p class="text-cp-xs text-cp-text-tertiary">
+            已选 {{ selectedModels.length }} 个。列表按账号模型限制过滤，已添加项不可重复选择；图片模型不参与 State 探测。模型目录不保证即时额度或上游可用性。
+          </p>
+        </div>
+        <BaseButton class="mt-3 self-start" :disabled="busy || loadingModels || !!modelsError || !selectedModels.length || draft.targets.length >= 128" @click="addTargets">
           添加维护项
         </BaseButton>
         <div v-for="(target, index) in draft.targets" :key="key(target)" class="mt-4 flex flex-wrap items-center gap-3 rounded-cp bg-cp-fill-quaternary p-3">

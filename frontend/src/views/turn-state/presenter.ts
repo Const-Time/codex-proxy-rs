@@ -1,4 +1,15 @@
+import type { AccountModelAccess } from '../../api/modules/accounts'
 import type { TurnStatePolicy, TurnStateShape } from '../../api/modules/turn-state'
+
+export function maintenanceModels(catalog: Array<{ id: string, label: string }>, access: AccountModelAccess) {
+  return catalog.filter((entry, index) =>
+    entry.id.length > 0 && entry.id.length <= 128 && !/[\s*]/.test(entry.id)
+    && !entry.id.startsWith('gpt-image-')
+    && catalog.findIndex(other => other.id === entry.id) === index
+    && (access.mode !== 'allowlist' || access.models.includes(entry.id))
+    && (access.mode !== 'denylist' || !access.models.includes(entry.id)),
+  ).map(entry => ({ value: entry.id, label: entry.label === entry.id ? entry.id : `${entry.label} · ${entry.id}` }))
+}
 
 export function takeoverPolicyLabel(accountEnabled: boolean, maintenanceEnabled: boolean): string {
   if (!accountEnabled)
@@ -42,7 +53,13 @@ export function waitReasonLabel(reason: string): string {
     idle: '无近期业务，等待流量',
     budget: '小时预算已用完',
     upstream_cooldown: '等待上游冷却',
-    account_busy: '账号忙',
+    account_busy: '等待账号并发槽或请求间隔',
+    state_missing: '上游未返回 State',
+    state_structure: 'State 结构无法解析',
+    state_shape_mismatch: '候选长度规则不匹配',
+    state_future: '候选签发时间超前',
+    state_ttl: '候选剩余时间不足',
+    state_duplicate: '未获取到新的 State',
     account_unavailable: '账号或模型不可用',
     proxy_unavailable: '代理不可用',
     storage_unavailable: '存储不可用',

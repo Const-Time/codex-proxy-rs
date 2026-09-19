@@ -1,5 +1,6 @@
 mod lifecycle;
 mod maintenance;
+mod regressions;
 mod websocket;
 use crate::{
     admin::{
@@ -56,6 +57,9 @@ struct StateStore {
     state: Mutex<(u64, Option<Vec<u8>>)>,
     fail: std::sync::atomic::AtomicBool,
     probes: Mutex<Vec<Value>>,
+    block_next_load: std::sync::atomic::AtomicBool,
+    load_started: tokio::sync::Notify,
+    release_load: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -69,6 +73,13 @@ impl TurnStateStore for StateStore {
         Ok(())
     }
     async fn load(&self) -> AdminStoreResult<(u64, Option<Vec<u8>>)> {
+        if self
+            .block_next_load
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.load_started.notify_one();
+            self.release_load.notified().await;
+        }
         let state = self.state.lock().unwrap();
         Ok((state.0.max(1), state.1.clone()))
     }

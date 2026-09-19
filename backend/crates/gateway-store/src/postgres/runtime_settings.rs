@@ -180,6 +180,26 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
 }
 
 impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
+    fn load_account_selection_policy(
+        &self,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<gateway_core::account::AccountSelectionPolicy, ProviderStoreError>,
+    > {
+        Box::pin(async move {
+            let settings = RuntimeSettingsRepository::load_runtime_settings(self)
+                .await
+                .map_err(|_| provider_unavailable("load account selection policy"))?;
+            Ok(gateway_core::account::AccountSelectionPolicy::new(
+                RotationStrategy::parse(&settings.rotation_strategy)
+                    .ok_or_else(|| provider_invalid("decode account selection policy"))?,
+                NonZeroU32::new(settings.max_concurrent_per_account)
+                    .ok_or_else(|| provider_invalid("decode account selection policy"))?,
+                Duration::from_millis(settings.request_interval_ms),
+            ))
+        })
+    }
+
     fn load_refresh_policy(
         &self,
     ) -> futures::future::BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>> {

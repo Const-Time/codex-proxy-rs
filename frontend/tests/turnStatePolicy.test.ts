@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 // eslint-disable-next-line test/no-import-node-test -- Use the existing native Node test runner.
 import test from 'node:test'
-import { exactModels, remainingLabel, shapeLabel, takeoverPolicyLabel, waitReasonLabel } from '../src/views/turn-state/presenter.ts'
+import { exactModels, maintenanceModels, remainingLabel, shapeLabel, takeoverPolicyLabel, waitReasonLabel } from '../src/views/turn-state/presenter.ts'
 
 test('takeover policy labels describe HTTP and WS eligibility rather than per-request injection', () => {
   assert.equal(takeoverPolicyLabel(true, true), 'HTTP / WS 接管已开启')
@@ -26,4 +26,38 @@ test('state maintenance distinguishes idle, budget and upstream cooldown', () =>
   assert.equal(waitReasonLabel('upstream_cooldown'), '等待上游冷却')
   assert.notEqual(waitReasonLabel('account_busy'), waitReasonLabel('paused'))
   assert.equal(waitReasonLabel('future_reason'), 'future_reason')
+})
+
+test('state maintenance explains individual candidate rejection reasons', () => {
+  assert.equal(waitReasonLabel('state_missing'), '上游未返回 State')
+  assert.equal(waitReasonLabel('state_shape_mismatch'), '候选长度规则不匹配')
+  assert.equal(waitReasonLabel('state_ttl'), '候选剩余时间不足')
+  assert.equal(waitReasonLabel('state_structure'), 'State 结构无法解析')
+  assert.equal(waitReasonLabel('state_future'), '候选签发时间超前')
+  assert.equal(waitReasonLabel('state_duplicate'), '未获取到新的 State')
+  assert.notEqual(waitReasonLabel('account_busy'), waitReasonLabel('storage_unavailable'))
+})
+
+test('maintenance model choices use exact account catalog IDs and account access rules', () => {
+  const catalog = [
+    { id: 'gpt-5.6-sol', label: 'Sol' },
+    { id: 'gpt-6-astra', label: 'gpt-6-astra' },
+    { id: 'gpt-5.6-sol', label: 'Duplicate' },
+    { id: 'gpt-image-2', label: 'Image' },
+    { id: 'gpt-*', label: 'Wildcard' },
+    { id: 'invalid model', label: 'Invalid' },
+    { id: '', label: 'Empty' },
+    { id: 'x'.repeat(129), label: 'Too long' },
+  ]
+  assert.deepEqual(maintenanceModels(catalog, { mode: 'all', models: [] }), [
+    { value: 'gpt-5.6-sol', label: 'Sol · gpt-5.6-sol' },
+    { value: 'gpt-6-astra', label: 'gpt-6-astra' },
+  ])
+  assert.deepEqual(maintenanceModels(catalog, { mode: 'allowlist', models: ['gpt-6-astra', 'not-in-catalog'] }), [
+    { value: 'gpt-6-astra', label: 'gpt-6-astra' },
+  ])
+  assert.deepEqual(maintenanceModels(catalog, { mode: 'denylist', models: ['gpt-5.6-sol'] }), [
+    { value: 'gpt-6-astra', label: 'gpt-6-astra' },
+  ])
+  assert.deepEqual(maintenanceModels([], { mode: 'all', models: [] }), [])
 })

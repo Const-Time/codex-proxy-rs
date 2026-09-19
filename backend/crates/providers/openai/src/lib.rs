@@ -109,6 +109,7 @@ async fn initialize_inner(
                 store,
                 Arc::clone(&accounts),
                 Arc::clone(&leases),
+                Arc::clone(&runtime_policy),
                 profile.clone(),
                 config.base_url().to_owned(),
                 session_identity.turn_state_key(),

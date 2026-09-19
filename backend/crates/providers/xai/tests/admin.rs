@@ -786,6 +786,20 @@ impl ProviderCooldownPort for TestCooldown {
 struct TestRuntimePolicy;
 
 impl ProviderRuntimePolicyPort for TestRuntimePolicy {
+    fn load_account_selection_policy(
+        &self,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<gateway_core::account::AccountSelectionPolicy, ProviderStoreError>,
+    > {
+        Box::pin(async {
+            Ok(gateway_core::account::AccountSelectionPolicy::new(
+                gateway_core::account::RotationStrategy::Smart,
+                NonZeroU32::new(4).expect("positive concurrency"),
+                Duration::ZERO,
+            ))
+        })
+    }
     fn load_refresh_policy(
         &self,
     ) -> BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>> {

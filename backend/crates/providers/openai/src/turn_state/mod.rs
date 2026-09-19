@@ -4,6 +4,7 @@ mod identity;
 mod network;
 mod probe;
 mod scheduling;
+mod traffic;
 mod worker;
 pub(crate) use worker::StateRefreshTask;
 
@@ -116,12 +117,14 @@ pub(crate) struct StateManager {
     cipher: StateCipher,
     repository: CodexCredentialRepository,
     leases: Arc<dyn gateway_core::provider_ports::ProviderLeasePort>,
+    runtime_policy: Arc<dyn gateway_core::provider_ports::ProviderRuntimePolicyPort>,
     profile: CodexWireProfileState,
     base_url: String,
     test_slot: tokio::sync::Semaphore,
     account_policies: RwLock<HashMap<String, TurnStateAccountPolicy>>,
     fingerprint_key: [u8; 32],
     changes: tokio::sync::watch::Sender<u64>,
+    traffic: std::sync::Mutex<HashMap<(String, String), traffic::Traffic>>,
 }
 
 pub(super) fn fingerprint(value: &str) -> String {
@@ -133,6 +136,7 @@ impl StateManager {
         store: Arc<dyn TurnStateStore>,
         accounts: Arc<dyn ProviderAccountStore>,
         leases: Arc<dyn gateway_core::provider_ports::ProviderLeasePort>,
+        runtime_policy: Arc<dyn gateway_core::provider_ports::ProviderRuntimePolicyPort>,
         profile: CodexWireProfileState,
         base_url: String,
         key: [u8; 32],
@@ -168,11 +172,13 @@ impl StateManager {
             cipher,
             repository: CodexCredentialRepository::new(accounts),
             leases,
+            runtime_policy,
             profile,
             base_url,
             test_slot: tokio::sync::Semaphore::new(1),
             account_policies,
             changes,
+            traffic: std::sync::Mutex::new(HashMap::new()),
             fingerprint_key: crate::transport::session::hmac_sha256(
                 &key,
                 &[b"fingerprint-projection/v1"],
@@ -183,9 +189,11 @@ impl StateManager {
     async fn commit(
         &self,
         runtime: &mut Runtime,
-        document: Document,
+        mut document: Document,
         context: Option<&MutationContext>,
     ) -> Result<(), AdminError> {
+        let traffic = self.traffic_snapshot();
+        Self::apply_traffic(&mut document, &traffic);
         let data =
             serde_json::to_vec(&document).map_err(|_| AdminError::internal("State 序列化失败"))?;
         let sealed = self.cipher.seal(data)?;
@@ -216,6 +224,11 @@ impl StateManager {
         runtime.storage_revision = revision;
         runtime.document = document;
         runtime.dirty = false;
+        // An event arriving during the store write remains pending for the next CAS.
+        self.traffic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, value| traffic.get(key) != Some(value));
         Ok(())
     }
 
@@ -266,6 +279,7 @@ impl StateManager {
             .await
             .map_err(|_| AdminError::unavailable("State 存储不可用"))?;
         if revision == runtime.storage_revision {
+            self.flush_traffic(runtime);
             return Ok(());
         }
         let document: Document = match sealed {
@@ -286,6 +300,9 @@ impl StateManager {
         runtime.document = document;
         runtime.storage_revision = revision;
         runtime.dirty = false;
+        // Replay only traffic, never stale switches, revoked candidates or budgets.
+        // Pending activity is acknowledged only by a successful CAS commit.
+        self.flush_traffic(runtime);
         Ok(())
     }
 
@@ -414,7 +431,8 @@ impl StateManager {
             && policy.enabled
             && self.account_policy(account.id().as_str()).takeover;
         if may_collect && FernetShape::parse(token).is_some() {
-            Self::discover(&mut runtime, account.id().as_str(), model, now);
+            runtime.dirty |=
+                Self::discover(&mut runtime.document, account.id().as_str(), model, now);
         }
         let Some(target) = runtime
             .document

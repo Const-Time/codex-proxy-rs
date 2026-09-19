@@ -11,10 +11,7 @@ use gateway_core::{
 };
 use gateway_protocol::openai::sse::SseEventDecoder;
 use secrecy::ExposeSecret as _;
-use std::{
-    num::NonZeroU32,
-    time::{Duration, Instant, SystemTime},
-};
+use std::time::{Duration, Instant, SystemTime};
 
 pub(super) struct Probe<'a> {
     pub manager: &'a StateManager,
@@ -51,6 +48,78 @@ impl ProbeFailure {
 }
 
 impl Probe<'_> {
+    fn candidate(&self, token: Option<&str>) -> Result<(FernetShape, i64), ProbeFailure> {
+        let token = token.filter(|token| !token.is_empty()).ok_or_else(|| {
+            ProbeFailure::retry("采集响应已完成，但上游未返回 turn-state", "state_missing")
+        })?;
+        let shape = FernetShape::parse(token).ok_or_else(|| {
+            ProbeFailure::retry(
+                format!("上游返回 {} 字符，无法解析为支持的 State 结构", token.len()),
+                "state_structure",
+            )
+        })?;
+        let now = Utc::now().timestamp();
+        let remaining = shape
+            .issued_at
+            .saturating_add(self.policy.ttl_seconds)
+            .saturating_sub(now);
+        let actual = format!(
+            "{} 字符 / {} 块，按配置 TTL 估算剩余 {} 秒",
+            shape.header_length, shape.blocks, remaining
+        );
+        let expected = if self.policy.header_length == 0 && self.policy.cipher_blocks == 0 {
+            "292 字符 / 10 块或 332 字符 / 12 块".to_owned()
+        } else {
+            format!(
+                "{} 字符 / {} 块",
+                self.policy.header_length, self.policy.cipher_blocks
+            )
+        };
+        let matches = if self.policy.header_length == 0 && self.policy.cipher_blocks == 0 {
+            matches!((shape.header_length, shape.blocks), (292, 10) | (332, 12))
+        } else {
+            shape.header_length == self.policy.header_length
+                && shape.blocks == self.policy.cipher_blocks
+        };
+        if !matches {
+            return Err(ProbeFailure::retry(
+                format!("候选长度规则不匹配：{actual}；要求 {expected}"),
+                "state_shape_mismatch",
+            ));
+        }
+        if shape.issued_at > now + 60 {
+            return Err(ProbeFailure::retry(
+                format!(
+                    "候选签发时间超前 {} 秒（最多允许 60 秒）：{actual}",
+                    shape.issued_at - now
+                ),
+                "state_future",
+            ));
+        }
+        let expires_at = shape.candidate_expiry(self.policy, now).ok_or_else(|| {
+            ProbeFailure::retry(
+                format!(
+                    "候选剩余时间不足：{actual}；至少需要 {} 秒",
+                    self.policy.minimum_remaining_seconds
+                ),
+                "state_ttl",
+            )
+        })?;
+        if self
+            .target
+            .current
+            .iter()
+            .chain(&self.target.alternatives)
+            .any(|s| s.token == token)
+        {
+            return Err(ProbeFailure::retry(
+                format!("上游返回已有的重复 State，未增加候选：{actual}"),
+                "state_duplicate",
+            ));
+        }
+        Ok((shape, expires_at))
+    }
+
     async fn valid(&self) -> Result<(), ProbeFailure> {
         if self.cancellation.is_cancelled() {
             return Err(ProbeFailure::cancelled());
@@ -92,7 +161,7 @@ impl Probe<'_> {
         } else {
             self.policy.max_attempts
         };
-        let mut failure = ProbeFailure::retry("无符合结构、长度和剩余时间要求的新 state", "retry");
+        let mut failure = ProbeFailure::retry("本轮未获得新候选", "retry");
         for attempt in 0..attempts {
             self.valid().await?;
             if attempt > 0 {
@@ -107,31 +176,18 @@ impl Probe<'_> {
             };
             let token = match self.call(Some(&proxy), None).await {
                 Ok(Some(token)) => token,
-                Ok(None) => continue,
+                Ok(None) => unreachable!("collection without a candidate is classified by call"),
                 Err(error)
-                    if !error.pause && error.cooldown_until == 0 && error.reason == "network" =>
+                    if !error.pause
+                        && error.cooldown_until == 0
+                        && (error.reason == "network" || error.reason.starts_with("state_")) =>
                 {
                     failure = error;
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            let Some(shape) = FernetShape::parse(&token) else {
-                continue;
-            };
-            let Some(expires_at) = shape.candidate_expiry(self.policy, Utc::now().timestamp())
-            else {
-                continue;
-            };
-            if self
-                .target
-                .current
-                .iter()
-                .chain(&self.target.alternatives)
-                .any(|s| s.token == token)
-            {
-                continue;
-            }
+            let (shape, expires_at) = self.candidate(Some(&token))?;
             self.gap().await?;
             self.call(self.account.outbound_proxy(), Some(&token))
                 .await?;
@@ -166,12 +222,20 @@ impl Probe<'_> {
             return Err(ProbeFailure::cancelled());
         }
         let duration = Duration::from_secs(self.policy.timeout_seconds);
+        let scheduling = self
+            .manager
+            .runtime_policy
+            .load_account_selection_policy()
+            .await
+            .map_err(|_| {
+                ProbeFailure::retry("账号调度策略读取失败，未发送探测", "storage_unavailable")
+            })?;
         let lease = ProviderSchedulingLeaseRequest::new(
             account.provider().clone(),
             account.id().clone(),
             account.revision(),
-            NonZeroU32::new(1).expect("one"),
-            Duration::from_secs(2),
+            account.effective_concurrency(scheduling.max_concurrent_per_account()),
+            scheduling.request_interval(),
             SystemTime::now() + duration,
         );
         let _guard = match self
@@ -181,7 +245,21 @@ impl Probe<'_> {
             .await
         {
             Ok(ProviderLeaseAcquisition::Acquired(guard)) => guard,
-            _ => return Err(ProbeFailure::retry("账号正忙，延后探测", "account_busy")),
+            Ok(ProviderLeaseAcquisition::Busy { retry_after }) => {
+                let retry = retry_after.map_or(String::new(), |delay| {
+                    format!("；建议至少等待 {} 毫秒", delay.as_millis())
+                });
+                return Err(ProbeFailure::retry(
+                    format!("账号并发已满或请求间隔未到，延后探测{retry}"),
+                    "account_busy",
+                ));
+            }
+            Err(_) => {
+                return Err(ProbeFailure::retry(
+                    "账号调度存储不可用，未发送探测",
+                    "storage_unavailable",
+                ));
+            }
         };
         let credential = self
             .manager
@@ -265,7 +343,7 @@ impl Probe<'_> {
                 .map_err(|e| classify(e, &mut observed))?;
             observed.status = response.diagnostics.status_code;
             observed.request_id = response.diagnostics.request_id;
-            observed.returned_state = response.turn_state.filter(|v| v.len() <= 4096);
+            observed.returned_state = response.turn_state;
             let mut decoder = SseEventDecoder::default();
             let mut bytes = 0;
             while let Some(chunk) = response.body.next().await {
@@ -302,14 +380,42 @@ impl Probe<'_> {
             }
             Err(ProbeFailure::retry("探测流未正常完成", "protocol"))
         };
-        let result = tokio::select! {
+        let mut result = tokio::select! {
             _ = self.cancellation.cancelled() => Err(ProbeFailure::cancelled()),
             _ = changes.changed() => Err(ProbeFailure::cancelled()),
             result = tokio::time::timeout(duration, operation) =>
                 result.unwrap_or_else(|_| Err(ProbeFailure::retry("探测请求超时", "network"))),
         };
+        // HTTP/SSE success and candidate acceptance are different facts. Keep real
+        // usage/success, but audit the rejection instead of silently spending budget.
+        if result.is_ok() && token.is_none() {
+            result = self
+                .candidate(observed.returned_state.as_deref())
+                .map(|_| ());
+        }
         observed.latency_ms = began.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         observed.message = result.as_ref().err().map(|e| e.message.clone());
+        if let Err(error) = &result
+            && error.reason.starts_with("state_")
+        {
+            let mut runtime = self.manager.runtime.lock().await;
+            if runtime.document.generation == self.generation
+                && let Some(target) = runtime.document.targets.iter_mut().find(|target| {
+                    target.input.account_id == self.target.input.account_id
+                        && target.input.model == self.target.input.model
+                })
+            {
+                record(
+                    target,
+                    "rejected",
+                    observed.returned_state.as_deref().unwrap_or(""),
+                    &error.message,
+                );
+                runtime.dirty = true;
+            }
+        }
+        // Do not persist arbitrarily large upstream headers in request details.
+        observed.returned_state = observed.returned_state.filter(|value| value.len() <= 4096);
         if let Err(error) = &result
             && error.cooldown_until > 0
         {

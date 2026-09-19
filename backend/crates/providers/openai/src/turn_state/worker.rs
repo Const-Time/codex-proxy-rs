@@ -88,6 +88,9 @@ impl StateManager {
                 }
             }
             let mut jobs = Vec::new();
+            // Maintenance is independently limited to one model per account per cycle.
+            // Do not encode this limit into the lease shared with real business requests.
+            let mut probing_accounts = HashSet::new();
             let count = doc.targets.len();
             let start = doc
                 .cursor
@@ -120,6 +123,9 @@ impl StateManager {
                     continue;
                 }
                 let target = &doc.targets[index];
+                if !probing_accounts.insert(target.input.account_id.clone()) {
+                    continue;
+                }
                 let (account, binding) = identity.expect("eligible identity");
                 let pool = doc
                     .pools
