@@ -6,6 +6,9 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait TurnStateStore: Send + Sync {
+    /// Must succeed before sending a maintenance request. Never debit an end user.
+    async fn begin_probe(&self, probe: &TurnStateProbeStart) -> AdminStoreResult<()>;
+    async fn finish_probe(&self, id: &str, result: &TurnStateProbeResult) -> AdminStoreResult<()>;
     async fn load(&self) -> AdminStoreResult<(u64, Option<Vec<u8>>)>;
     /// 所有写入 CAS；审计不包含密文、代理地址或 token。
     async fn save(

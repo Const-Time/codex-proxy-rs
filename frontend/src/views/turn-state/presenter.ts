@@ -28,3 +28,24 @@ export function exactModels(value: string): string[] {
     throw new Error('请填写精确上游模型名，不能使用通配符')
   return models
 }
+
+export function waitReasonLabel(reason: string): string {
+  const labels: Record<string, string> = {
+    paused: '维护已暂停',
+    fresh: '候选充足',
+    idle: '无近期业务，等待流量',
+    budget: '小时预算已用完',
+    upstream_cooldown: '等待上游冷却',
+    account_busy: '账号忙',
+    account_unavailable: '账号或模型不可用',
+    proxy_unavailable: '代理不可用',
+    storage_unavailable: '存储不可用',
+    upstream_failure: '上游拒绝或失败',
+    retry: '等待重试',
+    network: '网络异常',
+    protocol: '响应异常',
+    cancelled: '任务已取消',
+    queued: '等待调度',
+  }
+  return labels[reason] ?? reason
+}

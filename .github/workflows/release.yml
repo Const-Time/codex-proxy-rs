@@ -710,3 +710,30 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/release/*
+
+      # One-time version correction. Never withdraw the old release before all
+      # replacement assets and both architecture images have been published.
+      - name: Plan withdrawal of superseded v4.0.0
+        if: ${{ github.repository == 'Const-Time/codex-proxy-rs' && needs.release-info.outputs.tag == 'v3.10.0' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-info.outputs.tag }}
+          REPLACEMENT_DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: python3 release/withdraw_v4.py plan "${RUNNER_TEMP}/v4-withdrawal.json"
+
+      - name: Archive superseded release metadata
+        if: ${{ github.repository == 'Const-Time/codex-proxy-rs' && needs.release-info.outputs.tag == 'v3.10.0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: v4-withdrawal-backup
+          path: ${{ runner.temp }}/v4-withdrawal.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Withdraw superseded v4.0.0
+        if: ${{ github.repository == 'Const-Time/codex-proxy-rs' && needs.release-info.outputs.tag == 'v3.10.0' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-info.outputs.tag }}
+          REPLACEMENT_DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: python3 release/withdraw_v4.py apply "${RUNNER_TEMP}/v4-withdrawal.json"

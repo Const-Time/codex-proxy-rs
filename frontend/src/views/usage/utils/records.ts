@@ -159,6 +159,8 @@ export type UsageDisplayRecord = UsageListRecord
 type UsageCommonRecord = UsageDisplayRecord | UsageViewModel
 
 export function usageTransportType(transport?: string | null) {
+  if (transport === 'maintenance')
+    return '系统维护'
   if (transport === 'websocket')
     return 'WS'
 

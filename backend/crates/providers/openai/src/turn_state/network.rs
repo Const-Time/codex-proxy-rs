@@ -17,7 +17,7 @@ pub(super) fn validate_pool(pool: &Pool) -> Result<(), AdminError> {
         return Err(AdminError::invalid("代理入口、认证或 JSON Pointer 不合法"));
     }
     match pool.mode.as_str() {
-        "gateway" => {
+        "gateway" | "fixed" | "rotating" => {
             OutboundProxy::parse(&pool.endpoint)
                 .map_err(|_| AdminError::invalid("代理地址须为带端口的 HTTP(S)/SOCKS5(H) URL"))?;
         }
@@ -35,7 +35,11 @@ pub(super) fn validate_pool(pool: &Pool) -> Result<(), AdminError> {
                 ));
             }
         }
-        _ => return Err(AdminError::invalid("请选择轮换入口或 API 提取式")),
+        _ => {
+            return Err(AdminError::invalid(
+                "请选择固定出口、每连接轮换入口或 API 提取式",
+            ));
+        }
     }
     Ok(())
 }
@@ -88,7 +92,7 @@ async fn limited_body(response: reqwest::Response, max: usize) -> Result<Vec<u8>
 
 /// 每次探测重新提取一个代理，不缓存未知租约、不猜测供应商的续期与换 IP API。
 pub(super) async fn acquire(pool: &Pool) -> Result<OutboundProxy, AdminError> {
-    if pool.mode == "gateway" {
+    if matches!(pool.mode.as_str(), "gateway" | "fixed" | "rotating") {
         return OutboundProxy::parse(&pool.endpoint)
             .map_err(|_| AdminError::invalid("代理配置不合法"));
     }
@@ -122,30 +126,32 @@ pub(super) async fn acquire(pool: &Pool) -> Result<OutboundProxy, AdminError> {
     OutboundProxy::parse(&value).map_err(|_| AdminError::bad_gateway("提取结果不是完整代理 URL"))
 }
 
-pub(super) async fn test(pool: &Pool) -> Result<TurnStatePoolTest, AdminError> {
-    let proxy = acquire(pool).await?;
-    let response = client(Some(&proxy), Duration::from_secs(15))?
-        .get("https://api64.ipify.org")
+async fn test_ip(proxy: &OutboundProxy, url: &str) -> Option<IpAddr> {
+    let response = client(Some(proxy), Duration::from_secs(15))
+        .ok()?
+        .get(url)
         .send()
         .await
-        .map_err(|_| AdminError::bad_gateway("代理出口检测失败"))?;
+        .ok()?;
     if !response.status().is_success() {
-        return Err(AdminError::bad_gateway("出口检测服务拒绝请求"));
+        return None;
     }
-    let body = limited_body(response, 128).await?;
-    let ip: IpAddr = std::str::from_utf8(&body)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .ok_or_else(|| AdminError::bad_gateway("出口检测未返回 IP 地址"))?;
+    let body = limited_body(response, 128).await.ok()?;
+    std::str::from_utf8(&body).ok()?.trim().parse().ok()
+}
+
+pub(super) async fn test(pool: &Pool) -> Result<TurnStatePoolTest, AdminError> {
+    let proxy = acquire(pool).await?;
+    let (v4, v6) = tokio::join!(
+        test_ip(&proxy, "https://api.ipify.org"),
+        test_ip(&proxy, "https://api6.ipify.org")
+    );
+    let v4 = v4.filter(IpAddr::is_ipv4);
+    let v6 = v6.filter(IpAddr::is_ipv6);
     Ok(TurnStatePoolTest {
-        success: true,
-        ipv6: ip.is_ipv6(),
-        exit_ip: Some(ip.to_string()),
-        message: if ip.is_ipv6() {
-            "本次检测为 IPv6；动态入口的下一连接可能使用不同出口"
-        } else {
-            "本次检测为 IPv4，请检查供应商的 IPv6 出口设置"
-        }
-        .to_owned(),
+        success: v4.is_some() || v6.is_some(), ipv6: v6.is_some(),
+        exit_ip: v6.or(v4).map(|ip| ip.to_string()),
+        ipv4_address: v4.map(|ip| ip.to_string()), ipv6_address: v6.map(|ip| ip.to_string()),
+        message: "IPv4 / IPv6 分别检测；未取得地址表示本次检测未确认，不代表不支持。每连接轮换也不保证出口变化。".to_owned(),
     })
 }

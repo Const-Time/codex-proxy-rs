@@ -1,6 +1,6 @@
 mod admin;
 mod catalog;
-mod contract;
+pub(crate) mod contract;
 mod cookie;
 mod oauth;
 mod profile_statistics;

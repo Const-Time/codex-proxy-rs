@@ -123,7 +123,7 @@ fn round_robin_attempt() -> AttemptContext {
     )
 }
 
-fn selector(
+pub(crate) fn selector(
     store: &Arc<MemoryAccountStore>,
     leases: Arc<TestLeaseCoordinator>,
 ) -> CodexCredentialSelector {

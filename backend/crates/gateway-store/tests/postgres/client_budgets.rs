@@ -74,6 +74,264 @@ async fn status(database: &TestDatabase, key: &str) -> ClientBudgetStatus {
         .budget
 }
 
+async fn member(database: &TestDatabase, key: &str, suffix: &str) -> String {
+    let id = format!("acct_{:0<32}", hex::encode(suffix.as_bytes()));
+    sqlx::query("insert into provider_accounts(id, provider_kind, name, authentication_kind, provider_credentials_json, has_refresh_token, credential_observed_at, created_at, updated_at) values ($1, 'openai', 'test', 'oauth', '{}', false, now(), now(), now())")
+        .bind(&id).execute(&database.pool).await.unwrap();
+    sqlx::query("insert into account_group_accounts values ($1, $2, now())")
+        .bind(group_id(key).as_str())
+        .bind(&id)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn second_subscriber(database: &TestDatabase, key: &str) {
+    sqlx::query("insert into users(id, username, password_hash, created_at, updated_at) values ('second-user', 'second-user', 'unused', now(), now())")
+        .execute(&database.pool).await.unwrap();
+    sqlx::query(
+        "insert into user_account_groups(user_id, account_group_id) values ('second-user', $1)",
+    )
+    .bind(group_id(key).as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query("select advance_subscription_windows('second-user', $1, now())")
+        .bind(group_id(key).as_str())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn subscription_cycle_upgrade_keeps_historical_windows_counters_and_ledger() {
+    let Some(db) = TestDatabase::create_at_version("group_cycle_upgrade", 22).await else {
+        return;
+    };
+    seed(&db, "legacy", "0", "700").await;
+    member(&db, "legacy", "legacy").await;
+    sqlx::query("insert into user_group_budget_windows values('budget-user',$1,now()-interval '8 hours',now()+interval '16 hours',now()-interval '6 days',now()+interval '1 day',2.5,87.232645,null,null)")
+        .bind(group_id("legacy").as_str()).execute(&db.pool).await.unwrap();
+    sqlx::query("insert into user_group_charge_events(request_id,user_id,account_group_id,client_api_key_ref,amount_usd,completed_at) values('req_old','budget-user',$1,'legacy',202.60959436,now()-interval '7 days')")
+        .bind(group_id("legacy").as_str()).execute(&db.pool).await.unwrap();
+    let before: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(w) from user_group_budget_windows w")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
+    let after: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(w) from user_group_budget_windows w")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        before, after,
+        "migration is not an unapproved historical repair"
+    );
+    PgClientBudgetStore::new(db.pool.clone())
+        .admit(key_id("legacy"), Some(group_id("legacy")))
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "legacy").await.weekly_used_usd.canonical(),
+        "87.232645"
+    );
+    let ledger: String =
+        sqlx::query_scalar("select sum(amount_usd)::text from user_group_charge_events")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(ledger, "202.6095943600");
+    let events: i64 = sqlx::query_scalar("select count(*) from subscription_reset_events")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(events, 0);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn single_account_expiry_keeps_usage_until_confirmed_upstream_reset() {
+    let Some(db) = TestDatabase::create("single_group_cycle").await else {
+        return;
+    };
+    seed(&db, "single", "0", "10").await;
+    let account = member(&db, "single", "single").await;
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    store.settle(charge("single", "first", "9")).await.unwrap();
+    sqlx::query("update user_group_budget_windows set weekly_end=now()-interval '1 second'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update subscription_group_cycles set weekly_start=now()-interval '8 days',weekly_end=now()-interval '1 second'").execute(&db.pool).await.unwrap();
+    assert_eq!(status(&db, "single").await.weekly_used_usd.canonical(), "9");
+    store
+        .admit(key_id("single"), Some(group_id("single")))
+        .await
+        .unwrap();
+    store
+        .settle(charge("single", "after-boundary", "2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&db, "single").await.weekly_used_usd.canonical(),
+        "11"
+    );
+    assert_eq!(
+        store
+            .admit(key_id("single"), Some(group_id("single")))
+            .await
+            .unwrap_err()
+            .client_error_code(),
+        Some("group_weekly_budget_exceeded")
+    );
+    let events: i64 = sqlx::query_scalar("select count(*) from subscription_reset_events")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(events, 0, "no local weekly rollover in linked mode");
+    sqlx::query("insert into subscription_quota_observations values($1,'codex:weekly',now(),now()+interval '16 hours',75)")
+        .bind(&account).execute(&db.pool).await.unwrap();
+    second_subscriber(&db, "single").await;
+    let ends: i64 =
+        sqlx::query_scalar("select count(distinct weekly_end) from user_group_budget_windows")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(ends, 1, "new subscribers use the same upstream boundary");
+    assert_eq!(
+        status(&db, "single").await.weekly_used_usd.canonical(),
+        "11",
+        "first baseline must not repair or clear historical usage"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn multi_account_groups_ignore_individual_resets_and_roll_all_subscribers_together() {
+    use gateway_admin::ports::store::AccountStore as _;
+    let Some(db) = TestDatabase::create("multi_group_cycle").await else {
+        return;
+    };
+    seed(&db, "multi", "0", "100").await;
+    let first = member(&db, "multi", "first").await;
+    let second = member(&db, "multi", "second").await;
+    // Disabled configured members still count: enable toggles cannot clear budgets.
+    sqlx::query("update provider_accounts set enabled=false where id=$1")
+        .bind(second)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    store.settle(charge("multi", "one", "9")).await.unwrap();
+    second_subscriber(&db, "multi").await;
+    store
+        .settle(ClientBudgetCharge {
+            scope: Some(gateway_core::engine::budget::ClientBudgetScope {
+                user_id: "second-user".into(),
+                group_id: group_id("multi"),
+            }),
+            ..charge("multi", "two", "8")
+        })
+        .await
+        .unwrap();
+    super::admin_account_store(&db.pool)
+        .reset_account_subscriptions(&first, "one-account-credit")
+        .await
+        .unwrap();
+    assert_eq!(status(&db, "multi").await.weekly_used_usd.canonical(), "9");
+    let affected: i64 = sqlx::query_scalar(
+        "select affected_count from subscription_reset_events where reason='upstream_manual'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(affected, 0);
+    let boundary = Utc::now();
+    sqlx::query(
+        "update subscription_group_cycles set weekly_start=$1-interval '168 hours',weekly_end=$1",
+    )
+    .bind(boundary)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    store
+        .admit(key_id("multi"), Some(group_id("multi")))
+        .await
+        .unwrap();
+    store.settle(charge("multi", "after", "2")).await.unwrap();
+    store
+        .admit(key_id("multi"), Some(group_id("multi")))
+        .await
+        .unwrap();
+    let windows: (i64, i64, String) = sqlx::query_as("select count(distinct weekly_end),count(distinct weekly_start),sum(weekly_used_usd)::text from user_group_budget_windows").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(windows, (1, 1, "2.0000000000".into()));
+    let events: (i64, i64, i32) = sqlx::query_as("select count(*),max(affected_count),max(jsonb_array_length(targets)) from subscription_reset_events where reason='group_period'").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        events,
+        (1, 2, 2),
+        "one recorded group-wide reset, no duplicate after admission"
+    );
+    let last: String =
+        sqlx::query_scalar("select last_reset_reason from user_group_budget_windows limit 1")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(last, "group_period");
+    db.close().await;
+}
+
+#[tokio::test]
+async fn group_membership_and_manual_reset_preserve_shared_cycle_and_other_usage() {
+    let Some(db) = TestDatabase::create("group_cycle_transition").await else {
+        return;
+    };
+    seed(&db, "topology", "0", "100").await;
+    member(&db, "topology", "only").await;
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    store
+        .settle(charge("topology", "before", "7"))
+        .await
+        .unwrap();
+    member(&db, "topology", "additional").await;
+    second_subscriber(&db, "topology").await;
+    assert_eq!(
+        status(&db, "topology").await.weekly_used_usd.canonical(),
+        "7"
+    );
+    let before: DateTime<Utc> =
+        sqlx::query_scalar("select weekly_end from subscription_group_cycles")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let targets =
+        serde_json::json!([{"userId":"second-user","groupId":group_id("topology").as_str()}]);
+    sqlx::query("select reset_user_subscriptions('selected',null,null,'manual',now(),$1)")
+        .bind(sqlx::types::Json(targets))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let after: DateTime<Utc> =
+        sqlx::query_scalar("select weekly_end from subscription_group_cycles")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after);
+    let ends: i64 =
+        sqlx::query_scalar("select count(distinct weekly_end) from user_group_budget_windows")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(ends, 1);
+    assert_eq!(
+        status(&db, "topology").await.weekly_used_usd.canonical(),
+        "7"
+    );
+    db.close().await;
+}
+
 fn context() -> MutationContext {
     MutationContext {
         actor: MutationActor::System,
@@ -194,6 +452,7 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
     };
     seed(&db, "linked", "10", "100").await;
     seed(&db, "other", "10", "100").await;
+    seed(&db, "pooled", "10", "100").await;
     let account = "acct_00000000000000000000000000000991";
     sqlx::query("insert into provider_accounts(id, provider_kind, name, authentication_kind, provider_credentials_json, has_refresh_token, credential_observed_at, created_at, updated_at) values ($1, 'openai', 'test', 'oauth', '{}', false, now(), now(), now())")
         .bind(account).execute(&db.pool).await.unwrap();
@@ -203,7 +462,18 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
         .execute(&db.pool)
         .await
         .unwrap();
+    sqlx::query("insert into account_group_accounts values ($1, $2, now())")
+        .bind(group_id("pooled").as_str())
+        .bind(account)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    member(&db, "pooled", "pool-other").await;
     let store = PgClientBudgetStore::new(db.pool.clone());
+    store
+        .settle(charge("pooled", "pool-before", "5"))
+        .await
+        .unwrap();
     store
         .settle(charge("linked", "linked-before", "3"))
         .await
@@ -288,6 +558,11 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
         .unwrap();
     assert_eq!(status(&db, "linked").await.weekly_used_usd.canonical(), "0");
     assert_eq!(status(&db, "other").await.weekly_used_usd.canonical(), "4");
+    assert_eq!(
+        status(&db, "pooled").await.weekly_used_usd.canonical(),
+        "5",
+        "the same upstream event resets its single-account group, not its pooled group"
+    );
     let mut after = charge("linked", "linked-after", "2");
     after.completed_at = (now + chrono::Duration::seconds(2)).into();
     store.settle(after).await.unwrap();
@@ -620,10 +895,10 @@ async fn window_rollover_is_shanghai_midnight_and_seven_days_with_late_settlemen
     assert_eq!((day_end - day_start).num_hours(), 24);
     assert_eq!((week_end - day_start).num_hours(), 168);
     store.settle(charge("key", "first", "1")).await.unwrap();
-    sqlx::query("update user_group_budget_windows set daily_start = daily_start - interval '1 day', daily_end = daily_start")
-        .execute(&database.pool).await.unwrap();
-    store
-        .admit(key_id("key"), Some(group_id("key")))
+    sqlx::query("select advance_subscription_windows('budget-user', $1, $2)")
+        .bind(group_id("key").as_str())
+        .bind(day_end + chrono::Duration::seconds(1))
+        .execute(&database.pool)
         .await
         .unwrap();
     assert_eq!(
@@ -634,14 +909,17 @@ async fn window_rollover_is_shanghai_midnight_and_seven_days_with_late_settlemen
         status(&database, "key").await.weekly_used_usd.canonical(),
         "1"
     );
-    store.settle(charge("key", "second", "1")).await.unwrap();
-    sqlx::query("update user_group_budget_windows set daily_end = now() - interval '1 second', weekly_end = now() - interval '1 second'")
-        .execute(&database.pool).await.unwrap();
-    let virtual_reset = status(&database, "key").await;
-    assert_eq!(virtual_reset.daily_used_usd.canonical(), "0");
-    assert_eq!(virtual_reset.weekly_used_usd.canonical(), "0");
     store
-        .admit(key_id("key"), Some(group_id("key")))
+        .settle(ClientBudgetCharge {
+            completed_at: (day_end + chrono::Duration::seconds(2)).into(),
+            ..charge("key", "second", "1")
+        })
+        .await
+        .unwrap();
+    sqlx::query("select advance_subscription_windows('budget-user', $1, $2)")
+        .bind(group_id("key").as_str())
+        .bind(week_end + chrono::Duration::seconds(1))
+        .execute(&database.pool)
         .await
         .unwrap();
     let old = ClientBudgetCharge {

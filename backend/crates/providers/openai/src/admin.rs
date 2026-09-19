@@ -1467,13 +1467,20 @@ fn log_import_failure(stage: &'static str, error: &'static str) {
 
 fn map_oauth_error(error: CodexOAuthAdminError) -> ProviderAdminError {
     use CodexOAuthAdminError as Error;
+    if error == Error::IdentityMismatch {
+        return provider_admin_error(ProviderAdminErrorKind::Conflict).with_public_message(
+            "所选 ChatGPT 账号与账号记录不一致，无法完成授权：请改为新建账号并重新授权，不要重复提交本次回调",
+        );
+    }
     provider_admin_error(match error {
         Error::InvalidInput
         | Error::CallbackRejected
         | Error::TokenRejected
         | Error::Credential => ProviderAdminErrorKind::Invalid,
         Error::NotFound | Error::FlowExpired => ProviderAdminErrorKind::NotFound,
-        Error::Conflict | Error::Ambiguous => ProviderAdminErrorKind::Conflict,
+        Error::Conflict | Error::Ambiguous | Error::IdentityMismatch => {
+            ProviderAdminErrorKind::Conflict
+        }
         Error::UpstreamUnavailable | Error::StorageUnavailable => {
             ProviderAdminErrorKind::Unavailable
         }
@@ -1491,6 +1498,7 @@ const fn oauth_error_code(error: &CodexOAuthAdminError) -> &'static str {
         CodexOAuthAdminError::UpstreamUnavailable => "upstream_unavailable",
         CodexOAuthAdminError::Ambiguous => "ambiguous",
         CodexOAuthAdminError::StorageUnavailable => "storage_unavailable",
+        CodexOAuthAdminError::IdentityMismatch => "identity_mismatch",
         CodexOAuthAdminError::Credential => "credential",
     }
 }

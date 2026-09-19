@@ -924,7 +924,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             {
                 manager.observe_response(&active_account, upstream_model.as_str(), token,
                     response_transport != CodexBackendTransport::WebSocket && !request.managed_turn_state
-                        && !terminal_response_is_incomplete(&events), request.turn_state_generation).await;
+                        && !terminal_response_is_incomplete(&events), request.turn_state_generation, request.turn_state_binding).await;
             }
             if response_transport == CodexBackendTransport::WebSocket
                 && completed && terminal_failure.is_none()
@@ -1074,7 +1074,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         {
             manager.observe_response(&active_account, upstream_model.as_str(), token,
                 response_transport != CodexBackendTransport::WebSocket && !request.managed_turn_state
-                    && !terminal_response_is_incomplete(&events), request.turn_state_generation).await;
+                    && !terminal_response_is_incomplete(&events), request.turn_state_generation, request.turn_state_binding).await;
         }
         if response_transport == CodexBackendTransport::WebSocket
             && completed && terminal_failure.is_none()

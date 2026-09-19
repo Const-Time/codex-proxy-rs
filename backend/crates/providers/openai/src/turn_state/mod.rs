@@ -1,6 +1,9 @@
 //! 页面配置、短期 state 生命周期与 Provider 运行时读取。不会改变账号或业务出口。
 mod crypto;
+mod identity;
 mod network;
+mod probe;
+mod scheduling;
 mod worker;
 pub(crate) use worker::StateRefreshTask;
 
@@ -22,7 +25,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Pool {
     id: String,
     name: String,
@@ -40,6 +43,8 @@ struct Current {
     issued_at: i64,
     expires_at: i64,
     account_revision: u64,
+    #[serde(default)]
+    binding: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -51,6 +56,16 @@ struct Target {
     next_probe_at: i64,
     last_message: String,
     history: Vec<TurnStateObservation>,
+    #[serde(default)]
+    automatic: bool,
+    #[serde(default)]
+    last_traffic_at: Option<i64>,
+    #[serde(default)]
+    wait_reason: String,
+    #[serde(default)]
+    cooldown_until: i64,
+    #[serde(default)]
+    refresh_requested: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -61,6 +76,10 @@ struct Document {
     targets: Vec<Target>,
     #[serde(default)]
     accounts: Vec<TurnStateAccountPolicy>,
+    #[serde(default)]
+    budgets: Vec<scheduling::Budget>,
+    #[serde(default)]
+    cursor: Option<(String, String)>,
 }
 
 impl Default for Document {
@@ -71,6 +90,8 @@ impl Default for Document {
             pools: vec![],
             targets: vec![],
             accounts: vec![],
+            budgets: vec![],
+            cursor: None,
         }
     }
 }
@@ -85,7 +106,7 @@ struct Runtime {
 
 struct StateOwner {
     account_id: String,
-    revision: u64,
+    binding: [u8; 32],
     expires_at: i64,
 }
 
@@ -100,6 +121,7 @@ pub(crate) struct StateManager {
     test_slot: tokio::sync::Semaphore,
     account_policies: RwLock<HashMap<String, TurnStateAccountPolicy>>,
     fingerprint_key: [u8; 32],
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 pub(super) fn fingerprint(value: &str) -> String {
@@ -133,6 +155,7 @@ impl StateManager {
                 .map(|p| (p.account_id.clone(), p.clone()))
                 .collect(),
         );
+        let (changes, _) = tokio::sync::watch::channel(document.generation);
         Ok(Arc::new(Self {
             runtime: Mutex::new(Runtime {
                 storage_revision,
@@ -149,6 +172,7 @@ impl StateManager {
             base_url,
             test_slot: tokio::sync::Semaphore::new(1),
             account_policies,
+            changes,
             fingerprint_key: crate::transport::session::hmac_sha256(
                 &key,
                 &[b"fingerprint-projection/v1"],
@@ -181,6 +205,14 @@ impl StateManager {
             Err(_) => return Err(AdminError::unavailable("State 保存失败，未应用更改")),
         };
         self.publish_account_policies(&document);
+        self.changes.send_if_modified(|generation| {
+            if *generation == document.generation {
+                false
+            } else {
+                *generation = document.generation;
+                true
+            }
+        });
         runtime.storage_revision = revision;
         runtime.document = document;
         runtime.dirty = false;
@@ -243,6 +275,14 @@ impl StateManager {
         };
         document.policy.validate()?;
         self.publish_account_policies(&document);
+        self.changes.send_if_modified(|generation| {
+            if *generation == document.generation {
+                false
+            } else {
+                *generation = document.generation;
+                true
+            }
+        });
         runtime.document = document;
         runtime.storage_revision = revision;
         runtime.dirty = false;
@@ -250,7 +290,12 @@ impl StateManager {
     }
 
     /// 仅供新业务 attempt 读取；正常续接由调用方优先保留。截止时间在读取时再次检查。
-    pub(crate) async fn select(&self, account: &ProviderAccount, model: &str) -> Option<String> {
+    pub(crate) async fn select(
+        &self,
+        account: &ProviderAccount,
+        model: &str,
+        binding: &[u8; 32],
+    ) -> Option<String> {
         let runtime =
             tokio::time::timeout(std::time::Duration::from_millis(20), self.runtime.lock())
                 .await
@@ -262,6 +307,14 @@ impl StateManager {
         let target = doc.targets.iter().find(|t| {
             t.input.account_id == account.id().as_str() && t.input.model == model && t.input.enabled
         })?;
+        if target.automatic
+            && !self
+                .account_policy(account.id().as_str())
+                .maintenance
+                .auto_models
+        {
+            return None;
+        }
         if !doc
             .pools
             .iter()
@@ -274,8 +327,7 @@ impl StateManager {
             .iter()
             .chain(&target.alternatives)
             .find(|state| {
-                state.expires_at > Utc::now().timestamp()
-                    && state.account_revision == account.revision().get()
+                state.expires_at > Utc::now().timestamp() && state.belongs_to(account, binding)
             })
             .map(|state| state.token.clone())
     }
@@ -316,10 +368,23 @@ impl StateManager {
         token: &str,
         collect: bool,
         generation: Option<u64>,
+        binding: Option<[u8; 32]>,
     ) {
         if token.is_empty() || token.len() > 4096 {
             return;
         }
+        let Some(binding) = binding else { return };
+        let identity_current = if collect {
+            self.current_identity(account)
+                .await
+                .is_some_and(|(current, current_binding)| {
+                    current_binding == binding
+                        && current.enabled()
+                        && current.model_access().allows(model)
+                })
+        } else {
+            false
+        };
         let Ok(mut runtime) = self.runtime.try_lock() else {
             return;
         };
@@ -338,15 +403,19 @@ impl StateManager {
             hex::encode(Sha256::digest(token.as_bytes())),
             StateOwner {
                 account_id: account.id().as_str().to_owned(),
-                revision: account.revision().get(),
+                binding,
                 expires_at: now + 3600,
             },
         );
         let policy = runtime.document.policy.clone();
         let may_collect = collect
+            && identity_current
             && generation == Some(runtime.document.generation)
             && policy.enabled
             && self.account_policy(account.id().as_str()).takeover;
+        if may_collect && FernetShape::parse(token).is_some() {
+            Self::discover(&mut runtime, account.id().as_str(), model, now);
+        }
         let Some(target) = runtime
             .document
             .targets
@@ -374,6 +443,7 @@ impl StateManager {
                     issued_at: shape.issued_at,
                     expires_at,
                     account_revision: account.revision().get(),
+                    binding: Some(binding),
                 },
                 now,
             );
@@ -389,9 +459,11 @@ impl StateManager {
         &self,
         account: &ProviderAccount,
         request: &mut CodexResponsesRequest,
+        binding: [u8; 32],
     ) {
         let runtime = self.runtime.lock().await;
         request.turn_state_generation = Some(runtime.document.generation);
+        request.turn_state_binding = Some(binding);
         let now = Utc::now().timestamp();
         let wrong_owner = |token: &str| {
             if token.len() > 4096 {
@@ -400,8 +472,7 @@ impl StateManager {
             let fingerprint = hex::encode(Sha256::digest(token.as_bytes()));
             runtime.owners.get(&fingerprint).is_some_and(|owner| {
                 owner.expires_at > now
-                    && (owner.account_id != account.id().as_str()
-                        || owner.revision != account.revision().get())
+                    && (owner.account_id != account.id().as_str() || owner.binding != binding)
             }) || runtime.document.targets.iter().any(|target| {
                 target
                     .current
@@ -411,7 +482,7 @@ impl StateManager {
                         state.token == token
                             && state.expires_at > now
                             && (target.input.account_id != account.id().as_str()
-                                || state.account_revision != account.revision().get())
+                                || !state.belongs_to(account, &binding))
                     })
             })
         };
@@ -467,6 +538,9 @@ impl StateManager {
                 .targets
                 .iter()
                 .map(|t| {
+                    let maintenance = scheduling::maintenance(doc, &t.input.account_id);
+                    let (hourly_used, budget_resets_at) =
+                        scheduling::budget(doc, &t.input.account_id, now);
                     let active = t
                         .current
                         .iter()
@@ -477,6 +551,7 @@ impl StateManager {
                         target: t.input.clone(),
                         status: if !doc.policy.enabled
                             || !t.input.enabled
+                            || (t.automatic && !maintenance.auto_models)
                             || !doc
                                 .accounts
                                 .iter()
@@ -516,6 +591,19 @@ impl StateManager {
                             .accounts
                             .iter()
                             .any(|p| p.account_id == t.input.account_id && p.takeover),
+                        wait_reason: {
+                            let gate = scheduling::gate(doc, t, now);
+                            if gate == "queued" && !t.wait_reason.is_empty() {
+                                t.wait_reason.clone()
+                            } else {
+                                gate.to_owned()
+                            }
+                        },
+                        hourly_used,
+                        hourly_limit: maintenance.max_probes_per_hour,
+                        budget_resets_at,
+                        last_traffic_at: t.last_traffic_at,
+                        automatic: t.automatic,
                     }
                 })
                 .collect(),
@@ -533,12 +621,14 @@ fn publish_candidate(target: &mut Target, current: Current, now: i64) {
     }
     target.alternatives.retain(|old| {
         old.expires_at > now
-            && old.account_revision == current.account_revision
+            && old.binding == current.binding
+            && (current.binding.is_some() || old.account_revision == current.account_revision)
             && old.token != current.token
     });
     if let Some(previous) = target.current.take()
         && previous.expires_at > now
-        && previous.account_revision == current.account_revision
+        && previous.binding == current.binding
+        && (current.binding.is_some() || previous.account_revision == current.account_revision)
     {
         target.alternatives.insert(0, previous);
     }
@@ -600,6 +690,21 @@ impl TurnStateService for StateManager {
             .accounts
             .iter()
             .find(|p| p.account_id == account_id);
+        let maintenance = input
+            .maintenance
+            .unwrap_or_else(|| old.map(|p| p.maintenance.clone()).unwrap_or_default());
+        maintenance.validate()?;
+        if maintenance
+            .pool_id
+            .as_ref()
+            .is_some_and(|id| !document.pools.iter().any(|p| &p.id == id))
+        {
+            return Err(AdminError::invalid("自动模型代理池不存在"));
+        }
+        let changed = old.is_none_or(|p| {
+            p.takeover != input.takeover
+                || p.fingerprint_convergence != input.fingerprint_convergence
+        });
         let fingerprint_changed =
             old.is_some_and(|p| p.fingerprint_convergence) != input.fingerprint_convergence;
         document.accounts.retain(|p| p.account_id != account_id);
@@ -607,6 +712,7 @@ impl TurnStateService for StateManager {
             account_id: account_id.to_owned(),
             fingerprint_convergence: input.fingerprint_convergence,
             takeover: input.takeover,
+            maintenance: maintenance.clone(),
         });
         for target in &mut document.targets {
             if target.input.account_id == account_id {
@@ -614,8 +720,18 @@ impl TurnStateService for StateManager {
                     target.current = None;
                     target.alternatives.clear();
                 }
-                target.next_probe_at = Utc::now().timestamp();
-                target.last_message = "账号策略已更新；仅作用于后续请求".to_owned();
+                if target.automatic
+                    && let Some(pool) = &maintenance.pool_id
+                    && &target.input.pool_id != pool
+                {
+                    target.input.pool_id = pool.clone();
+                    target.current = None;
+                    target.alternatives.clear();
+                }
+                if changed {
+                    target.next_probe_at = Utc::now().timestamp();
+                }
+                target.last_message = "账号策略已更新；预算和上游冷却保持不变".to_owned();
             }
         }
         document.generation += 1;
@@ -677,6 +793,14 @@ impl TurnStateService for StateManager {
             pools.push(pool);
         }
         let mut targets = Vec::new();
+        if doc.accounts.iter().any(|a| {
+            a.maintenance
+                .pool_id
+                .as_ref()
+                .is_some_and(|id| !pool_ids.contains(id))
+        }) {
+            return Err(AdminError::invalid("请先解除账号自动模型对代理池的引用"));
+        }
         let mut target_ids = HashSet::new();
         for mut t in input.targets {
             t.model = t.model.trim().to_owned();
@@ -697,14 +821,37 @@ impl TurnStateService for StateManager {
                 .targets
                 .iter()
                 .find(|o| o.input.account_id == t.account_id && o.input.model == t.model);
-            // 修改任何配置后重新验证，不延长或沿用旧策略产生的值。
+            // Scheduling-only edits preserve tickets and their absolute expiry.
+            let preserve = old.is_some_and(|old| old.input.pool_id == t.pool_id)
+                && doc.policy.header_length == input.policy.header_length
+                && doc.policy.cipher_blocks == input.policy.cipher_blocks
+                && doc.policy.ttl_seconds == input.policy.ttl_seconds
+                && doc
+                    .pools
+                    .iter()
+                    .find(|p| p.id == t.pool_id)
+                    .zip(pools.iter().find(|p| p.id == t.pool_id))
+                    .is_some_and(|(old, new)| {
+                        old.mode == new.mode
+                            && old.endpoint == new.endpoint
+                            && old.bearer == new.bearer
+                            && old.json_pointer == new.json_pointer
+                    });
             targets.push(Target {
                 input: t,
-                current: None,
-                alternatives: Vec::new(),
-                next_probe_at: Utc::now().timestamp(),
-                last_message: "设置已保存，等待探测".to_owned(),
+                current: old.filter(|_| preserve).and_then(|t| t.current.clone()),
+                alternatives: old
+                    .filter(|_| preserve)
+                    .map(|t| t.alternatives.clone())
+                    .unwrap_or_default(),
+                next_probe_at: old.map_or(Utc::now().timestamp(), |t| t.next_probe_at),
+                last_message: "设置已保存；预算、上游冷却和绝对到期时间保持不变".to_owned(),
                 history: old.map(|t| t.history.clone()).unwrap_or_default(),
+                automatic: old.is_some_and(|t| t.automatic),
+                last_traffic_at: old.and_then(|t| t.last_traffic_at),
+                wait_reason: "queued".to_owned(),
+                cooldown_until: old.map_or(0, |t| t.cooldown_until),
+                refresh_requested: old.is_some_and(|t| t.refresh_requested),
             });
         }
         doc.policy = input.policy;
@@ -752,6 +899,7 @@ impl TurnStateService for StateManager {
                     ));
                 }
                 target.next_probe_at = Utc::now().timestamp();
+                target.refresh_requested = true;
                 target.last_message = "已排队".to_owned();
             }
             "pause" => target.input.enabled = false,

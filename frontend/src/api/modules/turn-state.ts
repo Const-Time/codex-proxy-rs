@@ -17,7 +17,7 @@ export interface TurnStatePool {
   id: string
   name: string
   enabled: boolean
-  mode: 'gateway' | 'api'
+  mode: 'gateway' | 'fixed' | 'rotating' | 'api'
   endpoint: string
   hasSecret: boolean
   jsonPointer: string
@@ -56,12 +56,26 @@ export interface TurnStateTarget extends TurnStateTargetInput {
   history: TurnStateObservation[]
   candidateCount: number
   takeover: boolean
+  waitReason: string
+  hourlyUsed: number
+  hourlyLimit: number
+  budgetResetsAt: number | null
+  lastTrafficAt: number | null
+  automatic: boolean
+}
+
+export interface TurnStateMaintenance {
+  maxProbesPerHour: number
+  idleSeconds: number
+  autoModels: boolean
+  poolId: string | null
 }
 
 export interface TurnStateAccountPolicy {
   accountId: string
   fingerprintConvergence: boolean
   takeover: boolean
+  maintenance: TurnStateMaintenance
 }
 
 export interface TurnStateView {
@@ -82,7 +96,7 @@ export interface TurnStateSettings {
 export function getTurnState() {
   return request<TurnStateView>({ url: '/api/admin/turn-state', method: 'GET' })
 }
-export function saveAccountTurnState(accountId: string, data: { revision: number, fingerprintConvergence: boolean, takeover: boolean }) {
+export function saveAccountTurnState(accountId: string, data: { revision: number, fingerprintConvergence: boolean, takeover: boolean, maintenance?: TurnStateMaintenance }) {
   return request<TurnStateView>({ url: '/api/admin/turn-state/account', method: 'POST', data: { ...data, accountId } })
 }
 export function saveTurnState(data: TurnStateSettings) {
@@ -92,7 +106,7 @@ export function turnStateAction(data: { accountId: string, model: string, action
   return request<TurnStateView>({ url: '/api/admin/turn-state/action', method: 'POST', data })
 }
 export function testTurnStatePool(id: string) {
-  return request<{ success: boolean, ipv6: boolean, exitIp: string | null, message: string }>({
+  return request<{ success: boolean, ipv6: boolean, exitIp: string | null, ipv4Address: string | null, ipv6Address: string | null, message: string }>({
     url: '/api/admin/turn-state/test-pool',
     method: 'POST',
     data: { id },

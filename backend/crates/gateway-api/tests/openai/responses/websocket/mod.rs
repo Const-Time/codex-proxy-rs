@@ -959,3 +959,61 @@ async fn quota_replay_projection_survives_the_downstream_websocket_boundary() {
     socket.close(None).await.unwrap();
     server.abort();
 }
+
+#[tokio::test]
+async fn final_capacity_failure_is_retryable_on_websocket_with_or_without_a_code() {
+    use gateway_core::error::ClientVisibleUpstreamError;
+    for code in [None, Some("server_is_overloaded"), Some("slow_down")] {
+        let trace = Arc::new(AtomicFailureTrace::default());
+        *trace.initial_error.lock().unwrap() = Some(
+            ProviderError::new(
+                ProviderErrorKind::UpstreamCapacityUnavailable,
+                UpstreamSendState::Sent,
+            )
+            .with_status(400)
+            .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                "Selected model is at capacity.",
+                code.map(str::to_owned),
+                Some("server_error".to_owned()),
+            )),
+        );
+        let app = api_router(Arc::new(AtomicFailureExecution {
+            client: authenticated_client("sk_ws_atomic"),
+            trace,
+            response_headers: vec![],
+            fail_before_first_event: false,
+        }))
+        .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut request = format!("ws://{address}/v1/responses")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, "Bearer sk_ws_atomic".parse().unwrap());
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        socket
+            .send(ClientMessage::Text(
+                json!({"type":"response.create","model":"model-a","input":"hello"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["status"], 503);
+        if code.is_some() {
+            assert_eq!(value["error"]["code"], "server_error");
+        }
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+}

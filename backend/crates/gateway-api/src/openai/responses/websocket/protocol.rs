@@ -141,7 +141,10 @@ pub(super) fn error_event(
             Value::String(request_id.to_owned()),
         );
     }
-    Value::Object(event).to_string()
+    let event = Value::Object(event);
+    crate::openai::error::capacity_error_for_client(&event)
+        .unwrap_or(event)
+        .to_string()
 }
 
 pub(super) fn connection_limit_event() -> String {

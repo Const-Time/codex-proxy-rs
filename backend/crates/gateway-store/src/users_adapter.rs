@@ -172,10 +172,10 @@ impl UserAuthStore {
             g.id as group_id, g.name as group_name, coalesce(ug.quota_multiplier, 1)::text as quota_multiplier,
             user_group_quota_limit(g.daily_limit_usd, u.id, g.id)::text as daily_limit_usd,
             user_group_quota_limit(g.weekly_limit_usd, u.id, g.id)::text as weekly_limit_usd,
-            (case when w.daily_end > now() then w.daily_used_usd else 0 end)::text as daily_used_usd,
-            (case when w.weekly_end > now() then w.weekly_used_usd else 0 end)::text as weekly_used_usd,
-            case when w.daily_end > now() then w.daily_end end as daily_resets_at,
-            case when w.weekly_end > now() then w.weekly_end end as weekly_resets_at,
+            coalesce(w.daily_used_usd, 0)::text as daily_used_usd,
+            coalesce(w.weekly_used_usd, 0)::text as weekly_used_usd,
+            w.daily_end as daily_resets_at,
+            w.weekly_end as weekly_resets_at,
             w.last_reset_at, w.last_reset_reason
             from scopes s join users u on u.id = s.user_id join account_groups g on g.id = s.account_group_id
             left join user_account_groups ug on ug.user_id = u.id and ug.account_group_id = g.id
@@ -247,10 +247,10 @@ impl UserAuthStore {
         id: &str,
     ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserGroup>> {
         let rows = sqlx::query("select g.id, g.name, g.color, g.enabled, user_group_quota_limit(g.daily_limit_usd, u.id, g.id)::text as daily_limit_usd, user_group_quota_limit(g.weekly_limit_usd, u.id, g.id)::text as weekly_limit_usd,
-            (case when w.daily_end > now() then w.daily_used_usd else 0 end)::text as daily_used,
-            (case when w.weekly_end > now() then w.weekly_used_usd else 0 end)::text as weekly_used,
-            case when w.daily_end > now() then w.daily_end end as daily_end,
-            case when w.weekly_end > now() then w.weekly_end end as weekly_end
+            coalesce(w.daily_used_usd, 0)::text as daily_used,
+            coalesce(w.weekly_used_usd, 0)::text as weekly_used,
+            w.daily_end as daily_end,
+            w.weekly_end as weekly_end
             from users u cross join account_groups g
             left join user_group_budget_windows w on w.user_id = u.id and w.account_group_id = g.id
             where u.id = $1 and u.enabled and ((u.role = 'admin' and not u.group_grants_configured) or exists(

@@ -7,7 +7,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use gateway_admin::model::turn_state::{TurnStateAccountUpdate, TurnStateSettingsInput};
+use gateway_admin::model::turn_state::{
+    TurnStateAccountUpdate, TurnStateMaintenance, TurnStateSettingsInput,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -31,6 +33,8 @@ struct AccountUpdate {
     revision: u64,
     fingerprint_convergence: bool,
     takeover: bool,
+    #[serde(default)]
+    maintenance: Option<TurnStateMaintenance>,
 }
 
 pub fn router<S: AdminSessionState + Clone + Send + Sync + 'static>() -> Router<S> {
@@ -59,6 +63,7 @@ async fn configure_account<S: AdminSessionState + Send + Sync>(
                 revision: input.revision,
                 fingerprint_convergence: input.fingerprint_convergence,
                 takeover: input.takeover,
+                maintenance: input.maintenance,
             },
             &auth.context().mutation_context(),
         )

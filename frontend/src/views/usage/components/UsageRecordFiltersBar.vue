@@ -23,12 +23,13 @@ const keys = shallowRef<SelectOption[]>([])
 const loading = shallowRef(false)
 const error = shallowRef('')
 const active = computed(() => Object.values(filters.value).some(value => value.trim()))
-const transports = [
+const transports = computed(() => [
   { label: '全部接入类型', value: '' },
   { label: 'HTTP', value: 'http_json' },
   { label: 'SSE', value: 'http_sse' },
   { label: 'WebSocket', value: 'websocket' },
-]
+  ...(!personal?.value ? [{ label: '系统维护探测', value: 'maintenance' }] : []),
+])
 
 async function loadCatalog<T>(load: (page: number) => Promise<{ items: T[], page: { totalPages: number } }>, label: (row: T) => SelectOption) {
   const items: SelectOption[] = []

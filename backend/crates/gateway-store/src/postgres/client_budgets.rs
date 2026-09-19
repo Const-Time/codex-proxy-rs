@@ -104,6 +104,7 @@ impl PgClientBudgetStore {
             } else {
                 "daily_end"
             });
+            tx.commit().await.map_err(|_| unavailable())?;
             return Err(GatewayError::new(
                 GatewayErrorKind::RateLimited,
                 "user group budget is exhausted",
@@ -133,7 +134,7 @@ impl PgClientBudgetStore {
         if let Some(billed_amount) = billed_amount {
             sqlx::query("update user_group_budget_windows set
                 daily_used_usd = least(9999999999.9999999999, daily_used_usd + case when $4 >= daily_start and $4 < daily_end then $3::text::numeric else 0 end),
-                weekly_used_usd = least(9999999999.9999999999, weekly_used_usd + case when $4 >= weekly_start and $4 < weekly_end then $3::text::numeric else 0 end)
+                weekly_used_usd = least(9999999999.9999999999, weekly_used_usd + case when $4 >= weekly_start and ($4 < weekly_end or exists(select 1 from subscription_group_cycles c where c.account_group_id = $2 and c.mode = 'upstream')) then $3::text::numeric else 0 end)
                 where user_id = $1 and account_group_id = $2")
                 .bind(&scope.user_id).bind(scope.group_id.as_str()).bind(billed_amount)
                 .bind(DateTime::<Utc>::from(charge.completed_at)).execute(&mut *tx).await.map_err(|_| ClientBudgetError)?;
@@ -169,17 +170,12 @@ async fn advance_windows(
     scope: &ClientBudgetScope,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("insert into user_group_budget_windows(user_id, account_group_id, daily_start, daily_end, weekly_start, weekly_end)
-        select $1, $2, day, day + interval '24 hours', day, day + interval '168 hours'
-        from (select date_trunc('day', $3::timestamptz at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai' as day) d
-        on conflict(user_id, account_group_id) do update set
-            daily_start = case when user_group_budget_windows.daily_end <= $3 then excluded.daily_start else user_group_budget_windows.daily_start end,
-            daily_end = case when user_group_budget_windows.daily_end <= $3 then excluded.daily_end else user_group_budget_windows.daily_end end,
-            daily_used_usd = case when user_group_budget_windows.daily_end <= $3 then 0 else user_group_budget_windows.daily_used_usd end,
-            weekly_start = case when user_group_budget_windows.weekly_end <= $3 then excluded.weekly_start else user_group_budget_windows.weekly_start end,
-            weekly_end = case when user_group_budget_windows.weekly_end <= $3 then excluded.weekly_end else user_group_budget_windows.weekly_end end,
-            weekly_used_usd = case when user_group_budget_windows.weekly_end <= $3 then 0 else user_group_budget_windows.weekly_used_usd end")
-        .bind(&scope.user_id).bind(scope.group_id.as_str()).bind(now).execute(&mut **tx).await?;
+    sqlx::query("select advance_subscription_windows($1, $2, $3)")
+        .bind(&scope.user_id)
+        .bind(scope.group_id.as_str())
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -196,10 +192,10 @@ pub(super) async fn load_client_key_budgets(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "select k.id, user_group_quota_limit(g.daily_limit_usd, k.owner_user_id, g.id)::text as daily_limit_usd, user_group_quota_limit(g.weekly_limit_usd, k.owner_user_id, g.id)::text as weekly_limit_usd,
-        (case when w.daily_end > now() then w.daily_used_usd else 0 end)::text as daily_used,
-        (case when w.weekly_end > now() then w.weekly_used_usd else 0 end)::text as weekly_used,
-        case when w.daily_end > now() then w.daily_end end as daily_end,
-        case when w.weekly_end > now() then w.weekly_end end as weekly_end
+        coalesce(w.daily_used_usd, 0)::text as daily_used,
+        coalesce(w.weekly_used_usd, 0)::text as weekly_used,
+        w.daily_end as daily_end,
+        w.weekly_end as weekly_end
         from client_api_keys k join client_api_key_groups kg on kg.client_api_key_id = k.id
         join account_groups g on g.id = kg.account_group_id
         left join user_group_budget_windows w on w.user_id = k.owner_user_id and w.account_group_id = g.id

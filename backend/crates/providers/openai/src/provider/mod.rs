@@ -503,7 +503,18 @@ impl Provider for CodexProvider {
         let original_client_turn_id = upstream_request.client_turn_id.clone();
         if let Some(manager) = &self.turn_state {
             manager
-                .guard_request(lease.account(), &mut upstream_request)
+                .note_traffic(lease.account_id().as_str(), upstream_request.model())
+                .await;
+            manager
+                .guard_request(
+                    lease.account(),
+                    &mut upstream_request,
+                    manager.identity_binding(
+                        lease.account(),
+                        lease.authentication(),
+                        lease.installation_id(),
+                    ),
+                )
                 .await;
             manager.converge(
                 &mut upstream_request,
@@ -538,7 +549,13 @@ impl Provider for CodexProvider {
             && upstream_request.previous_response_id().is_none()
             && let Some(manager) = &self.turn_state
             && let Some(token) = manager
-                .select(lease.account(), upstream_model.as_str())
+                .select(
+                    lease.account(),
+                    upstream_model.as_str(),
+                    &upstream_request
+                        .turn_state_binding
+                        .expect("account boundary binding"),
+                )
                 .await
         {
             // 显式覆盖优先级：清掉可覆盖生成头的原始值，不改业务 input。

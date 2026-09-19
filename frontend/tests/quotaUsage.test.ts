@@ -32,5 +32,5 @@ test('reset countdown handles missing, future and elapsed windows without invent
   assert.equal(quotaResetLabel('invalid', now), '重置时间暂不可用')
   assert.equal(quotaResetLabel('2026-09-12T12:55:00Z', now), '55 分钟后重置')
   assert.equal(quotaResetLabel('2026-09-19T05:00:00Z', now), '6 天 17 小时后重置')
-  assert.equal(quotaResetLabel('2026-09-12T11:00:00Z', now), '已到重置时间，请刷新')
+  assert.equal(quotaResetLabel('2026-09-12T11:00:00Z', now), '已到周期边界，等待确认重置')
 })

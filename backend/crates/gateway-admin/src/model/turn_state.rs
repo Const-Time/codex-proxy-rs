@@ -148,6 +148,43 @@ pub struct TurnStateAccountPolicy {
     pub fingerprint_convergence: bool,
     #[serde(default)]
     pub takeover: bool,
+    #[serde(default)]
+    pub maintenance: TurnStateMaintenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+pub struct TurnStateMaintenance {
+    pub max_probes_per_hour: u32,
+    /// Zero disables the idle gate for manually selected models.
+    pub idle_seconds: i64,
+    pub auto_models: bool,
+    pub pool_id: Option<String>,
+}
+
+impl Default for TurnStateMaintenance {
+    fn default() -> Self {
+        Self {
+            max_probes_per_hour: 30,
+            idle_seconds: 3600,
+            auto_models: false,
+            pool_id: None,
+        }
+    }
+}
+
+impl TurnStateMaintenance {
+    pub fn validate(&self) -> Result<(), AdminError> {
+        if !(1..=600).contains(&self.max_probes_per_hour)
+            || !(0..=86400).contains(&self.idle_seconds)
+            || (self.auto_models && self.pool_id.as_deref().is_none_or(str::is_empty))
+        {
+            return Err(AdminError::invalid(
+                "小时预算须为 1–600，空闲窗口须为 0–86400 秒；自动模型需指定代理池",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,6 +193,9 @@ pub struct TurnStateAccountUpdate {
     pub revision: u64,
     pub fingerprint_convergence: bool,
     pub takeover: bool,
+    /// Omission by older clients preserves the existing maintenance policy.
+    #[serde(default)]
+    pub maintenance: Option<TurnStateMaintenance>,
 }
 
 #[derive(Deserialize)]
@@ -203,6 +243,12 @@ pub struct TurnStateTargetView {
     pub history: Vec<TurnStateObservation>,
     pub candidate_count: usize,
     pub takeover: bool,
+    pub wait_reason: String,
+    pub hourly_used: u32,
+    pub hourly_limit: u32,
+    pub budget_resets_at: Option<i64>,
+    pub last_traffic_at: Option<i64>,
+    pub automatic: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,5 +267,34 @@ pub struct TurnStatePoolTest {
     pub success: bool,
     pub ipv6: bool,
     pub exit_ip: Option<String>,
+    pub ipv4_address: Option<String>,
+    pub ipv6_address: Option<String>,
     pub message: String,
+}
+
+/// Internal system requests: no user/key billing and no arbitrary raw response log.
+pub struct TurnStateProbeStart {
+    pub id: String,
+    pub account_id: String,
+    pub model: String,
+    pub phase: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Default)]
+pub struct TurnStateProbeResult {
+    pub succeeded: bool,
+    pub status: Option<u16>,
+    pub request_id: Option<String>,
+    pub response_id: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub latency_ms: u64,
+    pub message: Option<String>,
+    pub sent_state: Option<String>,
+    pub returned_state: Option<String>,
 }

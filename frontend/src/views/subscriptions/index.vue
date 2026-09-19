@@ -55,7 +55,7 @@ watch([search, groupId], () => {
   selected.value = []
 })
 const date = (value: string | null) => value ? formatDateTime(value) : '尚未开始'
-const reason = (value: string | null) => ({ manual: '管理员重置', upstream_manual: '账号主动重置', upstream_window: '上游窗口重置', upstream_recovery: '上游额度恢复' }[value ?? ''] ?? '—')
+const reason = (value: string | null) => ({ group_period: '分组周周期重置', daily_period: '每日周期重置', manual: '管理员重置', upstream_manual: '账号主动重置', upstream_window: '上游窗口重置', upstream_recovery: '上游额度恢复' }[value ?? ''] ?? '—')
 async function load() {
   loading.value = true
   error.value = ''

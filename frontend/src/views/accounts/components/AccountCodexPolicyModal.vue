@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
-import type { TurnStateView } from '@/api/modules/turn-state'
+import type { TurnStateMaintenance, TurnStateView } from '@/api/modules/turn-state'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { getTurnState, saveAccountTurnState } from '@/api/modules/turn-state'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
+import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import { toast } from '@/components/base/BaseToast'
 import { errorMessage } from '@/utils/async'
@@ -17,6 +18,11 @@ const loadError = ref('')
 const view = ref<TurnStateView | null>(null)
 const fingerprintConvergence = ref(false)
 const takeover = ref(false)
+const maintenance = ref<TurnStateMaintenance>({ maxProbesPerHour: 30, idleSeconds: 3600, autoModels: false, poolId: null })
+const poolOptions = computed(() => [
+  { value: '', label: '请选择自动发现模型使用的代理池' },
+  ...(view.value?.pools.map(p => ({ value: p.id, label: p.name })) ?? []),
+])
 const targets = computed(() => view.value?.targets.filter(t => t.accountId === props.account?.id) ?? [])
 let generation = 0
 
@@ -39,6 +45,7 @@ async function load() {
     const policy = result.accounts.find(p => p.accountId === accountId)
     fingerprintConvergence.value = policy?.fingerprintConvergence ?? false
     takeover.value = policy?.takeover ?? false
+    maintenance.value = { maxProbesPerHour: 30, idleSeconds: 3600, autoModels: false, poolId: null, ...policy?.maintenance }
   }
   catch (error) {
     if (requestGeneration === generation)
@@ -60,6 +67,7 @@ async function save() {
       revision: view.value.revision,
       fingerprintConvergence: fingerprintConvergence.value,
       takeover: takeover.value,
+      maintenance: maintenance.value,
     })
     if (requestGeneration !== generation)
       return
@@ -111,6 +119,26 @@ onBeforeUnmount(() => {
         </p>
         <p class="mt-2 text-cp-xs text-cp-text-tertiary">
           候选最多 3 个 / 模型；过期停止使用，不因返回 312 或候选耗尽禁用账号。
+        </p>
+      </section>
+      <section class="grid gap-4 rounded-cp border border-cp-border p-4">
+        <h3 class="font-semibold">
+          账号维护预算与自动发现
+        </h3>
+        <label for="state-hourly-budget" class="grid gap-2 text-cp-sm">
+          每小时最多探测请求（采集与验证分别计数）
+          <input id="state-hourly-budget" v-model.number="maintenance.maxProbesPerHour" type="number" min="1" max="600" class="rounded-cp border border-cp-border bg-transparent p-2" :disabled="loading || saving || !view">
+        </label>
+        <label for="state-idle-seconds" class="grid gap-2 text-cp-sm">
+          空闲后停止探测（秒；0 表示手动维护项不限制空闲）
+          <input id="state-idle-seconds" v-model.number="maintenance.idleSeconds" type="number" min="0" max="86400" class="rounded-cp border border-cp-border bg-transparent p-2" :disabled="loading || saving || !view">
+        </label>
+        <BaseSwitch v-model="maintenance.autoModels" label="从真实业务自动发现精确模型" :show-label="true" :disabled="loading || saving || !view" />
+        <BaseSelect :model-value="maintenance.poolId ?? ''" :options="poolOptions" aria-label="自动发现模型的代理池" :disabled="loading || saving || !view" @update:model-value="maintenance.poolId = String($event || '') || null" />
+        <p class="text-cp-xs text-cp-text-tertiary">
+          自动发现最多保留 8 个模型，不由维护探测递归触发；空闲窗口为 0 时，自动模型仍在空闲 1 小时后停止探测。
+          手动刷新、修改设置和重启不会重置预算或绕过上游冷却。
+          维护请求单独标记为系统流量，不扣用户余额。
         </p>
       </section>
       <div v-if="view" class="rounded-cp bg-cp-fill-quaternary p-4 text-cp-sm">

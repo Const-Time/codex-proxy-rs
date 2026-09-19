@@ -308,7 +308,22 @@ async fn send_initial_engine_error(
     {
         return ForwardOutcome::Disconnect;
     }
+    let capacity = matches!(error, EngineError::Provider(provider)
+        if provider.kind() == gateway_core::error::ProviderErrorKind::UpstreamCapacityUnavailable);
     let error = gateway_error_from_engine(error);
+    if capacity {
+        let (_, default_type, default_code) = gateway_error_contract(error.kind());
+        return send_error(
+            connection,
+            StatusCode::SERVICE_UNAVAILABLE,
+            error.client_error_type().unwrap_or(default_type),
+            error.client_error_code().unwrap_or(default_code),
+            error.client_message(),
+            None,
+            request_id,
+        )
+        .await;
+    }
     send_gateway_error(connection, &error, request_id).await
 }
 

@@ -88,7 +88,7 @@ const requestIntervalMs = defineModel<string>('requestIntervalMs', { required: t
           自动重置订阅分组配额
         </p>
         <p class="mt-1 text-cp-sm text-cp-text-secondary">
-          账号主动重置或上游周窗口变化时，自动重置关联分组下用户的日、周配额。关闭后仍可手动重置，订阅自身到期刷新不受影响；重新开启不补做关闭期间的重置。保存后生效。
+          开启时，单账号分组跟随上游周窗口，未确认重置前保留用量；多账号分组使用独立、统一的七天周期，不跟随其中某一个账号清零。关闭后所有分组使用独立周周期，仍可手动重置；切换开关不清空当前用量。保存后生效。
         </p>
       </div>
       <BaseSwitch v-model="subscriptionAutoResetEnabled" label="自动重置订阅分组配额" :disabled="disabled" />

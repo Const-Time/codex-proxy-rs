@@ -1,3 +1,5 @@
+mod lifecycle;
+mod maintenance;
 use crate::{
     admin::{
         TestOAuthPending, initialized_account_scope, initialized_provider_request,
@@ -52,10 +54,19 @@ const COMPLETED_SESSION_SSE: &str = concat!(
 struct StateStore {
     state: Mutex<(u64, Option<Vec<u8>>)>,
     fail: std::sync::atomic::AtomicBool,
+    probes: Mutex<Vec<Value>>,
 }
 
 #[async_trait]
 impl TurnStateStore for StateStore {
+    async fn begin_probe(&self, probe: &TurnStateProbeStart) -> AdminStoreResult<()> {
+        self.probes.lock().unwrap().push(json!({"id":probe.id,"phase":probe.phase,"model":probe.model,"account":probe.account_id}));
+        Ok(())
+    }
+    async fn finish_probe(&self, id: &str, result: &TurnStateProbeResult) -> AdminStoreResult<()> {
+        self.probes.lock().unwrap().push(json!({"id":id,"succeeded":result.succeeded,"input":result.input_tokens,"sent":result.sent_state,"returned":result.returned_state,"message":result.message}));
+        Ok(())
+    }
     async fn load(&self) -> AdminStoreResult<(u64, Option<Vec<u8>>)> {
         let state = self.state.lock().unwrap();
         Ok((state.0.max(1), state.1.clone()))
@@ -173,6 +184,7 @@ async fn set_account(
         .configure_account(
             "acct_state",
             TurnStateAccountUpdate {
+                maintenance: None,
                 revision: service.view().await.unwrap().revision,
                 fingerprint_convergence,
                 takeover,
@@ -264,6 +276,7 @@ async fn account_switch_is_default_off_persisted_cas_and_isolated() {
             .configure_account(
                 "missing",
                 TurnStateAccountUpdate {
+                    maintenance: None,
                     revision: 1,
                     fingerprint_convergence: false,
                     takeover: true,
@@ -293,6 +306,7 @@ async fn account_switch_is_default_off_persisted_cas_and_isolated() {
             .configure_account(
                 "acct_state",
                 TurnStateAccountUpdate {
+                    maintenance: None,
                     revision: 1,
                     fingerprint_convergence: false,
                     takeover: true,
@@ -308,6 +322,7 @@ async fn account_switch_is_default_off_persisted_cas_and_isolated() {
             .configure_account(
                 "acct_state",
                 TurnStateAccountUpdate {
+                    maintenance: None,
                     revision: view.revision,
                     fingerprint_convergence: false,
                     takeover: true,

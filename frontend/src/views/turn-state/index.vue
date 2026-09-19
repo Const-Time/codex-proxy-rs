@@ -14,7 +14,7 @@ import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import { toast } from '@/components/base/BaseToast'
 import { errorMessage } from '@/utils/async'
-import { exactModels, remainingLabel, shapeLabel } from './presenter'
+import { exactModels, remainingLabel, shapeLabel, waitReasonLabel } from './presenter'
 
 const view = ref<TurnStateView | null>(null)
 const draft = ref<TurnStateSettings | null>(null)
@@ -34,7 +34,7 @@ const poolResults = ref<Record<string, string>>({})
 const dirty = computed(() => JSON.stringify(draft.value) !== savedDraft.value)
 const accountOptions = computed(() => accounts.value.map(a => ({ value: a.id, label: `${a.name} · ${a.email ?? a.id}` })))
 const poolOptions = computed(() => draft.value?.pools.map(p => ({ value: p.id, label: p.name || '未命名代理池' })) ?? [])
-const modeOptions = [{ value: 'gateway', label: '固定轮换入口' }, { value: 'api', label: 'API 提取式' }]
+const modeOptions = [{ value: 'fixed', label: '固定出口（单次采集）' }, { value: 'rotating', label: '每连接轮换入口' }, { value: 'gateway', label: '轮换入口（旧配置）' }, { value: 'api', label: 'API 提取式' }]
 const numericFields = [
   { key: 'headerLength', label: 'Header 字符数（0 = 基线集合）', min: 0, max: 4096 },
   { key: 'cipherBlocks', label: '密文块数（与字符数同时为 0）', min: 0, max: 250 },
@@ -103,7 +103,7 @@ async function save() {
   busy.value = true
   try {
     apply(await saveTurnState(draft.value))
-    toast.success('已保存并热生效；维护项将按新设置重新验证')
+    toast.success('已保存并热生效；仅改变候选规则或出口时撤下旧值')
   }
   catch (error) {
     toast.error(errorMessage(error, '保存失败'))
@@ -114,7 +114,7 @@ async function save() {
 }
 
 function addPool() {
-  draft.value?.pools.push({ id: crypto.randomUUID(), name: '', enabled: true, mode: 'gateway', endpoint: '', bearer: '', jsonPointer: '' })
+  draft.value?.pools.push({ id: crypto.randomUUID(), name: '', enabled: true, mode: 'rotating', endpoint: '', bearer: '', jsonPointer: '' })
 }
 
 function removePool(id: string) {
@@ -171,7 +171,7 @@ async function testPool(id: string) {
   busy.value = true
   try {
     const result = await testTurnStatePool(id)
-    poolResults.value[id] = `${result.exitIp ?? '未知出口'} · ${result.message}`
+    poolResults.value[id] = `IPv4: ${result.ipv4Address ?? '未确认'} · IPv6: ${result.ipv6Address ?? '未确认'} · ${result.message}`
   }
   catch (error) {
     poolResults.value[id] = errorMessage(error, '测试失败')
@@ -235,12 +235,12 @@ onBeforeUnmount(() => {
         </div>
         <p class="mt-4 text-cp-sm text-cp-text-tertiary">
           候选最小剩余时间必须大于提前刷新时间。每次合格采集最多追加一次业务出口验证，会消耗上游额度；
-          到期无新值时回到原有请求逻辑，认证失败或限流会暂停对应维护项。
+          到期无新值时回到原有请求逻辑；认证失败暂停维护项，限流进入账号级冷却。
           字符数和块数同时为 0 时接受 292 / 10 块与 332 / 12 块两种候选形态，并非能力判定。
           还须在账号管理的「更多操作 → 指纹 / Turn-state」开启账号接管；默认不接管。
         </p>
       </BaseCard>
-      <BaseCard title="动态 IPv6 代理池" description="只用于采集，不修改账号业务出口。供应商负责轮换；本项目不管理本机地址。">
+      <BaseCard title="候选采集代理池" description="只用于采集，不修改账号业务出口。固定出口单次采集；轮换入口新连接不保证新 IP。">
         <template #actions>
           <BaseButton :disabled="busy || draft.pools.length >= 16" @click="addPool">
             添加代理池
@@ -257,10 +257,10 @@ onBeforeUnmount(() => {
             <FormItem label="接入方式">
               <BaseSelect v-model="pool.mode" :options="modeOptions" :disabled="busy" />
             </FormItem>
-            <FormItem :label="pool.mode === 'gateway' ? '代理 URL（可包含用户名和密码）' : 'HTTPS 提取接口 URL'" class="md:col-span-2">
+            <FormItem :label="pool.mode !== 'api' ? '代理 URL（可包含用户名和密码）' : 'HTTPS 提取接口 URL'" class="md:col-span-2">
               <BaseInput
                 :model-value="pool.endpoint ?? ''" type="password" autocomplete="new-password" :disabled="busy"
-                :placeholder="pool.mode === 'gateway' ? 'socks5h://用户名:密码@入口:端口；编辑时留空保留' : 'https://供应商/提取接口；编辑时留空保留'"
+                :placeholder="pool.mode !== 'api' ? 'socks5h://用户名:密码@入口:端口；编辑时留空保留' : 'https://供应商/提取接口；编辑时留空保留'"
                 @update:model-value="pool.endpoint = $event || undefined"
               />
               <span class="text-cp-xs text-cp-text-tertiary">已保存：{{ view?.pools.find(p => p.id === pool.id)?.endpoint ?? '未保存' }}。原连接信息不回显，修改时填写完整 URL。</span>
@@ -283,7 +283,7 @@ onBeforeUnmount(() => {
           <div class="mt-4 flex flex-wrap items-center gap-3">
             <BaseSwitch v-model="pool.enabled" label="启用代理池" :show-label="true" :disabled="busy" />
             <BaseButton size="sm" :disabled="busy || dirty" @click="testPool(pool.id)">
-              测试连接 / IPv6 出口
+              测试 IPv4 / IPv6 出口
             </BaseButton>
             <BaseButton size="sm" variant="ghost" :disabled="busy" @click="removePool(pool.id)">
               移除
@@ -294,7 +294,7 @@ onBeforeUnmount(() => {
           </p>
         </div>
       </BaseCard>
-      <BaseCard title="账号与模型" description="每个账号 × 精确上游模型独立维护。保存配置会撤下旧值并重新验证；不会中断已发出的请求。">
+      <BaseCard title="账号与模型" description="每个账号 × 精确上游模型独立维护。修改候选规则或出口才会撤下旧值；不会中断已发出的请求。">
         <div class="grid gap-3 md:grid-cols-2">
           <div class="flex gap-2">
             <BaseInput v-model="accountSearch" aria-label="搜索 OpenAI 账号" placeholder="搜索 OpenAI 账号（最多显示 100 条）" class="flex-1" />
@@ -349,6 +349,12 @@ onBeforeUnmount(() => {
           </div>
           <p class="text-cp-sm text-cp-text-tertiary">
             指纹 {{ target.fingerprint ?? '—' }} · 签发 {{ date(target.issuedAt) }} · 下次探测 {{ date(target.nextProbeAt) }}
+          </p>
+          <p class="text-cp-sm text-cp-text-secondary">
+            {{ waitReasonLabel(target.waitReason) }} · 小时预算 {{ target.hourlyUsed }}/{{ target.hourlyLimit }} · {{ target.automatic ? '自动发现' : '手动配置' }}
+          </p>
+          <p class="text-cp-xs text-cp-text-tertiary">
+            预算重置 {{ date(target.budgetResetsAt) }} · 最近业务 {{ date(target.lastTrafficAt) }}
           </p>
           <p class="text-cp-sm text-cp-text-secondary">
             {{ target.lastMessage }}

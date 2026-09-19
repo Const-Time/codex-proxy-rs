@@ -63,6 +63,8 @@ pub struct CodexResponsesRequest {
     pub managed_turn_state: bool,
     /// Configuration generation at the account boundary; late responses cannot repopulate revoked pools.
     pub turn_state_generation: Option<u64>,
+    /// Keyed authentication binding, local-only and never included in Debug.
+    pub(crate) turn_state_binding: Option<[u8; 32]>,
     /// turn metadata 透传头。
     pub turn_metadata: Option<String>,
     /// beta features 透传头。
@@ -517,6 +519,7 @@ impl CodexResponsesRequest {
             fingerprint_convergence: false,
             managed_turn_state: false,
             turn_state_generation: None,
+            turn_state_binding: None,
             turn_metadata: None,
             beta_features: None,
             version: None,

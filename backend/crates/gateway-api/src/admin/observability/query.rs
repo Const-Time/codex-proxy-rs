@@ -415,10 +415,12 @@ fn filter_text(
 
 fn client_transport(value: Option<String>) -> Result<Option<String>, WireValidationError> {
     let value = non_empty(value);
-    if value
-        .as_ref()
-        .is_some_and(|value| !matches!(value.as_str(), "http_json" | "http_sse" | "websocket"))
-    {
+    if value.as_ref().is_some_and(|value| {
+        !matches!(
+            value.as_str(),
+            "http_json" | "http_sse" | "websocket" | "maintenance"
+        )
+    }) {
         return Err(WireValidationError::new("clientTransport"));
     }
     Ok(value)

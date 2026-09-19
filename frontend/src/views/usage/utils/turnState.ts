@@ -9,6 +9,9 @@ export function turnStateDisplay(value: unknown) {
 
 /** v3.9.4 记录只有返回值、没有来源标记；未知来源不误标成请求。 */
 export function turnStateSourceDisplay(source: unknown) {
+  if (source === 'maintenance') {
+    return { label: '维护', description: '系统维护探测在业务出口验证时发送的候选状态，不是用户请求' }
+  }
   if (source === 'managed') {
     return { label: '接管', description: '本次 HTTP 请求由账号级接管策略注入的候选状态；上游未返回有效的新值' }
   }

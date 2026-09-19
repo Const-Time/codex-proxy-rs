@@ -34,7 +34,7 @@ export function quotaResetLabel(value: string | null, now: number): string {
     return '重置时间暂不可用'
   const remaining = target - now
   if (remaining <= 0)
-    return '已到重置时间，请刷新'
+    return '已到周期边界，等待确认重置'
   const minutes = Math.ceil(remaining / 60_000)
   const days = Math.floor(minutes / 1440)
   const hours = Math.floor(minutes % 1440 / 60)

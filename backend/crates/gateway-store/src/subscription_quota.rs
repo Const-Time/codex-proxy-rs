@@ -176,5 +176,21 @@ pub(crate) async fn observe(
         )
         .await?;
     }
+    if enabled {
+        // A first weekly snapshot aligns the single-account group's boundary
+        // without resetting any subscriber's existing usage. Multi-account
+        // groups must never advance their independent cycle from this path.
+        sqlx::query("select ensure_subscription_group_cycle(g.id, $2)
+            from account_groups g
+            where exists(select 1 from account_group_accounts ga
+                where ga.account_group_id = g.id and ga.provider_account_id = $1)
+            and (select count(*) from account_group_accounts ga where ga.account_group_id = g.id) = 1
+            order by g.id")
+            .bind(account_id)
+            .bind(observed_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(error)?;
+    }
     tx.commit().await.map_err(error)
 }
