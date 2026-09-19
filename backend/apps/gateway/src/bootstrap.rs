@@ -69,10 +69,15 @@ pub async fn run() -> Result<(), BootstrapError> {
     let mut store = gateway_store::initialize(store).await?;
     host.report_startup_ready("Store");
     let provider_ports = store.provider_ports();
-    let mut openai = provider_openai::initialize_with_turn_state(
+    let proxy_probe = host.proxy_probe(
+        provider_openai::build_reqwest_client_with_custom_ca,
+        Arc::new(provider_openai::transport::websocket::CodexProxyWebSocketProbe::default()),
+    );
+    let mut openai = provider_openai::initialize_with_state_probe(
         openai,
         provider_ports.clone(),
         store.turn_state_store(),
+        proxy_probe.clone(),
     )
     .await?;
     host.report_startup_ready("OpenAI Provider");
@@ -86,15 +91,7 @@ pub async fn run() -> Result<(), BootstrapError> {
         store.admin_ports(),
         vec![openai.admin_provider(), xai.admin_provider()],
         core.snapshot_control(),
-        (
-            core.account_probe(),
-            host.proxy_probe(
-                provider_openai::build_reqwest_client_with_custom_ca,
-                Arc::new(
-                    provider_openai::transport::websocket::CodexProxyWebSocketProbe::default(),
-                ),
-            ),
-        ),
+        (core.account_probe(), proxy_probe),
         host.client_distribution_resolver(),
         host.system_operations(),
     )

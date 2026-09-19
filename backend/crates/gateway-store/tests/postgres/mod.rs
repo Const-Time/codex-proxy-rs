@@ -258,6 +258,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "subscription_quota_observations",
             "subscription_reset_events",
             "turn_state_management",
+            "turn_state_probe_records",
             "user_account_groups",
             "user_group_budget_windows",
             "user_group_charge_events",

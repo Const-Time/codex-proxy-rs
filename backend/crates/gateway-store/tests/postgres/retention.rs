@@ -65,3 +65,38 @@ async fn retention_cycle_should_stop_at_the_batch_budget() {
     assert_eq!(remaining, 3);
     database.close().await;
 }
+
+#[tokio::test]
+async fn probe_logs_follow_ops_retention_including_abandoned_requests() {
+    let Some(database) = TestDatabase::create("state_probe_retention").await else {
+        return;
+    };
+    sqlx::query(
+        "insert into turn_state_probe_records
+        (id,cycle_id,account_id,account_name,model,phase,route_name,started_at,deadline_at,facts)
+        values ('old','cycle','a','A','gpt-5.4','collect','proxy',
+          now()-interval '40 days',now()-interval '40 days','{\"decision\":\"running\"}'),
+         ('recent','cycle','a','A','gpt-5.4','collect','proxy',
+          now()-interval '1 day',now()-interval '1 day','{\"decision\":\"failed\"}')",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    PgRetentionRepository::new(database.pool.clone())
+        .apply_retention(
+            Utc::now(),
+            RuntimeRetentionSettings {
+                usage_retention_days: 31,
+                ops_event_retention_days: 30,
+                audit_retention_days: 90,
+            },
+        )
+        .await
+        .unwrap();
+    let ids: Vec<String> = sqlx::query_scalar("select id from turn_state_probe_records")
+        .fetch_all(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(ids, ["recent"]);
+    database.close().await;
+}

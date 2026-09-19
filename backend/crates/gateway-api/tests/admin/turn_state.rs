@@ -25,6 +25,9 @@ fn view() -> TurnStateView {
 
 #[async_trait]
 impl TurnStateService for StateService {
+    async fn records(&self, _: TurnStateRecordQuery) -> Result<TurnStateRecordPage, AdminError> {
+        Ok(TurnStateRecordPage::default())
+    }
     async fn view(&self) -> Result<TurnStateView, AdminError> {
         Ok(view())
     }
@@ -88,6 +91,7 @@ async fn turn_state_routes_require_admin_and_preserve_cas_and_mutation_context()
         ("POST", "/api/admin/turn-state/account"),
         ("POST", "/api/admin/turn-state/action"),
         ("POST", "/api/admin/turn-state/test-pool"),
+        ("POST", "/api/admin/turn-state/records"),
     ] {
         for (cookie, status) in [
             ("", StatusCode::UNAUTHORIZED),
@@ -152,4 +156,35 @@ async fn turn_state_routes_require_admin_and_preserve_cas_and_mutation_context()
         *service.0.lock().unwrap(),
         vec![("acct_a".to_owned(), true, false, "req_state".to_owned())]
     );
+    for (overrides, expected) in [
+        (json!({}), StatusCode::OK),
+        (json!({"pageSize":101}), StatusCode::BAD_REQUEST),
+        (json!({"page":0}), StatusCode::BAD_REQUEST),
+        (json!({"phase":"bogus"}), StatusCode::BAD_REQUEST),
+        (json!({"decision":"bogus"}), StatusCode::BAD_REQUEST),
+        (
+            json!({"to":"2026-10-31T00:00:00Z"}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut body = json!({"from":"2026-09-18T00:00:00Z","to":"2026-09-19T00:00:00Z","page":1,"pageSize":20});
+        body.as_object_mut()
+            .unwrap()
+            .extend(overrides.as_object().unwrap().clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/turn-state/records")
+                    .header("x-request-id", "req_records")
+                    .header("cookie", "cpr_admin_session=admin-session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{body}");
+    }
 }

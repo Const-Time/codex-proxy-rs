@@ -169,6 +169,13 @@ impl RetentionRepository for PgRetentionRepository {
                 settings.audit_retention_days,
                 "delete expired operation logs",
             ),
+            RetentionTarget::new(
+                "delete from turn_state_probe_records where ctid in (
+                    select ctid from turn_state_probe_records
+                    where deadline_at < $1 - ($2 * interval '1 day') limit $3)",
+                settings.ops_event_retention_days,
+                "delete expired state probe records",
+            ),
         ];
         let started_at = Instant::now();
         let mut batches = 0_u32;

@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use gateway_admin::model::turn_state::{
-    TurnStateAccountUpdate, TurnStateMaintenance, TurnStateSettingsInput,
+    TurnStateAccountUpdate, TurnStateMaintenance, TurnStateRecordQuery, TurnStateSettingsInput,
 };
 use serde::Deserialize;
 
@@ -46,6 +46,26 @@ pub fn router<S: AdminSessionState + Clone + Send + Sync + 'static>() -> Router<
         )
         .route("/api/admin/turn-state/action", post(action::<S>))
         .route("/api/admin/turn-state/test-pool", post(test_pool::<S>))
+        .route("/api/admin/turn-state/records", post(records::<S>))
+}
+
+async fn records<S: AdminSessionState + Send + Sync>(
+    _: AdminAuth,
+    State(state): State<S>,
+    AdminJson(query): AdminJson<TurnStateRecordQuery>,
+) -> Result<impl IntoResponse, AdminError> {
+    query.validate().map_err(error)?;
+    let result = state
+        .admin_services()
+        .turn_state()
+        .map_err(error)?
+        .records(query)
+        .await
+        .map_err(error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(result),
+    ))
 }
 
 async fn configure_account<S: AdminSessionState + Send + Sync>(

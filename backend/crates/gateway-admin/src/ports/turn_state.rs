@@ -6,6 +6,16 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait TurnStateStore: Send + Sync {
+    async fn records(
+        &self,
+        _query: &TurnStateRecordQuery,
+    ) -> AdminStoreResult<TurnStateRecordPage> {
+        Err(super::store::AdminStoreError::new(
+            super::store::AdminStoreErrorKind::Unavailable,
+            "turn state records",
+            "探测记录不可用",
+        ))
+    }
     /// Must succeed before sending a maintenance request. Never debit an end user.
     async fn begin_probe(&self, probe: &TurnStateProbeStart) -> AdminStoreResult<()>;
     async fn finish_probe(&self, id: &str, result: &TurnStateProbeResult) -> AdminStoreResult<()>;
@@ -21,6 +31,12 @@ pub trait TurnStateStore: Send + Sync {
 
 #[async_trait]
 pub trait TurnStateService: Send + Sync {
+    async fn records(
+        &self,
+        _query: TurnStateRecordQuery,
+    ) -> Result<TurnStateRecordPage, AdminError> {
+        Err(AdminError::unavailable("探测记录不可用"))
+    }
     async fn view(&self) -> Result<TurnStateView, AdminError>;
     async fn configure_account(
         &self,

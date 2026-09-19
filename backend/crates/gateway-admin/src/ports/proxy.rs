@@ -63,6 +63,12 @@ pub struct ProxyImportReservation {
 
 #[async_trait]
 pub trait ProxyProbe: Send + Sync {
+    async fn test_egress(&self, proxy: Option<&OutboundProxy>) -> Option<ProxyTestResult> {
+        match proxy {
+            Some(proxy) => Some(self.test(proxy).await),
+            None => None,
+        }
+    }
     async fn test(&self, proxy: &OutboundProxy) -> ProxyTestResult;
     async fn quality(&self, proxy: &OutboundProxy) -> ProxyQualityReport;
 }

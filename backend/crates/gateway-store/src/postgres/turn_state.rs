@@ -1,9 +1,6 @@
 use async_trait::async_trait;
 use gateway_admin::{
-    model::{
-        MutationContext,
-        turn_state::{TurnStateProbeResult, TurnStateProbeStart},
-    },
+    model::{MutationContext, turn_state::*},
     ports::{
         store::{AdminStoreError, AdminStoreErrorKind, AdminStoreResult},
         turn_state::TurnStateStore,
@@ -27,27 +24,25 @@ fn unavailable() -> AdminStoreError {
 
 #[async_trait]
 impl TurnStateStore for PgTurnStateStore {
+    async fn records(&self, query: &TurnStateRecordQuery) -> AdminStoreResult<TurnStateRecordPage> {
+        super::turn_state_records::list(&self.pool, query).await
+    }
     async fn begin_probe(&self, probe: &TurnStateProbeStart) -> AdminStoreResult<()> {
         let result = sqlx::query(
-            "insert into model_requests (
-                id, client_api_key_ref, config_revision, protocol, operation, endpoint,
-                client_transport, requested_model_id, upstream_model_id, provider_kind,
-                provider_account_id, provider_account_ref, provider_account_name_snapshot,
-                provider_account_email_snapshot, provider_account_authentication_kind_snapshot,
-                upstream_transport, attempt_count, upstream_send_state, request_kind,
-                started_at, deadline_at, routing_scope
-             ) select $1, 'system:turn-state', r.config_revision, 'openai', 'maintenance_probe', $2,
-                'maintenance', $3, $3, a.provider_kind, a.id, a.id, a.name, a.email,
-                a.authentication_kind, 'http_sse', 1, 'ambiguous', 'state_probe',
-                $4, $4 + ($5::bigint * interval '1 second'), 'legacy_provider'
-             from provider_accounts a cross join runtime_settings r where a.id=$6 and r.id=1",
+            "insert into turn_state_probe_records
+             (id, phase, model, started_at, deadline_at, account_id, account_name, cycle_id, pool_id, route_name, facts)
+             select $1,$2,$3,$4,$4 + ($5::bigint * interval '1 second'),a.id,a.name,$7,$8,$9,
+             '{\"decision\":\"running\"}'::jsonb from provider_accounts a where a.id=$6",
         )
         .bind(&probe.id)
-        .bind(format!("/internal/turn-state/{}", probe.phase))
+        .bind(&probe.phase)
         .bind(&probe.model)
         .bind(probe.started_at)
         .bind(i64::try_from(probe.timeout_seconds).map_err(|_| unavailable())?)
         .bind(&probe.account_id)
+        .bind(&probe.cycle_id)
+        .bind(&probe.pool_id)
+        .bind(&probe.route_name)
         .execute(&self.pool)
         .await
         .map_err(|_| unavailable())?;
@@ -58,30 +53,45 @@ impl TurnStateStore for PgTurnStateStore {
     }
 
     async fn finish_probe(&self, id: &str, result: &TurnStateProbeResult) -> AdminStoreResult<()> {
-        let number = |v: Option<u64>| v.and_then(|v| i64::try_from(v).ok());
-        let observation = serde_json::json!({
-            "turnState": result.returned_state.as_ref().or(result.sent_state.as_ref()),
-            "turnStateSource": if result.returned_state.is_some() { "response" } else { "request" },
-            "turnStateSent": result.sent_state,
-            "turnStateSentSource": result.sent_state.as_ref().map(|_| "maintenance"),
-            "turnStateReturned": result.returned_state,
-            "maintenanceProbe": true
-        });
+        // Verification describes the candidate sent, not any replacement header.
+        let state = result
+            .sent_state
+            .as_ref()
+            .or(result.returned_state.as_ref());
+        let facts = TurnStateProbeFacts {
+            completed: result.succeeded,
+            status: result.status,
+            decision: if result.decision.is_empty() {
+                "failed".to_owned()
+            } else {
+                result.decision.clone()
+            },
+            reason: result.reason.clone(),
+            message: result.message.clone(),
+            latency_ms: Some(result.latency_ms),
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+            cached_tokens: result.cached_tokens,
+            reasoning_tokens: result.reasoning_tokens,
+            total_tokens: result.total_tokens,
+            state_length: state.map(|s| s.chars().count()),
+            shape: state.and_then(|s| FernetShape::parse(s)),
+            fingerprint: state.map(|s| {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(s.as_bytes()))[..16].to_owned()
+            }),
+            expires_at: result.expires_at,
+            egress: result.egress.clone(),
+        };
         sqlx::query(
-            "update model_requests set outcome=$2, completed_at=now(),
-                client_status_code=$3, upstream_status_code=$4, upstream_request_id=$5,
-                input_tokens=$6, output_tokens=$7, cached_tokens=$8, reasoning_tokens=$9,
-                total_tokens=$10, latency_ms=$11, error_message=$12,
-                provider_observation_json=$13, downstream_committed_at=case when $14 then now() else null end
-             where id=$1 and request_kind='state_probe' and outcome='running'"
-        ).bind(id).bind(if result.succeeded { "succeeded" } else { "failed" })
-        .bind(if result.succeeded { 200i32 } else { 502i32 })
-        .bind(result.status.map(i32::from)).bind(&result.request_id)
-        .bind(number(result.input_tokens)).bind(number(result.output_tokens))
-        .bind(number(result.cached_tokens)).bind(number(result.reasoning_tokens))
-        .bind(number(result.total_tokens)).bind(number(Some(result.latency_ms)))
-        .bind(&result.message).bind(observation).bind(result.succeeded)
-        .execute(&self.pool).await.map_err(|_| unavailable())?;
+            "update turn_state_probe_records set finished_at=now(), facts=$2
+             where id=$1 and finished_at is null",
+        )
+        .bind(id)
+        .bind(serde_json::to_value(facts).map_err(|_| unavailable())?)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| unavailable())?;
         Ok(())
     }
 

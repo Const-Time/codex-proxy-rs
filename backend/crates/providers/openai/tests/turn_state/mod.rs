@@ -1,5 +1,6 @@
 mod lifecycle;
 mod maintenance;
+mod observability;
 mod regressions;
 mod websocket;
 use crate::{
@@ -65,11 +66,11 @@ struct StateStore {
 #[async_trait]
 impl TurnStateStore for StateStore {
     async fn begin_probe(&self, probe: &TurnStateProbeStart) -> AdminStoreResult<()> {
-        self.probes.lock().unwrap().push(json!({"id":probe.id,"phase":probe.phase,"model":probe.model,"account":probe.account_id}));
+        self.probes.lock().unwrap().push(json!({"id":probe.id,"phase":probe.phase,"model":probe.model,"account":probe.account_id,"cycle":probe.cycle_id,"pool":probe.pool_id,"route":probe.route_name}));
         Ok(())
     }
     async fn finish_probe(&self, id: &str, result: &TurnStateProbeResult) -> AdminStoreResult<()> {
-        self.probes.lock().unwrap().push(json!({"id":id,"succeeded":result.succeeded,"input":result.input_tokens,"sent":result.sent_state,"returned":result.returned_state,"message":result.message}));
+        self.probes.lock().unwrap().push(json!({"id":id,"succeeded":result.succeeded,"input":result.input_tokens,"sent":result.sent_state,"returned":result.returned_state,"message":result.message,"decision":result.decision,"egress":result.egress}));
         Ok(())
     }
     async fn load(&self) -> AdminStoreResult<(u64, Option<Vec<u8>>)> {

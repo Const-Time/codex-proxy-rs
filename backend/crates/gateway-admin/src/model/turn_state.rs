@@ -270,6 +270,7 @@ pub struct TurnStatePoolTest {
     pub ipv4_address: Option<String>,
     pub ipv6_address: Option<String>,
     pub message: String,
+    pub egress: Option<TurnStateEgress>,
 }
 
 /// Internal system requests: no user/key billing and no arbitrary raw response log.
@@ -280,6 +281,9 @@ pub struct TurnStateProbeStart {
     pub phase: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub timeout_seconds: u64,
+    pub cycle_id: String,
+    pub pool_id: Option<String>,
+    pub route_name: String,
 }
 
 #[derive(Default)]
@@ -297,4 +301,131 @@ pub struct TurnStateProbeResult {
     pub message: Option<String>,
     pub sent_state: Option<String>,
     pub returned_state: Option<String>,
+    pub decision: String,
+    pub reason: Option<String>,
+    pub egress: Option<TurnStateEgress>,
+    pub expires_at: Option<i64>,
+}
+
+/// Independent egress detection, NEVER proof of the IP used by an upstream request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateEgress {
+    pub ip: Option<String>,
+    pub location: Option<gateway_core::account::RequestLocation>,
+    pub detected_at: i64,
+    pub source: String,
+    pub rotating: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TurnStateRecordQuery {
+    pub from: chrono::DateTime<chrono::Utc>,
+    pub to: chrono::DateTime<chrono::Utc>,
+    pub page: u32,
+    pub page_size: u32,
+    pub account_id: Option<String>,
+    pub model: Option<String>,
+    pub phase: Option<String>,
+    pub decision: Option<String>,
+    pub cycle_id: Option<String>,
+}
+
+impl TurnStateRecordQuery {
+    pub fn validate(&self) -> Result<(), AdminError> {
+        if self.from >= self.to
+            || (self.to - self.from) > chrono::TimeDelta::days(31)
+            || self.page == 0
+            || self.page > 100_000
+            || !(1..=100).contains(&self.page_size)
+            || self.account_id.as_ref().is_some_and(|v| v.len() > 256)
+            || self.model.as_ref().is_some_and(|v| v.len() > 128)
+            || self.cycle_id.as_ref().is_some_and(|v| v.len() > 256)
+            || self
+                .phase
+                .as_deref()
+                .is_some_and(|v| !matches!(v, "collect" | "verify"))
+            || self.decision.as_deref().is_some_and(|v| {
+                !matches!(
+                    v,
+                    "accepted"
+                        | "verified"
+                        | "rejected"
+                        | "failed"
+                        | "running"
+                        | "interrupted"
+                        | "legacy"
+                )
+            })
+        {
+            return Err(AdminError::invalid(
+                "探测记录筛选不合法，时间范围最多 31 天，每页最多 100 条",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Safe persisted facts. Raw State, proxy URLs and credentials are intentionally absent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TurnStateProbeFacts {
+    pub completed: bool,
+    pub status: Option<u16>,
+    pub decision: String,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub state_length: Option<usize>,
+    pub shape: Option<FernetShape>,
+    pub fingerprint: Option<String>,
+    pub expires_at: Option<i64>,
+    pub egress: Option<TurnStateEgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateProbeRecord {
+    pub id: String,
+    pub cycle_id: String,
+    pub account_id: String,
+    pub account_name: String,
+    pub model: String,
+    pub phase: String,
+    pub pool_id: Option<String>,
+    pub route_name: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub facts: TurnStateProbeFacts,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateProbeStats {
+    pub total: i64,
+    pub completed: i64,
+    pub collections: i64,
+    pub collection_results: i64,
+    pub accepted: i64,
+    pub verifications: i64,
+    pub verification_results: i64,
+    pub verified: i64,
+    pub rejected: i64,
+    pub failed: i64,
+    pub unknown_tokens: i64,
+    pub known_tokens: i64,
+    pub average_latency_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateRecordPage {
+    pub items: Vec<TurnStateProbeRecord>,
+    pub stats: TurnStateProbeStats,
 }

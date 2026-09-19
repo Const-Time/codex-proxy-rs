@@ -56,7 +56,7 @@ pub async fn initialize(
     config: OpenAiConfig,
     ports: ProviderStorePorts,
 ) -> Result<ProviderBundle, OpenAiInitializeError> {
-    initialize_inner(config, ports, None).await
+    initialize_inner(config, ports, None, None).await
 }
 
 /// 组合根装配数据库中的页面配置；不增加启动配置文件字段。
@@ -65,13 +65,24 @@ pub async fn initialize_with_turn_state(
     ports: ProviderStorePorts,
     store: Arc<dyn gateway_admin::ports::turn_state::TurnStateStore>,
 ) -> Result<ProviderBundle, OpenAiInitializeError> {
-    initialize_inner(config, ports, Some(store)).await
+    initialize_inner(config, ports, Some(store), None).await
+}
+
+/// Reuses the host's bounded IP/location detector; tests can omit or replace it.
+pub async fn initialize_with_state_probe(
+    config: OpenAiConfig,
+    ports: ProviderStorePorts,
+    store: Arc<dyn gateway_admin::ports::turn_state::TurnStateStore>,
+    probe: Arc<dyn gateway_admin::ports::proxy::ProxyProbe>,
+) -> Result<ProviderBundle, OpenAiInitializeError> {
+    initialize_inner(config, ports, Some(store), Some(probe)).await
 }
 
 async fn initialize_inner(
     config: OpenAiConfig,
     ports: ProviderStorePorts,
     state_store: Option<Arc<dyn gateway_admin::ports::turn_state::TurnStateStore>>,
+    egress_probe: Option<Arc<dyn gateway_admin::ports::proxy::ProxyProbe>>,
 ) -> Result<ProviderBundle, OpenAiInitializeError> {
     let provider_kind =
         ProviderKind::new("openai").map_err(|_| OpenAiInitializeError::InvalidProviderKind)?;
@@ -113,6 +124,7 @@ async fn initialize_inner(
                 profile.clone(),
                 config.base_url().to_owned(),
                 session_identity.turn_state_key(),
+                egress_probe,
             )
             .await
             .map_err(|_| OpenAiInitializeError::TurnState)?,

@@ -71,7 +71,7 @@ const adminNavItems = [
   { label: '订阅管理', icon: CreditCard, path: '/subscriptions' },
   { label: '账号管理', icon: Server, path: '/accounts' },
   { label: '代理管理', icon: Network, path: '/proxies' },
-  { label: 'State 自动维护', icon: RefreshCw, path: '/turn-state' },
+  { label: '状态维护', icon: RefreshCw, path: '/turn-state' },
   { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
   { label: '操作日志', icon: ShieldCheck, path: '/operation-logs' },
   { label: '系统设置', icon: Settings, path: '/settings' },

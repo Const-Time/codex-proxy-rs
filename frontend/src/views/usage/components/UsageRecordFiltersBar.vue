@@ -28,7 +28,6 @@ const transports = computed(() => [
   { label: 'HTTP', value: 'http_json' },
   { label: 'SSE', value: 'http_sse' },
   { label: 'WebSocket', value: 'websocket' },
-  ...(!personal?.value ? [{ label: '系统维护探测', value: 'maintenance' }] : []),
 ])
 
 async function loadCatalog<T>(load: (page: number) => Promise<{ items: T[], page: { totalPages: number } }>, label: (row: T) => SelectOption) {

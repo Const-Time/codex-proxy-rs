@@ -8,6 +8,25 @@ use wiremock::{
 };
 
 #[tokio::test]
+async fn direct_egress_uses_the_same_bounded_ip_and_location_detector() {
+    use wiremock::matchers::path;
+    let server = MockServer::start().await;
+    Mock::given(path("/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ip":"203.0.113.8"})))
+        .mount(&server)
+        .await;
+    Mock::given(path("/geo/203.0.113.8")).respond_with(ResponseTemplate::new(200)
+        .set_body_json(json!({"success":true,"ip":"203.0.113.8","country_code":"US","region":"California","city":"Los Angeles","timezone":{"id":"America/Los_Angeles"}})))
+        .mount(&server).await;
+    let probe = HttpProxyProbe::new(format!("{}/ip", server.uri()))
+        .with_location_endpoint(format!("{}/geo/", server.uri()));
+    let result = probe.test_egress(None).await.unwrap();
+    assert!(result.success);
+    assert_eq!(result.exit_ip.unwrap().to_string(), "203.0.113.8");
+    assert_eq!(result.location.unwrap().city, "Los Angeles");
+}
+
+#[tokio::test]
 async fn proxy_probe_supports_ipv4_and_ipv6_proxies_and_exit_addresses() {
     for (listen_address, exit_ip) in [
         ("127.0.0.1:0", "203.0.113.8"),

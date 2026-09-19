@@ -1,5 +1,6 @@
 //! 页面配置、短期 state 生命周期与 Provider 运行时读取。不会改变账号或业务出口。
 mod crypto;
+mod egress;
 mod identity;
 mod network;
 mod probe;
@@ -112,6 +113,8 @@ struct StateOwner {
 }
 
 pub(crate) struct StateManager {
+    egress_probe: Option<Arc<dyn gateway_admin::ports::proxy::ProxyProbe>>,
+    egress_cache: Mutex<HashMap<String, TurnStateEgress>>,
     runtime: Mutex<Runtime>,
     store: Arc<dyn TurnStateStore>,
     cipher: StateCipher,
@@ -132,6 +135,7 @@ pub(super) fn fingerprint(value: &str) -> String {
 }
 
 impl StateManager {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn load(
         store: Arc<dyn TurnStateStore>,
         accounts: Arc<dyn ProviderAccountStore>,
@@ -140,6 +144,7 @@ impl StateManager {
         profile: CodexWireProfileState,
         base_url: String,
         key: [u8; 32],
+        egress_probe: Option<Arc<dyn gateway_admin::ports::proxy::ProxyProbe>>,
     ) -> Result<Arc<Self>, AdminError> {
         let cipher = StateCipher::new(&key)?;
         let (storage_revision, sealed) = store
@@ -161,6 +166,8 @@ impl StateManager {
         );
         let (changes, _) = tokio::sync::watch::channel(document.generation);
         Ok(Arc::new(Self {
+            egress_probe,
+            egress_cache: Mutex::new(HashMap::new()),
             runtime: Mutex::new(Runtime {
                 storage_revision,
                 document,
@@ -673,6 +680,16 @@ fn record(target: &mut Target, direction: &str, token: &str, message: &str) {
 
 #[async_trait]
 impl TurnStateService for StateManager {
+    async fn records(
+        &self,
+        query: TurnStateRecordQuery,
+    ) -> Result<TurnStateRecordPage, AdminError> {
+        query.validate()?;
+        self.store
+            .records(&query)
+            .await
+            .map_err(|_| AdminError::unavailable("探测记录读取失败"))
+    }
     async fn view(&self) -> Result<TurnStateView, AdminError> {
         let mut runtime = self.runtime.lock().await;
         self.synchronize(&mut runtime).await?;
@@ -918,7 +935,8 @@ impl TurnStateService for StateManager {
                 }
                 target.next_probe_at = Utc::now().timestamp();
                 target.refresh_requested = true;
-                target.last_message = "已排队".to_owned();
+                target.wait_reason = "queued".to_owned();
+                target.last_message = "已登记刷新；执行前仍需检查小时预算、并发和冷却".to_owned();
             }
             "pause" => target.input.enabled = false,
             "resume" => {
@@ -953,6 +971,6 @@ impl TurnStateService for StateManager {
             .find(|p| p.id == id)
             .cloned()
             .ok_or_else(|| AdminError::not_found("请先保存代理池"))?;
-        network::test(&pool).await
+        network::test(&pool, self).await
     }
 }

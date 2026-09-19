@@ -106,10 +106,86 @@ export function turnStateAction(data: { accountId: string, model: string, action
   return request<TurnStateView>({ url: '/api/admin/turn-state/action', method: 'POST', data })
 }
 export function testTurnStatePool(id: string) {
-  return request<{ success: boolean, ipv6: boolean, exitIp: string | null, ipv4Address: string | null, ipv6Address: string | null, message: string }>({
+  return request<{ success: boolean, ipv6: boolean, exitIp: string | null, ipv4Address: string | null, ipv6Address: string | null, message: string, egress: TurnStateEgress | null }>({
     url: '/api/admin/turn-state/test-pool',
     method: 'POST',
     data: { id },
     timeout: 40000,
   })
+}
+
+export interface TurnStateEgress {
+  ip: string | null
+  location: { country: string, region: string, city: string, timezone: string } | null
+  detectedAt: number
+  source: string
+  rotating: boolean
+}
+
+export interface TurnStateProbeRecord {
+  id: string
+  cycleId: string
+  accountId: string
+  accountName: string
+  model: string
+  phase: 'collect' | 'verify'
+  poolId: string | null
+  routeName: string
+  startedAt: string
+  finishedAt: string | null
+  facts: {
+    completed: boolean
+    status: number | null
+    decision: string
+    reason: string | null
+    message: string | null
+    latencyMs: number | null
+    inputTokens: number | null
+    outputTokens: number | null
+    cachedTokens: number | null
+    reasoningTokens: number | null
+    totalTokens: number | null
+    stateLength: number | null
+    shape: TurnStateShape | null
+    fingerprint: string | null
+    expiresAt: number | null
+    egress: TurnStateEgress | null
+  }
+}
+
+export interface TurnStateProbeStats {
+  total: number
+  completed: number
+  collections: number
+  collectionResults: number
+  accepted: number
+  verifications: number
+  verificationResults: number
+  verified: number
+  rejected: number
+  failed: number
+  unknownTokens: number
+  knownTokens: number
+  averageLatencyMs: number | null
+}
+
+export interface TurnStateRecordQuery {
+  from: string
+  to: string
+  page: number
+  pageSize: number
+  accountId?: string
+  model?: string
+  phase?: string
+  decision?: string
+  cycleId?: string
+}
+
+export interface TurnStateRecordPage {
+  items: TurnStateProbeRecord[]
+  stats: TurnStateProbeStats
+}
+
+export function getTurnStateRecords(data: TurnStateRecordQuery) {
+  return request<TurnStateRecordPage>({ url: '/api/admin/turn-state/records', method: 'POST', data })
 }

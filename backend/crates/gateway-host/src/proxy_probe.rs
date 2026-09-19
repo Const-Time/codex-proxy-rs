@@ -69,7 +69,7 @@ impl HttpProxyProbe {
 
     async fn request_location(
         &self,
-        proxy: &OutboundProxy,
+        proxy: Option<&OutboundProxy>,
         ip: IpAddr,
     ) -> Option<gateway_core::account::RequestLocation> {
         let endpoint = self.location_endpoint.as_ref()?;
@@ -142,16 +142,17 @@ impl HttpProxyProbe {
         self
     }
 
-    fn client(&self, proxy: &OutboundProxy) -> Result<reqwest::Client, &'static str> {
-        let proxy = reqwest::Proxy::all(proxy.expose_url()).map_err(|_| "代理地址不合法")?;
-        (self.build_client)(
-            reqwest::Client::builder()
-                .no_proxy()
-                .proxy(proxy)
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(12))
-                .redirect(reqwest::redirect::Policy::none()),
-        )
+    fn client(&self, proxy: Option<&OutboundProxy>) -> Result<reqwest::Client, &'static str> {
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(proxy) = proxy {
+            builder = builder
+                .proxy(reqwest::Proxy::all(proxy.expose_url()).map_err(|_| "代理地址不合法")?);
+        }
+        (self.build_client)(builder)
     }
 
     async fn check_target(
@@ -162,13 +163,17 @@ impl HttpProxyProbe {
     ) -> ProxyQualityCheck {
         let started = Instant::now();
         let result = async {
-            self.client(proxy)?.get(url).send().await.map_err(|error| {
-                if error.is_timeout() {
-                    "连接超时"
-                } else {
-                    "连接失败，请检查代理认证、DNS、TCP 和 TLS"
-                }
-            })
+            self.client(Some(proxy))?
+                .get(url)
+                .send()
+                .await
+                .map_err(|error| {
+                    if error.is_timeout() {
+                        "连接超时"
+                    } else {
+                        "连接失败，请检查代理认证、DNS、TCP 和 TLS"
+                    }
+                })
         }
         .await;
         let latency_ms = elapsed_ms(started);
@@ -193,7 +198,7 @@ impl HttpProxyProbe {
         }
     }
 
-    async fn exit_ip(&self, proxy: &OutboundProxy) -> Result<IpAddr, &'static str> {
+    async fn exit_ip(&self, proxy: Option<&OutboundProxy>) -> Result<IpAddr, &'static str> {
         let client = self.client(proxy)?;
         let mut response = client.get(&self.endpoint).send().await.map_err(|error| {
             if error.is_timeout() {
@@ -286,6 +291,16 @@ impl ProxyProbe for HttpProxyProbe {
     }
 
     async fn test(&self, proxy: &OutboundProxy) -> ProxyTestResult {
+        self.detect_egress(Some(proxy)).await
+    }
+
+    async fn test_egress(&self, proxy: Option<&OutboundProxy>) -> Option<ProxyTestResult> {
+        Some(self.detect_egress(proxy).await)
+    }
+}
+
+impl HttpProxyProbe {
+    async fn detect_egress(&self, proxy: Option<&OutboundProxy>) -> ProxyTestResult {
         let started = Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(15), self.exit_ip(proxy)).await;
         let result = result.unwrap_or(Err("代理连接超时"));

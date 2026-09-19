@@ -156,6 +156,7 @@ impl Probe<'_> {
     }
 
     pub(super) async fn run(&self) -> Result<Current, ProbeFailure> {
+        let cycle_id = uuid::Uuid::new_v4().to_string();
         let attempts = if self.pool.mode == "fixed" {
             1
         } else {
@@ -174,7 +175,7 @@ impl Probe<'_> {
                 proxy = network::acquire(self.pool) => proxy
                     .map_err(|e| ProbeFailure::retry(e.message(), "proxy_unavailable"))?,
             };
-            let token = match self.call(Some(&proxy), None).await {
+            let token = match self.call(Some(&proxy), None, &cycle_id).await {
                 Ok(Some(token)) => token,
                 Ok(None) => unreachable!("collection without a candidate is classified by call"),
                 Err(error)
@@ -189,7 +190,7 @@ impl Probe<'_> {
             };
             let (shape, expires_at) = self.candidate(Some(&token))?;
             self.gap().await?;
-            self.call(self.account.outbound_proxy(), Some(&token))
+            self.call(self.account.outbound_proxy(), Some(&token), &cycle_id)
                 .await?;
             return Ok(Current {
                 fingerprint: fingerprint(&token),
@@ -207,6 +208,7 @@ impl Probe<'_> {
         &self,
         proxy: Option<&OutboundProxy>,
         token: Option<&str>,
+        cycle_id: &str,
     ) -> Result<Option<String>, ProbeFailure> {
         self.valid().await?;
         let (account, binding) = self
@@ -238,7 +240,7 @@ impl Probe<'_> {
             scheduling.request_interval(),
             SystemTime::now() + duration,
         );
-        let _guard = match self
+        let guard = match self
             .manager
             .leases
             .try_acquire(ProviderLeaseRequest::Scheduling(lease))
@@ -321,6 +323,15 @@ impl Probe<'_> {
             phase: if token.is_some() { "verify" } else { "collect" }.to_owned(),
             started_at: Utc::now(),
             timeout_seconds: self.policy.timeout_seconds,
+            cycle_id: cycle_id.to_owned(),
+            pool_id: token.is_none().then(|| self.pool.id.clone()),
+            route_name: if token.is_none() {
+                self.pool.name.clone()
+            } else if proxy.is_some() {
+                "账号业务代理".to_owned()
+            } else {
+                "服务器直连".to_owned()
+            },
         };
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -395,6 +406,24 @@ impl Probe<'_> {
         }
         observed.latency_ms = began.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         observed.message = result.as_ref().err().map(|e| e.message.clone());
+        observed.reason = result.as_ref().err().map(|e| e.reason.to_owned());
+        observed.decision = match (&result, token.is_some(), observed.succeeded) {
+            (Ok(_), true, _) => "verified",
+            (Ok(_), false, _) => "accepted",
+            (Err(_), false, true) => "rejected",
+            _ => "failed",
+        }
+        .to_owned();
+        observed.expires_at = token
+            .or(observed.returned_state.as_deref())
+            .and_then(FernetShape::parse)
+            .and_then(|shape| shape.issued_at.checked_add(self.policy.ttl_seconds));
+        // Release the business scheduling slot before auxiliary network telemetry.
+        drop(guard);
+        observed.egress = self
+            .manager
+            .egress(proxy, token.is_none() && self.pool.mode != "fixed", false)
+            .await;
         if let Err(error) = &result
             && error.reason.starts_with("state_")
         {
@@ -416,7 +445,7 @@ impl Probe<'_> {
         }
         // Do not persist arbitrarily large upstream headers in request details.
         observed.returned_state = observed.returned_state.filter(|value| value.len() <= 4096);
-        if let Err(error) = &result
+        let cooldown_result = if let Err(error) = &result
             && error.cooldown_until > 0
         {
             self.manager
@@ -424,8 +453,10 @@ impl Probe<'_> {
                 .await
                 .map_err(|_| {
                     ProbeFailure::retry("上游冷却保存失败；停止探测", "storage_unavailable")
-                })?;
-        }
+                })
+        } else {
+            Ok(())
+        };
         tokio::time::timeout(
             Duration::from_secs(5),
             self.manager.store.finish_probe(&start.id, &observed),
@@ -433,6 +464,7 @@ impl Probe<'_> {
         .await
         .map_err(|_| ProbeFailure::retry("探测结果记账超时", "storage_unavailable"))?
         .map_err(|_| ProbeFailure::retry("探测结果记账失败", "storage_unavailable"))?;
+        cooldown_result?;
         result?;
         Ok(observed.returned_state)
     }

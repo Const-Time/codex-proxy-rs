@@ -140,15 +140,20 @@ async fn test_ip(proxy: &OutboundProxy, url: &str) -> Option<IpAddr> {
     std::str::from_utf8(&body).ok()?.trim().parse().ok()
 }
 
-pub(super) async fn test(pool: &Pool) -> Result<TurnStatePoolTest, AdminError> {
+pub(super) async fn test(
+    pool: &Pool,
+    manager: &super::StateManager,
+) -> Result<TurnStatePoolTest, AdminError> {
     let proxy = acquire(pool).await?;
-    let (v4, v6) = tokio::join!(
+    let (v4, v6, egress) = tokio::join!(
         test_ip(&proxy, "https://api.ipify.org"),
-        test_ip(&proxy, "https://api6.ipify.org")
+        test_ip(&proxy, "https://api6.ipify.org"),
+        manager.egress(Some(&proxy), pool.mode != "fixed", true)
     );
     let v4 = v4.filter(IpAddr::is_ipv4);
     let v6 = v6.filter(IpAddr::is_ipv6);
     Ok(TurnStatePoolTest {
+        egress,
         success: v4.is_some() || v6.is_some(), ipv6: v6.is_some(),
         exit_ip: v6.or(v4).map(|ip| ip.to_string()),
         ipv4_address: v4.map(|ip| ip.to_string()), ipv6_address: v6.map(|ip| ip.to_string()),
