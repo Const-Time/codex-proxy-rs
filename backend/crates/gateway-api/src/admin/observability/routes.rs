@@ -290,6 +290,9 @@ fn retain_personal_fields(value: &mut serde_json::Value) {
         "route",
         "model",
         "requestedModel",
+        // Model routing facts are public; account and transport diagnostics remain private.
+        "upstreamModel",
+        "upstreamResponseModel",
         "serviceTier",
         "statusCode",
         "clientTransport",

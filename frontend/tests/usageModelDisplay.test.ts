@@ -30,3 +30,31 @@ test('mapping and response equality is explained while missing models stay unkno
     { primary: '—', secondary: '', routes: [] },
   )
 })
+
+test('personal usage shows the routed model beneath the requested model', () => {
+  for (const upstreamResponseModel of [null, 'gpt-5.6-luna']) {
+    const display = usageModelDisplay({
+      requestedModel: 'codex-auto-review',
+      model: 'gpt-5.6-luna',
+      upstreamModel: 'gpt-5.6-luna',
+      upstreamResponseModel,
+    })
+    assert.equal(display.primary, 'codex-auto-review')
+    assert.equal(display.secondary, 'gpt-5.6-luna')
+    assert.deepEqual(display.routes.map(route => [route.kind, route.model]), [
+      [upstreamResponseModel ? 'returned' : 'mapped', 'gpt-5.6-luna'],
+    ])
+  }
+})
+
+test('personal usage does not show a routing arrow when the model is unchanged', () => {
+  const display = usageModelDisplay({
+    requestedModel: 'gpt-5.6-sol',
+    model: 'gpt-5.6-sol',
+    upstreamModel: 'gpt-5.6-sol',
+    upstreamResponseModel: 'gpt-5.6-sol',
+  })
+  assert.equal(display.primary, 'gpt-5.6-sol')
+  assert.equal(display.secondary, '')
+  assert.deepEqual(display.routes, [])
+})

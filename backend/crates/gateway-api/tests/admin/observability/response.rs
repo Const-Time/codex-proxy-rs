@@ -522,6 +522,62 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
             "attemptAuthenticationKind": "api_key",
         })
     );
+
+    fixture
+        .auth
+        .insert_user_session("personal-session", "ordinary");
+    for response_model in [None, Some("returned-model")] {
+        fixture
+            .usage_detail
+            .lock()
+            .expect("usage detail")
+            .as_mut()
+            .expect("usage detail record")
+            .request
+            .upstream_response_model = response_model.map(str::to_owned);
+        for (session, personal) in [("personal-session", false), ("valid-session", true)] {
+            let response = observability::router::<AdminTestState>()
+                .with_state(fixture.state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/admin/usage/records/detail?id=req_detail&personal={personal}"
+                        ))
+                        .header(header::COOKIE, format!("cpr_admin_session={session}"))
+                        .header("x-request-id", "personal-usage-detail")
+                        .body(Body::empty())
+                        .expect("personal detail request"),
+                )
+                .await
+                .expect("personal detail response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("personal detail body");
+            let value: serde_json::Value =
+                serde_json::from_slice(&body).expect("personal detail JSON");
+            let item = &value["data"];
+            assert_eq!(item["requestedModel"], "coding");
+            assert_eq!(item["upstreamModel"], "upstream-model");
+            assert_eq!(
+                item.get("upstreamResponseModel"),
+                Some(&serde_json::json!(response_model))
+            );
+            for field in [
+                "accountId",
+                "accountName",
+                "accountEmail",
+                "authenticationKind",
+                "upstreamTransport",
+                "upstreamRequestId",
+                "latencyDetails",
+                "metadata",
+                "attempts",
+            ] {
+                assert!(item.get(field).is_none(), "personal detail exposes {field}");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -979,6 +1035,8 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
     let personal: serde_json::Value = serde_json::from_slice(&personal_bytes).unwrap();
     let item = &personal["data"]["items"][0];
     assert_eq!(item["requestedModel"], "grok-4.5");
+    assert_eq!(item["upstreamModel"], "grok-4.5");
+    assert_eq!(item["upstreamResponseModel"], "grok-4.6-build");
     assert_eq!(item["tokenDetails"]["imageInputTokens"], 31);
     for field in [
         "userId",
@@ -988,7 +1046,6 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         "accountName",
         "accountEmail",
         "authenticationKind",
-        "upstreamModel",
         "upstreamTransport",
         "latencyDetails",
         "turnState",
