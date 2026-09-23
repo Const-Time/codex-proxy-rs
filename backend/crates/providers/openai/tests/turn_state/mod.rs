@@ -419,7 +419,7 @@ async fn http_takeover_marks_actual_source_and_does_not_invalidate_on_312() {
     let body = zstd::stream::decode_all(requests[0].body.as_slice()).unwrap();
     assert_eq!(
         serde_json::from_slice::<Value>(&body).unwrap()["input"],
-        "unchanged user input"
+        json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"unchanged user input"}]}])
     );
     // 同一 blob 回到别的账号时剥离；绝不拿 A 的池替 B。
     execute(&bundle, operation(Some(&candidate), false), "acct_other").await;

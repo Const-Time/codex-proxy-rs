@@ -65,6 +65,11 @@ export const routes: RouteRecordRaw[] = [
         name: 'settings-backup',
         component: () => import('@/views/settings/index.vue'),
       },
+      {
+        path: 'settings/pricing',
+        name: 'settings-pricing',
+        component: () => import('@/views/settings/index.vue'),
+      },
     ],
   },
   {

@@ -397,11 +397,17 @@ Worker 由各 Bundle 贡献、由 Host 统一监督：
 
 - Store：过期请求恢复、历史保留和 PostgreSQL/Redis 观测队列；
 - Core：`runtime` owner 的 RuntimeSnapshot 周期对账和 Redis change 订阅；
-- Admin：S3/R2 备份 daemon，负责调度、执行、删除收敛与保留清理；
+- Admin：S3/R2 备份、订阅/额度采样和价格同步 daemon；
 - Provider：credential refresh、quota/catalog 健康和官方版本/etag 检查。
 
 周期任务的 Redis lease 只保证单周期互斥，不构成多副本 leader 选举。备份 daemon 依赖单副本部署边界，
 自更新也只替换处理请求的当前进程，因此整个应用必须保持单副本。
+
+价格同步由 Admin 决定策略，Host 负责固定远程来源的下载、摘要验证和 LiteLLM 格式转换，
+Store 在事务内保存价目、策略与审计，并通过原有配置修订发布 Core 快照。
+后台每 10 分钟检查，默认只加入未知模型；推理请求只读已冻结快照，不访问远程价格服务。
+人工覆盖优先于同步层，内置价目用于兜底；上游明确上报的实际费用仍优先。
+已结算费用和请求时分组倍率不会随当前价目重算。详见 `docs/model-pricing.md`。
 
 ## 11. 生命周期、安全与恢复
 

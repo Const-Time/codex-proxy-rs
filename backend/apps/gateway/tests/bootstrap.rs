@@ -271,16 +271,106 @@ fn bootstrap_config_debug_should_redact_all_passwords() {
 }
 
 #[test]
-fn config_loader_should_reject_unknown_fields() {
-    assert_rejected(format!(
-        "{}\nunknown_terminal_field: true\n",
-        valid_config()
-    ));
+fn config_loader_should_ignore_unknown_fields_in_configuration_sections() {
+    let mut document = valid_config_document();
+    document["host"]["system_update"] = serde_json::json!({});
+    document["store"]["pool"] = serde_json::json!({});
+    for path in [
+        "",
+        "/host",
+        "/host/listen",
+        "/host/logging",
+        "/host/logging/file",
+        "/host/system_update",
+        "/store",
+        "/store/database",
+        "/store/redis",
+        "/store/pool",
+        "/admin",
+        "/api",
+        "/openai",
+        "/openai/wire_profile",
+        "/xai",
+        "/xai/wire_profile",
+    ] {
+        let mut extended = document.clone();
+        extended.pointer_mut(path).expect("configuration section")["unused_setting"] =
+            serde_json::json!({"nested": [true, null, "ignored"]});
+        parse_config(&extended.to_string())
+            .unwrap_or_else(|error| panic!("unknown field in {path}: {error}"));
+    }
 }
 
 #[test]
-fn config_loader_should_reject_removed_tls_section() {
-    assert_rejected(valid_config().replace("openai:\n", "openai:\n  tls: {}\n"));
+fn config_loader_should_ignore_removed_tls_and_fingerprint_sections() {
+    let mut document = valid_config_document();
+    document["openai"]["tls"] = serde_json::json!({});
+    document["openai"]["fingerprint"] = serde_json::json!({"browser": "removed"});
+    parse_config(&document.to_string()).expect("removed provider settings are ignored");
+}
+
+#[test]
+fn config_loader_should_reject_invalid_known_fields_alongside_unknown_fields() {
+    for port in [serde_json::json!(0), serde_json::json!("not-a-port")] {
+        let mut document = valid_config_document();
+        document["host"]["listen"]["unused_setting"] = serde_json::json!(true);
+        document["host"]["listen"]["port"] = port;
+        assert_rejected(document.to_string());
+    }
+}
+
+#[test]
+fn config_loader_should_report_startup_configuration_diagnostics() {
+    const CHILD_ENV: &str = "CPR_TEST_CONFIG_DIAGNOSTICS_CHILD";
+    const UNUSED_SECRET: &str = "unused-value-must-not-appear-in-diagnostics";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        gateway_host::load_config::<GatewayConfig>().expect("startup configuration");
+        return;
+    }
+    for case in ["normal", "unused", "missing"] {
+        let mut document = valid_config_document();
+        if case == "unused" {
+            document["openai"]["wire_profile"]["location"] = serde_json::json!(UNUSED_SECRET);
+        } else if case == "missing" {
+            document["host"]["listen"]
+                .as_object_mut()
+                .unwrap()
+                .remove("port");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("deploy")).unwrap();
+        fs::write(
+            directory.path().join("deploy/config.yaml"),
+            document.to_string(),
+        )
+        .unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "bootstrap::config_loader_should_report_startup_configuration_diagnostics",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            case != "missing",
+            "{case}: {stderr}"
+        );
+        match case {
+            "unused" => assert!(
+                stderr.contains("openai.wire_profile.location") && stderr.contains("已忽略"),
+                "{stderr}"
+            ),
+            "missing" => assert!(stderr.contains("host.listen.port"), "{stderr}"),
+            _ => assert!(!stderr.contains("警告"), "{stderr}"),
+        }
+        assert!(!stderr.contains(UNUSED_SECRET), "{stderr}");
+        assert!(!stderr.contains("services"), "{stderr}");
+    }
 }
 
 #[test]
@@ -322,11 +412,12 @@ fn config_loader_should_reject_admin_password_with_compose_interpolation() {
 }
 
 #[test]
-fn config_loader_should_reject_removed_fingerprint_section() {
-    assert_rejected(valid_config().replace(
+fn config_loader_should_ignore_removed_fingerprint_section() {
+    parse_config(&valid_config().replace(
         "openai:\n",
         "openai:\n  fingerprint:\n    browser: removed\n",
-    ));
+    ))
+    .expect("legacy field ignored");
 }
 
 #[test]
@@ -390,4 +481,15 @@ fn parse_config(config: &str) -> Result<(GatewayConfig, tempfile::TempDir), Stri
         .resolve_and_validate(&deploy)
         .map_err(|error| error.to_string())?;
     Ok((config, directory))
+}
+
+fn valid_config_document() -> serde_json::Value {
+    config::Config::builder()
+        .add_source(config::File::from_str(
+            &valid_config(),
+            config::FileFormat::Yaml,
+        ))
+        .build()
+        .and_then(config::Config::try_deserialize)
+        .expect("example config document")
 }

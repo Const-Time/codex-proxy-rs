@@ -28,6 +28,8 @@ export interface BaseTableColumn<Row extends TableRow = TableRow> {
   sortable?: boolean | string
   format?: (value: unknown, row: Row) => unknown
   emptyText?: string
+  hideable?: boolean
+  defaultHidden?: boolean
   mobileFullWidth?: boolean
 }
 
@@ -37,6 +39,7 @@ export interface BaseTableSort {
 }
 
 export interface BaseTableProps<Row extends TableRow> {
+  tableId?: string
   mobileActionsFirst?: boolean
   columns: BaseTableColumn<Row>[]
   rows: Row[]
@@ -46,6 +49,7 @@ export interface BaseTableProps<Row extends TableRow> {
   density?: 'compact' | 'default'
   loading?: boolean
   emptyText?: string
+  showHeaderWhenEmpty?: boolean
   scrollbarAlwaysVisible?: boolean
   sort?: BaseTableSort
 }

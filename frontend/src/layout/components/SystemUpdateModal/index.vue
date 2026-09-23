@@ -39,7 +39,6 @@ const {
   updateError,
   updateSuccess,
   needRestart,
-  loadedOnce,
   updateLogs,
   updateStreaming,
   updateStreamError,
@@ -97,7 +96,11 @@ function pinUpdateLogsToBottom() {
 async function handleCheckUpdates(force = true) {
   try {
     const data = await checkUpdates(force)
-    toast.success(data?.hasUpdate ? '发现可用更新' : '当前已是最新版本')
+    if (data?.warning) {
+      toast.error(data.warning)
+      return
+    }
+    toast.success(data?.hasUpdate ? '发现可用更新' : '当前没有可用更新')
   }
   catch (error: unknown) {
     toast.error(errorMessage(error, '检查更新失败'))
@@ -112,8 +115,12 @@ async function handleUpdateRequest() {
   preparingUpdate.value = true
   try {
     const data = await checkUpdates(true)
+    if (data?.warning) {
+      toast.error(data.warning)
+      return
+    }
     if (!data?.hasUpdate) {
-      toast.success('当前已是最新版本')
+      toast.success('当前没有可用更新')
       return
     }
     const remoteTargetVersion = normalizeSystemVersion(data.latestVersion)
@@ -140,8 +147,8 @@ async function handleUpdateRequest() {
 async function runConfirmedUpdate(targetVersion: string) {
   try {
     const result = await updateNow(targetVersion)
-    if (result?.needRestart) {
-      toast.success('更新完成，请重启服务')
+    if (result) {
+      toast.success('更新已开始')
     }
   }
   catch (error: unknown) {
@@ -169,10 +176,8 @@ async function handleRestart() {
 }
 
 watch(open, (visible) => {
-  if (visible && !loadedOnce.value) {
-    void loadSystem(false).catch((error: unknown) => {
-      toast.error(errorMessage(error, '加载系统更新信息失败'))
-    })
+  if (visible) {
+    void loadSystem(false).catch(() => undefined)
   }
 })
 
@@ -195,7 +200,7 @@ watch(
     description="检查版本、查看发布说明并执行在线更新"
     tone="success"
     size="lg"
-    :dismissible="!updating && !restarting"
+    :dismissible="!restarting"
   >
     <template #icon>
       <ArrowUpCircle class="size-4.5 text-cp-success" />
@@ -363,7 +368,7 @@ watch(
         {{ presentation.restartButtonLabel }}
       </BaseButton>
       <BaseButton
-        v-else
+        v-else-if="hasUpdate || updating"
         variant="primary"
         :loading="preparingUpdate || updating"
         :disabled="!canUpdate || preparingUpdate"

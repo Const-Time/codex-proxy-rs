@@ -5,6 +5,7 @@ mod backup;
 mod client_keys;
 mod observability;
 mod openai;
+mod pricing;
 mod proxies;
 mod settings;
 mod system;
@@ -94,6 +95,7 @@ pub(super) struct AdminHarness {
     providers: Vec<Arc<dyn ProviderAdmin>>,
     probe: Arc<dyn AccountProbe>,
     system: Arc<dyn SystemOperations>,
+    pricing_source: Arc<dyn gateway_admin::ports::pricing::PricingSource>,
 }
 
 impl AdminHarness {
@@ -117,6 +119,7 @@ impl AdminHarness {
             ],
             probe: Arc::new(UnavailableProbe),
             system: Arc::new(UnavailableSystem),
+            pricing_source: Arc::new(UnavailablePricingSource),
         }
     }
 
@@ -162,6 +165,14 @@ impl AdminHarness {
 
     pub(super) fn settings(mut self, store: Arc<dyn SettingsStore>) -> Self {
         self.settings = store;
+        self
+    }
+
+    pub(super) fn pricing_source(
+        mut self,
+        source: Arc<dyn gateway_admin::ports::pricing::PricingSource>,
+    ) -> Self {
+        self.pricing_source = source;
         self
     }
 
@@ -219,11 +230,14 @@ impl AdminHarness {
                 self.settings,
                 self.backup,
             ),
-            self.providers,
-            Arc::new(NoopSnapshot),
-            (self.probe, Arc::new(proxies::TestProxies::default())),
-            Arc::new(NoopClientDistribution),
-            self.system,
+            gateway_admin::AdminRuntimePorts {
+                providers: self.providers,
+                snapshot: Arc::new(NoopSnapshot),
+                probes: (self.probe, Arc::new(proxies::TestProxies::default())),
+                client_distribution: Arc::new(NoopClientDistribution),
+                system: self.system,
+                pricing_source: self.pricing_source,
+            },
         )
         .await
         .expect("initialize admin test harness")
@@ -664,6 +678,30 @@ impl ObservabilityStore for UnavailableStore {
 
 #[async_trait]
 impl SettingsStore for UnavailableStore {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        Ok(Default::default())
+    }
+    async fn sync_pricing(
+        &self,
+        _: gateway_admin::model::pricing::SyncPricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Option<gateway_admin::model::Revision>> {
+        panic!("unexpected pricing sync")
+    }
+    async fn update_pricing_sync_policy(
+        &self,
+        _: gateway_admin::model::pricing::PricingSyncPolicy,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing sync policy")
+    }
+    async fn update_pricing(
+        &self,
+        _: gateway_admin::model::pricing::UpdatePricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing update")
+    }
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Err(unavailable("settings"))
     }
@@ -700,6 +738,20 @@ struct UnavailableProvider {
     kind: ProviderKind,
     dashboard_profile: Option<DashboardWireProfile>,
     calculated_billing: Option<gateway_admin::model::observability::CalculatedBillingBreakdown>,
+    prices: gateway_admin::model::pricing::ProviderPricingCatalog,
+}
+
+struct UnavailablePricingSource;
+#[async_trait]
+impl gateway_admin::ports::pricing::PricingSource for UnavailablePricingSource {
+    async fn fetch(
+        &self,
+    ) -> Result<gateway_admin::model::pricing::PricingSyncPreview, gateway_admin::model::AdminError>
+    {
+        Err(gateway_admin::model::AdminError::internal(
+            "pricing source unavailable",
+        ))
+    }
 }
 
 impl UnavailableProvider {
@@ -708,12 +760,16 @@ impl UnavailableProvider {
             kind: ProviderKind::new(kind).expect("provider kind"),
             dashboard_profile: None,
             calculated_billing: None,
+            prices: Default::default(),
         }
     }
 }
 
 #[async_trait]
 impl ProviderAdmin for UnavailableProvider {
+    fn pricing_catalog(&self) -> gateway_admin::model::pricing::ProviderPricingCatalog {
+        self.prices.clone()
+    }
     fn provider_kind(&self) -> &ProviderKind {
         &self.kind
     }
@@ -802,6 +858,7 @@ impl ProviderAdmin for UnavailableProvider {
 
 pub(super) fn dashboard_profile_provider() -> Arc<dyn ProviderAdmin> {
     Arc::new(UnavailableProvider {
+        prices: Default::default(),
         kind: ProviderKind::new("openai").expect("provider kind"),
         dashboard_profile: Some(DashboardWireProfile {
             provider: "openai".to_owned(),
@@ -845,10 +902,13 @@ pub(super) fn calculated_billing_provider() -> Arc<dyn ProviderAdmin> {
             .expect("test billing amount"),
     };
     Arc::new(UnavailableProvider {
+        prices: Default::default(),
         kind: ProviderKind::new("openai").expect("provider kind"),
         dashboard_profile: None,
         calculated_billing: Some(
             gateway_admin::model::observability::CalculatedBillingBreakdown {
+                custom_multiplier_bps: 10_000,
+                image: None,
                 input_amount: amount("0.8"),
                 output_amount: amount("0.2"),
                 cache_read_amount: amount("0"),

@@ -670,6 +670,7 @@ pub(super) fn codex_model_presentation(model: &CodexCatalogModel) -> ModelPresen
         capabilities.image_detail_original() == CodexCatalogCapabilityEvidence::DeclaredNative,
     )
     .with_verbosity(capabilities.verbosity() == CodexCatalogCapabilityEvidence::DeclaredNative)
+    .with_service_tiers(capabilities.service_tiers().to_vec())
     .with_hidden(hidden)
 }
 
@@ -828,7 +829,12 @@ pub(super) fn map_selection_error(error: CredentialSelectionError) -> ProviderEr
             ProviderErrorKind::NoEligibleAccount,
             UpstreamSendState::NotSent,
         ),
-        CredentialSelectionError::InvalidCredential
+        CredentialSelectionError::QuotaExhausted => provider_error(
+            ProviderErrorKind::QuotaExhausted,
+            UpstreamSendState::NotSent,
+        ),
+        CredentialSelectionError::AccountSnapshotChanged
+        | CredentialSelectionError::InvalidCredential
         | CredentialSelectionError::Store
         | CredentialSelectionError::Coordinator
         | CredentialSelectionError::CookiePolicy => provider_error(

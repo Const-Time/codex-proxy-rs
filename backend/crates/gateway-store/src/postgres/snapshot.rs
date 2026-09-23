@@ -20,6 +20,7 @@ use super::ClientApiKeySnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRuntimeSettings {
+    pub pricing: gateway_core::metering::PricingOverrides,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
@@ -148,7 +149,8 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 data.settings.model_mappings,
                 data.settings.min_codex_desktop_version,
                 data.settings.min_codex_cli_version,
-            );
+            )
+            .with_pricing(data.settings.pricing);
             let client_policies = data
                 .client_api_keys
                 .into_iter()
@@ -221,6 +223,18 @@ fn core_revision(revision: Revision) -> Result<ConfigRevision, SnapshotStoreErro
 async fn load_settings(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<(Revision, SnapshotRuntimeSettings)> {
+    let prices = sqlx::query_as::<
+        _,
+        (
+            sqlx::types::Json<gateway_core::metering::PricingOverrides>,
+            sqlx::types::Json<gateway_core::metering::PricingOverrides>,
+        ),
+    >(
+        "select pricing_synced_json, pricing_overrides_json from runtime_settings where id = 1",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| postgres_unavailable("load pricing snapshot"))?;
     let row = sqlx::query_as::<
         _,
         (
@@ -259,6 +273,11 @@ async fn load_settings(
             model_mappings: row.6.0,
             min_codex_desktop_version: row.7,
             min_codex_cli_version: row.8,
+            pricing: {
+                super::pricing::validate_pricing(&prices.0.0)?;
+                super::pricing::validate_pricing(&prices.1.0)?;
+                gateway_core::metering::merge_pricing(prices.0.0, &prices.1.0)
+            },
         },
     ))
 }

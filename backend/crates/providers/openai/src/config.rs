@@ -29,7 +29,6 @@ const fn default_stream_max_retries() -> u64 {
 
 /// OpenAI Provider 唯一启动配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OpenAiConfig {
     #[serde(default)]
     pub api: CodexApiConfig,
@@ -129,7 +128,6 @@ impl Default for OpenAiConfig {
 
 /// Codex 上游 API 的 Provider-owned 地址配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CodexApiConfig {
     pub base_url: String,
 }
@@ -170,7 +168,6 @@ impl CodexApiConfig {
 
 /// Codex Responses WebSocket pool 的 Provider-owned 启动设置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CodexWebSocketPoolSettings {
     pub enabled: bool,
     pub max_age_ms: u64,
@@ -211,7 +208,6 @@ impl CodexWebSocketPoolSettings {
 
 /// OpenAI Provider 的额度刷新策略。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CodexQuotaSettings {
     /// 保留模型目录的刷新周期；额度独立每 30 秒检查周期复核和 reset 到期条件。
     pub refresh_interval_minutes: u64,
@@ -244,7 +240,6 @@ impl CodexQuotaSettings {
 
 /// OpenAI OAuth 的 Provider-owned 运行开关和端点。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CodexAuthSettings {
     pub refresh_enabled: bool,
     pub oauth_client_id: String,
@@ -277,7 +272,6 @@ impl CodexAuthSettings {
 
 /// 经审计固定的 Codex Desktop 上游请求画像。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CodexWireProfileConfig {
     pub originator: String,
     /// 官方 Desktop ZIP 内嵌 Core 的启动基线；运行时按完整制品元组更新。

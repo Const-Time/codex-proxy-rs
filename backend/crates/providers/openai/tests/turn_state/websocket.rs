@@ -98,7 +98,10 @@ async fn managed_ws_without_fingerprint_convergence_is_frame_only_and_preserves_
         assert_eq!(body["client_metadata"]["unrelated"], "preserved");
         assert!(body["client_metadata"].get("turnState").is_none());
         assert!(body["client_metadata"].get("turn_state").is_none());
-        assert_eq!(body["input"], "unchanged user input");
+        assert_eq!(
+            body["input"],
+            json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"unchanged user input"}]}])
+        );
         ws.send(completed(0)).await.unwrap();
     });
     let result = execute(

@@ -85,6 +85,7 @@ impl DefaultAccountsService {
                 },
                 points,
                 history.pending_request_count,
+                interrupted,
             );
             let cycle_based = sample.method == QuotaForecastMethod::Cumulative;
             if sample.discontinuous || (interrupted && cycle_based) {
@@ -118,10 +119,14 @@ impl DefaultAccountsService {
             // A missing historical multiplier must not silently become ×1.
             let billed = (usage.missing_billed_count == 0).then_some(usage.billed_usd);
             let tokens = (usage.tokens > 0).then_some(usage.tokens);
-            let factor = 100.0 / delta;
             let remaining_factor = (100.0 - percent) / delta;
-            let estimated_tokens = tokens.and_then(|value| token_estimate(value, factor));
-            let total_usd = amount.and_then(|value| money(value * factor));
+            let cycle = &sample.cycle_usage;
+            let estimated_tokens = tokens
+                .and_then(|value| token_estimate(value, remaining_factor))
+                .and_then(|remaining| cycle.tokens.checked_add(remaining));
+            let total_usd = amount
+                .filter(|_| cycle.unavailable_cost_count == 0)
+                .and_then(|value| money(cycle.usd + value * remaining_factor));
             if estimated_tokens.is_none() && total_usd.is_none() {
                 window.estimate_hint = Some("暂无可用的 Token 或费用数据，等待用量入账".to_owned());
                 continue;
@@ -130,10 +135,16 @@ impl DefaultAccountsService {
                 cycle_based,
                 missing_cost_count: usage.unavailable_cost_count,
                 request_count: usage.request_count,
-                used_usd: amount.and_then(money),
+                used_usd: (cycle.known_cost_count > 0 && cycle.unavailable_cost_count == 0)
+                    .then_some(cycle.usd)
+                    .and_then(money),
                 total_usd,
-                billed_used_usd: billed.and_then(money),
-                billed_total_usd: billed.and_then(|value| money(value * factor)),
+                billed_used_usd: (cycle.missing_billed_count == 0)
+                    .then_some(cycle.billed_usd)
+                    .and_then(money),
+                billed_total_usd: billed
+                    .filter(|_| cycle.missing_billed_count == 0)
+                    .and_then(|value| money(cycle.billed_usd + value * remaining_factor)),
                 estimated_tokens,
                 remaining_tokens: tokens.and_then(|value| token_estimate(value, remaining_factor)),
                 remaining_usd: amount.and_then(|value| money(value * remaining_factor)),

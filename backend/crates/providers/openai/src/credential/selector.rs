@@ -351,6 +351,29 @@ impl CodexCredentialSelector {
         cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         model_catalog_eligibility: ModelCatalogEligibility<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        for retry in 0..=3 {
+            match self
+                .select_snapshot(request, cyber_policy_session_key, model_catalog_eligibility)
+                .await
+            {
+                Err(CredentialSelectionError::AccountSnapshotChanged) if retry < 3 => {
+                    request.attempt.trace().record(
+                        "account.snapshot_conflict",
+                        serde_json::json!({"retryCount": retry + 1, "maxRetries": 3}),
+                    );
+                }
+                result => return result,
+            }
+        }
+        Err(CredentialSelectionError::AccountSnapshotChanged)
+    }
+
+    async fn select_snapshot(
+        &self,
+        request: &CredentialSelectionInput<'_>,
+        cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
+        model_catalog_eligibility: ModelCatalogEligibility<'_>,
+    ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let diagnostic = request.attempt.is_diagnostic_required_account();
         let mut accounts = self.repository.list_for_provider().await?;
         // 正常调度列表不含停用账号；仅管理端固定账号诊断允许补回。
@@ -508,6 +531,7 @@ impl CodexCredentialSelector {
         } else {
             affinity.bound_account().cloned()
         };
+        let base_excluded = excluded.clone();
         let mut shortest_retry = None;
         let policy = request.attempt.account_selection_policy();
 
@@ -536,10 +560,23 @@ impl CodexCredentialSelector {
                 .trace()
                 .account_selection(&candidates, &context, selection.as_ref());
             let Some(selection) = selection else {
+                let mut statuses = candidates
+                    .iter()
+                    .filter(|candidate| !base_excluded.contains(candidate.account.id()))
+                    .map(|candidate| {
+                        candidate
+                            .account
+                            .status_projection(context.now, candidate.signals.rate_limited_until)
+                            .status
+                    });
+                let quota_exhausted = !diagnostic
+                    && statuses.next() == Some(AccountStatus::QuotaExhausted)
+                    && statuses.all(|status| status == AccountStatus::QuotaExhausted);
                 return match shortest_retry {
                     Some(retry_after) => Err(CredentialSelectionError::CapacityUnavailable {
                         retry_after: Some(retry_after),
                     }),
+                    None if quota_exhausted => Err(CredentialSelectionError::QuotaExhausted),
                     None => Err(CredentialSelectionError::NoEligibleCredential),
                 };
             };
@@ -550,6 +587,8 @@ impl CodexCredentialSelector {
                 .find(|candidate| candidate.account.id() == selected.account.id())
                 .map(|candidate| candidate.account.clone())
                 .ok_or(CredentialSelectionError::InvalidCredential)?;
+            // Validate the complete snapshot before reserving capacity or request intervals.
+            let runtime = self.repository.load_runtime_credential(&account).await?;
             let allows_account_state_mutation = !diagnostic || account.enabled();
             match self
                 .leases
@@ -631,7 +670,6 @@ impl CodexCredentialSelector {
                             .is_some_and(CodexSessionAffinity::session_id_present),
                         "OpenAI account selected"
                     );
-                    let runtime = self.repository.load_runtime_credential(&account).await?;
                     let cookies = runtime
                         .cookies
                         .into_iter()
@@ -1384,6 +1422,10 @@ impl fmt::Debug for CodexCredentialLease {
 pub enum CredentialSelectionError {
     #[error("no eligible Codex account")]
     NoEligibleCredential,
+    #[error("account snapshot changed during selection")]
+    AccountSnapshotChanged,
+    #[error("all eligible accounts have exhausted quota")]
+    QuotaExhausted,
     #[error("Codex account capacity is unavailable")]
     CapacityUnavailable { retry_after: Option<Duration> },
     #[error("Codex account data is invalid")]
@@ -1400,9 +1442,8 @@ impl From<CredentialRepositoryError> for CredentialSelectionError {
     fn from(error: CredentialRepositoryError) -> Self {
         match error {
             CredentialRepositoryError::InvalidCredentialData => Self::InvalidCredential,
-            CredentialRepositoryError::RevisionConflict | CredentialRepositoryError::Store => {
-                Self::Store
-            }
+            CredentialRepositoryError::RevisionConflict => Self::AccountSnapshotChanged,
+            CredentialRepositoryError::Store => Self::Store,
         }
     }
 }

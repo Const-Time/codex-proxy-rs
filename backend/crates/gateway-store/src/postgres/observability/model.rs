@@ -200,6 +200,7 @@ pub enum DiagnosticDimension {
     User,
     Provider,
     Model,
+    KeyModel,
     Account,
     ApiKey,
     Transport,
@@ -352,6 +353,7 @@ pub struct RequestMetricPoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalculatedUsageBillingFact {
     pub billing_multiplier: DecimalAmount,
+    pub billing_snapshot_json: Option<serde_json::Value>,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
     pub upstream_model_id: String,
@@ -501,6 +503,7 @@ pub struct UsageListRecord {
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub username: Option<String>,
+    pub billing_snapshot_json: Option<serde_json::Value>,
     pub id: String,
     pub endpoint: String,
     pub client_transport: String,
@@ -551,6 +554,7 @@ pub struct UsageListRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
+    pub billing_snapshot_json: Option<serde_json::Value>,
     pub id: String,
     pub client_api_key_ref: String,
     pub config_revision: u64,

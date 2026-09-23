@@ -58,6 +58,8 @@ pub struct CostCoverageView {
 pub struct BillingView {
     pub group_multiplier_display: String,
     pub original_amount_display: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageBillingView>,
     pub input_amount_display: String,
     pub output_amount_display: String,
     pub cache_read_amount_display: String,
@@ -70,6 +72,15 @@ pub struct BillingView {
     pub cache_write_price_display: String,
     pub service_tier_display: String,
     pub multiplier_display: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBillingView {
+    pub input_amount_display: String,
+    pub cache_read_amount_display: String,
+    pub input_price_display: String,
+    pub cache_read_price_display: String,
 }
 
 /// 使用记录表格的窄展示。
@@ -758,6 +769,7 @@ pub struct DiagnosticItemView {
     pub retry_rate: f64,
     pub impact_score: f64,
     pub estimated_cost: Option<String>,
+    pub cost_incomplete: bool,
     pub attempt_count: u64,
     pub total_tokens: u64,
 }

@@ -167,6 +167,7 @@ pub enum DiagnosticDimension {
     User,
     Provider,
     Model,
+    KeyModel,
     Account,
     ApiKey,
     Transport,
@@ -312,6 +313,7 @@ pub struct ProviderBillingInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageCalculatedBillingFact {
     pub billing_multiplier: DecimalAmount,
+    pub breakdown: Option<CalculatedBillingBreakdown>,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
     pub upstream_model_id: String,
@@ -326,6 +328,8 @@ pub struct UsageCalculatedBillingFact {
 /// Provider 已确认的逐项费用与单价。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalculatedBillingBreakdown {
+    pub image: Option<ImageBillingBreakdown>,
+    pub custom_multiplier_bps: u32,
     pub input_amount: CurrencyCost,
     pub output_amount: CurrencyCost,
     pub cache_read_amount: CurrencyCost,
@@ -338,6 +342,16 @@ pub struct CalculatedBillingBreakdown {
     pub cache_write_price_per_million: CurrencyCost,
     pub service_tier: Option<String>,
     pub multiplier_percent: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBillingBreakdown {
+    pub input_tokens: u64,
+    pub cached_tokens: u64,
+    pub input_amount: CurrencyCost,
+    pub cache_read_amount: CurrencyCost,
+    pub input_price_per_million: CurrencyCost,
+    pub cache_read_price_per_million: CurrencyCost,
 }
 
 /// 单次请求的费用语义。
@@ -1174,6 +1188,7 @@ pub struct DiagnosticsItem {
     pub retry_rate: f64,
     pub impact_score: f64,
     pub estimated_cost: Option<DecimalAmount>,
+    pub cost_incomplete: bool,
     pub attempt_count: u64,
     pub total_tokens: u64,
 }

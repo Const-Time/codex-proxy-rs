@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Save } from '@lucide/vue'
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -17,23 +17,15 @@ import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
 import { useAdminApiKey } from './composables/useAdminApiKey'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { rotationOptions } from './constants'
+import PricingSection from './pricing/index.vue'
 
 const route = useRoute()
 const router = useRouter()
-
-type SettingsSection = 'runtime' | 'backup'
-
-const section = computed<SettingsSection>(() =>
-  route.name === 'settings-backup' ? 'backup' : 'runtime',
-)
+const pricingVisited = ref(false)
+const section = computed(() => route.name === 'settings-pricing' ? 'pricing' : route.name === 'settings-backup' ? 'backup' : 'runtime')
 
 function switchSection(value: string): void {
-  const paths: Record<SettingsSection, string> = {
-    runtime: '/settings',
-    backup: '/settings/backup',
-  }
-  const nextSection: SettingsSection = value === 'backup' ? 'backup' : 'runtime'
-  void router.push(paths[nextSection])
+  void router.push(value === 'runtime' ? '/settings' : `/settings/${value}`)
 }
 
 const {
@@ -72,6 +64,8 @@ const {
 watch(
   section,
   (value) => {
+    if (value === 'pricing')
+      pricingVisited.value = true
     if (value === 'runtime') {
       void loadSettings()
       void loadAdminApiKeyStatus()
@@ -82,16 +76,17 @@ watch(
 </script>
 
 <template>
-  <div class="w-full">
-    <BasePageHeader title="系统设置" description="管理运行参数、管理员凭据与备份配置" />
+  <div class="w-full" :class="section === 'pricing' ? 'flex h-[calc(100dvh-2rem)] flex-none! flex-col min-[961px]:h-[calc(100dvh-3rem)]' : undefined">
+    <BasePageHeader title="系统设置" description="管理运行参数、模型定价、管理员凭据与备份配置" />
 
-    <div class="mt-4 flex min-h-cp-control flex-wrap items-center justify-between gap-3">
+    <div class="mt-4 flex min-h-cp-control shrink-0 flex-wrap items-center justify-between gap-3">
       <BaseSegmented
         :model-value="section"
         label="设置分区"
         class="bg-(--cp-input-bg)!"
         :options="[
           { label: '运行设置', value: 'runtime' },
+          { label: '模型定价', value: 'pricing' },
           { label: '备份', value: 'backup' },
         ]"
         @update:model-value="switchSection"
@@ -165,8 +160,9 @@ watch(
       </BaseConfirmModal>
     </div>
 
-    <div v-else class="mt-5">
+    <div v-else-if="section === 'backup'" class="mt-5">
       <SettingsBackupSection :active="section === 'backup'" />
     </div>
+    <PricingSection v-if="pricingVisited" v-show="section === 'pricing'" class="mt-5 min-h-0 flex-1" />
   </div>
 </template>

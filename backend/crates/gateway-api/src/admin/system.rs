@@ -160,6 +160,7 @@ impl From<SystemOperationState> for SystemOperationStateView {
 struct SystemUpdateStatusView {
     previous_version: Option<String>,
     current_version: Option<String>,
+    need_restart: bool,
     operation: SystemOperationStateView,
 }
 
@@ -168,6 +169,7 @@ impl From<SystemUpdateStatus> for SystemUpdateStatusView {
         Self {
             previous_version: status.previous_version,
             current_version: status.current_version,
+            need_restart: status.need_restart,
             operation: status.operation.into(),
         }
     }
@@ -179,7 +181,6 @@ struct UpdateAcceptedView {
     operation_id: String,
     deployment_mode: String,
     message: String,
-    need_restart: bool,
     target_version: String,
 }
 
@@ -305,19 +306,17 @@ where
         operation_id,
         deployment_mode,
         message,
-        need_restart,
         target_version,
     } = result
     else {
         return Err(AdminError::internal());
     };
     Ok(AdminResponse::new(
-        StatusCode::OK,
+        StatusCode::ACCEPTED,
         AdminEnvelope::ok(UpdateAcceptedView {
             operation_id,
             deployment_mode,
             message,
-            need_restart,
             target_version,
         }),
     ))

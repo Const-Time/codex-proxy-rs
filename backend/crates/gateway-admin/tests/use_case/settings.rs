@@ -15,6 +15,30 @@ struct UnusedSettingsStore;
 
 #[async_trait]
 impl SettingsStore for UnusedSettingsStore {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        Ok(Default::default())
+    }
+    async fn sync_pricing(
+        &self,
+        _: gateway_admin::model::pricing::SyncPricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Option<gateway_admin::model::Revision>> {
+        panic!("unexpected pricing sync")
+    }
+    async fn update_pricing_sync_policy(
+        &self,
+        _: gateway_admin::model::pricing::PricingSyncPolicy,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing sync policy")
+    }
+    async fn update_pricing(
+        &self,
+        _: gateway_admin::model::pricing::UpdatePricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing update")
+    }
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Err(unused())
     }

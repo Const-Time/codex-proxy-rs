@@ -153,8 +153,10 @@ fn compiler_should_preserve_passthrough_when_provider_catalog_is_unavailable() {
     let providers =
         ProviderRegistry::new([Arc::new(TestCatalogProvider::Unavailable) as Arc<dyn Provider>])
             .expect("provider registry");
-    let compiler =
-        RuntimeSnapshotCompiler::new(Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))), providers);
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        Arc::new(providers),
+    );
 
     let snapshot = block_on(compiler.compile()).expect("compile snapshot");
     let provider = ProviderKind::new("alpha").expect("provider");
@@ -173,8 +175,10 @@ fn known_empty_catalog_should_report_model_not_found() {
     let providers =
         ProviderRegistry::new([Arc::new(TestCatalogProvider::Empty) as Arc<dyn Provider>])
             .expect("provider registry");
-    let compiler =
-        RuntimeSnapshotCompiler::new(Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))), providers);
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        Arc::new(providers),
+    );
     let snapshot = block_on(compiler.compile()).expect("compile empty catalog");
     let error = snapshot
         .plan(
@@ -205,8 +209,10 @@ fn compiler_retries_when_provider_publishes_catalog_during_compilation() {
     });
     let providers =
         ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).expect("provider registry");
-    let compiler =
-        RuntimeSnapshotCompiler::new(Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))), providers);
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        Arc::new(providers),
+    );
 
     let snapshot = block_on(compiler.compile()).expect("stable catalog snapshot");
 
@@ -311,7 +317,7 @@ fn facts_revision(facts: &SnapshotFacts) -> ConfigRevision {
 }
 
 fn compiler(store: Arc<dyn SnapshotStorePort>) -> RuntimeSnapshotCompiler {
-    RuntimeSnapshotCompiler::new(store, ProviderRegistry::default())
+    RuntimeSnapshotCompiler::new(store, Arc::new(ProviderRegistry::default()))
 }
 
 fn revision(value: u64) -> ConfigRevision {

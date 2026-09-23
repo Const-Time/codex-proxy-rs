@@ -5,6 +5,7 @@ use serde_json::Value;
 
 const MODEL_DIAGNOSTIC_DIMENSION_SQL: &str =
     "coalesce(mr.upstream_model_id, mr.requested_model_id)";
+const KEY_MODEL_DIAGNOSTIC_DIMENSION_SQL: &str = "json_build_array(mr.client_api_key_ref, coalesce(mr.upstream_model_id, mr.requested_model_id))::text";
 
 pub(crate) fn push_usage_filter(
     query: &mut QueryBuilder<Postgres>,
@@ -112,6 +113,15 @@ pub(crate) fn push_usage_filter(
             query.push(format!(" escape '\\' or {alias}.{column} like "));
             query.push_bind(pattern.clone());
         }
+        if filter.owner_user_id.is_none() {
+            for column in [
+                "provider_account_email_snapshot",
+                "provider_account_name_snapshot",
+            ] {
+                query.push(format!(" escape '\\' or {alias}.{column} like "));
+                query.push_bind(pattern.clone());
+            }
+        }
         query.push(" escape '\\'");
         query.push(")");
     }
@@ -140,7 +150,7 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             mr.upstream_model_id, mr.upstream_transport, mr.upstream_response_model, mr.service_tier,
             mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
             mr.reasoning_tokens, mr.image_input_tokens, mr.image_output_tokens,
-            mr.total_tokens, mr.cost_source, mr.cost_amount::text as raw_cost_amount, mr.billing_multiplier::text, mr.billed_cost_amount::text as cost_amount, mr.cost_currency,
+            mr.total_tokens, mr.billing_snapshot_json, mr.cost_source, mr.cost_amount::text as raw_cost_amount, mr.billing_multiplier::text, mr.billed_cost_amount::text as cost_amount, mr.cost_currency,
             mr.transport_decision_wait_ms, mr.connect_ms, mr.headers_ms,
             mr.first_event_ms, mr.first_reasoning_ms, mr.first_text_ms, mr.first_token_ms,
             mr.provider_processing_ms, mr.latency_ms, mr.admission_decision_ms,
@@ -168,7 +178,7 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             mr.error_kind, mr.provider_error_code, mr.error_message, mr.retry_after_ms,
             mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
             mr.reasoning_tokens, mr.image_input_tokens, mr.image_output_tokens,
-            mr.total_tokens, mr.cost_source, mr.cost_amount::text as raw_cost_amount, mr.billing_multiplier::text, mr.billed_cost_amount::text as cost_amount,
+            mr.total_tokens, mr.billing_snapshot_json, mr.cost_source, mr.cost_amount::text as raw_cost_amount, mr.billing_multiplier::text, mr.billed_cost_amount::text as cost_amount,
             mr.cost_currency, mr.transport_decision_wait_ms, mr.connect_ms, mr.headers_ms,
             mr.first_event_ms, mr.first_reasoning_ms, mr.first_text_ms, mr.first_token_ms,
             mr.provider_processing_ms, mr.latency_ms, mr.admission_decision_ms,
@@ -470,7 +480,16 @@ pub(crate) async fn usage_diagnostics(
     );
     statement.push(ranking_order);
     statement.push(" limit ");
-    statement.push_bind(DIAGNOSTIC_LIMIT);
+    // Key 用量页及管理端 Key×模型视图都需要保留区间内的全部组合。
+    statement.push_bind(
+        if dimension == DiagnosticDimension::KeyModel
+            || (dimension == DiagnosticDimension::Model && filter.client_api_key_ref.is_some())
+        {
+            10_000
+        } else {
+            DIAGNOSTIC_LIMIT
+        },
+    );
     statement.push(
         ")
          select aggregated.*
@@ -535,6 +554,28 @@ pub(crate) async fn usage_diagnostics(
                     .collect::<Vec<_>>(),
             )
             .await?
+        }
+        DiagnosticDimension::KeyModel => {
+            let pairs = observations
+                .iter()
+                .map(|item| {
+                    serde_json::from_str::<(String, String)>(&item.key)
+                        .map_err(|_| postgres_unavailable("decode key/model diagnostic"))
+                })
+                .collect::<StoreResult<Vec<_>>>()?;
+            let names = diagnostic_api_key_display_names(
+                pool,
+                &pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            )
+            .await?;
+            observations
+                .iter()
+                .zip(pairs)
+                .map(|(item, (key, model))| {
+                    let name = names.get(&key).map_or(key.as_str(), String::as_str);
+                    (item.key.clone(), format!("{name} → {model}"))
+                })
+                .collect()
         }
         _ => HashMap::new(),
     };
@@ -614,6 +655,7 @@ pub(crate) fn diagnostic_dimension_sql(dimension: DiagnosticDimension) -> &'stat
     match dimension {
         DiagnosticDimension::Provider => "coalesce(mr.provider_kind, 'unrouted')",
         DiagnosticDimension::Model => MODEL_DIAGNOSTIC_DIMENSION_SQL,
+        DiagnosticDimension::KeyModel => KEY_MODEL_DIAGNOSTIC_DIMENSION_SQL,
         DiagnosticDimension::Account => "coalesce(mr.provider_account_ref, 'unrouted')",
         DiagnosticDimension::ApiKey => "mr.client_api_key_ref",
         DiagnosticDimension::User => "coalesce(mr.user_id, 'unknown')",
@@ -637,6 +679,11 @@ pub(crate) fn push_diagnostic_dimension_filter(
         }
         DiagnosticDimension::Model => {
             statement.push(" and ");
+            statement.push(MODEL_DIAGNOSTIC_DIMENSION_SQL);
+            statement.push(" is not null");
+        }
+        DiagnosticDimension::KeyModel => {
+            statement.push(" and mr.client_api_key_ref is not null and ");
             statement.push(MODEL_DIAGNOSTIC_DIMENSION_SQL);
             statement.push(" is not null");
         }

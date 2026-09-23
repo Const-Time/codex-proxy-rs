@@ -125,7 +125,7 @@ fn encoder_should_remove_unsupported_fields_from_upstream_body() {
         Value::Object(encoded.body().clone()),
         json!({
             "model": "gpt-test",
-            "input": "hello",
+            "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],
             "max_tokens": 256,
             "store": false,
         })
@@ -579,9 +579,10 @@ fn observability_semantics_should_use_the_transparent_openai_payload() {
 #[test]
 fn encoder_should_preserve_explicit_store_values() {
     for store in [json!(false), json!(true), Value::Null, json!("false")] {
-        let body = json!({"model": "gpt-test", "input": "hello", "store": store});
+        let mut body = json!({"model": "gpt-test", "input": "hello", "store": store});
         let encoded = encode_downstream_request(body.clone());
 
+        body["input"] = json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]);
         assert_eq!(Value::Object(encoded.body().clone()), body);
     }
 }
@@ -597,6 +598,7 @@ fn default_store_keeps_unknown_fields_and_nested_store_values_unchanged() {
     });
     let encoded = encode_downstream_request(body.clone());
     body["store"] = json!(false);
+    body["input"] = json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"store is a business field"}]}]);
     assert_eq!(Value::Object(encoded.body().clone()), body);
 }
 
@@ -640,7 +642,7 @@ async fn backend_http_should_send_default_store_for_downstream_request() {
     assert_eq!(
         server.await.expect("HTTP server task"),
         json!({
-            "model": "gpt-test", "input": "hello", "store": false, "stream": true
+            "model": "gpt-test", "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}], "store": false, "stream": true
         })
     );
 }
@@ -699,4 +701,30 @@ fn encode_downstream_request(body: Value) -> CodexResponsesRequest {
             .expect("OpenAI payload");
     encode_generate_request(&GenerateRequest::from_protocol_payload(payload), "gpt-test")
         .expect("encode downstream request")
+}
+
+#[test]
+fn codex_body_adaptation_is_narrow_and_preserves_history() {
+    let body = json!({"model":"test", "input":[
+      {"type":"message","role":"system","content":"instructions","future":true},
+      {"role":"system","content":"leave implicit messages alone"},
+      {"type":"reasoning","status":"completed","encrypted_content":"ciphertext","content":[{"text":"redundant"}],"summary":[]},
+      {"type":"reasoning","status":"completed","content":[{"text":"only copy"}]},
+      {"type":"function_call","status":"completed","arguments":"{\"role\":\"system\"}"}
+    ],"prompt_cache_key":"keep","prompt_cache_retention":"24h","future":{"role":"system"}});
+    let encoded = encode_downstream_request(body);
+    let input = &encoded.body()["input"];
+    assert_eq!(input[0]["role"], "developer");
+    assert_eq!(input[0]["content"], "instructions");
+    assert_eq!(input[0]["future"], true);
+    assert_eq!(input[1]["role"], "system");
+    assert!(input[2].get("status").is_none());
+    assert!(input[2].get("content").is_none());
+    assert_eq!(input[2]["encrypted_content"], "ciphertext");
+    assert!(input[3].get("status").is_none());
+    assert_eq!(input[3]["content"][0]["text"], "only copy");
+    assert_eq!(input[4]["status"], "completed");
+    assert_eq!(encoded.body()["future"]["role"], "system");
+    assert_eq!(encoded.body()["prompt_cache_key"], "keep");
+    assert!(!encoded.body().contains_key("prompt_cache_retention"));
 }

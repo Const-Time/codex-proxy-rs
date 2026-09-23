@@ -278,7 +278,7 @@ async fn response_model_migration_backfills_only_explicit_valid_openai_reports()
         .await
         .expect("upgrade to 21");
     let after: Vec<Value> = sqlx::query_scalar(
-        "select to_jsonb(mr) - 'upstream_response_model' from model_requests mr order by id",
+        "select to_jsonb(mr) - 'upstream_response_model' - 'billing_snapshot_json' from model_requests mr order by id",
     )
     .fetch_all(&db.pool)
     .await

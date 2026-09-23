@@ -86,6 +86,7 @@ pub(crate) const fn store_diagnostic_dimension(
     match dimension {
         admin_observability::DiagnosticDimension::Provider => DiagnosticDimension::Provider,
         admin_observability::DiagnosticDimension::Model => DiagnosticDimension::Model,
+        admin_observability::DiagnosticDimension::KeyModel => DiagnosticDimension::KeyModel,
         admin_observability::DiagnosticDimension::Account => DiagnosticDimension::Account,
         admin_observability::DiagnosticDimension::User => DiagnosticDimension::User,
         admin_observability::DiagnosticDimension::ApiKey => DiagnosticDimension::ApiKey,
@@ -377,6 +378,10 @@ pub(crate) fn admin_calculated_usage_billing_fact(
 ) -> AdminStoreResult<admin_observability::UsageCalculatedBillingFact> {
     Ok(admin_observability::UsageCalculatedBillingFact {
         billing_multiplier: admin_decimal_amount(fact.billing_multiplier)?,
+        breakdown: fact
+            .billing_snapshot_json
+            .as_ref()
+            .and_then(super::super::pricing::decode_billing_snapshot),
         bucket_start: fact.bucket_start,
         provider_kind: fact.provider_kind,
         upstream_model_id: fact.upstream_model_id,
@@ -415,6 +420,35 @@ pub(crate) fn admin_usage_page(
         page_size: page.page_size,
         total: page.total,
     })
+}
+
+fn restore_billing_snapshot(
+    billing: Option<admin_observability::UsageBilling>,
+    snapshot: Option<&serde_json::Value>,
+) -> Option<admin_observability::UsageBilling> {
+    if let Some(admin_observability::UsageBilling::GroupAdjusted {
+        multiplier,
+        original,
+        total,
+    }) = billing
+    {
+        let original = restore_billing_snapshot(Some(*original), snapshot)?;
+        return Some(admin_observability::UsageBilling::GroupAdjusted {
+            multiplier,
+            original: Box::new(original),
+            total,
+        });
+    }
+    if let Some(admin_observability::UsageBilling::Total { source, total }) = &billing
+        && source == "calculated"
+        && let Some(detail) = snapshot.and_then(super::super::pricing::decode_billing_snapshot)
+        && &detail.total_amount == total
+    {
+        return Some(admin_observability::UsageBilling::Calculated(Box::new(
+            detail,
+        )));
+    }
+    billing
 }
 
 pub(crate) fn admin_usage_list_record(
@@ -458,6 +492,7 @@ pub(crate) fn admin_usage_list_record(
             }));
         }
     };
+    let billing = restore_billing_snapshot(billing, record.billing_snapshot_json.as_ref());
     Ok(admin_observability::UsageListRecord {
         turn_state: record.turn_state,
         turn_state_source: record.turn_state_source,
@@ -553,6 +588,7 @@ pub(crate) fn admin_usage_record(
             }));
         }
     };
+    let billing = restore_billing_snapshot(billing, record.billing_snapshot_json.as_ref());
     Ok(admin_observability::UsageRecord {
         id: record.id,
         client_api_key_ref: record.client_api_key_ref,
@@ -822,6 +858,7 @@ pub(crate) fn usage_list_record_from_row(
         user_id: get(row, "user_id")?,
         user_email: get(row, "user_email")?,
         username: get(row, "username")?,
+        billing_snapshot_json: get(row, "billing_snapshot_json")?,
         id: get(row, "id")?,
         endpoint: get(row, "endpoint")?,
         client_transport: get(row, "client_transport")?,
@@ -873,6 +910,7 @@ pub(crate) fn usage_list_record_from_row(
 
 pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<UsageRecord> {
     Ok(UsageRecord {
+        billing_snapshot_json: get(row, "billing_snapshot_json")?,
         id: get(row, "id")?,
         client_api_key_ref: get(row, "client_api_key_ref")?,
         config_revision: unsigned(row, "config_revision")?,
@@ -1030,6 +1068,7 @@ pub(crate) fn calculated_usage_billing_fact_from_row(
 ) -> StoreResult<CalculatedUsageBillingFact> {
     Ok(CalculatedUsageBillingFact {
         billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
+        billing_snapshot_json: get(row, "billing_snapshot_json")?,
         bucket_start: get(row, "bucket_start")?,
         provider_kind: get(row, "provider_kind")?,
         upstream_model_id: get(row, "upstream_model_id")?,

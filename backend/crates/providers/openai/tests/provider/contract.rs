@@ -484,11 +484,20 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
 }
 
 fn context(request_id: &str, cancellation: CancellationToken) -> AttemptContext {
+    context_with_pricing(request_id, cancellation, Default::default())
+}
+
+fn context_with_pricing(
+    request_id: &str,
+    cancellation: CancellationToken,
+    pricing: gateway_core::metering::PricingOverrides,
+) -> AttemptContext {
     AttemptContext::new(
         RequestAttemptContext::new(
             ModelRequestId::new(request_id).expect("request id"),
             ClientApiKeyId::new("key_openai_contract").expect("client key id"),
-        ),
+        )
+        .with_pricing(Arc::new(pricing)),
         NonZeroU32::new(1).expect("attempt"),
         SystemTime::now() + Duration::from_secs(30),
         account_policy(),
@@ -1254,13 +1263,13 @@ async fn image_prices_should_use_modality_rates_and_precede_delivery() {
                         .canonical_facts()
                         .iter()
                         .filter_map(move |fact| match fact {
-                            GatewayEvent::CalculatedCost(cost) => Some((index, *cost)),
+                            GatewayEvent::CalculatedCost(cost) => Some((index, cost.clone())),
                             _ => None,
                         })
                 })
                 .collect::<Vec<_>>();
             assert_eq!(costs.len(), 1, "model={model}");
-            let (cost_index, cost) = costs[0];
+            let (cost_index, cost) = costs[0].clone();
             assert_eq!(
                 cost.total().amount().scaled(),
                 expected_ticks,
@@ -1358,6 +1367,15 @@ async fn image_metering_events(
     response: &[u8],
     model: &str,
 ) -> Vec<gateway_core::event::ProviderEvent> {
+    image_metering_events_with_pricing(kind, response, model, Default::default()).await
+}
+
+async fn image_metering_events_with_pricing(
+    kind: ImageRequestKind,
+    response: &[u8],
+    model: &str,
+    pricing: gateway_core::metering::PricingOverrides,
+) -> Vec<gateway_core::event::ProviderEvent> {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
     let server = MockServer::start().await;
@@ -1386,7 +1404,7 @@ async fn image_metering_events(
     let mut stream = provider
         .execute(
             planned_provider_endpoint_request("openai", operation),
-            context("req_image_usage", CancellationToken::new()),
+            context_with_pricing("req_image_usage", CancellationToken::new(), pricing),
         )
         .await
         .expect("prepare image stream");
@@ -1396,6 +1414,45 @@ async fn image_metering_events(
     }
     server.verify().await;
     events
+}
+
+#[tokio::test]
+async fn image_custom_prices_apply_text_and_image_rates_from_the_frozen_request() {
+    let pricing = serde_json::from_value(json!({"openai":{"gpt-image-2":{
+        "multiplierBps":20000,"bands":{
+            "standard":{"input":"2","output":"0","cacheRead":"0","cacheWrite":"0"},
+            "image":{"input":"8","output":"30","cacheRead":"2","cacheWrite":"0"}
+        }
+    }}}))
+    .unwrap();
+    let response = serde_json::to_vec(&json!({"data":[{"b64_json":"AAEC"}],"usage":{
+        "input_tokens":100,"input_tokens_details":{"text_tokens":20,"image_tokens":80},
+        "output_tokens":10,"output_tokens_details":{"text_tokens":0,"image_tokens":10},"total_tokens":110
+    }})).unwrap();
+    let events = image_metering_events_with_pricing(
+        ImageRequestKind::Generation,
+        &response,
+        "gpt-image-2",
+        pricing,
+    )
+    .await;
+    let cost = events
+        .iter()
+        .flat_map(|event| event.canonical_facts())
+        .find_map(|event| match event {
+            GatewayEvent::CalculatedCost(cost) => Some(cost.clone()),
+            _ => None,
+        })
+        .unwrap()
+        .into_estimate();
+    assert_eq!(cost.total().unwrap().amount().canonical(), "0.00196");
+    let breakdown = cost.breakdown().unwrap();
+    assert_eq!(breakdown.input_amount().amount().canonical(), "0.00008");
+    assert_eq!(
+        breakdown.image().unwrap().input_amount.amount().canonical(),
+        "0.00128"
+    );
+    assert_eq!(breakdown.custom_multiplier_bps(), 20000);
 }
 
 #[tokio::test]
@@ -3523,6 +3580,162 @@ async fn opaque_provider_options_do_not_change_openai_account_selection() {
 }
 
 #[tokio::test]
+async fn http_account_scoping_drops_downstream_installation_header() {
+    for owner in ["acct_scope_same", "acct_scope_old"] {
+        let raw = r#"{"installation_id":"client-installation","future":true}"#;
+        let request = capture_scoped_http_request(
+            "req_installation_http",
+            "acct_scope_same",
+            owner,
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("hello")),
+                ("installation_id".to_owned(), json!("client-installation")),
+                (
+                    "client_metadata".to_owned(),
+                    json!({
+                        "x-codex-installation-id": "client-installation",
+                        "x-codex-turn-metadata": raw
+                    }),
+                ),
+            ]),
+            Map::from_iter([
+                ("turn_metadata".to_owned(), json!(raw)),
+                (
+                    "opaque_request_headers".to_owned(),
+                    json!([
+                        [
+                            "x-codex-installation-id",
+                            STANDARD.encode(b"client-installation")
+                        ],
+                        ["x-codex-turn-metadata", STANDARD.encode(raw)]
+                    ]),
+                ),
+            ]),
+        )
+        .await;
+        let body = captured_request_body(&request);
+        let installation_id = body["client_metadata"]["x-codex-installation-id"]
+            .as_str()
+            .expect("account installation ID");
+        assert_ne!(installation_id, "client-installation");
+        assert!(uuid::Uuid::parse_str(installation_id).is_ok());
+        assert_eq!(body["installation_id"], installation_id);
+        assert!(captured_header_values(&request, "x-codex-installation-id").is_empty());
+        let headers = captured_header_values(&request, "x-codex-turn-metadata");
+        assert_eq!(headers.len(), 1);
+        for encoded in [
+            std::str::from_utf8(&headers[0]).expect("header metadata"),
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("body metadata"),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<Value>(encoded).expect("turn metadata JSON"),
+                json!({"installation_id": installation_id, "future": true}),
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn websocket_account_scoping_drops_downstream_installation_header() {
+    for owner in ["acct_scope_same", "acct_scope_old"] {
+        let raw = r#"{"installation_id":"client-installation","future":true}"#;
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_scope_same").await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let base_url = format!("http://{}", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept websocket");
+            let mut received_headers = None;
+            let mut socket =
+                crate::transport::accept_codex_test_websocket_with(socket, |request, _| {
+                    received_headers = Some(request.headers().clone());
+                })
+                .await;
+            let message = socket.next().await.expect("request").expect("valid frame");
+            let body: Value = serde_json::from_str(message.to_text().expect("text")).expect("JSON");
+            socket
+                .send(Message::Text(
+                    json!({
+                        "type": "response.completed",
+                        "response": {"id": "resp_installation", "model": "gpt-5.4", "status": "completed", "output": []}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("complete response");
+            (received_headers.expect("opening headers"), body)
+        });
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("hello")),
+                ("installation_id".to_owned(), json!("client-installation")),
+                (
+                    "client_metadata".to_owned(),
+                    json!({
+                        "x-codex-installation-id": "client-installation",
+                        "x-codex-turn-metadata": raw
+                    }),
+                ),
+            ]),
+        )
+        .expect("payload")
+        .with_context(Map::from_iter([
+            ("turn_metadata".to_owned(), json!(raw)),
+            (
+                "opaque_request_headers".to_owned(),
+                json!([
+                    [
+                        "x-codex-installation-id",
+                        STANDARD.encode(b"client-installation")
+                    ],
+                    ["x-codex-turn-metadata", STANDARD.encode(raw)]
+                ]),
+            ),
+        ]));
+        let mut stream = provider_with_base_url(&store, base_url)
+            .execute(
+                planned_request(
+                    "openai",
+                    Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                ),
+                context_with_state_owner("req_installation_ws", owner),
+            )
+            .await
+            .expect("provider stream");
+        while let Some(event) = stream.next().await {
+            event.expect("successful websocket response");
+        }
+        let (header, body) = server.await.expect("server");
+        let installation_id = body["client_metadata"]["x-codex-installation-id"]
+            .as_str()
+            .expect("account installation ID");
+        assert_ne!(installation_id, "client-installation");
+        assert!(uuid::Uuid::parse_str(installation_id).is_ok());
+        assert_eq!(body["installation_id"], installation_id);
+        assert!(!header.contains_key("x-codex-installation-id"));
+        for encoded in [
+            header["x-codex-turn-metadata"]
+                .to_str()
+                .expect("header metadata"),
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("body metadata"),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<Value>(encoded).expect("turn metadata JSON"),
+                json!({"installation_id": installation_id, "future": true}),
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn same_account_scope_preserves_future_protocol_shapes() {
     let request = capture_scoped_http_request(
         "req_scope_same",
@@ -4111,6 +4324,10 @@ async fn account_change_drops_only_account_bound_opaque_headers() {
                 "x-codex-turn-metadata",
                 STANDARD.encode(br#"{"installation_id":"client-installation","safe":true}"#)
             ],
+            [
+                "X-Codex-Turn-Metadata",
+                STANDARD.encode(br#"{"installationId":"second-client-installation","safe":false}"#)
+            ],
             ["x-openai-future", STANDARD.encode(b"keep-on-switch")]
         ]),
     )]);
@@ -4139,6 +4356,21 @@ async fn account_change_drops_only_account_bound_opaque_headers() {
         captured_header_values(&same_account, "x-codex-turn-state"),
         vec![b"turn-first".to_vec(), b"turn-\x80".to_vec()]
     );
+    let metadata = captured_header_values(&same_account, "x-codex-turn-metadata");
+    let first: Value = serde_json::from_slice(&metadata[0]).unwrap();
+    let installation_id = first["installation_id"].as_str().unwrap();
+    assert!(uuid::Uuid::parse_str(installation_id).is_ok());
+    assert_ne!(installation_id, "client-installation");
+    assert_eq!(metadata.len(), 2);
+    for (raw, expected) in metadata.iter().zip([
+        json!({"installation_id": installation_id, "safe": true}),
+        json!({"installationId": installation_id, "safe": false}),
+    ]) {
+        assert_eq!(
+            serde_json::from_slice::<Value>(raw).expect("turn metadata JSON"),
+            expected,
+        );
+    }
     assert_eq!(
         captured_header_values(&same_account, "x-openai-future"),
         vec![b"keep-on-switch".to_vec()]
@@ -4519,7 +4751,9 @@ async fn affinity_quota_switch_should_clear_old_turn_state_without_a_provider_st
     let second_request = &requests[0];
     assert_eq!(
         captured_request_body(second_request).get("input"),
-        Some(&json!("second request"))
+        Some(
+            &json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"second request"}]}])
+        )
     );
     assert!(captured_header_values(second_request, "x-codex-turn-state").is_empty());
     let expected_account_id = format!("chatgpt-{second_account_id}");
@@ -7640,7 +7874,10 @@ async fn quota_continuation_full_client_replay_selects_another_account() {
         let delta: Value =
             serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(delta["previous_response_id"], "resp_previous");
-        assert_eq!(delta["input"], "continue");
+        assert_eq!(
+            delta["input"],
+            json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}])
+        );
         ws.send(Message::Text(json!({"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"You have reached your usage limit."}}).to_string().into())).await.unwrap();
         let (socket, _) = listener.accept().await.unwrap();
         let mut ws = accept_codex_test_websocket(socket).await;
@@ -7737,4 +7974,36 @@ async fn quota_continuation_full_client_replay_selects_another_account() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn streamed_invalid_prompt_is_a_client_error_not_an_account_failure() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let raw = r#"{"type":"response.failed","response":{"id":"resp_invalid_prompt","status":"failed","error":{"code":"invalid_prompt","message":"invalid prompt fixture"}}}"#;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(format!("data: {raw}\n\n"), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut stream = provider_with_base_url(&store, server.uri())
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_invalid_prompt", CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        if let Err(error) = event {
+            assert_eq!(error.kind(), ProviderErrorKind::InvalidRequest);
+            assert_eq!(error.upstream_code().unwrap().as_str(), "invalid_prompt");
+            return;
+        }
+    }
+    panic!("stream failure must remain a typed client error");
 }

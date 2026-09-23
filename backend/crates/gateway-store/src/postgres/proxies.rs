@@ -421,10 +421,18 @@ impl ProxyStore for PgProxyRepository {
         if !acquired {
             return Err(store_error(conflict(id)));
         }
-        let record = self.get(id).await?;
-        if !record.last_test.is_some_and(|test| test.success) {
-            return Err(store_error(conflict(id)));
-        }
+        let record = match self.get(id).await {
+            Ok(record) if record.last_test.as_ref().is_some_and(|test| test.success) => record,
+            result => {
+                // 拒绝预留时先等待数据库释放锁，避免连接关闭尚未生效就误挡后续代理操作。
+                sqlx::query("select pg_advisory_unlock_shared(hashtextextended($1, 739219))")
+                    .bind(id)
+                    .execute(&mut connection)
+                    .await
+                    .map_err(|_| store_error(unavailable()))?;
+                return Err(result.err().unwrap_or_else(|| store_error(conflict(id))));
+            }
+        };
         Ok(ProxyImportReservation {
             binding: ImportProxyBinding {
                 id: record.id,

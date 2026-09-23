@@ -106,6 +106,11 @@ impl ProviderAdminError {
 /// 全部由 [`crate::ports::store::AccountStore`] 提交。运行时资源通知只在事务成功后发生。
 #[async_trait]
 pub trait ProviderAdmin: Send + Sync {
+    /// 只读内置价目；没有本地计价能力的 Provider 返回空目录。
+    fn pricing_catalog(&self) -> crate::model::pricing::ProviderPricingCatalog {
+        Default::default()
+    }
+
     fn provider_kind(&self) -> &ProviderKind;
 
     /// 将原始套餐值投影为展示名称；默认保留未知 Provider 的原始名称。
@@ -238,6 +243,14 @@ pub struct ProviderAdminRegistry {
 }
 
 impl ProviderAdminRegistry {
+    #[must_use]
+    pub fn pricing_catalog(&self) -> gateway_core::metering::PricingOverrides {
+        self.providers
+            .iter()
+            .map(|(kind, provider)| (kind.as_str().to_owned(), provider.pricing_catalog()))
+            .collect()
+    }
+
     /// 创建无重复 ProviderKind 的注册表。
     ///
     /// # Errors

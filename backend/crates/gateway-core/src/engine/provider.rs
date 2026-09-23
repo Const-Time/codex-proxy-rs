@@ -1,4 +1,5 @@
 //! Provider 的唯一动态执行边界。
+pub use crate::routing::{ProviderCatalogGeneration, ProviderModelCapabilities};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -20,9 +21,7 @@ use crate::event::{EventSequenceValidator, ProviderEvent};
 use crate::identity::ProviderKind;
 use crate::operation::Operation;
 use crate::policy::ClientApiKeyId;
-use crate::routing::{
-    ModelCapabilities, ModelPresentation, ProviderCandidate, PublicModelId, UpstreamModelId,
-};
+use crate::routing::{ProviderCandidate, PublicModelId, UpstreamModelId};
 use crate::upstream::OpaqueUpstreamValue;
 use crate::upstream::{UpstreamSendState, UpstreamTransport};
 
@@ -437,64 +436,6 @@ pub struct ContinuationRequestObservation {
     pub requested: bool,
 }
 
-/// Provider 实时目录编译后的单模型能力。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderModelCapabilities {
-    upstream_model: UpstreamModelId,
-    capabilities: ModelCapabilities,
-    presentation: Option<ModelPresentation>,
-}
-
-/// Provider 实时目录成功发布后的进程内单调代次。
-///
-/// 代次只表达“目录内容已经变化”，不承载模型、ETag 或 Provider 私有数据。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProviderCatalogGeneration(u64);
-
-impl ProviderCatalogGeneration {
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl ProviderModelCapabilities {
-    #[must_use]
-    pub const fn new(upstream_model: UpstreamModelId, capabilities: ModelCapabilities) -> Self {
-        Self {
-            upstream_model,
-            capabilities,
-            presentation: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_presentation(mut self, presentation: ModelPresentation) -> Self {
-        self.presentation = Some(presentation);
-        self
-    }
-
-    #[must_use]
-    pub const fn upstream_model(&self) -> &UpstreamModelId {
-        &self.upstream_model
-    }
-
-    #[must_use]
-    pub const fn capabilities(&self) -> &ModelCapabilities {
-        &self.capabilities
-    }
-
-    #[must_use]
-    pub const fn presentation(&self) -> Option<&ModelPresentation> {
-        self.presentation.as_ref()
-    }
-}
-
 impl ProviderRequest {
     /// 绑定 operation 与请求计划中冻结的 Provider 候选。
     #[must_use]
@@ -560,11 +501,30 @@ pub trait Provider: Send + Sync {
         &self,
     ) -> Result<Vec<ProviderModelCapabilities>, ProviderError>;
 
+    /// 读取当前客户端协议的原生目录，必须限定到认证时冻结的账号范围。
+    /// `None` 表示不提供该协议的原生目录；读取失败不能伪装成不支持。
+    async fn query_client_model_catalog(
+        &self,
+        _scope: &crate::account::scope::FrozenAccountScope,
+        _protocol: &str,
+        _client_version: &str,
+    ) -> Result<
+        Option<Vec<crate::routing::ProviderModelDescriptor>>,
+        crate::routing::ProviderCatalogUnavailable,
+    > {
+        Ok(None)
+    }
+
     /// 选择一个未被排除的资源并返回 cold [`ProviderStream`]。
+    ///
+    /// 返回成功、返回错误或准备 future 被取消前，均不得发送本次请求的上游握手或业务
+    /// 载荷，也不得启动可独立完成这些发送的后台任务。发送只在返回的流被 poll 后发生，
+    /// 保证 Core 能在真实出站前校验账号范围并登记 attempt。
     ///
     /// # Errors
     ///
-    /// 没有可用资源、请求无效或在产生 stream 前失败时返回 Provider 错误。
+    /// 没有可用资源、请求无效或准备失败时返回 `NotSent` 错误；
+    /// 可能已发送的失败必须通过 stream 返回，不得降级发送事实。
     async fn execute(
         &self,
         request: ProviderRequest,
@@ -729,5 +689,25 @@ impl ProviderRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
+    }
+}
+
+impl crate::routing::ProviderCatalogPort for ProviderRegistry {
+    fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+        self.catalog_generations()
+    }
+    fn query_model_capabilities(
+        &self,
+        provider: &ProviderKind,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<Vec<ProviderModelCapabilities>, crate::routing::ProviderCatalogUnavailable>,
+    > {
+        let provider = provider.clone();
+        Box::pin(async move {
+            self.query_model_capabilities(&provider)
+                .await
+                .map_err(|_| crate::routing::ProviderCatalogUnavailable)
+        })
     }
 }

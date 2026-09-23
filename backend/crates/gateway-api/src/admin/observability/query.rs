@@ -180,6 +180,7 @@ impl TrendKind {
 pub enum DiagnosticDimension {
     User,
     Model,
+    KeyModel,
     Account,
     ApiKey,
     Provider,
@@ -194,6 +195,7 @@ impl DiagnosticDimension {
         match trimmed(value) {
             None | Some("model") => Ok(Self::Model),
             Some("user") => Ok(Self::User),
+            Some("keyModel") => Ok(Self::KeyModel),
             Some("account") => Ok(Self::Account),
             Some("apiKey" | "api_key") => Ok(Self::ApiKey),
             Some("provider") => Ok(Self::Provider),
@@ -210,6 +212,7 @@ impl DiagnosticDimension {
         match self {
             Self::Model => "model",
             Self::User => "user",
+            Self::KeyModel => "keyModel",
             Self::Account => "account",
             Self::ApiKey => "apiKey",
             Self::Provider => "provider",
@@ -280,6 +283,7 @@ pub(crate) fn domain_diagnostic_dimension(
     match dimension {
         DiagnosticDimension::User => domain::DiagnosticDimension::User,
         DiagnosticDimension::Model => domain::DiagnosticDimension::Model,
+        DiagnosticDimension::KeyModel => domain::DiagnosticDimension::KeyModel,
         DiagnosticDimension::Account => domain::DiagnosticDimension::Account,
         DiagnosticDimension::ApiKey => domain::DiagnosticDimension::ApiKey,
         DiagnosticDimension::Provider => domain::DiagnosticDimension::Provider,

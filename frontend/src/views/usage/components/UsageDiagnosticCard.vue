@@ -30,6 +30,7 @@ const dimension = defineModel('dimension', { type: String, required: true })
 const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 const dimensionOptions = computed(() => [
   { label: '模型', value: 'model' },
+  { label: '密钥×模型', value: 'keyModel' },
   { label: '账号', value: 'account' },
   { label: '密钥', value: 'apiKey' },
   { label: '上游', value: 'provider' },
@@ -71,18 +72,28 @@ const diagnosticColumns = defineTableColumns<DiagnosticDisplayItem>([
   },
 ])
 
+const keyModelColumns = defineTableColumns<DiagnosticDisplayItem>([
+  { key: 'nameDisplay', label: '密钥 / 模型', kind: 'custom', size: 'xl' },
+  { key: 'requestCount', label: '请求', kind: 'numeric', size: 'sm' },
+  { key: 'totalTokens', label: 'TOKEN', kind: 'numeric', size: 'lg' },
+  { key: 'estimatedCost', label: '估算费用 USD', kind: 'numeric', size: 'lg' },
+])
+
 const selectedDimensionLabel = computed(
   () => dimensionOptions.value.find(option => option.value === dimension.value)?.label ?? '维度',
 )
 
 const resultDimension = computed(() => props.diagnostics.dimension || dimension.value)
+const visibleColumns = computed(() => resultDimension.value === 'keyModel' ? keyModelColumns : diagnosticColumns)
 const resultDimensionLabel = computed(
   () => dimensionOptions.value.find(option => option.value === resultDimension.value)?.label ?? '维度',
 )
 
 const sortedItems = computed(() =>
   [...props.diagnostics.items].sort(
-    (left, right) => right.impactScore - left.impactScore || right.requestCount - left.requestCount,
+    (left, right) => resultDimension.value === 'keyModel'
+      ? right.requestCount - left.requestCount
+      : right.impactScore - left.impactScore || right.requestCount - left.requestCount,
   ),
 )
 
@@ -102,7 +113,7 @@ function diagnosticNameDisplay(name: string) {
   const raw = name.trim() || '未知'
   const full
     = resultDimension.value === 'transport' ? ({ websocket: 'WS', http_sse: 'SSE' }[raw] ?? raw) : raw
-  if (resultDimension.value !== 'model' && resultDimension.value !== 'account') {
+  if (resultDimension.value !== 'model' && resultDimension.value !== 'account' && resultDimension.value !== 'keyModel') {
     return { primary: full, secondary: '', full }
   }
 
@@ -118,8 +129,8 @@ function diagnosticNameDisplay(name: string) {
 <template>
   <BaseCard
     as="article"
-    title="热点诊断"
-    :description="`按${selectedDimensionLabel}定位高影响请求`"
+    :title="resultDimension === 'keyModel' ? '密钥模型用量' : '热点诊断'"
+    :description="resultDimension === 'keyModel' ? '各密钥下每个模型的 Token 与估算费用' : `按${selectedDimensionLabel}定位高影响请求`"
     class="cp-mobile-auto-height h-105 min-h-105 max-h-105 min-w-0 w-full lg:h-full lg:min-h-90 lg:max-h-105"
   >
     <template #actions>
@@ -128,7 +139,7 @@ function diagnosticNameDisplay(name: string) {
         label="诊断维度"
         :options="dimensionOptions"
         :disabled="loading"
-        class="w-full min-w-0 lg:w-80"
+        class="w-full min-w-0 lg:w-96"
       />
     </template>
 
@@ -137,7 +148,7 @@ function diagnosticNameDisplay(name: string) {
         v-if="hasData"
         :key="resultDimension"
         class="min-h-0 w-full xl:contain-[size]"
-        :columns="diagnosticColumns"
+        :columns="visibleColumns"
         :rows="displayItems"
         density="compact"
         row-key="key"
@@ -231,8 +242,15 @@ function diagnosticNameDisplay(name: string) {
         </template>
 
         <template #estimatedCost="{ row }">
-          <span class="font-mono font-bold tabular-nums text-cp-green-text">
-            {{ formatUsd(row.estimatedCost) }}
+          <span class="grid justify-items-end gap-1 font-mono tabular-nums text-cp-green-text">
+            <strong>{{ formatUsd(row.estimatedCost) }}</strong>
+            <small v-if="row.costIncomplete" class="text-[10px] text-cp-text-tertiary">部分费用缺失</small>
+          </span>
+        </template>
+
+        <template #totalTokens="{ row }">
+          <span class="font-mono font-bold tabular-nums" :title="String(row.totalTokens)">
+            {{ formatCompactNumber(row.totalTokens) }}
           </span>
         </template>
       </BaseTable>

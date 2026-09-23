@@ -269,6 +269,7 @@ impl ModelRequestTimings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRequestFinalization {
+    pub billing_snapshot_json: Option<Value>,
     pub model_request_id: String,
     pub outcome: ModelRequestOutcome,
     pub upstream_send_state: UpstreamSendState,
@@ -719,6 +720,7 @@ impl ModelRequestRepository for PgExecutionStore {
         finalization: ModelRequestFinalization,
     ) -> StoreResult<bool> {
         finalization.validate()?;
+        // 墙上时间可能回拨；终态必须可落盘，实际耗时仍保留 Core 的单调时钟观测。
         let finalized = sqlx::query_scalar::<_, i64>(
             "with finalized as (
              update model_requests
@@ -736,7 +738,7 @@ impl ModelRequestRepository for PgExecutionStore {
                  transport_decision_wait_ms = $27, connect_ms = $28,
                  headers_ms = $29, first_event_ms = $30, first_reasoning_ms = $31,
                  first_text_ms = $32, first_token_ms = $33, provider_processing_ms = $34,
-                 latency_ms = $35, completed_at = $36,
+                 latency_ms = $35, completed_at = greatest($36, started_at),
                  upstream_transport = coalesce($37, upstream_transport),
                  http_version = coalesce($38, http_version), websocket_pool = $39,
                  service_tier = $40, provider_observation_json = $41,
@@ -746,7 +748,7 @@ impl ModelRequestRepository for PgExecutionStore {
                  upstream_connection_exit_reason = $45,
                  upstream_connection_age_ms = $46,
                  upstream_connection_idle_ms = $47, diagnostic_trace_json = $48,
-                 upstream_response_model = $49
+                 upstream_response_model = $49, billing_snapshot_json = $50
              where id = $1 and outcome = 'running'
              returning id, client_api_key_ref, continuation_affinity_hash,
                        continuation_requested, provider_kind, upstream_transport,
@@ -939,6 +941,7 @@ impl ModelRequestRepository for PgExecutionStore {
         )?)
         .bind(finalization.diagnostic_trace_json.map(sqlx::types::Json))
         .bind(finalization.upstream_response_model)
+        .bind(finalization.billing_snapshot_json.map(sqlx::types::Json))
         .fetch_one(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("finalize model request"))?;
@@ -1219,6 +1222,10 @@ impl ExecutionStore for PgExecutionStore {
         let completed = ModelRequestRepository::finalize_model_request(
             self,
             ModelRequestFinalization {
+                billing_snapshot_json: finalization
+                    .cost
+                    .breakdown()
+                    .map(super::pricing::encode_billing_snapshot),
                 model_request_id: finalization.request_id.as_str().to_owned(),
                 outcome: outcome_from_core(finalization.outcome)?,
                 upstream_send_state: send_state_from_core(finalization.send_state),

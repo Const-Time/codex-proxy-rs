@@ -160,7 +160,7 @@ fn logging_rejects_zero_retention_windows() {
 }
 
 #[test]
-fn logging_defaults_to_seven_days_and_one_day_for_payloads_and_rejects_count_retention() {
+fn logging_defaults_to_time_retention_and_ignores_removed_count_retention() {
     let mut value = serde_json::json!({
         "level": "info", "stdout": true,
         "file": { "enabled": true, "directory": "logs", "max_file_size_mb": 20 }
@@ -170,7 +170,10 @@ fn logging_defaults_to_seven_days_and_one_day_for_payloads_and_rejects_count_ret
     assert_eq!(config.file.retention_days, 7);
     assert!(!config.oauth_recovery);
     value["file"]["max_files"] = serde_json::json!(20);
-    assert!(serde_json::from_value::<LoggingConfig>(value).is_err());
+    assert_eq!(
+        serde_json::from_value::<LoggingConfig>(value).unwrap(),
+        config
+    );
 }
 
 #[test]

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 
+use super::{ProviderCatalogGeneration, ProviderCatalogPort};
 use crate::account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy};
-use crate::engine::provider::{ProviderCatalogGeneration, ProviderRegistry};
 use crate::operation::Operation;
 use crate::policy::{
     ClientApiKeyId, ClientPolicy, CodexClientMinVersions, CodexClientVersion,
@@ -27,6 +27,7 @@ const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
 /// Store 在一个一致性读取中提供的调度设置事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotSettingsFacts {
+    pricing: Arc<crate::metering::PricingOverrides>,
     max_concurrent_per_account: u32,
     request_interval_ms: u64,
     rotation_strategy: String,
@@ -37,6 +38,12 @@ pub struct SnapshotSettingsFacts {
 
 impl SnapshotSettingsFacts {
     #[must_use]
+    pub fn with_pricing(mut self, pricing: crate::metering::PricingOverrides) -> Self {
+        self.pricing = Arc::new(pricing);
+        self
+    }
+
+    #[must_use]
     pub fn new(
         max_concurrent_per_account: u32,
         request_interval_ms: u64,
@@ -46,6 +53,7 @@ impl SnapshotSettingsFacts {
         min_codex_cli_version: Option<String>,
     ) -> Self {
         Self {
+            pricing: Arc::default(),
             max_concurrent_per_account,
             request_interval_ms,
             rotation_strategy: rotation_strategy.into(),
@@ -229,12 +237,15 @@ pub enum RuntimeSnapshotCompileError {
 #[derive(Clone)]
 pub struct RuntimeSnapshotCompiler {
     store: Arc<dyn SnapshotStorePort>,
-    providers: ProviderRegistry,
+    providers: Arc<dyn ProviderCatalogPort>,
 }
 
 impl RuntimeSnapshotCompiler {
     #[must_use]
-    pub const fn new(store: Arc<dyn SnapshotStorePort>, providers: ProviderRegistry) -> Self {
+    pub const fn new(
+        store: Arc<dyn SnapshotStorePort>,
+        providers: Arc<dyn ProviderCatalogPort>,
+    ) -> Self {
         Self { store, providers }
     }
 
@@ -260,7 +271,7 @@ impl RuntimeSnapshotCompiler {
             if facts.config_revision != facts.observed_current_revision {
                 return Err(RuntimeSnapshotCompileError::RevisionChanged);
             }
-            let snapshot = compile_runtime_snapshot(facts, &self.providers).await?;
+            let snapshot = compile_runtime_snapshot(facts, self.providers.as_ref()).await?;
             let observed_generations = self.providers.catalog_generations();
             if catalog_generations == observed_generations {
                 return Ok(snapshot.with_provider_catalog_generations(observed_generations));
@@ -272,9 +283,12 @@ impl RuntimeSnapshotCompiler {
 
 async fn compile_runtime_snapshot(
     facts: SnapshotFacts,
-    providers: &ProviderRegistry,
+    providers: &dyn ProviderCatalogPort,
 ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
-    let provider_kinds = providers.provider_kinds().cloned().collect::<Vec<_>>();
+    let provider_kinds = providers
+        .catalog_generations()
+        .into_keys()
+        .collect::<Vec<_>>();
     let registered_providers = provider_kinds.iter().cloned().collect::<BTreeSet<_>>();
 
     // 目录查询失败表示未知；查询成功后，即使为空，也必须与“已知缺少模型”区分。
@@ -431,6 +445,7 @@ async fn compile_runtime_snapshot(
     .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
     .map(|snapshot| {
         snapshot
+            .with_pricing(facts.settings.pricing)
             .with_model_mappings(model_mappings)
             .with_account_directory(account_directory)
             .with_known_provider_catalogs(known_provider_catalogs)
@@ -441,6 +456,7 @@ async fn compile_runtime_snapshot(
 /// 数据面使用的不可变配置快照。
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
+    pricing: Arc<crate::metering::PricingOverrides>,
     revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     providers: Arc<BTreeSet<ProviderKind>>,
@@ -456,6 +472,12 @@ pub struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    #[must_use]
+    pub fn with_pricing(mut self, pricing: Arc<crate::metering::PricingOverrides>) -> Self {
+        self.pricing = pricing;
+        self
+    }
+
     /// 校验 Provider、实时模型目录和 Client API Key，并构建快照。
     pub fn new(
         revision: ConfigRevision,
@@ -524,6 +546,7 @@ impl RuntimeSnapshot {
         client_policy_map.retain(|_, policy| policy.enabled());
 
         Ok(Self {
+            pricing: Arc::default(),
             revision,
             account_selection_policy,
             providers: Arc::new(provider_set),
@@ -831,6 +854,7 @@ impl RuntimeSnapshot {
 
         Ok(RoutingPlan {
             config_revision: self.revision,
+            pricing: Arc::clone(&self.pricing),
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
             max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
@@ -872,6 +896,7 @@ impl RuntimeSnapshot {
         };
         Ok(RoutingPlan {
             config_revision: self.revision,
+            pricing: Arc::clone(&self.pricing),
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
             max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)

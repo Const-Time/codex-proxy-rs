@@ -19,6 +19,7 @@ use serde::Deserialize;
 pub mod backup;
 pub mod model;
 pub mod ports;
+mod pricing_task;
 mod subscription_task;
 mod use_case;
 
@@ -92,7 +93,6 @@ impl fmt::Debug for InitialAdminPassword {
 
 /// 管理控制面的启动配置。
 #[derive(Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AdminConfig {
     pub session_ttl_minutes: u64,
     pub default_username: String,
@@ -264,15 +264,28 @@ impl AdminBundle {
 /// # Errors
 ///
 /// 配置非法、Provider 注册冲突/缺失或默认管理员初始化失败时返回错误。
+pub struct AdminRuntimePorts {
+    pub providers: Vec<Arc<dyn ProviderAdmin>>,
+    pub snapshot: Arc<dyn SnapshotControl>,
+    pub probes: (Arc<dyn AccountProbe>, Arc<dyn ports::proxy::ProxyProbe>),
+    pub client_distribution: Arc<dyn ClientDistributionResolver>,
+    pub system: Arc<dyn SystemOperations>,
+    pub pricing_source: Arc<dyn ports::pricing::PricingSource>,
+}
+
 pub async fn initialize(
     mut config: AdminConfig,
     store: AdminStorePorts,
-    providers: Vec<Arc<dyn ProviderAdmin>>,
-    snapshot: Arc<dyn SnapshotControl>,
-    probes: (Arc<dyn AccountProbe>, Arc<dyn ports::proxy::ProxyProbe>),
-    client_distribution: Arc<dyn ClientDistributionResolver>,
-    system: Arc<dyn SystemOperations>,
+    runtime: AdminRuntimePorts,
 ) -> Result<AdminBundle, AdminError> {
+    let AdminRuntimePorts {
+        providers,
+        snapshot,
+        probes,
+        client_distribution,
+        system,
+        pricing_source,
+    } = runtime;
     let (probe, proxy_probe) = probes;
     config
         .resolve_and_validate(Path::new("."))
@@ -338,11 +351,13 @@ pub async fn initialize(
             store.observability(),
             store.accounts(),
             store.settings(),
-            registry,
+            registry.clone(),
         )),
         settings: Arc::new(DefaultSettingsService::new(
             store.settings(),
             snapshot.clone(),
+            registry,
+            pricing_source,
         )),
         system: Arc::new(DefaultSystemService::new(system)),
         openai: Arc::new(DefaultOpenAiService::new(
@@ -360,6 +375,21 @@ pub async fn initialize(
         backups,
     };
     let mut worker_contributions = backup_worker_contribution(backup_task)?;
+    worker_contributions.push(WorkerContribution::Registration(
+        WorkerRegistration::try_new(
+            WorkerId::try_new(WorkerKind::PricingSync, "pricing")
+                .map_err(|_| AdminError::internal("invalid pricing worker id"))?,
+            WorkerRunnable::Daemon {
+                restart: DaemonRestartPolicy::try_new(
+                    Duration::from_secs(5),
+                    Duration::from_secs(60),
+                )
+                .map_err(|_| AdminError::internal("invalid pricing restart policy"))?,
+                task: Box::new(pricing_task::PricingTask(services.settings.clone())),
+            },
+        )
+        .map_err(|_| AdminError::internal("invalid pricing worker"))?,
+    ));
     worker_contributions.push(WorkerContribution::Registration(
         WorkerRegistration::try_new(
             WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "subscriptions")

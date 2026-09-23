@@ -182,6 +182,7 @@ const ADAPTER_PUBLIC_MODULES: &[(&str, &[&str])] = &[
         &[
             "client_distribution",
             "config",
+            "pricing",
             "proxy_probe",
             "serve",
             "system_update",

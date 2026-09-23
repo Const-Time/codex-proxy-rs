@@ -211,6 +211,7 @@ const {
             </BaseButton>
           </div>
           <BaseTable
+            table-id="accounts"
             class="flex-none [--cp-table-row-height:72px] sm:h-100! sm:min-h-100 xl:h-auto! xl:min-h-0 xl:flex-1"
             mobile-actions-first
             :columns="accountColumns"

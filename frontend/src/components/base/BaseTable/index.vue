@@ -7,6 +7,7 @@ import { computed, nextTick, onMounted, shallowRef, useSlots, useTemplateRef, wa
 import BaseEmpty from '../BaseEmpty.vue'
 import BaseScrollbar from '../BaseScrollbar.vue'
 import BaseSelect from '../BaseSelect.vue'
+import BaseTableColumnSettings from './BaseTableColumnSettings.vue'
 import {
   alignClass,
   cellContentClass,
@@ -15,10 +16,11 @@ import {
   cellValue,
   columnSortKey,
   columnStyle,
-  resolveColumns,
   stickyStyle,
   tableStyle,
 } from './columns'
+import { useTableColumnMotion } from './useTableColumnMotion'
+import { useTableColumns } from './useTableColumns'
 
 const props = withDefaults(defineProps<BaseTableProps<Row>>(), {
   rowKey: 'id',
@@ -27,6 +29,7 @@ const props = withDefaults(defineProps<BaseTableProps<Row>>(), {
   density: 'default',
   loading: false,
   emptyText: '暂无数据',
+  showHeaderWhenEmpty: false,
   scrollbarAlwaysVisible: false,
   sort: undefined,
 })
@@ -36,7 +39,7 @@ const emit = defineEmits<{
 }>()
 const slots = useSlots()
 const mobile = useMediaQuery('(max-width: 639px)')
-const computedColumns = computed(() => resolveColumns(props.columns))
+const { visibleColumns: computedColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(() => props.columns, props.tableId ?? 'transient')
 const mobileColumns = computed(() => {
   const columns = [...computedColumns.value]
   if (props.mobileActionsFirst) {
@@ -81,6 +84,7 @@ const hasRows = computed(() => displayRows.value.length > 0)
 
 const scrollbarRef = useTemplateRef<InstanceType<typeof BaseScrollbar>>('scrollbar')
 const tableRef = useTemplateRef<HTMLTableElement>('table')
+useTableColumnMotion(tableRef, () => computedColumns.value.map(column => column.key))
 const horizontalScrolled = shallowRef(false)
 const horizontalCanScrollRight = shallowRef(false)
 
@@ -215,6 +219,9 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
 
 <template>
   <div class="cp-data-table isolate flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden">
+    <div v-if="tableId" class="flex shrink-0 justify-end py-1">
+      <BaseTableColumnSettings :options="columnOptions" @change="setColumnVisible" @reorder="setColumnOrder" @reset="resetColumns" />
+    </div>
     <div v-loading="loading" class="cp-data-table-body relative flex min-h-0 max-w-full flex-1 overflow-hidden">
       <div v-if="mobile && hasRows" class="w-full min-w-0">
         <div v-if="computedColumns.some(column => column.sortable || column.kind === 'selection')" class="mb-3 flex flex-wrap items-center gap-3">
@@ -235,6 +242,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
               <div
                 v-for="column in mobileColumns"
                 :key="column.key"
+                :data-column-motion="column.sticky ? undefined : column.key"
                 class="cp-record-field"
                 :class="[
                   ['actions', 'selection', 'expander'].includes(column.kind) ? 'cp-record-field--wide' : '',
@@ -261,7 +269,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
         </div>
       </div>
       <BaseScrollbar
-        v-else-if="hasRows"
+        v-else-if="hasRows || showHeaderWhenEmpty"
         ref="scrollbar"
         class="min-h-0 flex-1"
         :class="
@@ -282,6 +290,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
               <th
                 v-for="(column, columnIndex) in computedColumns"
                 :key="column.key"
+                :data-column-motion="column.sticky ? undefined : column.key"
                 class="sticky top-0 z-30 whitespace-nowrap bg-(--cp-table-header-bg) shadow-[0_10px_16px_-18px_var(--cp-color-shadow)]"
                 :class="[
                   column.paddingClass ?? cellPaddingClass,
@@ -337,6 +346,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
                 <td
                   v-for="(column, columnIndex) in computedColumns"
                   :key="column.key"
+                  :data-column-motion="column.sticky ? undefined : column.key"
                   class="min-w-0"
                   :class="[
                     column.paddingClass ?? cellPaddingClass,
@@ -380,8 +390,15 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
           </tbody>
         </table>
       </BaseScrollbar>
-      <div v-else class="grid min-h-0 flex-1 place-items-center overflow-hidden px-4">
-        <BaseEmpty v-if="!loading" :title="emptyText" surface="none" class="w-full max-w-80" />
+      <div
+        v-if="!hasRows"
+        v-loading="loading && showHeaderWhenEmpty"
+        class="grid min-h-0 flex-1 place-items-center overflow-hidden px-4"
+        :class="showHeaderWhenEmpty ? ['absolute inset-x-0 bottom-0', density === 'compact' ? 'top-8' : 'top-10'] : undefined"
+      >
+        <slot v-if="!loading" name="empty">
+          <BaseEmpty :title="emptyText" surface="none" class="w-full max-w-80" />
+        </slot>
       </div>
     </div>
   </div>

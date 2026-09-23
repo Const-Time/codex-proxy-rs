@@ -99,6 +99,8 @@ pub(super) struct AdminTestFixture {
     pub ops_errors: Arc<Mutex<Vec<OpsError>>>,
     pub dashboard_observation: Arc<Mutex<Option<DashboardObservation>>>,
     pub dashboard_summary_range: Arc<Mutex<Option<TimeRange>>>,
+    pub provider_error: Arc<Mutex<Option<ProviderAdminError>>>,
+    pub account: Arc<Mutex<Option<AccountPageItem>>>,
 }
 
 impl AdminTestFixture {
@@ -118,6 +120,8 @@ impl AdminTestFixture {
         let ops_errors = Arc::new(Mutex::new(Vec::new()));
         let dashboard_observation = Arc::new(Mutex::new(None));
         let dashboard_summary_range = Arc::new(Mutex::new(None));
+        let provider_error = Arc::new(Mutex::new(None));
+        let account = Arc::new(Mutex::new(None));
         let unused = Arc::new(UnusedStore {
             usage_records: Arc::clone(&usage_records),
             usage_detail: Arc::clone(&usage_detail),
@@ -125,6 +129,7 @@ impl AdminTestFixture {
             ops_errors: Arc::clone(&ops_errors),
             dashboard_observation: Arc::clone(&dashboard_observation),
             dashboard_summary_range: Arc::clone(&dashboard_summary_range),
+            account: Arc::clone(&account),
         });
         let stores = AdminStorePorts::new(
             AdminAccountStorePorts::new(
@@ -140,8 +145,8 @@ impl AdminTestFixture {
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
         );
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
-            Arc::new(UnusedProvider::new("openai")),
-            Arc::new(UnusedProvider::new("xai")),
+            Arc::new(UnusedProvider::new("openai", Arc::clone(&provider_error))),
+            Arc::new(UnusedProvider::new("xai", Arc::clone(&provider_error))),
         ];
         let bundle = gateway_admin::initialize(
             AdminConfig {
@@ -150,11 +155,14 @@ impl AdminTestFixture {
                 default_password: InitialAdminPassword::new("strong-admin-password"),
             },
             stores,
-            providers,
-            Arc::new(NoopSnapshot),
-            (Arc::new(NoopProbe), Arc::new(proxies::SuccessfulProbe)),
-            Arc::new(StaticClientDistribution),
-            system,
+            gateway_admin::AdminRuntimePorts {
+                providers,
+                snapshot: Arc::new(NoopSnapshot),
+                probes: (Arc::new(NoopProbe), Arc::new(proxies::SuccessfulProbe)),
+                client_distribution: Arc::new(StaticClientDistribution),
+                system,
+                pricing_source: Arc::new(StaticPricingSource),
+            },
         )
         .await
         .expect("initialize test admin services");
@@ -168,6 +176,8 @@ impl AdminTestFixture {
             ops_errors,
             dashboard_observation,
             dashboard_summary_range,
+            provider_error,
+            account,
         }
     }
 
@@ -401,14 +411,31 @@ impl AuthStore for MemoryAuthStore {
 }
 
 pub(super) struct MemorySettingsStore {
+    pricing: Mutex<gateway_admin::model::pricing::StoredPricing>,
     settings: Mutex<RuntimeSettings>,
     api_key: Arc<Mutex<Option<AdminApiKey>>>,
+}
+
+struct StaticPricingSource;
+#[async_trait]
+impl gateway_admin::ports::pricing::PricingSource for StaticPricingSource {
+    async fn fetch(
+        &self,
+    ) -> Result<gateway_admin::model::pricing::PricingSyncPreview, gateway_admin::model::AdminError>
+    {
+        Ok(gateway_admin::model::pricing::PricingSyncPreview {
+            prices: serde_json::from_value(serde_json::json!({"openai":{"gpt-5.4":{
+                "multiplierBps":10000,"bands":{"standard":{"input":"2.5","output":"15","cacheRead":"0.25","cacheWrite":"0"}}
+            }}})).expect("prices"), skipped: vec![], source_hash: "a".repeat(64),
+        })
+    }
 }
 
 impl MemorySettingsStore {
     fn new(api_key: Arc<Mutex<Option<AdminApiKey>>>) -> Self {
         Self {
             settings: Mutex::new(test_runtime_settings()),
+            pricing: Mutex::default(),
             api_key,
         }
     }
@@ -420,6 +447,63 @@ impl MemorySettingsStore {
 
 #[async_trait]
 impl SettingsStore for MemorySettingsStore {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        Ok(self.pricing.lock().expect("pricing").clone())
+    }
+    async fn sync_pricing(
+        &self,
+        command: gateway_admin::model::pricing::SyncPricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Option<gateway_admin::model::Revision>> {
+        let mut pricing = self.pricing.lock().expect("pricing");
+        pricing.synced = command.preview.prices;
+        pricing.source_hash = Some(command.preview.source_hash);
+        pricing.synced_at = Some(Utc::now());
+        let mut settings = self.settings.lock().expect("settings");
+        settings.config_revision = next_revision(settings.config_revision);
+        Ok(Some(settings.config_revision))
+    }
+    async fn update_pricing_sync_policy(
+        &self,
+        policy: gateway_admin::model::pricing::PricingSyncPolicy,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        self.pricing.lock().unwrap().sync_policy = policy;
+        let mut settings = self.settings.lock().unwrap();
+        settings.config_revision = next_revision(settings.config_revision);
+        Ok(settings.config_revision)
+    }
+    async fn update_pricing(
+        &self,
+        command: gateway_admin::model::pricing::UpdatePricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        use gateway_admin::model::pricing::PricingChange;
+        let mut pricing = self.pricing.lock().expect("pricing");
+        let models = pricing.overrides.entry(command.provider).or_default();
+        for model in command.models {
+            match &command.change {
+                PricingChange::Reset => {
+                    models.remove(&model);
+                }
+                PricingChange::Replace(p) => {
+                    models.insert(model, p.clone());
+                }
+                PricingChange::Multiplier(bps) => {
+                    models
+                        .entry(model)
+                        .or_insert_with(|| gateway_core::metering::ModelPriceOverride {
+                            multiplier_bps: 10_000,
+                            bands: Default::default(),
+                        })
+                        .multiplier_bps = *bps;
+                }
+            }
+        }
+        let mut settings = self.settings.lock().expect("settings");
+        settings.config_revision = next_revision(settings.config_revision);
+        Ok(settings.config_revision)
+    }
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Ok(self.settings.lock().expect("settings").clone())
     }
@@ -812,6 +896,7 @@ struct UnusedStore {
     ops_errors: Arc<Mutex<Vec<OpsError>>>,
     dashboard_observation: Arc<Mutex<Option<DashboardObservation>>>,
     dashboard_summary_range: Arc<Mutex<Option<TimeRange>>>,
+    account: Arc<Mutex<Option<AccountPageItem>>>,
 }
 
 #[async_trait]
@@ -826,9 +911,12 @@ impl AccountStore for UnusedStore {
 
     async fn load_account(
         &self,
-        _: &str,
+        id: &str,
         _: AccountRuntimeSnapshot,
     ) -> AdminStoreResult<Option<AccountPageItem>> {
+        if let Some(account) = self.account.lock().expect("account").as_ref() {
+            return Ok((account.account.id == id).then(|| account.clone()));
+        }
         Err(unavailable("account"))
     }
 
@@ -1049,12 +1137,14 @@ impl ObservabilityStore for UnusedStore {
 
 struct UnusedProvider {
     kind: ProviderKind,
+    error: Arc<Mutex<Option<ProviderAdminError>>>,
 }
 
 impl UnusedProvider {
-    fn new(kind: &str) -> Self {
+    fn new(kind: &str, error: Arc<Mutex<Option<ProviderAdminError>>>) -> Self {
         Self {
             kind: ProviderKind::new(kind).expect("provider kind"),
+            error,
         }
     }
 }
@@ -1095,7 +1185,12 @@ impl ProviderAdmin for UnusedProvider {
         &self,
         _: PrepareCredentialImport,
     ) -> Result<PreparedCredentialImport, ProviderAdminError> {
-        Err(unsupported_provider())
+        Err(self
+            .error
+            .lock()
+            .expect("provider error")
+            .clone()
+            .unwrap_or_else(unsupported_provider))
     }
 
     async fn start_authorization(
@@ -1123,7 +1218,12 @@ impl ProviderAdmin for UnusedProvider {
         &self,
         _: PrepareCredentialRefresh,
     ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
-        Err(unsupported_provider())
+        Err(self
+            .error
+            .lock()
+            .expect("provider error")
+            .clone()
+            .unwrap_or_else(unsupported_provider))
     }
 
     async fn quota(

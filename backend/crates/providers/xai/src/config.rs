@@ -9,7 +9,6 @@ use crate::{GrokOAuthConfig, XaiWireProfileState};
 
 /// xAI Provider 唯一启动配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct XaiConfig {
     pub wire_profile: XaiWireProfileConfig,
 }
@@ -33,7 +32,6 @@ impl XaiConfig {
 
 /// 经参考实现核验的 Grok CLI 请求画像。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct XaiWireProfileConfig {
     pub client_identifier: String,
     pub client_version: String,

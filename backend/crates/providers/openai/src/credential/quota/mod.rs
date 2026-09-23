@@ -57,8 +57,8 @@ use snapshot::{
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 pub(crate) const QUOTA_SCHEDULING_TTL: Duration = Duration::from_secs(10 * 60);
 const QUOTA_HYDRATION_FAILURE_TTL: Duration = Duration::from_secs(5);
-const EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
-const EXHAUSTED_QUOTA_RESET_GRACE: Duration = Duration::from_secs(2 * 60);
+const PERIODIC_QUOTA_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const QUOTA_RESET_GRACE: Duration = Duration::from_secs(2 * 60);
 const EXHAUSTED_QUOTA_RESET_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// 首次 OAuth 异步观察失败时，由既有 quota worker 兜底重试的单轮上限。
 const INITIAL_QUOTA_SYNC_BATCH: usize = 100;
@@ -385,15 +385,19 @@ impl CodexQuotaSchedulingProjection {
     fn reserve_periodic_refreshes(
         &self,
         accounts: Vec<ProviderAccount>,
+        observed_snapshots: &BTreeMap<ProviderAccountId, CodexAccountQuotaSnapshot>,
         now: SystemTime,
     ) -> Vec<ProviderAccount> {
         let candidates = accounts
             .into_iter()
-            .filter_map(|account| quota_refresh_candidate(account, now))
+            .filter_map(|account| {
+                let snapshot = observed_snapshots.get(account.id());
+                quota_refresh_candidate(account, snapshot, now)
+            })
             .collect::<Vec<_>>();
         let candidate_ids = candidates
             .iter()
-            .map(|account| account.id().clone())
+            .map(|(account, _)| account.id().clone())
             .collect::<BTreeSet<_>>();
         let refreshed_at = Instant::now();
         let mut state = self
@@ -404,18 +408,18 @@ impl CodexQuotaSchedulingProjection {
             .last_periodic_refresh_at
             .retain(|account_id, _| candidate_ids.contains(account_id));
 
-        // 正常账号只由真实请求的响应头和 `codex.rate_limits` 被动同步。
-        // 已耗尽账号每 30 分钟复核，不能等待旧 reset：官方活动可能提前重置额度。
-        // reset + 2 分钟触发复核；过期窗口每分钟重试，以完成连续观测确认
-        // 或容忍上游延迟传播，不能再让恢复确认等待完整的 30 分钟。
+        // 已耗尽账号首次立即复核，之后每 30 分钟复核，以发现官方提前重置。
+        // reset + 2 分钟额外触发一次复核，给上游重置留出传播时间。
+        // 正常账号仅在非零用量窗口经过宽限期后参与，未更新时复用周期节流。
         let mut reserved = Vec::new();
-        for account in candidates {
+        for (account, target_reset) in candidates {
             if !periodic_quota_refresh_due(
                 &state,
                 account.id(),
-                account.quota().reset_at(),
+                target_reset,
                 now,
                 refreshed_at,
+                account.quota().is_exhausted(),
             ) {
                 continue;
             }
@@ -432,9 +436,35 @@ impl CodexQuotaSchedulingProjection {
     }
 }
 
-fn quota_refresh_candidate(account: ProviderAccount, now: SystemTime) -> Option<ProviderAccount> {
-    (eligible_periodic_quota_refresh(&account, now) && account.quota().is_exhausted())
-        .then_some(account)
+fn quota_refresh_candidate(
+    account: ProviderAccount,
+    snapshot: Option<&CodexAccountQuotaSnapshot>,
+    now: SystemTime,
+) -> Option<(ProviderAccount, Option<SystemTime>)> {
+    if !eligible_periodic_quota_refresh(&account, now) {
+        return None;
+    }
+    if account.quota().is_exhausted() {
+        let reset_at = account.quota().reset_at();
+        return Some((account, reset_at));
+    }
+    // 正常账号首次进入周期候选也要等待宽限期，不能由“无刷新历史”绕过。
+    let snapshot = snapshot?;
+    let expired_window_reset = snapshot
+        .windows()
+        .iter()
+        .filter(|window| {
+            window.used_percent().is_some_and(|used| used > 0.0) || window.limit_reached()
+        })
+        .filter_map(CodexQuotaWindow::reset_at)
+        .map(SystemTime::from)
+        .filter(|reset| {
+            reset
+                .checked_add(QUOTA_RESET_GRACE)
+                .is_some_and(|due_at| due_at <= now)
+        })
+        .min();
+    expired_window_reset.map(|reset_at| (account, Some(reset_at)))
 }
 
 fn periodic_quota_refresh_due(
@@ -443,20 +473,21 @@ fn periodic_quota_refresh_due(
     reset_at: Option<SystemTime>,
     now: SystemTime,
     monotonic_now: Instant,
+    exhausted: bool,
 ) -> bool {
     state
         .last_periodic_refresh_at
         .get(account_id)
         .is_none_or(|last| {
-            let reset_due =
-                reset_at.and_then(|reset| reset.checked_add(EXHAUSTED_QUOTA_RESET_GRACE));
+            let reset_due = reset_at.and_then(|reset| reset.checked_add(QUOTA_RESET_GRACE));
             monotonic_now.saturating_duration_since(last.monotonic_at)
-                >= EXHAUSTED_QUOTA_REFRESH_RETRY_INTERVAL
+                >= PERIODIC_QUOTA_REFRESH_RETRY_INTERVAL
                 || reset_due.is_some_and(|due_at| {
                     due_at <= now
                         && (last.wall_at < due_at
-                            || monotonic_now.saturating_duration_since(last.monotonic_at)
-                                >= EXHAUSTED_QUOTA_RESET_RETRY_INTERVAL)
+                            || (exhausted
+                                && monotonic_now.saturating_duration_since(last.monotonic_at)
+                                    >= EXHAUSTED_QUOTA_RESET_RETRY_INTERVAL))
                 })
         })
 }
@@ -694,8 +725,26 @@ impl CodexCredentialQuotaService {
         let accounts = self.repository.list_for_provider().await?;
         let mut summary = CodexQuotaSyncSummary::default();
         let now = SystemTime::now();
-        let initial = self.initial_quota_sync_accounts(&accounts, now).await?;
-        let periodic = self.scheduling.reserve_periodic_refreshes(accounts, now);
+        let account_ids = accounts
+            .iter()
+            .map(|account| account.id().clone())
+            .collect::<Vec<_>>();
+        let observed = self.store.get_quotas(&account_ids).await?;
+        let observed_snapshots = observed
+            .iter()
+            .filter_map(|obs| {
+                quota_snapshot_from_observation(obs)
+                    .map(|snapshot| (obs.account_id.clone(), snapshot))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let observed_ids = observed
+            .into_iter()
+            .map(|observation| observation.account_id)
+            .collect::<BTreeSet<_>>();
+        let initial = Self::initial_quota_sync_accounts(&accounts, &observed_ids, now);
+        let periodic =
+            self.scheduling
+                .reserve_periodic_refreshes(accounts, &observed_snapshots, now);
         let accounts = initial
             .into_iter()
             .chain(periodic)
@@ -770,28 +819,19 @@ impl CodexCredentialQuotaService {
     }
 
     /// `quota_observed_at` 为空代表首次异步观察尚未成功；不另建同步状态表。
-    async fn initial_quota_sync_accounts(
-        &self,
+    fn initial_quota_sync_accounts(
         accounts: &[ProviderAccount],
+        observed_ids: &BTreeSet<ProviderAccountId>,
         now: SystemTime,
-    ) -> Result<Vec<ProviderAccount>, CodexCredentialQuotaError> {
-        let account_ids = accounts
-            .iter()
-            .map(|account| account.id().clone())
-            .collect::<Vec<_>>();
-        let observed = self.store.get_quotas(&account_ids).await?;
-        let observed_ids = observed
-            .into_iter()
-            .map(|observation| observation.account_id)
-            .collect::<BTreeSet<_>>();
-        Ok(accounts
+    ) -> Vec<ProviderAccount> {
+        accounts
             .iter()
             .filter(|account| {
                 !observed_ids.contains(account.id()) && eligible_initial_quota_sync(account, now)
             })
             .take(INITIAL_QUOTA_SYNC_BATCH)
             .cloned()
-            .collect())
+            .collect()
     }
 
     /// 解析并 revision-fenced 落库单账号的 Provider quota JSON。

@@ -40,6 +40,7 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 
 <template>
   <BaseTable
+    table-id="usage-records"
     :columns="columns"
     :rows="rows"
     :loading="loading"

@@ -178,16 +178,24 @@ const billingItems = computed(() => {
 
   return [
     { label: '总费用', value: value.totalAmountDisplay, mono: true },
-    { label: '原始输入费用', value: value.inputAmountDisplay, mono: true },
-    { label: '原始输出费用', value: value.outputAmountDisplay, mono: true },
-    { label: '原始缓存读取费用', value: value.cacheReadAmountDisplay, mono: true },
-    { label: '原始缓存写入费用', value: value.cacheWriteAmountDisplay, mono: true },
+    ...(value.image
+      ? [
+          { label: '图像输入费用', value: value.image.inputAmountDisplay, mono: true },
+          { label: '图像缓存费用', value: value.image.cacheReadAmountDisplay, mono: true },
+          { label: '图像输入单价', value: value.image.inputPriceDisplay, mono: true },
+          { label: '图像缓存单价', value: value.image.cacheReadPriceDisplay, mono: true },
+        ]
+      : []),
+    { label: value.image ? '文本输入' : '输入', value: value.inputAmountDisplay, mono: true },
+    { label: value.image ? '图像输出' : '输出', value: value.outputAmountDisplay, mono: true },
+    { label: value.image ? '文本缓存读取' : '缓存读取', value: value.cacheReadAmountDisplay, mono: true },
+    { label: '缓存写入', value: value.cacheWriteAmountDisplay, mono: true },
     { label: '原始费用', value: value.originalAmountDisplay, mono: true },
     { label: '分组模型倍率', value: value.groupMultiplierDisplay, mono: true },
     { label: '标准费用', value: value.standardAmountDisplay, mono: true },
-    { label: '输入单价', value: value.inputPriceDisplay, mono: true },
-    { label: '输出单价', value: value.outputPriceDisplay, mono: true },
-    { label: '缓存单价', value: value.cacheReadPriceDisplay, mono: true },
+    { label: value.image ? '文本输入单价' : '输入单价', value: value.inputPriceDisplay, mono: true },
+    { label: value.image ? '图像输出单价' : '输出单价', value: value.outputPriceDisplay, mono: true },
+    { label: value.image ? '文本缓存单价' : '缓存单价', value: value.cacheReadPriceDisplay, mono: true },
     { label: '缓存写入单价', value: value.cacheWritePriceDisplay, mono: true },
     { label: '服务档位', value: value.serviceTierDisplay },
     { label: '服务档位倍率', value: value.multiplierDisplay, mono: true },

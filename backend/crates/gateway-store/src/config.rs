@@ -19,7 +19,6 @@ pub(crate) const POSTGRES_HEALTH_RETRY_DELAY: Duration = Duration::from_millis(5
 
 /// Store 自己拥有并校验的启动配置。
 #[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StoreConfig {
     pub(crate) database: StoreConnectionConfig,
     pub(crate) redis: StoreConnectionConfig,
@@ -31,7 +30,7 @@ pub struct StoreConfig {
 
 /// PostgreSQL 连接池预算；acquire 超时决定池耗尽时快速失败而非排队积压。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct StorePoolConfig {
     pub max_connections: u32,
     pub acquire_timeout_seconds: u64,
@@ -149,7 +148,6 @@ impl fmt::Debug for StoreConfig {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct StoreConnectionConfig {
     pub(crate) url: String,
     pub(crate) password: String,

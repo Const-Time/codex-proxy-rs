@@ -1,6 +1,11 @@
 //! Provider、模型目录、精确模型映射与请求级候选计划。
 
+mod catalog;
 pub mod snapshot;
+pub use catalog::{
+    ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
+    ProviderModelCapabilities, ProviderModelDescriptor, PublicModelDescriptor,
+};
 
 pub use crate::account::scope::{
     AccountGroupId, AccountRoutingScopeKind, AccountRoutingSnapshot, ClientRoutingScope,
@@ -530,6 +535,7 @@ impl ProviderCandidate {
 /// 一次请求冻结的 Provider 尝试顺序。
 #[derive(Debug, Clone)]
 pub struct RoutingPlan {
+    pricing: Arc<crate::metering::PricingOverrides>,
     config_revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     operation: OperationKind,
@@ -539,6 +545,11 @@ pub struct RoutingPlan {
 }
 
 impl RoutingPlan {
+    #[must_use]
+    pub fn pricing(&self) -> Arc<crate::metering::PricingOverrides> {
+        Arc::clone(&self.pricing)
+    }
+
     #[must_use]
     pub const fn config_revision(&self) -> ConfigRevision {
         self.config_revision

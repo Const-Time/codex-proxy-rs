@@ -61,6 +61,13 @@ fn diagnostics_query_should_keep_wire_dimension_name() {
         serde_json::from_value(json!({"dimension": "failure_class"})).unwrap();
     assert_eq!(query.dimension().unwrap(), DiagnosticDimension::Failure);
     assert_eq!(DiagnosticDimension::Failure.display_name(), "failureClass");
+    let key_model: DiagnosticsQuery =
+        serde_json::from_value(json!({"dimension": "keyModel"})).unwrap();
+    assert_eq!(
+        key_model.dimension().unwrap(),
+        DiagnosticDimension::KeyModel
+    );
+    assert_eq!(DiagnosticDimension::KeyModel.display_name(), "keyModel");
 }
 
 #[test]

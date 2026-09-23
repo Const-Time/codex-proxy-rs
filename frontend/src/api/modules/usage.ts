@@ -34,6 +34,12 @@ export interface UsageCostCoverage {
 export interface UsageBilling {
   groupMultiplierDisplay: string
   originalAmountDisplay: string
+  image?: {
+    inputAmountDisplay: string
+    cacheReadAmountDisplay: string
+    inputPriceDisplay: string
+    cacheReadPriceDisplay: string
+  }
   inputAmountDisplay: string
   outputAmountDisplay: string
   cacheReadAmountDisplay: string
@@ -453,6 +459,7 @@ export interface UsageDiagnosticItem {
   retryRate: number
   impactScore: number
   estimatedCost: string | null
+  costIncomplete: boolean
   attemptCount: number
   totalTokens: number
 }

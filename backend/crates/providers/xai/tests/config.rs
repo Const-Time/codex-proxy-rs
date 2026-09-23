@@ -18,5 +18,5 @@ fn xai_config_requires_and_freezes_the_explicit_wire_profile() {
     assert!(serde_json::from_str::<XaiConfig>(
         r#"{"wire_profile":{"client_identifier":"grok-shell","client_version":"0.2.106","client_mode":"headless","target_os":"linux","target_arch":"x86_64","verified_at":"2026-07-21T00:00:00+08:00","unknown":true}}"#,
     )
-    .is_err());
+    .is_ok());
 }

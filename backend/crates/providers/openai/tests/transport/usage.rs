@@ -77,6 +77,54 @@ fn astra_billing_should_preserve_components_across_tiers_and_context_boundary() 
 }
 
 #[test]
+fn gpt_6_sol_and_luna_should_use_published_tier_and_context_prices() {
+    // 每百万 token 价格依次为输入、缓存读、缓存写、输出。
+    for (model, tier, input, expected) in [
+        ("gpt-6-sol", None, 272_000, ["2", "0.2", "2.5", "10"]),
+        ("gpt-6-sol", None, 272_001, ["4", "0.4", "5", "15"]),
+        (
+            "gpt-6-sol",
+            Some("flex"),
+            272_000,
+            ["1", "0.1", "1.25", "5"],
+        ),
+        ("gpt-6-sol", Some("fast"), 272_001, ["8", "0.8", "10", "30"]),
+        ("gpt-6-luna", None, 272_000, ["0.1", "0.01", "0.125", "0.5"]),
+        ("gpt-6-luna", None, 272_001, ["0.2", "0.02", "0.25", "0.75"]),
+        (
+            "gpt-6-luna",
+            Some("flex"),
+            272_001,
+            ["0.1", "0.01", "0.125", "0.375"],
+        ),
+        (
+            "gpt-6-luna",
+            Some("fast"),
+            272_000,
+            ["0.2", "0.02", "0.25", "1"],
+        ),
+    ] {
+        let breakdown = openai_billing_breakdown(model, billing_usage(input, 1, 1, 1), tier)
+            .expect("published GPT-6 pricing");
+        let actual = [
+            breakdown.input_price_per_million(),
+            breakdown.cache_read_price_per_million(),
+            breakdown.cache_write_price_per_million(),
+            breakdown.output_price_per_million(),
+        ]
+        .map(|price| {
+            price
+                .amount()
+                .to_string()
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned()
+        });
+        assert_eq!(actual, expected, "{model} {tier:?} {input}");
+    }
+}
+
+#[test]
 fn billing_breakdown_should_preserve_input_output_and_cache_components() {
     let breakdown = openai_billing_breakdown("gpt-5.6-sol", billing_usage(100, 5, 20, 10), None)
         .expect("known model pricing");
@@ -690,4 +738,86 @@ fn context() -> CodexRequestContext<'static> {
         turn_id: None,
         account_selection: Default::default(),
     }
+}
+
+use gateway_core::metering::ModelPriceOverride;
+use provider_openai::transport::openai_billing_breakdown_with_override;
+use serde_json::json;
+
+#[test]
+fn custom_price_has_exact_cache_and_multiplier_math() {
+    let custom: ModelPriceOverride = serde_json::from_value(json!({"multiplierBps":12500,"bands":{
+        "standard":{"input":"2","output":"10","cacheRead":"0","cacheWrite":"3"}
+    }}))
+    .unwrap();
+    let breakdown = openai_billing_breakdown_with_override(
+        "custom-model",
+        billing_usage(100, 10, 20, 10),
+        None,
+        Some(&custom),
+    )
+    .unwrap();
+    assert_eq!(breakdown.input_amount().amount().canonical(), "0.000175");
+    assert_eq!(breakdown.output_amount().amount().canonical(), "0.000125");
+    assert_eq!(breakdown.cache_read_amount().amount().canonical(), "0");
+    assert_eq!(
+        breakdown.cache_write_amount().amount().canonical(),
+        "0.0000375"
+    );
+    assert_eq!(breakdown.total_amount().amount().canonical(), "0.0003375");
+    assert_eq!(breakdown.custom_multiplier_bps(), 12500);
+    assert!(
+        openai_billing_breakdown_with_override(
+            "custom-model",
+            billing_usage(100, 10, 0, 0),
+            Some("flex"),
+            Some(&custom)
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn a_custom_long_priority_band_requires_a_known_long_standard_comparison() {
+    let pricing = serde_json::from_value(json!({"multiplierBps":10000,"bands":{
+        "standard":{"input":"2","output":"10","cacheRead":"0","cacheWrite":"0"},
+        "long_fast":{"input":"8","output":"40","cacheRead":"0","cacheWrite":"0"}
+    }}))
+    .unwrap();
+    let result = openai_billing_breakdown_with_override(
+        "custom-model",
+        billing_usage(300_000, 0, 0, 0),
+        Some("priority"),
+        Some(&pricing),
+    );
+    assert!(result.is_none());
+}
+
+#[test]
+fn multiplier_only_preserves_builtin_tiers_and_unknown_models_remain_unknown() {
+    let custom: ModelPriceOverride =
+        serde_json::from_value(json!({"multiplierBps":20000,"bands":{}})).unwrap();
+    for tier in [None, Some("priority"), Some("flex")] {
+        for input in [100, 272_001] {
+            let usage = billing_usage(input, 10, 20, 5);
+            let original = openai_billing_breakdown("gpt-6-astra", usage, tier).unwrap();
+            let adjusted =
+                openai_billing_breakdown_with_override("gpt-6-astra", usage, tier, Some(&custom))
+                    .unwrap();
+            assert_eq!(
+                adjusted.total_amount().amount().scaled(),
+                original.total_amount().amount().scaled() * 2
+            );
+            assert_eq!(adjusted.multiplier_percent(), original.multiplier_percent());
+        }
+    }
+    assert!(
+        openai_billing_breakdown_with_override(
+            "unknown-model",
+            billing_usage(100, 10, 0, 0),
+            None,
+            Some(&custom)
+        )
+        .is_none()
+    );
 }

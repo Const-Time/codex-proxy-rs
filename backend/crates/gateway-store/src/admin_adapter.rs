@@ -24,6 +24,73 @@ pub(crate) struct AdminSettingsStoreAdapter {
 
 #[async_trait::async_trait]
 impl SettingsStore for AdminSettingsStoreAdapter {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        self.control_plane
+            .load_pricing()
+            .await
+            .map_err(|error| admin_store_error("model pricing", error))
+    }
+
+    async fn sync_pricing(
+        &self,
+        command: gateway_admin::model::pricing::SyncPricing,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Option<gateway_admin::model::Revision>> {
+        let audit = mutation_audit(
+            context,
+            "pricing.sync",
+            "model_pricing",
+            "sub2api-litellm",
+            vec!["synced".to_owned()],
+        );
+        let revision = self
+            .control_plane
+            .sync_pricing(command, audit)
+            .await
+            .map_err(|error| admin_store_error("model pricing sync", error))?;
+        revision.map(admin_revision).transpose()
+    }
+
+    async fn update_pricing_sync_policy(
+        &self,
+        policy: gateway_admin::model::pricing::PricingSyncPolicy,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        let audit = mutation_audit(
+            context,
+            "pricing.sync_policy",
+            "model_pricing",
+            "sub2api-litellm",
+            vec!["sync_policy".to_owned()],
+        );
+        let revision = self
+            .control_plane
+            .update_pricing_sync_policy(policy, audit)
+            .await
+            .map_err(|error| admin_store_error("pricing sync policy", error))?;
+        admin_revision(revision)
+    }
+
+    async fn update_pricing(
+        &self,
+        command: gateway_admin::model::pricing::UpdatePricing,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        let audit = mutation_audit(
+            context,
+            "pricing.update",
+            "model_pricing",
+            &command.provider,
+            command.models.clone(),
+        );
+        let revision = self
+            .control_plane
+            .update_pricing(command, audit)
+            .await
+            .map_err(|error| admin_store_error("model pricing", error))?;
+        admin_revision(revision)
+    }
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<AdminRuntimeSettings> {
         let snapshot = postgres::ControlPlaneRepository::load_control_plane(&self.control_plane)
             .await

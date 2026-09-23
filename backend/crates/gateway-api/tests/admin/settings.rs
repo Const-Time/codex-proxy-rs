@@ -391,3 +391,257 @@ async fn admin_auth_should_accept_a_configured_request_id_header_name() {
 
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+fn custom_pricing() -> Value {
+    json!({"multiplierBps":12500,"bands":{"standard":{"input":"3","output":"12","cacheRead":"0","cacheWrite":"0"}}})
+}
+
+#[tokio::test]
+async fn pricing_routes_keep_manual_overrides_during_sync_and_reset_to_source() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let app = app(fixture.state());
+    let response = app.clone().oneshot(request(Method::POST, "/api/admin/settings/pricing/update", Some(json!({
+        "provider":"openai", "models":["gpt-5.4"], "change":{"action":"replace", "pricing":custom_pricing()}
+    })))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/admin/settings/pricing/sync/preview",
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let approved = preview["data"].clone();
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/pricing/sync",
+            Some(approved),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = response_json(
+        app.clone()
+            .oneshot(request(Method::GET, "/api/admin/settings/pricing", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        result["data"]["overrides"]["openai"]["gpt-5.4"],
+        custom_pricing()
+    );
+    assert_eq!(
+        result["data"]["synced"]["openai"]["gpt-5.4"]["bands"]["standard"]["input"],
+        "2.5"
+    );
+    assert!(result["data"]["syncedAt"].is_string());
+    for _ in 0..2 {
+        let response = app.clone().oneshot(request(Method::POST, "/api/admin/settings/pricing/update", Some(json!({
+            "provider":"openai", "models":["gpt-5.4"], "change":{"action":"multiplier", "multiplierBps":20000}
+        })))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let result = response_json(
+        app.clone()
+            .oneshot(request(Method::GET, "/api/admin/settings/pricing", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        result["data"]["overrides"]["openai"]["gpt-5.4"]["multiplierBps"],
+        20000
+    );
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/pricing/update",
+            Some(json!({
+                "provider":"openai", "models":["gpt-5.4"], "change":{"action":"reset"}
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = response_json(
+        app.oneshot(request(Method::GET, "/api/admin/settings/pricing", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(result["data"]["overrides"]["openai"]["gpt-5.4"].is_null());
+    assert!(result["data"]["synced"]["openai"]["gpt-5.4"].is_object());
+}
+
+#[tokio::test]
+async fn pricing_rejects_invalid_edits_and_tampered_sync_without_writes() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let app = app(fixture.state());
+    for body in [
+        json!({"provider":"unknown","models":["model"],"change":{"action":"reset"}}),
+        json!({"provider":"openai","models":[],"change":{"action":"reset"}}),
+        json!({"provider":"openai","models":["bad model"],"change":{"action":"reset"}}),
+        json!({"provider":"openai","models":["model"],"change":{"action":"multiplier","multiplierBps":1_000_001}}),
+        json!({"provider":"openai","models":["model"],"change":{"action":"replace","pricing":{"multiplierBps":10000,"bands":{}}}}),
+    ] {
+        let scenario = body.to_string();
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/admin/settings/pricing/update",
+                Some(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{scenario}");
+    }
+    // JSON 合同错误沿用 AdminJson 的 422，业务校验错误为 400。
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/pricing/update",
+            Some(json!({
+                "provider":"openai","models":["model"],"change":{"action":"reset","extra":true}
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/pricing/sync",
+            Some(json!({"prices":{},"skipped":[],"sourceHash":"a".repeat(64)})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let result = response_json(
+        app.oneshot(request(Method::GET, "/api/admin/settings/pricing", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(result["data"]["overrides"], json!({}));
+    assert_eq!(result["data"]["synced"], json!({}));
+}
+
+#[tokio::test]
+async fn pricing_endpoints_require_administrator_authentication() {
+    let fixture = AdminTestFixture::new().await;
+    let app = app(fixture.state());
+    for (method, path, body) in [
+        (
+            Method::POST,
+            "/api/admin/settings/pricing/sync/policy",
+            Some(json!({"enabled":false,"updateExisting":false})),
+        ),
+        (Method::GET, "/api/admin/settings/pricing", None),
+        (
+            Method::POST,
+            "/api/admin/settings/pricing/update",
+            Some(json!({"provider":"openai","models":["model"],"change":{"action":"reset"}})),
+        ),
+        (
+            Method::POST,
+            "/api/admin/settings/pricing/sync/preview",
+            None,
+        ),
+        (
+            Method::POST,
+            "/api/admin/settings/pricing/sync",
+            Some(json!({"prices":{},"skipped":[],"sourceHash":"a".repeat(64)})),
+        ),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(method, path, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+#[tokio::test]
+async fn pricing_sync_policy_is_admin_managed_and_disabled_sync_does_not_write() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let app = app(fixture.state());
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/pricing/sync/policy",
+            Some(json!({"enabled":false,"updateExisting":false})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    fixture.services.settings().refresh_pricing().await.unwrap();
+    let data = response_json(
+        app.clone()
+            .oneshot(request(Method::GET, "/api/admin/settings/pricing", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        data["data"]["syncPolicy"],
+        json!({"enabled":false,"updateExisting":false})
+    );
+    assert_eq!(data["data"]["synced"], json!({}));
+    assert!(data["data"]["sourceHash"].is_null());
+    for value in [
+        json!({"enabled":true,"updateExisting":true,"sourceUrl":"http://127.0.0.1"}),
+        json!({"enabled":true}),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(
+                    Method::POST,
+                    "/api/admin/settings/pricing/sync/policy",
+                    Some(value)
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/admin/settings/pricing/sync/policy",
+                Some(json!({"enabled":true,"updateExisting":true}))
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    fixture.services.settings().refresh_pricing().await.unwrap();
+    let data = response_json(
+        app.oneshot(request(Method::GET, "/api/admin/settings/pricing", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(data["data"]["synced"]["openai"]["gpt-5.4"].is_object());
+    assert_eq!(data["data"]["sourceHash"], "a".repeat(64));
+}

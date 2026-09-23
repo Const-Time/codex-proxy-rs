@@ -19,6 +19,9 @@ const SERVER_PORT_ENV: &str = "CPR_SERVER_PORT";
 /// Host 只负责找到和解析文件；每个包的字段解释与相对路径解析
 /// 由顶层配置委托给对应的包完成。
 pub trait LoadableConfig: DeserializeOwned {
+    /// 同一配置文件中由其他工具消费的顶层配置段。
+    const EXTERNAL_SECTIONS: &'static [&'static str] = &[];
+
     fn resolve_and_validate(&mut self, source_dir: &Path) -> Result<(), ConfigError>;
 }
 
@@ -27,18 +30,44 @@ pub fn load_config<T: LoadableConfig>() -> Result<T, ConfigError> {
     let current = env::current_dir().map_err(|_| ConfigError::CurrentDirectory)?;
     let path = discover_config_path(&current)?;
     let source_dir = path.parent().ok_or(ConfigError::InvalidConfigPath)?;
-    let mut value: T = config::Config::builder()
+    let document = config::Config::builder()
         .add_source(config::File::from(path.as_path()).required(true))
         .build()
-        .and_then(config::Config::try_deserialize)
         .map_err(|_| ConfigError::InvalidDocument { path: path.clone() })?;
+    let mut unused = std::collections::BTreeSet::new();
+    let mut value: T = serde_ignored::deserialize(document, |field| {
+        unused.insert(field.to_string());
+    })
+    .map_err(|error| match missing_config_field(&error) {
+        Some(field) => ConfigError::MissingField {
+            path: path.clone(),
+            field,
+        },
+        None => ConfigError::InvalidDocument { path: path.clone() },
+    })?;
+    // 此时日志尚未初始化；只报告字段路径，不回显可能包含凭据的配置值。
+    for field in unused {
+        if !T::EXTERNAL_SECTIONS.contains(&field.as_str()) {
+            eprintln!("[警告] 配置字段 {field:?} 未使用，已忽略");
+        }
+    }
     value.resolve_and_validate(source_dir)?;
     Ok(value)
 }
 
+fn missing_config_field(error: &config::ConfigError) -> Option<String> {
+    match error {
+        config::ConfigError::NotFound(field) => Some(field.clone()),
+        config::ConfigError::At { error, key, .. } => missing_config_field(error).map(|field| {
+            key.as_ref()
+                .map_or_else(|| field.clone(), |key| format!("{key}.{field}"))
+        }),
+        _ => None,
+    }
+}
+
 /// Host 唯一拥有的进程配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct HostConfig {
     pub listen: ListenConfig,
     pub runtime_data_dir: PathBuf,
@@ -113,7 +142,6 @@ impl HostConfig {
 
 /// HTTP 监听地址。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ListenConfig {
     pub host: String,
     pub port: u16,
@@ -121,7 +149,6 @@ pub struct ListenConfig {
 
 /// Host 结构化日志配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     pub level: String,
     pub stdout: bool,
@@ -178,7 +205,6 @@ impl LoggingConfig {
 
 /// Host 文件日志配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct FileLoggingConfig {
     pub enabled: bool,
     pub directory: PathBuf,
@@ -198,6 +224,8 @@ pub enum ConfigError {
     InvalidConfigPath,
     #[error("configuration document is invalid: {path}")]
     InvalidDocument { path: PathBuf },
+    #[error("配置文件 {path} 缺少必填字段 {field:?}")]
+    MissingField { path: PathBuf, field: String },
     #[error("configuration field is invalid: {0}")]
     InvalidField(&'static str),
     #[error("environment variable is invalid: {0}")]

@@ -314,6 +314,7 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context。
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
+    pricing: Arc<crate::metering::PricingOverrides>,
     request_id: ModelRequestId,
     client_api_key_ref: ClientApiKeyId,
     timing_started_at: Instant,
@@ -322,10 +323,17 @@ pub struct RequestAttemptContext {
 
 impl RequestAttemptContext {
     #[must_use]
+    pub fn with_pricing(mut self, pricing: Arc<crate::metering::PricingOverrides>) -> Self {
+        self.pricing = pricing;
+        self
+    }
+
+    #[must_use]
     pub fn new(request_id: ModelRequestId, client_api_key_ref: ClientApiKeyId) -> Self {
         Self {
             request_id,
             client_api_key_ref,
+            pricing: Arc::default(),
             timing_started_at: Instant::now(),
             trace: crate::diagnostics::TraceContext::default(),
         }
@@ -376,6 +384,11 @@ pub struct AttemptContext {
 }
 
 impl AttemptContext {
+    #[must_use]
+    pub fn pricing(&self) -> &crate::metering::PricingOverrides {
+        &self.request.pricing
+    }
+
     /// 当前 attempt 的诊断关联；克隆后可传给后台 transport 任务。
     #[must_use]
     pub fn trace(&self) -> crate::diagnostics::TraceContext {

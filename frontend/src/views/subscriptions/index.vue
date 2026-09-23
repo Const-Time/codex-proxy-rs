@@ -118,7 +118,7 @@ onMounted(load)
       {{ error }}
     </p>
     <BaseCard class="cp-mobile-table-host min-w-0">
-      <BaseTable class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="visible" :row-key="rowKey" :selected-row-keys="selected" empty-text="没有匹配的订阅">
+      <BaseTable table-id="subscriptions" class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="visible" :row-key="rowKey" :selected-row-keys="selected" empty-text="没有匹配的订阅">
         <template #header-selection>
           <BaseCheckbox label="选择当前页订阅" :model-value="pageSelected" :indeterminate="!pageSelected && visible.some(item => selected.includes(rowKey(item)))" :disabled="loading || !visible.length" @update:model-value="togglePage" />
         </template>

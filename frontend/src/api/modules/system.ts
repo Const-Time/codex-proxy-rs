@@ -1,3 +1,4 @@
+import type { AxiosRequestConfig as RequestOptions } from 'axios'
 import request from '../request'
 
 export interface SystemVersion {
@@ -33,8 +34,23 @@ export interface SystemUpdateAccepted {
   operationId: string
   deploymentMode: string
   message: string
-  needRestart: boolean
   targetVersion: string
+}
+
+export interface SystemUpdateStatus {
+  previousVersion: string | null
+  currentVersion: string | null
+  needRestart: boolean
+  operation: {
+    operationId: string | null
+    kind: 'update' | 'rollback' | 'restart' | null
+    status: 'idle' | 'running' | 'succeeded' | 'failed'
+    targetVersion: string | null
+    message: string | null
+    error: string | null
+    startedAt: string | null
+    finishedAt: string | null
+  }
 }
 
 export interface SystemRestartAccepted {
@@ -66,11 +82,12 @@ export function getSystemUpdateDetail(data: SystemUpdateDetailQuery) {
   })
 }
 
-export function performSystemUpdate(data: SystemUpdateTarget) {
+export function performSystemUpdate(data: SystemUpdateTarget, options: RequestOptions = {}) {
   return request<SystemUpdateAccepted>({
     url: '/api/admin/system/update',
     method: 'POST',
     data,
+    ...options,
   })
 }
 
@@ -78,5 +95,13 @@ export function restartSystem() {
   return request<SystemRestartAccepted>({
     url: '/api/admin/system/restart',
     method: 'POST',
+  })
+}
+
+export function getSystemUpdateStatus(options: RequestOptions = {}) {
+  return request<SystemUpdateStatus>({
+    url: '/api/admin/system/update/status',
+    method: 'GET',
+    ...options,
   })
 }

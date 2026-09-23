@@ -543,6 +543,47 @@ async fn proxy_accounts_paginate_thousands_of_accounts_and_search_without_loadin
 }
 
 #[tokio::test]
+async fn rejected_import_reservations_release_proxy_lock_before_returning() {
+    let Some(database) = TestDatabase::create("rejected_proxy_import").await else {
+        return;
+    };
+    let store = PgProxyRepository::new(database.pool.clone());
+    let other_process = PgProxyRepository::new(database.pool.clone());
+    let context = context();
+    let saved = store
+        .create(
+            NewProxy {
+                location_policy: Default::default(),
+                name: "未通过检测的出口".to_owned(),
+                proxy: OutboundProxy::parse("http://127.0.0.1:8080").unwrap(),
+            },
+            &context,
+        )
+        .await
+        .unwrap()
+        .record;
+
+    // 每次失败后立即写入检测结果，不等待连接关闭或重试锁冲突。
+    for _ in 0..64 {
+        let error = store.reserve_import(&saved.id).await.err().unwrap();
+        assert_eq!(error.kind(), AdminStoreErrorKind::Conflict);
+        other_process
+            .record_test(
+                &saved.id,
+                saved.revision,
+                ProxyTestResult {
+                    success: false,
+                    ..success()
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+    }
+    database.close().await;
+}
+
+#[tokio::test]
 async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are_committed() {
     use gateway_store::postgres::{
         ImportProviderAccounts, ProviderAccountAdminRepository, ProviderAccountAdminScope,

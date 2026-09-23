@@ -867,6 +867,13 @@ impl AccountStore for FakeAccountStore {
         self.record("store.batch_update_accounts");
         self.record_context(context);
         self.require_commit()?;
+        if let Some(enabled) = command.enabled {
+            for account in self.accounts.lock().expect("accounts").iter_mut() {
+                if command.account_ids.contains(&account.id) {
+                    account.enabled = enabled;
+                }
+            }
+        }
         Ok(AccountsUpdateResult {
             config_revision: revision(2),
             account_ids: command
@@ -903,6 +910,30 @@ struct StaticSettingsStore;
 
 #[async_trait]
 impl SettingsStore for StaticSettingsStore {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        Ok(Default::default())
+    }
+    async fn sync_pricing(
+        &self,
+        _: gateway_admin::model::pricing::SyncPricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Option<gateway_admin::model::Revision>> {
+        panic!("unexpected pricing sync")
+    }
+    async fn update_pricing_sync_policy(
+        &self,
+        _: gateway_admin::model::pricing::PricingSyncPolicy,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing sync policy")
+    }
+    async fn update_pricing(
+        &self,
+        _: gateway_admin::model::pricing::UpdatePricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing update")
+    }
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Ok(RuntimeSettings {
             config_revision: revision(1),
@@ -1261,7 +1292,6 @@ async fn accounts_recover_should_commit_facts_then_return_normal_account() {
     let events = events();
     let provider = FakeProviderAdmin::new("openai", events.clone());
     let mut account = account_record("openai");
-    account.enabled = false;
     account.credential_state = CredentialState::Invalid;
     account.quota = QuotaState::exhausted(
         QuotaEvidence::UsageLimitReached,
@@ -1306,6 +1336,114 @@ async fn accounts_recover_should_commit_facts_then_return_normal_account() {
         ]
     );
     assert_eq!(store.audit_requests(), ["recover-request"]);
+}
+
+#[tokio::test]
+async fn accounts_recover_disabled_should_only_enable_scheduling_and_preserve_quota() {
+    for has_error in [false, true] {
+        let events = events();
+        let provider = FakeProviderAdmin::new("openai", events.clone());
+        let mut account = account_record("openai");
+        account.enabled = false;
+        if has_error {
+            account.credential_state = CredentialState::Invalid;
+            account.last_error_reason =
+                Some(gateway_core::account::AccountErrorReason::CredentialInvalid);
+            account.last_error_message = Some("invalid credential".to_owned());
+            account.quota = QuotaState::exhausted(
+                QuotaEvidence::UsageLimitReached,
+                std::time::SystemTime::now(),
+                None,
+            );
+        }
+        let quota = ProviderQuota {
+            observed_at: Some(Utc::now()),
+            windows: vec![ProviderQuotaWindow {
+                key: "primary".to_owned(),
+                group: "shortTerm".to_owned(),
+                label: "5小时限额".to_owned(),
+                limit_id: None,
+                limit_name: None,
+                role: None,
+                local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
+                window_seconds: Some(5 * 60 * 60),
+                estimated_quota: None,
+                estimate_hint: None,
+                used_percent: Some(92.0),
+                reset_at: Some(Utc::now() + TimeDelta::hours(1)),
+                limit_reached: false,
+                local_usage: None,
+                provider_data: None,
+            }],
+            ..empty_quota()
+        };
+        provider.set_quota(quota.clone());
+        let store = FakeAccountStore::with_account(account.clone(), events.clone());
+        let services = accounts_service(provider.clone(), store.clone()).await;
+
+        let result = services
+            .accounts()
+            .recover(
+                &context("enable-request"),
+                ProviderAccountId::new("acct_test").expect("account ID"),
+            )
+            .await
+            .expect("enable disabled account");
+
+        account.enabled = true;
+        assert_eq!(result.config_revision, revision(2));
+        assert_eq!(result.account.account, account);
+        let mut observed_quota = result.account.quota.clone();
+        observed_quota.windows[0].estimate_hint = None;
+        assert_eq!(observed_quota, quota);
+        assert_eq!(
+            result.account.projection.status,
+            if has_error {
+                gateway_admin::model::accounts::AccountStatus::Error
+            } else {
+                gateway_admin::model::accounts::AccountStatus::Normal
+            }
+        );
+        assert_eq!(
+            recorded(&events),
+            [
+                "store.load_account",
+                "store.batch_update_accounts",
+                "provider.account_facts_changed",
+                "store.load_account",
+            ]
+        );
+        assert_eq!(store.audit_requests(), ["enable-request"]);
+        let requests = provider.quota_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].refresh);
+    }
+}
+
+#[tokio::test]
+async fn accounts_recover_disabled_should_not_publish_when_enabling_fails() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let mut account = account_record("openai");
+    account.enabled = false;
+    let store = FakeAccountStore::with_account(account.clone(), events.clone());
+    store.fail_next_commit();
+    let services = accounts_service(provider, store.clone()).await;
+
+    let result = services
+        .accounts()
+        .recover(
+            &context("enable-failed"),
+            ProviderAccountId::new("acct_test").expect("account ID"),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(*store.accounts.lock().expect("accounts"), [account]);
+    assert_eq!(
+        recorded(&events),
+        ["store.load_account", "store.batch_update_accounts"]
+    );
 }
 
 #[tokio::test]
@@ -2629,14 +2767,14 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
         );
         assert!(!estimate.cycle_based);
         assert_eq!(estimate.percent_delta, 10.0);
-        assert_eq!(estimate.estimated_tokens, Some(200_000));
+        assert_eq!(estimate.estimated_tokens, Some(228_000));
         assert_eq!(estimate.remaining_tokens, Some(108_000));
         if missing {
             assert_eq!(estimate.total_usd, None);
             assert_eq!(estimate.billed_total_usd, None);
         } else {
-            assert_eq!(estimate.total_usd.as_deref(), Some("200.00"));
-            assert_eq!(estimate.billed_total_usd.as_deref(), Some("400.00"));
+            assert_eq!(estimate.total_usd.as_deref(), Some("228.00"));
+            assert_eq!(estimate.billed_total_usd.as_deref(), Some("456.00"));
             assert_eq!(estimate.remaining_billed_usd.as_deref(), Some("216.00"));
         }
     }

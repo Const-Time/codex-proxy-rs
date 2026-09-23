@@ -116,6 +116,7 @@ watch(
       <template #body>
         <div class="flex h-full min-h-0 flex-col">
           <BaseTable
+            table-id="api-keys"
             class="min-h-0 flex-1"
             :columns="apiKeyColumns"
             :rows="apiKeys"
