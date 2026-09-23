@@ -25,7 +25,7 @@ export interface AccountQuotaWindow {
   limitReached: boolean
   localUsage?: unknown
   estimateHint?: string | null
-  estimatedQuota?: { cycleBased?: boolean, missingCostCount?: number, requestCount?: number, billedUsedUsd?: string | null, billedTotalUsd?: string | null, usedUsd: string | null, totalUsd: string | null, estimatedTokens?: number | null, remainingTokens?: number | null, remainingUsd?: string | null, remainingBilledUsd?: string | null, blockCount?: number, lowSample?: boolean, incompleteTokens?: boolean, percentDelta: number, sampleStart: string, sampleEnd: string } | null
+  estimatedQuota?: { cycleMissingCostCount?: number, cycleMissingBilledCount?: number, costIncomplete?: boolean, billedCostIncomplete?: boolean, sampleUsd?: string | null, sampleBilledUsd?: string | null, cycleBased?: boolean, missingCostCount?: number, requestCount?: number, billedUsedUsd?: string | null, billedTotalUsd?: string | null, usedUsd: string | null, totalUsd: string | null, estimatedTokens?: number | null, remainingTokens?: number | null, remainingUsd?: string | null, remainingBilledUsd?: string | null, blockCount?: number, lowSample?: boolean, incompleteTokens?: boolean, percentDelta: number, sampleStart: string, sampleEnd: string } | null
   resetAtDisplay: string
 }
 

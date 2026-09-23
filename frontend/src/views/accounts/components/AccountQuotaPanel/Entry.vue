@@ -9,7 +9,7 @@ import {
   quotaWindowPresentation,
   resolveAccountUsageWindowPresentation,
 } from '../AccountUsageWindow/presenter'
-import { quotaEstimatePresentation } from './estimate'
+import { estimateCostCoverage, estimateCostDisplay, quotaEstimatePresentation } from './estimate'
 
 const props = defineProps<{
   label: string | null
@@ -45,12 +45,8 @@ const items = computed(() => props.windows.map((window) => {
     localUsageDisplay: quotaWindowLocalUsageDisplay(window),
     resetAtDisplay: window.resetAtDisplay,
     showEstimate: Boolean(window.localUsage),
-    estimateDisplay: window.estimatedQuota?.totalUsd != null
-      ? Number(window.estimatedQuota.totalUsd).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
-      : '待估算',
-    estimateBilledDisplay: window.estimatedQuota?.billedTotalUsd != null
-      ? Number(window.estimatedQuota.billedTotalUsd).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
-      : '待估算',
+    estimateDisplay: estimateCostDisplay(window.estimatedQuota?.totalUsd, estimateCostCoverage(window.estimatedQuota).raw),
+    estimateBilledDisplay: estimateCostDisplay(window.estimatedQuota?.billedTotalUsd, estimateCostCoverage(window.estimatedQuota).billed),
     estimateTokens: window.estimatedQuota?.estimatedTokens != null ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(window.estimatedQuota.estimatedTokens) : '待估算',
     remainingTokens: window.estimatedQuota?.remainingTokens != null ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(window.estimatedQuota.remainingTokens) : '—',
     estimateTitle: estimate.title,

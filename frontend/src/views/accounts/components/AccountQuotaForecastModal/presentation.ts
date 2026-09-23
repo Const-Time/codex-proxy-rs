@@ -1,4 +1,5 @@
 import type { AccountQuotaWindow } from '@/api'
+import { estimateCostCoverage, estimateCostDisplay } from '../AccountQuotaPanel/estimate.ts'
 
 export function forecastNumber(value: unknown, currency = false, empty = '待估算') {
   if (value == null || value === '' || (typeof value !== 'number' && typeof value !== 'string'))
@@ -13,6 +14,7 @@ export function forecastNumber(value: unknown, currency = false, empty = '待估
 
 export function forecastCapacityRows(window: AccountQuotaWindow) {
   const estimate = window.estimatedQuota
+  const coverage = estimateCostCoverage(estimate)
   const local = window.localUsage && typeof window.localUsage === 'object' && 'totalTokens' in window.localUsage
     ? window.localUsage.totalTokens
     : null
@@ -26,17 +28,17 @@ export function forecastCapacityRows(window: AccountQuotaWindow) {
     },
     {
       label: '原始费用 · USD',
-      basis: estimate?.cycleBased ? '周期累计费用' : '采样区间费用',
+      basis: coverage.raw ? '本周期已知费用（不完整）' : '本周期累计费用',
       used: forecastNumber(estimate?.usedUsd, true, '待补算'),
-      total: forecastNumber(estimate?.totalUsd, true),
-      remaining: forecastNumber(estimate?.remainingUsd, true, '—'),
+      total: estimateCostDisplay(estimate?.totalUsd, coverage.raw),
+      remaining: estimate?.remainingUsd == null ? '—' : estimateCostDisplay(estimate.remainingUsd, coverage.raw),
     },
     {
       label: '倍率后计费 · USD',
-      basis: estimate?.cycleBased ? '周期累计计费' : '采样区间计费',
+      basis: coverage.billed ? '本周期已知计费（不完整）' : '本周期累计计费',
       used: forecastNumber(estimate?.billedUsedUsd, true, '待补算'),
-      total: forecastNumber(estimate?.billedTotalUsd, true),
-      remaining: forecastNumber(estimate?.remainingBilledUsd, true, '—'),
+      total: estimateCostDisplay(estimate?.billedTotalUsd, coverage.billed),
+      remaining: estimate?.remainingBilledUsd == null ? '—' : estimateCostDisplay(estimate.remainingBilledUsd, coverage.billed),
     },
   ]
 }

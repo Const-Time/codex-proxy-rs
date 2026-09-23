@@ -350,6 +350,12 @@ pub struct AccountQuotaWindowView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountQuotaEstimateView {
+    pub cycle_missing_cost_count: u64,
+    pub cycle_missing_billed_count: u64,
+    pub cost_incomplete: bool,
+    pub billed_cost_incomplete: bool,
+    pub sample_usd: Option<String>,
+    pub sample_billed_usd: Option<String>,
     pub cycle_based: bool,
     pub missing_cost_count: u64,
     pub request_count: u64,

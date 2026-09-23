@@ -781,6 +781,18 @@ pub struct ProviderQuotaWindow {
 /// Display-only extrapolation from consumption between two quota observations.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QuotaIntervalEstimate {
+    #[serde(default)]
+    pub cycle_missing_cost_count: u64,
+    #[serde(default)]
+    pub cycle_missing_billed_count: u64,
+    #[serde(default)]
+    pub cost_incomplete: bool,
+    #[serde(default)]
+    pub billed_cost_incomplete: bool,
+    #[serde(default)]
+    pub sample_usd: Option<String>,
+    #[serde(default)]
+    pub sample_billed_usd: Option<String>,
     pub cycle_based: bool,
     pub missing_cost_count: u64,
     pub request_count: u64,

@@ -2769,13 +2769,95 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
         assert_eq!(estimate.percent_delta, 10.0);
         assert_eq!(estimate.estimated_tokens, Some(228_000));
         assert_eq!(estimate.remaining_tokens, Some(108_000));
-        if missing {
-            assert_eq!(estimate.total_usd, None);
-            assert_eq!(estimate.billed_total_usd, None);
-        } else {
-            assert_eq!(estimate.total_usd.as_deref(), Some("228.00"));
-            assert_eq!(estimate.billed_total_usd.as_deref(), Some("456.00"));
-            assert_eq!(estimate.remaining_billed_usd.as_deref(), Some("216.00"));
+        assert_eq!(estimate.cost_incomplete, missing);
+        assert_eq!(estimate.billed_cost_incomplete, missing);
+        assert_eq!(estimate.cycle_missing_cost_count, u64::from(missing));
+        assert_eq!(estimate.total_usd.as_deref(), Some("228.00"));
+        assert_eq!(estimate.billed_total_usd.as_deref(), Some("456.00"));
+        assert_eq!(estimate.remaining_billed_usd.as_deref(), Some("216.00"));
+        assert_eq!(estimate.sample_usd.as_deref(), Some("20.00"));
+        assert_eq!(estimate.used_usd.as_deref(), Some("120.00"));
+    }
+    // Old holes outside the current sample remain visible; raw/billed coverage
+    // and absence of all sample prices must be handled independently.
+    let clean = history.clone();
+    for scenario in [
+        "old-hole",
+        "missing-multiplier",
+        "all-unpriced",
+        "known-zero",
+    ] {
+        let mut case = clean.clone();
+        case.usage.unavailable_cost_count = 0;
+        case.usage.missing_billed_count = 0;
+        match scenario {
+            "old-hole" => {
+                case.points[0].usage.unavailable_cost_count = 1;
+                case.points[0].usage.missing_billed_count = 1;
+                case.usage.unavailable_cost_count = 1;
+                case.usage.missing_billed_count = 1;
+            }
+            "missing-multiplier" => case.usage.missing_billed_count = 20,
+            "all-unpriced" => {
+                case.usage.known_cost_count = 100;
+                case.usage.unavailable_cost_count = 20;
+                case.usage.missing_billed_count = 20;
+                case.usage.usd = 100.0;
+                case.usage.billed_usd = 200.0;
+            }
+            "known-zero" => {
+                case.usage.usd = 0.0;
+                case.usage.billed_usd = 0.0;
+                case.points[0].usage.usd = 0.0;
+                case.points[0].usage.billed_usd = 0.0;
+            }
+            _ => unreachable!(),
+        }
+        *store.forecast_history.lock().unwrap() = case;
+        let page = services
+            .accounts()
+            .list(AccountListQuery {
+                page: 1,
+                page_size: gateway_admin::model::PageSize::new(20).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: None,
+                sort: None,
+            })
+            .await
+            .unwrap();
+        let estimate = page.items[0].quota.windows[0]
+            .estimated_quota
+            .as_ref()
+            .unwrap();
+        match scenario {
+            "old-hole" => {
+                assert_eq!(estimate.missing_cost_count, 0);
+                assert_eq!(estimate.cycle_missing_cost_count, 1);
+                assert!(estimate.cost_incomplete);
+                assert_eq!(estimate.total_usd.as_deref(), Some("228.00"));
+            }
+            "missing-multiplier" => {
+                assert!(!estimate.cost_incomplete);
+                assert!(estimate.billed_cost_incomplete);
+                assert_eq!(estimate.total_usd.as_deref(), Some("228.00"));
+                assert_eq!(estimate.billed_total_usd, None);
+                assert_eq!(estimate.sample_billed_usd, None);
+            }
+            "all-unpriced" => {
+                assert_eq!(estimate.total_usd, None);
+                assert_eq!(estimate.remaining_usd, None);
+                assert_eq!(estimate.billed_total_usd, None);
+                assert_eq!(estimate.used_usd.as_deref(), Some("100.00"));
+                assert_eq!(estimate.estimated_tokens, Some(228_000));
+            }
+            "known-zero" => {
+                assert_eq!(estimate.total_usd.as_deref(), Some("0.00"));
+                assert_eq!(estimate.billed_total_usd.as_deref(), Some("0.00"));
+                assert!(!estimate.cost_incomplete);
+            }
+            _ => unreachable!(),
         }
     }
     // Optional plan headers must not discard paired samples, for either 5h or weekly quotas.

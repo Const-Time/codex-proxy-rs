@@ -114,36 +114,44 @@ impl DefaultAccountsService {
                 window.estimate_hint = Some("采样区间没有已完成的推理用量".to_owned());
                 continue;
             }
-            let amount = (usage.known_cost_count > 0 && usage.unavailable_cost_count == 0)
-                .then_some(usage.usd);
+            // Missing records remain unknown. Extrapolate only known amounts and
+            // expose coverage explicitly; never rewrite historical bills or assume
+            // current prices/multipliers applied to an unpriced historical request.
+            let amount = (usage.known_cost_count > 0).then_some(usage.usd);
             // A missing historical multiplier must not silently become ×1.
-            let billed = (usage.missing_billed_count == 0).then_some(usage.billed_usd);
+            let billed =
+                (usage.request_count > usage.missing_billed_count).then_some(usage.billed_usd);
             let tokens = (usage.tokens > 0).then_some(usage.tokens);
             let remaining_factor = (100.0 - percent) / delta;
             let cycle = &sample.cycle_usage;
             let estimated_tokens = tokens
                 .and_then(|value| token_estimate(value, remaining_factor))
                 .and_then(|remaining| cycle.tokens.checked_add(remaining));
-            let total_usd = amount
-                .filter(|_| cycle.unavailable_cost_count == 0)
-                .and_then(|value| money(cycle.usd + value * remaining_factor));
+            let total_usd = amount.and_then(|value| money(cycle.usd + value * remaining_factor));
             if estimated_tokens.is_none() && total_usd.is_none() {
                 window.estimate_hint = Some("暂无可用的 Token 或费用数据，等待用量入账".to_owned());
                 continue;
             }
             window.estimated_quota = Some(QuotaIntervalEstimate {
                 cycle_based,
+                cycle_missing_cost_count: cycle.unavailable_cost_count,
+                cycle_missing_billed_count: cycle.missing_billed_count,
+                cost_incomplete: usage.unavailable_cost_count > 0
+                    || cycle.unavailable_cost_count > 0,
+                billed_cost_incomplete: usage.missing_billed_count > 0
+                    || cycle.missing_billed_count > 0,
+                sample_usd: amount.and_then(money),
+                sample_billed_usd: billed.and_then(money),
                 missing_cost_count: usage.unavailable_cost_count,
                 request_count: usage.request_count,
-                used_usd: (cycle.known_cost_count > 0 && cycle.unavailable_cost_count == 0)
+                used_usd: (cycle.known_cost_count > 0)
                     .then_some(cycle.usd)
                     .and_then(money),
                 total_usd,
-                billed_used_usd: (cycle.missing_billed_count == 0)
+                billed_used_usd: (cycle.request_count > cycle.missing_billed_count)
                     .then_some(cycle.billed_usd)
                     .and_then(money),
                 billed_total_usd: billed
-                    .filter(|_| cycle.missing_billed_count == 0)
                     .and_then(|value| money(cycle.billed_usd + value * remaining_factor)),
                 estimated_tokens,
                 remaining_tokens: tokens.and_then(|value| token_estimate(value, remaining_factor)),
@@ -151,7 +159,7 @@ impl DefaultAccountsService {
                 remaining_billed_usd: billed.and_then(|value| money(value * remaining_factor)),
                 block_count: sample.block_count,
                 low_sample: delta < 10.0 || (!cycle_based && sample.block_count < 2),
-                incomplete_tokens: usage.missing_token_count > 0,
+                incomplete_tokens: usage.missing_token_count > 0 || cycle.missing_token_count > 0,
                 percent_delta: delta,
                 sample_start: sample.start_at,
                 sample_end: sample.end_at,

@@ -198,6 +198,12 @@ pub(crate) fn quota_window_view(window: ProviderQuotaWindow) -> AccountQuotaWind
             low_sample: estimate.low_sample,
             incomplete_tokens: estimate.incomplete_tokens,
 
+            cycle_missing_cost_count: estimate.cycle_missing_cost_count,
+            cycle_missing_billed_count: estimate.cycle_missing_billed_count,
+            cost_incomplete: estimate.cost_incomplete,
+            billed_cost_incomplete: estimate.billed_cost_incomplete,
+            sample_usd: estimate.sample_usd,
+            sample_billed_usd: estimate.sample_billed_usd,
             missing_cost_count: estimate.missing_cost_count,
             request_count: estimate.request_count,
             billed_used_usd: estimate.billed_used_usd,
