@@ -24,6 +24,8 @@ use super::{
 
 const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
 
+type ModelCatalogAccounts = BTreeMap<ProviderKind, BTreeMap<String, BTreeSet<ProviderAccountId>>>;
+
 /// Store 在一个一致性读取中提供的调度设置事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotSettingsFacts {
@@ -261,6 +263,20 @@ impl RuntimeSnapshotCompiler {
 
     /// 读取一个 revision，并为已注册 Provider 查询实时模型目录。
     pub async fn compile(&self) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
+        self.compile_inner(None).await
+    }
+
+    pub(crate) async fn compile_with_cached_catalog(
+        &self,
+        previous: &RuntimeSnapshot,
+    ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
+        self.compile_inner(Some(previous)).await
+    }
+
+    async fn compile_inner(
+        &self,
+        previous: Option<&RuntimeSnapshot>,
+    ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
         for _ in 0..MAXIMUM_CATALOG_STABILITY_ATTEMPTS {
             let catalog_generations = self.providers.catalog_generations();
             let facts = self
@@ -271,10 +287,17 @@ impl RuntimeSnapshotCompiler {
             if facts.config_revision != facts.observed_current_revision {
                 return Err(RuntimeSnapshotCompileError::RevisionChanged);
             }
-            let snapshot = compile_runtime_snapshot(facts, self.providers.as_ref()).await?;
+            let snapshot =
+                compile_runtime_snapshot(facts, self.providers.as_ref(), previous).await?;
             let observed_generations = self.providers.catalog_generations();
             if catalog_generations == observed_generations {
-                return Ok(snapshot.with_provider_catalog_generations(observed_generations));
+                return Ok(
+                    snapshot.with_provider_catalog_generations(if previous.is_some() {
+                        BTreeMap::new()
+                    } else {
+                        observed_generations
+                    }),
+                );
             }
         }
         Err(RuntimeSnapshotCompileError::CatalogChanged)
@@ -284,6 +307,7 @@ impl RuntimeSnapshotCompiler {
 async fn compile_runtime_snapshot(
     facts: SnapshotFacts,
     providers: &dyn ProviderCatalogPort,
+    previous: Option<&RuntimeSnapshot>,
 ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
     let provider_kinds = providers
         .catalog_generations()
@@ -293,13 +317,44 @@ async fn compile_runtime_snapshot(
 
     // 目录查询失败表示未知；查询成功后，即使为空，也必须与“已知缺少模型”区分。
     let mut provider_models = Vec::new();
+    let mut catalog_accounts: ModelCatalogAccounts = BTreeMap::new();
     let mut known_provider_catalogs = BTreeSet::new();
     for provider in &provider_kinds {
+        if let Some(previous) = previous {
+            if let Some(accounts) = previous.model_catalog_accounts.get(provider) {
+                catalog_accounts.insert(provider.clone(), accounts.clone());
+            }
+            if previous.known_provider_catalogs.contains(provider) {
+                known_provider_catalogs.insert(provider.clone());
+            }
+            if let Some(models) = previous.provider_models.get(provider) {
+                provider_models.extend(models.iter().map(|(model, capabilities)| {
+                    let compiled =
+                        ProviderModel::new(provider.clone(), model.clone(), capabilities.clone());
+                    match previous
+                        .provider_model_presentations
+                        .get(provider)
+                        .and_then(|presentations| presentations.get(model))
+                    {
+                        Some(presentation) => compiled.with_presentation(presentation.clone()),
+                        None => compiled,
+                    }
+                }));
+            }
+            continue;
+        }
+
         let Ok(models) = providers.query_model_capabilities(provider).await else {
             continue;
         };
         known_provider_catalogs.insert(provider.clone());
         provider_models.extend(models.into_iter().map(|model| {
+            if let Some(accounts) = model.catalog_accounts() {
+                catalog_accounts
+                    .entry(provider.clone())
+                    .or_default()
+                    .insert(model.upstream_model().as_str().to_owned(), accounts.clone());
+            }
             let compiled = ProviderModel::new(
                 provider.clone(),
                 model.upstream_model().clone(),
@@ -449,6 +504,7 @@ async fn compile_runtime_snapshot(
             .with_model_mappings(model_mappings)
             .with_account_directory(account_directory)
             .with_known_provider_catalogs(known_provider_catalogs)
+            .with_model_catalog_accounts(catalog_accounts)
             .with_min_codex_client_versions(min_client_versions)
     })
 }
@@ -466,6 +522,7 @@ pub struct RuntimeSnapshot {
     model_mappings: Arc<BTreeMap<String, String>>,
     provider_catalog_generations: Arc<BTreeMap<ProviderKind, ProviderCatalogGeneration>>,
     known_provider_catalogs: Arc<BTreeSet<ProviderKind>>,
+    model_catalog_accounts: Arc<ModelCatalogAccounts>,
     account_directory: Arc<RuntimeAccountDirectory>,
     client_policies: Arc<BTreeMap<ClientApiKeyId, ClientPolicy>>,
     min_codex_client_versions: CodexClientMinVersions,
@@ -555,6 +612,7 @@ impl RuntimeSnapshot {
             model_mappings: Arc::new(BTreeMap::new()),
             provider_catalog_generations: Arc::new(BTreeMap::new()),
             known_provider_catalogs: Arc::new(known_provider_catalogs),
+            model_catalog_accounts: Arc::default(),
             account_directory: Arc::new(RuntimeAccountDirectory::default()),
             client_policies: Arc::new(client_policy_map),
             min_codex_client_versions: CodexClientMinVersions::default(),
@@ -582,6 +640,11 @@ impl RuntimeSnapshot {
     #[must_use]
     fn with_known_provider_catalogs(mut self, providers: BTreeSet<ProviderKind>) -> Self {
         self.known_provider_catalogs = Arc::new(providers);
+        self
+    }
+
+    fn with_model_catalog_accounts(mut self, accounts: ModelCatalogAccounts) -> Self {
+        self.model_catalog_accounts = Arc::new(accounts);
         self
     }
 
@@ -684,9 +747,7 @@ impl RuntimeSnapshot {
             .flat_map(|provider| {
                 self.public_models_for_provider(provider)
                     .into_iter()
-                    .filter(|model| {
-                        scope.allows_provider_model(provider, &self.mapped_model(model.as_str()))
-                    })
+                    .filter(|model| self.catalog_model_allowed_for_scope(provider, model, scope))
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -702,9 +763,7 @@ impl RuntimeSnapshot {
         let mut profiles = BTreeMap::new();
         for provider in scope.provider_kinds() {
             for profile in self.public_model_profiles_for_provider(provider) {
-                if !scope
-                    .allows_provider_model(provider, &self.mapped_model(profile.model().as_str()))
-                {
+                if !self.catalog_model_allowed_for_scope(provider, profile.model(), scope) {
                     continue;
                 }
                 profiles
@@ -743,8 +802,31 @@ impl RuntimeSnapshot {
     ) -> bool {
         scope.provider_kinds().iter().any(|provider| {
             self.contains_public_model_for_provider(public_model, provider)
-                && scope.allows_provider_model(provider, &self.mapped_model(public_model.as_str()))
+                && self.catalog_model_allowed_for_scope(provider, public_model, scope)
         })
+    }
+
+    pub(crate) fn catalog_model_allowed_for_scope(
+        &self,
+        provider: &ProviderKind,
+        public_model: &PublicModelId,
+        scope: &FrozenAccountScope,
+    ) -> bool {
+        let upstream_model = self.mapped_model(public_model.as_str());
+        match self
+            .model_catalog_accounts
+            .get(provider)
+            .and_then(|models| models.get(&upstream_model))
+        {
+            Some(accounts) => accounts.iter().any(|account| {
+                scope
+                    .directory()
+                    .account(account)
+                    .is_some_and(|entry| entry.provider_kind() == provider)
+                    && scope.allows_model(account, &upstream_model)
+            }),
+            None => scope.allows_provider_model(provider, &upstream_model),
+        }
     }
 
     #[must_use]
@@ -834,7 +916,7 @@ impl RuntimeSnapshot {
         }
 
         if candidates.is_empty() {
-            // 模型存在性必须包含被熔断的 Provider；目录未知时不能断言模型不存在。
+            // 模型存在性必须包含被请求路由限制排除的 Provider；目录未知时不能断言模型不存在。
             let mut scoped_providers = providers.intersection(&self.providers).peekable();
             if scoped_providers.peek().is_some()
                 && scoped_providers.all(|provider| {

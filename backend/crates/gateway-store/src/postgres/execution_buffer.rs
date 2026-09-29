@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use gateway_core::engine::{
-    AttemptRecord, ExecutionStore, IntermediateFailure, ModelRequestFinalization, ModelRequestId,
-    NewModelRequest, ProbeFailure, RecoveryReport,
+    AttemptRecord, EntryRejection, ExecutionStore, IntermediateFailure, ModelRequestFinalization,
+    ModelRequestId, NewModelRequest, ProbeFailure, RecoveryReport,
 };
 use gateway_core::error::{ProviderError, StoreError};
 use gateway_core::lifecycle::CancellationToken;
@@ -298,6 +298,13 @@ where
         Ok(())
     }
 
+    async fn record_entry_rejection(&self, rejection: EntryRejection) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::EntryRejection(Box::new(
+            rejection,
+        )));
+        Ok(())
+    }
+
     async fn record_probe_failure(&self, failure: ProbeFailure) -> Result<(), StoreError> {
         self.enqueue(ExecutionObservationWrite::ProbeFailure(Box::new(failure)));
         Ok(())
@@ -506,6 +513,7 @@ enum ExecutionObservationWrite {
     },
     IntermediateFailure(Box<IntermediateFailure>),
     ProbeFailure(Box<ProbeFailure>),
+    EntryRejection(Box<EntryRejection>),
     Finalize(Box<ModelRequestFinalization>),
 }
 
@@ -520,6 +528,7 @@ impl ExecutionObservationWrite {
             Self::RecordClientStatus { .. } => "record_client_status",
             Self::IntermediateFailure(_) => "record_intermediate_failure",
             Self::ProbeFailure(_) => "record_probe_failure",
+            Self::EntryRejection(_) => "record_entry_rejection",
             Self::Finalize(_) => "finalize_model_request",
         }
     }
@@ -533,7 +542,7 @@ impl ExecutionObservationWrite {
             | Self::MarkDownstreamCommitted { request_id, .. }
             | Self::RecordClientStatus { request_id, .. } => Some(request_id.as_str()),
             Self::IntermediateFailure(failure) => Some(failure.request_id.as_str()),
-            Self::ProbeFailure(_) => None,
+            Self::ProbeFailure(_) | Self::EntryRejection(_) => None,
             Self::Finalize(finalization) => Some(finalization.request_id.as_str()),
         }
     }
@@ -559,6 +568,14 @@ impl ExecutionObservationWrite {
                 failure.upstream_request_id.as_deref(),
             ])
             .saturating_add(provider_error_bytes(&failure.error)),
+            Self::EntryRejection(rejection) => text_bytes([
+                Some(rejection.request_id.as_str()),
+                Some(rejection.client_key_id.as_str()),
+                Some(rejection.error.client_message()),
+                rejection.error.client_error_code(),
+                rejection.error.client_error_type(),
+            ])
+            .saturating_add(size_of::<EntryRejection>()),
             Self::ProbeFailure(failure) => text_bytes([
                 Some(failure.provider_kind.as_str()),
                 Some(failure.account_id.as_str()),
@@ -628,6 +645,7 @@ impl ExecutionObservationWrite {
             }
             Self::IntermediateFailure(failure) => store.record_intermediate_failure(*failure).await,
             Self::ProbeFailure(failure) => store.record_probe_failure(*failure).await,
+            Self::EntryRejection(rejection) => store.record_entry_rejection(*rejection).await,
             Self::Finalize(finalization) => store.finalize_model_request(*finalization).await,
         }
     }

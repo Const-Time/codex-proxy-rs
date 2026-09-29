@@ -256,22 +256,22 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         let result = sqlx::query(
             "update provider_accounts
              set credential_state = case
-                     when enabled and upstream_user_id is not null then $3
+                     when upstream_user_id is not null then $3
                      else credential_state
                  end,
                  credential_observed_at = case
-                     when enabled and upstream_user_id is not null then $4
+                     when upstream_user_id is not null then $4
                      else credential_observed_at
                  end,
                  last_error_reason = case
-                     when enabled and upstream_user_id is not null then $5
+                     when upstream_user_id is not null then $5
                      else last_error_reason
                  end,
                  last_error_message = case
-                     when enabled and upstream_user_id is not null then $6
+                     when upstream_user_id is not null then $6
                      else last_error_message
                  end,
-                 updated_at = case when enabled then greatest(now(), updated_at, $4) else updated_at end
+                 updated_at = greatest(now(), updated_at, $4)
              where id = $1 and credential_revision = $2
                and (credential_observed_at is null or credential_observed_at <= $4)",
         )
@@ -864,16 +864,12 @@ pub(crate) async fn rotate_provider_account_in_transaction(
              upstream_user_id = case when $11::boolean then $12::text else upstream_user_id end,
              upstream_account_id = case when $11::boolean then $13::text else upstream_account_id end,
              credential_state = case
-                 when not enabled then credential_state
                  when coalesce($12::text, upstream_user_id) is not null then 'ready'
                  else 'unknown'
              end,
-             credential_observed_at = case
-                 when not enabled then credential_observed_at
-                 else now()
-             end,
-             last_error_reason = case when enabled then null else last_error_reason end,
-             last_error_message = case when enabled then null else last_error_message end,
+             credential_observed_at = now(),
+             last_error_reason = null,
+             last_error_message = null,
              updated_at = now()
          where id = $1 and provider_kind = $2
            and credential_revision = $3

@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod client;
 mod client_json;
 mod client_sse;
+pub(crate) mod connection;
 pub mod diagnostics;
 pub mod endpoints;
 pub mod fingerprint;

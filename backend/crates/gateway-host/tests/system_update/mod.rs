@@ -1770,3 +1770,57 @@ fn release_response(version: &str, assets: Vec<serde_json::Value>) -> ResponseTe
     });
     ResponseTemplate::new(200).set_body_json(serde_json::json!([release]))
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn restart_uses_install_path_after_running_binary_is_renamed() {
+    const CHILD: &str = "CPR_TEST_RENAMED_EXECUTABLE";
+    let Ok(root) = std::env::var(CHILD) else {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed-gateway-test");
+        std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+        let output = std::process::Command::new(installed)
+            .args([
+                "--exact",
+                "system_update::restart_uses_install_path_after_running_binary_is_renamed",
+            ])
+            .env(CHILD, root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let installed = root.join("installed-gateway-test");
+    assert_eq!(
+        std::env::current_exe().unwrap(),
+        installed,
+        "must not restart the backup executable"
+    );
+    let fixture = Fixture::new();
+    let mut config = fixture.config("http://127.0.0.1:1/repos");
+    config.executable_path = None;
+    config.self_restart_enabled = true;
+    let service = ProcessSystemOperations::new(CancellationToken::new(), config);
+    let permissions = std::fs::metadata(&installed).unwrap().permissions();
+    std::fs::rename(&installed, root.join("backup-test")).unwrap();
+    std::fs::write(
+        &installed,
+        "#!/bin/sh\n: > \"$CPR_TEST_RENAMED_EXECUTABLE/replacement-ran\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&installed, permissions).unwrap();
+    service.restart().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.join("replacement-ran").is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("restart must execute replacement at the original installation path");
+}

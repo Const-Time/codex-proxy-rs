@@ -1969,3 +1969,114 @@ impl OAuthPendingFlowPort for TestOAuthPending {
         })
     }
 }
+
+#[tokio::test]
+async fn quota_refresh_exposes_safe_failure_reasons_and_recovers_without_account_errors() {
+    use gateway_admin::ports::provider::ProviderAdminErrorKind as Kind;
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_quota_error";
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: account_id.to_owned(),
+            name: "quota error".to_owned(),
+            secret: secret("quota-error-test-token"),
+            verified_account: profile("chatgpt-quota-error"),
+            next_refresh_at: None,
+            enabled: true,
+        })
+        .await;
+    let before = store.account(account_id).expect("account");
+    let server = MockServer::start().await;
+    let mut config = valid_config();
+    config.config.api.base_url = server.uri();
+    let bundle = provider_openai::initialize(
+        config.config,
+        provider_ports_with(store.clone(), Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .expect("OpenAI bundle");
+    for (status, code, expected_kind, expected_message) in [
+        (
+            401,
+            "token_revoked",
+            Kind::BadGateway,
+            "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权",
+        ),
+        (
+            401,
+            "unknown_code",
+            Kind::BadGateway,
+            "OpenAI 拒绝了额度查询（HTTP 401），请检查账号授权状态；若令牌已在服务端失效，请重新授权",
+        ),
+        (
+            403,
+            "forbidden",
+            Kind::BadGateway,
+            "OpenAI 拒绝了额度查询（HTTP 403），请检查账号授权状态",
+        ),
+        (
+            429,
+            "rate_limited",
+            Kind::BadGateway,
+            "OpenAI 额度查询被限流，请稍后重试",
+        ),
+        (
+            503,
+            "unavailable",
+            Kind::BadGateway,
+            "OpenAI 额度查询服务异常，请稍后重试",
+        ),
+        (
+            400,
+            "invalid_request",
+            Kind::Unavailable,
+            "OpenAI 额度查询失败，请检查出站连接与上游服务",
+        ),
+    ] {
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                "error": {"code": code, "message": "raw-secret-marker"}
+            })))
+            .mount(&server)
+            .await;
+        let error = bundle
+            .admin_provider()
+            .quota(ProviderQuotaRequest {
+                account_id: before.id().clone(),
+                refresh: true,
+                rolling_usage: None,
+            })
+            .await
+            .expect_err("quota rejection");
+        assert_eq!(error.kind(), expected_kind);
+        assert_eq!(error.public_message(), Some(expected_message));
+        assert!(!format!("{error:?} {error}").contains("raw-secret-marker"));
+        assert_eq!(
+            store.account(account_id).expect("account after rejection"),
+            before
+        );
+    }
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rate_limit": {"allowed": true, "primary_window": {"used_percent": 8}}
+        })))
+        .mount(&server)
+        .await;
+    let quota = bundle
+        .admin_provider()
+        .quota(ProviderQuotaRequest {
+            account_id: before.id().clone(),
+            refresh: true,
+            rolling_usage: None,
+        })
+        .await
+        .expect("quota recovered");
+    assert_eq!(quota.representative_used_percent(), Some(8.0));
+    let current = store.account(account_id).expect("account after recovery");
+    assert_eq!(current.credential_state(), CredentialState::Ready);
+    assert!(current.last_error_message().is_none());
+}

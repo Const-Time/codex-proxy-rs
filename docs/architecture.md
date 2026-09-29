@@ -271,7 +271,9 @@ Client Key 与账号分组形成授权范围：
 `account::AccountModelAccess` 拥有管理员模型政策的校验与精确匹配语义，存入账号行的 `model_access_json`，
 由 `RuntimeAccountDirectory` / `FrozenAccountScope` 随配置快照冻结。Provider 在额度、亲和与租约之前
 按映射后的上游模型筛选账号；重试和 fallback 使用同一冻结政策。上游目录和凭据不承载或改写该政策。
-客户端目录的政策过滤判断范围内整个候选池；本次不引入上游并发队列或原生目录重构。
+客户端目录还按 Provider 记录的模型来源账号过滤：来源必须在当前冻结范围内且允许该模型；
+模型别名按映射后的上游 ID 判断。来源用于目录可见性，不作为额外的推理能力白名单。
+暂时并发或间隔容量不足与无资格账号分别分类；目前没有账号等待队列。
 
 账号编辑在一个事务中更新调度事实，批量更新只应用显式提供的字段。导入与首次 OAuth 可携带统一账号设置，由 Admin 传递给 Store，
 与凭据在同一事务中提交；Provider 仍独占凭据解析。未附带设置的导入、重新授权和后台刷新保留已有分组、
@@ -337,7 +339,9 @@ HTTP validation
 
 额度、cooldown、目录 generation、请求统计和自动 credential refresh 属于运行时观测，不推进全局
 revision；credential 轮换只推进账号自己的 `credential_revision`。Redis 通知用于缩短收敛延迟，
-PostgreSQL 周期对账才是正确性基础。
+PostgreSQL 周期对账才是正确性基础。已提交配置发布可打断慢后台目录读取，复用上次目录数据，
+同时从最新配置重新编译用户、分组与模型权限。后续后台对账更新目录；旧后台任务不能覆盖新权限。
+配置读取失败仍暂停新请求，已开始的请求保留自己的冻结快照。
 
 ## 8. 状态所有权
 
@@ -345,7 +349,7 @@ PostgreSQL 周期对账才是正确性基础。
 | --- | --- | --- |
 | 账号、credential、分组、Client Key、设置、审计、请求与备份记录 | PostgreSQL | 业务持久化事实 |
 | Client Key 金额窗口与费用事件 | PostgreSQL | 准入与幂等结算的权威账本，独立于请求观测与日志保留策略 |
-| admission、lease、cooldown、circuit、会话亲和、continuation、OAuth pending、目录 cache | Redis | 可重建、可过期的协调状态 |
+| admission、lease、cooldown、会话亲和、continuation、OAuth pending、目录 cache | Redis | 可重建、可过期的协调状态 |
 | 日志、OAuth 恢复记录、在线更新状态、备份暂存 | `.runtime/` | 部署节点本地运行文件 |
 | 重置卡库存与消费结果 | OpenAI upstream | 后端不建立本地卡库存；前端只保留当前浏览器会话的最近查询 |
 | Provider 公开模型与请求画像 | Provider/runtime cache | 由官方目录或发布源刷新，不写成第二份业务配置 |
@@ -479,3 +483,17 @@ client_api_keys.owner_user_id 不可由 API 修改。创建/变更在事务内�
 account_groups 配置日/周 USD 限额；user_group_budget_windows 按 (user_id, account_group_id) 维护窗口，user_group_charge_events 按 request_id 幂等结算。删除/改绑 Key 不改变计费归属和已用金额。使用记录查询在 SQL 层按可信用户 ID 限定，个人响应采用字段允许清单，避免新增诊断字段自动暴露。
 
 密钥仍以明文持久化，以支持本人再次读取；“管理员不能查看”由应用权限保证，不隔离数据库、备份或部署主机的操作者。后台备份仍属于部署管理权限。
+
+
+### 连接恢复与响应控制
+
+Core 为一次请求共享发送前建连预算，只有可靠 NotSent 失败才能申请同账号连接重试。
+已发送或结果不明时不能使用此路径重放。Provider 全局熔断已移除；OpenAI WS origin 级连接保护仍由 transport 拥有。
+HTTP/WS 共用有界建连准入，排队取消释放名额，本地建连容量拒绝不投影为账号或上游故障。
+
+OpenAI 在允许 HTTP 的请求上发送前估算 WS create 大小，过大时切换传输；增量续接需要完整历史时返回客户端重放提示。
+预提交缓冲受时间与字节双重边界约束，记录提交原因，不能无期限积压非终态输出。
+
+每次执行持有自己的 ResponseControl。Provider 在确认 response ID 后注册目标，并在终态/退出时释放；
+API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发送中断。后续 response.create 仍有界串行排队。
+控制帧处理期间保留同一个执行读取 future，不取消正在进行的结算与正文处理。

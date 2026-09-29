@@ -4,7 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 use gateway_core::engine::budget::{ClientBudgetCharge, ClientBudgetError, ClientBudgetPort};
@@ -113,7 +113,6 @@ fn service(admissions: Arc<Admissions>, budget: Arc<Budget>) -> DefaultExecution
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         admissions,
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     )
@@ -170,7 +169,6 @@ fn reused_client_uses_updated_limits_for_each_execution() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         admissions.clone(),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -283,7 +281,6 @@ fn user_concurrency_and_rpm_are_shared_across_distinct_keys_and_release_both_sco
             Arc::new(TrackingExecutionStore::default()),
             ProviderRegistry::default(),
             admissions.clone(),
-            Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
         );
@@ -342,7 +339,6 @@ fn reused_client_cannot_start_after_key_disable_or_snapshot_suspension() {
             Arc::new(TrackingExecutionStore::default()),
             ProviderRegistry::default(),
             admissions.clone(),
-            Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
         );
@@ -417,7 +413,6 @@ fn early_failure_service(
         store,
         ProviderRegistry::new([Arc::new(LocalFailingProvider) as Arc<dyn Provider>]).unwrap(),
         admissions,
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     )
@@ -696,7 +691,6 @@ fn charged_service(
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::new([Arc::new(ChargedProvider { fail }) as Arc<dyn Provider>]).unwrap(),
         admissions,
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -965,8 +959,7 @@ use gateway_core::engine::continuation::{
 };
 use gateway_core::engine::execution::{
     ClientApiKeyUsageSink, ClientTransport, DefaultExecutionService, ExecutionRequestMetadata,
-    ExecutionService, ExecutionSession, ProviderCircuitDecision, ProviderCircuitError,
-    ProviderCircuitPort, StartExecution, StartProviderExecution, provider_failure_affects_circuit,
+    ExecutionService, ExecutionSession, StartExecution, StartProviderExecution,
 };
 use gateway_core::engine::probe::{AccountProbe, AccountProbeErrorSource, AccountProbeRequest};
 use gateway_core::engine::provider::{
@@ -999,26 +992,6 @@ use gateway_core::upstream::{UpstreamSendState, UpstreamTransport};
 use serde_json::json;
 
 #[test]
-fn only_provider_attributable_failures_should_affect_circuit() {
-    assert!(provider_failure_affects_circuit(ProviderErrorKind::Timeout));
-    assert!(provider_failure_affects_circuit(
-        ProviderErrorKind::Transport
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::RateLimited
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::InvalidRequest
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::ContinuationRecoveryRequired
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::UpstreamCapacityUnavailable
-    ));
-}
-
-#[test]
 fn account_probe_should_not_write_to_the_persistent_execution_store() {
     let store = Arc::new(TrackingExecutionStore::default());
     let service = DefaultExecutionService::new(
@@ -1026,7 +999,6 @@ fn account_probe_should_not_write_to_the_persistent_execution_store() {
         store.clone(),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1055,7 +1027,6 @@ fn probe_failures_should_be_observable_without_a_model_request_row() {
         store.clone(),
         providers,
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1098,7 +1069,6 @@ fn provider_local_probe_failure_should_remain_distinct_from_upstream() {
         store,
         providers,
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1129,7 +1099,6 @@ fn probe_observation_store_failure_preserves_the_provider_error() {
         store.clone(),
         providers,
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1269,7 +1238,6 @@ fn successful_authentication_should_record_client_key_usage() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         usage.clone(),
     );
@@ -1297,7 +1265,6 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
         }) as Arc<dyn Provider>])
         .expect("provider registry"),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1343,83 +1310,13 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
 }
 
 #[test]
-fn circuit_store_failure_should_fail_open_during_request_start() {
-    let service = DefaultExecutionService::new(
-        RuntimeSnapshotHandle::new(start_snapshot()),
-        Arc::new(TrackingExecutionStore::default()),
-        ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
-        Arc::new(FailingDecisionCircuits),
-        Arc::new(UnusedContinuation),
-        Arc::new(RecordingClientApiKeyUsage::default()),
-    );
-    let client = service
-        .authenticate("sk_start_test")
-        .expect("authenticated client");
-
-    let started = block_on(service.start(StartExecution {
-        client,
-        public_model: PublicModelId::new("gpt-start").expect("public model"),
-        operation: start_operation(),
-        metadata: ExecutionRequestMetadata {
-            protocol: "openai".to_owned(),
-            endpoint: "/v1/responses".to_owned(),
-            transport: ClientTransport::HttpJson,
-            stream: false,
-            client_ip: None,
-            user_agent: None,
-            previous_response_id: None,
-        },
-    }))
-    .expect("recoverable circuit state must not reject the request");
-
-    assert!(!started.session.is_finalized());
-}
-
-#[test]
-fn slow_circuit_store_should_time_out_and_fail_open_during_request_start() {
-    let service = DefaultExecutionService::new(
-        RuntimeSnapshotHandle::new(start_snapshot()),
-        Arc::new(TrackingExecutionStore::default()),
-        ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
-        Arc::new(PendingDecisionCircuits),
-        Arc::new(UnusedContinuation),
-        Arc::new(RecordingClientApiKeyUsage::default()),
-    );
-    let client = service
-        .authenticate("sk_start_test")
-        .expect("authenticated client");
-    let started_at = Instant::now();
-
-    let started = block_on(service.start(StartExecution {
-        client,
-        public_model: PublicModelId::new("gpt-start").expect("public model"),
-        operation: start_operation(),
-        metadata: ExecutionRequestMetadata {
-            protocol: "openai".to_owned(),
-            endpoint: "/v1/responses".to_owned(),
-            transport: ClientTransport::HttpJson,
-            stream: false,
-            client_ip: None,
-            user_agent: None,
-            previous_response_id: None,
-        },
-    }))
-    .expect("slow recoverable circuit state must not reject the request");
-
-    assert!(started_at.elapsed() < Duration::from_secs(2));
-    assert!(!started.session.is_finalized());
-}
-
-#[test]
 fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
+    let store = Arc::new(TrackingExecutionStore::default());
     let service = DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(start_snapshot()),
-        Arc::new(TrackingExecutionStore::default()),
+        store.clone(),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1453,6 +1350,10 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
             "the requested model was not found in the provider catalogs available to this API key; check the model name",
         )
     );
+    let rejections = store.entry_rejections.lock().unwrap();
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0].error.kind(), GatewayErrorKind::ModelNotFound);
+    assert!(store.requests.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1462,7 +1363,6 @@ fn continuation_owned_by_another_client_api_key_should_fail_closed() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(RejectedContinuation::OwnershipMismatch),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1490,7 +1390,6 @@ fn invalid_continuation_record_should_not_be_forwarded_as_an_external_handle() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(RejectedContinuation::InvalidData),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1547,6 +1446,7 @@ impl ClientApiKeyUsageSink for RecordingClientApiKeyUsage {
 struct TrackingExecutionStore {
     touched: AtomicBool,
     probe_failures: Mutex<Vec<String>>,
+    entry_rejections: Mutex<Vec<gateway_core::engine::EntryRejection>>,
     requests: Mutex<Vec<NewModelRequest>>,
     attempts: Mutex<Vec<AttemptRecord>>,
     finalizations: Mutex<Vec<ModelRequestFinalization>>,
@@ -1609,6 +1509,14 @@ impl TrackingExecutionStore {
 
 #[async_trait]
 impl ExecutionStore for TrackingExecutionStore {
+    async fn record_entry_rejection(
+        &self,
+        rejection: gateway_core::engine::EntryRejection,
+    ) -> Result<(), StoreError> {
+        self.entry_rejections.lock().unwrap().push(rejection);
+        Ok(())
+    }
+
     async fn create_model_request(&self, request: NewModelRequest) -> Result<(), StoreError> {
         self.touch();
         self.creates.fetch_add(1, Ordering::SeqCst);
@@ -1715,81 +1623,6 @@ impl ClientAdmissionPort for UnusedAdmissions {
         _: ClientAdmissionRecovery,
     ) -> BoxFuture<'_, Result<ClientAdmissionRestoreResult, ClientAdmissionError>> {
         Box::pin(async { Ok(ClientAdmissionRestoreResult::default()) })
-    }
-}
-
-struct UnusedCircuits;
-
-impl ProviderCircuitPort for UnusedCircuits {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(async { Ok(ProviderCircuitDecision::Allow) })
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-struct FailingDecisionCircuits;
-
-impl ProviderCircuitPort for FailingDecisionCircuits {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(async { Err(ProviderCircuitError) })
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-struct PendingDecisionCircuits;
-
-impl ProviderCircuitPort for PendingDecisionCircuits {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(futures::future::pending())
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
     }
 }
 

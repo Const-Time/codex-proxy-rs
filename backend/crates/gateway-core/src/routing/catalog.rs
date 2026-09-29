@@ -4,7 +4,9 @@ use super::{ModelCapabilities, ModelPresentation};
 use super::{PublicModelId, PublicModelProfile, UpstreamModelId};
 use crate::operation::RawJsonPayload;
 use futures::future::BoxFuture;
-use std::collections::BTreeMap;
+
+use crate::account::ProviderAccountId;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub trait ProviderCatalogPort: Send + Sync {
     fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration>;
@@ -39,6 +41,7 @@ pub struct ProviderModelCapabilities {
     upstream_model: UpstreamModelId,
     capabilities: ModelCapabilities,
     presentation: Option<ModelPresentation>,
+    catalog_accounts: Option<BTreeSet<ProviderAccountId>>,
 }
 
 /// Provider 实时目录成功发布后的进程内单调代次。
@@ -66,6 +69,7 @@ impl ProviderModelCapabilities {
             upstream_model,
             capabilities,
             presentation: None,
+            catalog_accounts: None,
         }
     }
 
@@ -73,6 +77,19 @@ impl ProviderModelCapabilities {
     pub fn with_presentation(mut self, presentation: ModelPresentation) -> Self {
         self.presentation = Some(presentation);
         self
+    }
+
+    /// 声明发现此模型的账号；仅用于目录可见性，不作为推理能力白名单。
+    #[must_use]
+    pub fn with_catalog_accounts(mut self, accounts: BTreeSet<ProviderAccountId>) -> Self {
+        self.catalog_accounts = Some(accounts);
+        self
+    }
+
+    /// 未提供账号来源的 Provider 沿用 Provider 级目录；空集合表示无可展示来源。
+    #[must_use]
+    pub const fn catalog_accounts(&self) -> Option<&BTreeSet<ProviderAccountId>> {
+        self.catalog_accounts.as_ref()
     }
 
     #[must_use]

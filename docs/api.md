@@ -184,7 +184,7 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足错误时，代理在允许安全重放且
 尚未交付输出的前提下，先做最多 3 次同账号指数退避，再通过现有调度换号。默认间隔从 500ms 开始，
 上游 `Retry-After` 参与退避计算，单次等待不超过 8 秒；重试同时受请求总尝试次数和截止时间约束。
-容量不足不扣 Smart 账号健康分，不触发 Provider 全局熔断，也不作为账号额度耗尽写入冷却状态。
+容量不足不扣 Smart 账号健康分，也不作为账号额度耗尽写入冷却状态。网关不再维护 Provider 全局熔断。
 最终交付的上游错误仍按上述透明边界保留原始状态码、错误码和正文。
 明确额度耗尽继续走现有账号隔离与安全换号流程，
 包括 WebSocket 握手返回的 429；不会因其长 `Retry-After` 而转入同账号传输恢复等待。
@@ -927,3 +927,18 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 账号额度 `estimatedQuota` 使用本周期已知费用加采样区间已知费用外推剩余额度，不修改请求费用或用户扣费账本。历史缺价不再使所有费用估算为空；部分结果由 `costIncomplete` / `billedCostIncomplete` 分别标记，前端显示“部分估算”。这不是上游承诺额度或未来费用的保证下限。
 
 `missingCostCount` / `requestCount` 仍表示采样区间覆盖；`cycleMissingCostCount` / `cycleMissingBilledCount` 表示整个周期的缺失笔数，防止当前样本完整而隐藏周期早期缺失。`usedUsd` / `billedUsedUsd` 是本周期已知累计额；新增 `sampleUsd` / `sampleBilledUsd` 才是外推分子的采样费用。没有任何已知费用的采样仍返回空费用估算，真实已知零元与未知费用严格区分。没有可靠历史价格、用量或倍率依据的记录不会套用现价、按零元补账或追扣。
+
+
+## 传输恢复与活动响应控制
+
+- Responses WS 支持 `{"type":"response.interrupt","response_id":"当前响应 ID","mode":"discard_partial_items"}`。
+  只允许中断当前执行的活动上游 WS 响应；ID 不匹配、模式无效或当前没有可中断响应时返回 400。
+  中断不创建新执行、不重放请求；后续 response.create 继续串行，断连仍走正常取消与结算。
+- OpenAI response.create 达到 15 MiB 时，允许降级的请求在发送前转 HTTP；依赖原 WS 的增量续接在无法安全继续时
+  要求客户端携带完整历史重试。上游 1009 按请求过大处理，保留关闭诊断。
+- 预提交缓冲以 128 KiB 或 2.5 秒为交付阈值；提前终态按原合同处理，达到边界后正常交付，不无限等待。
+- 下游提供的账号路由覆盖、FedRAMP、认证、组织/项目与安装身份字段不能覆盖代理选择的账号身份。
+  parent_response_id 只按当前账号 owner 保留，不递归删除业务工具结果中的同名扩展字段。
+- 模型列表、详情及模型画像只显示当前 Key 范围内来源账号允许的模型；别名使用映射后的模型 ID 判断。
+- 停用 OAuth 账号仍可后台轮换凭据，刷新不会重新启用账号。额度查询失败返回安全管理错误，不能据此改写 credential/quota 状态。
+- 路由或准入拒绝记录为入口观测，不伪造 model_requests 或上游 attempt；观测失败不改变客户端原本应收到的错误。

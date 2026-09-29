@@ -78,13 +78,17 @@ use crate::transport::protocol::responses::{
     CodexResponsesRequest, PREVIOUS_RESPONSE_NOT_FOUND_CODE, PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
     PreviousResponseScope, ResponseEventSignals, TransportRequirement, transport_requirement,
 };
-use crate::transport::protocol::websocket::WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE;
+use crate::transport::protocol::websocket::{
+    WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE, websocket_response_create_payload_len,
+};
 use crate::transport::request::{
     CodexRequestEncodeError, RequestAccountScope, encode_generate_request, scope_request_to_account,
 };
 use crate::transport::session::CodexSessionIdentity;
 use crate::transport::usage::normalize_service_tier;
-use crate::transport::websocket::{CodexWebSocketExchangeError, PreviousResponseUnavailableReason};
+use crate::transport::websocket::{
+    CodexWebSocketExchangeError, PreviousResponseUnavailableReason, WEBSOCKET_CLOSE_MESSAGE_TOO_BIG,
+};
 use crate::transport::{
     CODEX_ALPHA_SEARCH_PATH, CODEX_IMAGE_EDITS_PATH, CODEX_IMAGE_GENERATIONS_PATH,
     CODEX_RESPONSES_PATH, CodexAccountSelectionTelemetry, CodexBackendClient,
@@ -110,13 +114,14 @@ const PROVIDER_NAME: &str = "openai";
 const HTTP_SSE_TRANSPORT: &str = "http_sse";
 const HTTP_JSON_TRANSPORT: &str = "http_json";
 const WEBSOCKET_TRANSPORT: &str = "websocket";
+const WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES: usize = 15 * 1024 * 1024;
 const MAX_COOKIE_HEADER_BYTES: usize = 16 * 1024;
-/// 提交边界前最多保留 64 KiB 原始上游 chunk；达到阈值后结束无感换号窗口，
+/// 提交边界前最多保留 128 KiB 原始上游 chunk；达到阈值后结束无感换号窗口，
 /// 但不会把上游数据改写成协议失败。
-const MAX_STREAM_PREFETCH_BYTES: usize = 64 * 1024;
+const MAX_STREAM_PREFETCH_BYTES: usize = 128 * 1024;
 /// 短暂保留 response.created 等结构事件，让随后到达的明确拒绝可以无感换号；
 /// 到期即放行，避免模型长时间思考时让客户端一直收不到首事件。
-const STREAM_REPLAY_GRACE: Duration = Duration::from_millis(1_200);
+const STREAM_REPLAY_GRACE: Duration = Duration::from_millis(2_500);
 // 额度拒绝后先给上游额度结算留出时间，再以受限时长同步 usage 快照。
 const QUOTA_FAILURE_REFRESH_DELAY: Duration = Duration::from_secs(2);
 const QUOTA_FAILURE_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -294,10 +299,17 @@ impl Provider for CodexProvider {
         let snapshot = self.catalog.synchronize().await.map_err(|_| {
             provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
         })?;
+        let mut accounts = snapshot.model_catalog_accounts();
         Ok(snapshot
             .models()
             .iter()
-            .map(compile_model_capabilities)
+            .map(|model| {
+                compile_model_capabilities(model).with_catalog_accounts(
+                    accounts
+                        .remove(model.request_model().as_str())
+                        .unwrap_or_default(),
+                )
+            })
             .collect())
     }
 
@@ -394,20 +406,32 @@ impl Provider for CodexProvider {
             derive_codex_cyber_policy_session_key(&upstream_request, context.client_api_key_ref());
 
         let selection_started_at = Instant::now();
-        let lease = self
-            .selector
-            .select_with_cyber_policy(
-                &SelectCodexCredential {
-                    upstream_model: upstream_model.as_str(),
-                    request_url: &self.responses_url,
-                    attempt: &context,
-                    session_affinity_key: session_affinity.as_ref().map(|affinity| affinity.key()),
-                },
-                cyber_policy_session_key.as_ref(),
-                session_affinity.as_ref(),
-            )
-            .await
-            .map_err(map_selection_error)?;
+        let selection = async {
+            self.selector
+                .select_with_cyber_policy(
+                    &SelectCodexCredential {
+                        upstream_model: upstream_model.as_str(),
+                        request_url: &self.responses_url,
+                        attempt: &context,
+                        session_affinity_key: session_affinity
+                            .as_ref()
+                            .map(|affinity| affinity.key()),
+                    },
+                    cyber_policy_session_key.as_ref(),
+                    session_affinity.as_ref(),
+                )
+                .await
+                .map_err(map_selection_error)
+        };
+        let lease = if let Some(remaining) = context.connection_budget().startup_remaining() {
+            tokio::time::timeout(remaining, selection)
+                .await
+                .map_err(|_| {
+                    provider_error(ProviderErrorKind::Timeout, UpstreamSendState::NotSent)
+                })??
+        } else {
+            selection.await?
+        };
         let account_selection_wait_ms =
             u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let lease = Arc::new(lease);
@@ -497,6 +521,20 @@ impl Provider for CodexProvider {
         {
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
+        if upstream_request
+            .downstream_websocket_connection_id
+            .is_some()
+            && upstream_request.previous_response_id().is_some()
+            && upstream_request.generate()
+            && previous_session.as_ref().is_some_and(|state| {
+                state.continuation_scope == OpenAiContinuationScope::ReplayRequired
+            })
+        {
+            // HTTP store=false 没有原生续链，完整历史仍由客户端持有；不能把 delta
+            // 当作独立新请求发送，也不能用 previous_response_id 猜测上游存储状态。
+            return Err(continuation_replay_required_error("scope_unavailable"));
+        }
+
         let location_application = crate::transport::location::apply_request_location(
             upstream_request.body_mut(),
             lease
@@ -547,13 +585,48 @@ impl Provider for CodexProvider {
             && session_affinity
                 .as_ref()
                 .is_some_and(|affinity| self.session_transport_recovery.uses_http(affinity.key()));
-        let transport = if requirement.requires_websocket() {
+        let mut transport = if requirement.requires_websocket() {
             CodexProviderTransport::PreferWebSocket
         } else if context.transport() == AttemptTransport::Fallback || session_http_fallback {
             CodexProviderTransport::HttpOnly
         } else {
             requested_transport
         };
+        if transport == CodexProviderTransport::PreferWebSocket
+            && (matches!(
+                requirement,
+                TransportRequirement::NewChain | TransportRequirement::WebSocketNewChain
+            ) || (requirement == TransportRequirement::ExactWebSocketContinuation
+                && upstream_request
+                    .downstream_websocket_connection_id
+                    .is_some()))
+        {
+            let payload_bytes =
+                websocket_response_create_payload_len(&upstream_request).map_err(|_| {
+                    provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent)
+                })?;
+            if payload_bytes >= WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES {
+                if requirement == TransportRequirement::ExactWebSocketContinuation {
+                    tracing::info!(
+                        request_id = context.request_id().as_str(),
+                        payload_bytes,
+                        threshold_bytes = WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES,
+                        continuation_recovery_action = "client_replay_required",
+                        "OpenAI oversized WebSocket continuation requires full client input before send"
+                    );
+                    return Err(continuation_replay_required_error(
+                        "transport_payload_too_large",
+                    ));
+                }
+                transport = CodexProviderTransport::HttpOnly;
+                tracing::info!(
+                    request_id = context.request_id().as_str(),
+                    payload_bytes,
+                    threshold_bytes = WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES,
+                    "OpenAI oversized new-chain request selected HTTP before WebSocket send"
+                );
+            }
+        }
         apply_transport(&mut upstream_request, transport);
         // 每个 attempt 独立选择候选，不把接管标记或候选绑定到可复用的 WS 连接。
         // 同轮/native continuation 沿用原有状态，绝不在续接中途从池中换票。
@@ -645,9 +718,14 @@ impl Provider for CodexProvider {
         };
         let events = cold_response_stream(ColdResponse {
             turn_state: self.turn_state.clone(),
-            client: self.client.for_account(lease.account()).map_err(|_| {
-                provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
-            })?,
+            client: self
+                .client
+                .for_account(lease.account())
+                .map_err(|_| {
+                    provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
+                })?
+                .with_connection_budget(context.connection_budget().clone())
+                .with_response_control(context.response_control().cloned()),
             response_origin: self.responses_url.clone(),
             request: upstream_request,
             upstream_model: upstream_model.clone(),

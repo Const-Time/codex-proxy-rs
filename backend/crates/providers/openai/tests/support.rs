@@ -59,6 +59,14 @@ pub(crate) struct MemoryAccountStore {
 }
 
 impl MemoryAccountStore {
+    pub(crate) fn set_egress(&self, id: &str, proxy: Option<gateway_core::account::OutboundProxy>) {
+        let mut accounts = self.accounts.lock().unwrap();
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).unwrap())
+            .unwrap();
+        stored.account = stored.account.clone().with_outbound_proxy(proxy);
+    }
+
     pub(crate) fn repository(self: &Arc<Self>) -> CodexCredentialRepository {
         CodexCredentialRepository::new(self.clone())
     }
@@ -578,6 +586,7 @@ fn rebuild_account(current: &ProviderAccount, rebuild: AccountRebuild) -> Provid
 
 #[derive(Default)]
 pub(crate) struct TestLeaseCoordinator {
+    pub(crate) in_flight: AtomicUsize,
     pub(crate) requests: Mutex<Vec<ProviderSchedulingLeaseRequest>>,
     pub(crate) busy: Mutex<bool>,
     pub(crate) busy_accounts: Mutex<BTreeSet<ProviderAccountId>>,
@@ -599,7 +608,8 @@ impl ProviderLeasePort for TestLeaseCoordinator {
                     (
                         account,
                         AccountRuntimeSignals {
-                            in_flight: 0,
+                            in_flight: u32::try_from(self.in_flight.load(Ordering::SeqCst))
+                                .unwrap(),
                             last_started_at: None,
                             quota_reset_at: None,
                             quota_remaining_rank: None,

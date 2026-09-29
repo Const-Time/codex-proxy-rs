@@ -204,6 +204,29 @@ fn continuation_recovery_should_keep_its_internal_classification_and_client_cont
 }
 
 #[test]
+fn message_too_big_should_map_to_a_request_scoped_client_contract() {
+    let error = ProviderError::new(
+        ProviderErrorKind::MessageTooBig,
+        UpstreamSendState::Ambiguous,
+    )
+    .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+        "upstream websocket message too big",
+        Some("message_too_big".to_owned()),
+        Some("invalid_request_error".to_owned()),
+    ));
+    let gateway = GatewayError::from_provider(&error);
+
+    assert_eq!(error.kind().as_str(), "message_too_big");
+    assert_eq!(gateway.kind().as_str(), "message_too_big");
+    assert_eq!(
+        gateway.safe_message(),
+        "upstream rejected the request because the message is too large"
+    );
+    assert_eq!(gateway.client_error_code(), Some("message_too_big"));
+    assert_eq!(gateway.client_error_type(), Some("invalid_request_error"));
+}
+
+#[test]
 fn client_visible_upstream_error_should_preserve_opaque_structured_fields() {
     let message = format!("\0{}\n", "m".repeat(9_000));
     let code = format!("\0{}", "c".repeat(300));

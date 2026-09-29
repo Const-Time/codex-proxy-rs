@@ -1,8 +1,9 @@
 //! 运行时快照的原子发布、健康状态与跨进程版本收敛。
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as SyncMutex, RwLock};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -130,6 +131,81 @@ pub trait SnapshotControl: Send + Sync {
     fn publish_committed(&self, committed_revision: ConfigRevision) -> BoxFuture<'_, ()>;
 }
 
+#[derive(Default)]
+struct RefreshPriorityState {
+    pending_commits: usize,
+    active_background: Option<CancellationToken>,
+}
+
+struct CommittedRefreshGuard {
+    priority: Arc<SyncMutex<RefreshPriorityState>>,
+}
+
+impl CommittedRefreshGuard {
+    fn begin(priority: Arc<SyncMutex<RefreshPriorityState>>) -> Self {
+        let active = {
+            let mut state = lock_unpoisoned(&priority);
+            state.pending_commits += 1;
+            state.active_background.clone()
+        };
+        // 先登记待发布提交，再取消正在等待目录的后台刷新，避免后者抢先重入。
+        if let Some(active) = active {
+            active.cancel();
+        }
+        Self { priority }
+    }
+}
+
+impl Drop for CommittedRefreshGuard {
+    fn drop(&mut self) {
+        lock_unpoisoned(&self.priority).pending_commits -= 1;
+    }
+}
+
+struct BackgroundRefreshGuard {
+    priority: Arc<SyncMutex<RefreshPriorityState>>,
+    cancellation: CancellationToken,
+}
+
+impl BackgroundRefreshGuard {
+    fn begin(priority: Arc<SyncMutex<RefreshPriorityState>>) -> Option<Self> {
+        let mut state = lock_unpoisoned(&priority);
+        if state.pending_commits != 0 {
+            return None;
+        }
+        let cancellation = CancellationToken::new();
+        state.active_background = Some(cancellation.clone());
+        drop(state);
+        Some(Self {
+            priority,
+            cancellation,
+        })
+    }
+}
+
+impl Drop for BackgroundRefreshGuard {
+    fn drop(&mut self) {
+        lock_unpoisoned(&self.priority).active_background = None;
+    }
+}
+
+// 仅中断未完成的后台读取或编译；配置提交负责发布最新事实并发送通知。
+async fn preempt_for_committed_refresh<T>(
+    cancellation: Option<&CancellationToken>,
+    operation: impl Future<Output = T>,
+) -> Result<T, RuntimeSnapshotCompileError> {
+    let Some(cancellation) = cancellation else {
+        return Ok(operation.await);
+    };
+    let cancelled = cancellation.cancelled().fuse();
+    let operation = operation.fuse();
+    pin_mut!(cancelled, operation);
+    select_biased! {
+        _ = cancelled => Err(RuntimeSnapshotCompileError::RevisionChanged),
+        result = operation => Ok(result),
+    }
+}
+
 /// 配置提交后的本进程快照发布与跨进程失效通知。
 #[derive(Clone)]
 pub struct RuntimeSnapshotPublisher {
@@ -137,11 +213,13 @@ pub struct RuntimeSnapshotPublisher {
     snapshots: RuntimeSnapshotHandle,
     subscriptions: Arc<dyn SnapshotSubscriptionPort>,
     refresh_lock: Arc<Mutex<()>>,
+    refresh_priority: Arc<SyncMutex<RefreshPriorityState>>,
 }
 
 enum RefreshMode {
     Required,
     Reconcile,
+    Committed,
 }
 
 impl RuntimeSnapshotPublisher {
@@ -156,6 +234,7 @@ impl RuntimeSnapshotPublisher {
             snapshots,
             subscriptions,
             refresh_lock: Arc::new(Mutex::new(())),
+            refresh_priority: Arc::new(SyncMutex::new(RefreshPriorityState::default())),
         }
     }
 
@@ -168,19 +247,41 @@ impl RuntimeSnapshotPublisher {
         &self,
         mode: RefreshMode,
     ) -> Result<ConfigRevision, RuntimeSnapshotCompileError> {
-        // 所有入口共享从读取事实到发布或暂停的完整临界区；只锁最后的替换会让
-        // 旧编译覆盖新授权，或让晚到的失败暂停新快照。请求读取不等待此锁。
+        // 提交先登记并中断慢后台读取；发布/暂停仍在完整临界区内串行执行。
+        let _committed = matches!(mode, RefreshMode::Committed)
+            .then(|| CommittedRefreshGuard::begin(Arc::clone(&self.refresh_priority)));
         let _refresh = self.refresh_lock.lock().await;
+        self.refresh_locked_with_priority(mode).await
+    }
+
+    async fn refresh_locked_with_priority(
+        &self,
+        mode: RefreshMode,
+    ) -> Result<ConfigRevision, RuntimeSnapshotCompileError> {
+        if matches!(mode, RefreshMode::Committed) {
+            return self.refresh_locked(mode, None).await;
+        }
+        let background = BackgroundRefreshGuard::begin(Arc::clone(&self.refresh_priority))
+            .ok_or(RuntimeSnapshotCompileError::RevisionChanged)?;
+        self.refresh_locked(mode, Some(&background.cancellation))
+            .await
+    }
+
+    async fn refresh_locked(
+        &self,
+        mode: RefreshMode,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ConfigRevision, RuntimeSnapshotCompileError> {
         let configuration_changed = if matches!(mode, RefreshMode::Reconcile) {
-            let persisted_revision = self
-                .compiler
-                .store()
-                .current_config_revision()
-                .await
-                .map_err(|_| {
-                    self.snapshots.suspend();
-                    RuntimeSnapshotCompileError::StoreUnavailable
-                })?;
+            let persisted_revision = preempt_for_committed_refresh(
+                cancellation,
+                self.compiler.store().current_config_revision(),
+            )
+            .await?
+            .map_err(|_| {
+                self.snapshots.suspend();
+                RuntimeSnapshotCompileError::StoreUnavailable
+            })?;
             let changed = runtime_revision_needs_refresh(
                 self.published_revision().map(ConfigRevision::get),
                 persisted_revision.get(),
@@ -192,13 +293,24 @@ impl RuntimeSnapshotPublisher {
         } else {
             true
         };
-        let snapshot = self.compiler.compile().await.inspect_err(|_| {
-            // 仅目录代次变化时保留旧快照，下一周期继续对账；配置缺失、变化
-            // 或持久 revision 回退均须 fail closed，不按 revision 大小丢弃刷新。
-            if configuration_changed {
-                self.snapshots.suspend();
+        let compiled = if matches!(mode, RefreshMode::Committed) {
+            match self.snapshots.acquire().ok() {
+                Some(previous) => self.compiler.compile_with_cached_catalog(&previous).await,
+                None => self.compiler.compile().await,
             }
-        })?;
+        } else {
+            preempt_for_committed_refresh(cancellation, self.compiler.compile()).await?
+        };
+        let snapshot = match compiled {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // 目录对账失败可继续服务旧快照；配置或权限变化无法确认时须暂停。
+                if configuration_changed {
+                    self.snapshots.suspend();
+                }
+                return Err(error);
+            }
+        };
         let revision = snapshot.revision();
         self.snapshots.publish(snapshot);
         Ok(revision)
@@ -217,7 +329,7 @@ impl RuntimeSnapshotPublisher {
 
     /// 数据库提交不能被目录或通知基础设施的暂时故障伪装成回滚。
     async fn publish_committed_inner(&self, committed_revision: ConfigRevision) {
-        let _ = self.refresh().await;
+        let _ = self.refresh_with_mode(RefreshMode::Committed).await;
         let _ = self
             .subscriptions
             .publish_snapshot_revision(committed_revision)
@@ -365,5 +477,10 @@ fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 
 fn write_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_unpoisoned<T>(lock: &SyncMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

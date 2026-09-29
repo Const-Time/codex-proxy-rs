@@ -482,6 +482,8 @@ pub(crate) fn scope_request_to_account(
                 {
                     metadata.remove(*key);
                 }
+                // 父响应属于原账号，仅同账号可信续接可保留。
+                metadata.remove("parent_response_id");
             }
             metadata.insert(
                 "installation_id".to_owned(),

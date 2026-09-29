@@ -1918,3 +1918,27 @@ async fn model_access_overrides_soft_session_affinity() {
         .expect("select pro");
     assert_eq!(lease.account_id().as_str(), "acct_other");
 }
+
+#[test]
+fn saturated_snapshot_returns_capacity_without_attempting_a_lease() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    leases
+        .in_flight
+        .store(100, std::sync::atomic::Ordering::SeqCst);
+    let selector = selector(&store, leases.clone());
+    let attempt = attempt(BTreeSet::new());
+    let error = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap(),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CredentialSelectionError::CapacityUnavailable { retry_after: None }
+    ));
+    assert!(leases.requests.lock().unwrap().is_empty());
+}

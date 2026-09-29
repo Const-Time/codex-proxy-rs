@@ -1554,23 +1554,63 @@ const fn oauth_error_code(error: &CodexOAuthAdminError) -> &'static str {
 fn map_quota_error(error: CodexCredentialQuotaError) -> ProviderAdminError {
     use CodexCredentialQuotaError as Error;
     use ProviderAdminErrorKind as Kind;
-    let (kind, message) = match error {
-        Error::InvalidCredentialData => (Kind::Invalid, "OpenAI 额度查询凭据无效，请检查账号授权"),
-        Error::NotFound => (Kind::NotFound, "OpenAI 额度查询账号不存在"),
-        Error::RevisionConflict => (Kind::Conflict, "账号凭据已被更新，请刷新账号列表后重试"),
+    let (kind, public_message, upstream_message) = match error {
+        Error::InvalidCredentialData => (
+            Kind::Invalid,
+            "OpenAI 额度查询凭据无效，请检查账号授权",
+            None,
+        ),
+        Error::NotFound => (Kind::NotFound, "OpenAI 额度查询账号不存在", None),
+        Error::RevisionConflict => (
+            Kind::Conflict,
+            "账号凭据已被更新，请刷新账号列表后重试",
+            None,
+        ),
         Error::CredentialRefreshRequired => (
             Kind::Unavailable,
             "OpenAI 额度查询需要有效凭据，请刷新令牌后重试",
+            None,
         ),
         Error::Repository(_) | Error::Store { .. } => {
-            (Kind::Unavailable, "OpenAI 额度查询的依赖服务暂不可用")
+            (Kind::Unavailable, "OpenAI 额度查询的依赖服务暂不可用", None)
         }
-        Error::Upstream { .. } => (
-            Kind::Unavailable,
-            "OpenAI 额度查询失败，请检查出站连接与上游服务",
-        ),
+        Error::Upstream {
+            status,
+            code,
+            detail,
+        } => {
+            // 公开文案只解释已知状态和错误码；原始上游材料留在内部诊断，
+            // 额度查询拒绝不作为凭据失效证据，也不写入账号的凭据错误字段。
+            let (kind, public_message) = match (status, code.as_deref()) {
+                (Some(401), Some("token_revoked")) => (
+                    Kind::BadGateway,
+                    "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权",
+                ),
+                (Some(401), _) => (
+                    Kind::BadGateway,
+                    "OpenAI 拒绝了额度查询（HTTP 401），请检查账号授权状态；若令牌已在服务端失效，请重新授权",
+                ),
+                (Some(403), _) => (
+                    Kind::BadGateway,
+                    "OpenAI 拒绝了额度查询（HTTP 403），请检查账号授权状态",
+                ),
+                (Some(429), _) => (Kind::BadGateway, "OpenAI 额度查询被限流，请稍后重试"),
+                (Some(500..=599), _) => (Kind::BadGateway, "OpenAI 额度查询服务异常，请稍后重试"),
+                _ => (
+                    Kind::Unavailable,
+                    "OpenAI 额度查询失败，请检查出站连接与上游服务",
+                ),
+            };
+            let upstream_message =
+                format!("OpenAI 额度查询失败：上游 HTTP {status:?}，code = {code:?}：{detail}");
+            (kind, public_message, Some(upstream_message))
+        }
     };
-    provider_admin_error(kind).with_public_message(message)
+    let error = provider_admin_error(kind).with_public_message(public_message);
+    match upstream_message {
+        Some(message) => error.with_message(message),
+        None => error,
+    }
 }
 
 fn map_profile_statistics_error(error: CodexProfileStatisticsError) -> ProviderAdminError {

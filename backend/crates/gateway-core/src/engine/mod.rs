@@ -2,12 +2,14 @@
 
 pub mod admission;
 pub mod budget;
+pub mod connection;
 pub mod continuation;
 pub mod coordinator;
 pub mod execution;
 mod observation;
 pub mod probe;
 pub mod provider;
+pub mod response_control;
 
 pub use coordinator::{AttemptCoordinator, ResponseExecutionSession};
 
@@ -112,9 +114,9 @@ impl AttemptTrigger {
     }
 }
 
-/// 一次实际上游调用对 Provider 健康度产生的事实。
+/// 一次实际上游调用的诊断结果。
 ///
-/// 该事实只描述调用结果，不在 Core 中定义 circuit 策略或持久化方式。
+/// 该事实只描述调用结果，不参与跨请求的路由屏蔽。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderAttemptOutcome {
     /// 上游流自然完成且通过 canonical event 序列校验。
@@ -314,14 +316,25 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context。
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
+    response_control: Option<response_control::ResponseControl>,
     pricing: Arc<crate::metering::PricingOverrides>,
     request_id: ModelRequestId,
     client_api_key_ref: ClientApiKeyId,
     timing_started_at: Instant,
     trace: crate::diagnostics::TraceContext,
+    connection_budget: connection::ConnectionBudget,
 }
 
 impl RequestAttemptContext {
+    #[must_use]
+    pub fn with_response_control(
+        mut self,
+        control: Option<response_control::ResponseControl>,
+    ) -> Self {
+        self.response_control = control;
+        self
+    }
+
     #[must_use]
     pub fn with_pricing(mut self, pricing: Arc<crate::metering::PricingOverrides>) -> Self {
         self.pricing = pricing;
@@ -331,17 +344,26 @@ impl RequestAttemptContext {
     #[must_use]
     pub fn new(request_id: ModelRequestId, client_api_key_ref: ClientApiKeyId) -> Self {
         Self {
+            response_control: None,
             request_id,
             client_api_key_ref,
             pricing: Arc::default(),
             timing_started_at: Instant::now(),
             trace: crate::diagnostics::TraceContext::default(),
+            connection_budget: connection::ConnectionBudget::default(),
         }
     }
 
     #[must_use]
     pub fn with_trace(mut self, trace: crate::diagnostics::TraceContext) -> Self {
         self.trace = trace;
+        self
+    }
+
+    /// 传递请求内共享的连接恢复预算。
+    #[must_use]
+    pub fn with_connection_budget(mut self, budget: connection::ConnectionBudget) -> Self {
+        self.connection_budget = budget;
         self
     }
 
@@ -384,6 +406,11 @@ pub struct AttemptContext {
 }
 
 impl AttemptContext {
+    #[must_use]
+    pub fn response_control(&self) -> Option<&response_control::ResponseControl> {
+        self.request.response_control.as_ref()
+    }
+
     #[must_use]
     pub fn pricing(&self) -> &crate::metering::PricingOverrides {
         &self.request.pricing
@@ -516,6 +543,11 @@ impl AttemptContext {
         self.continuation_attempt
     }
 
+    #[must_use]
+    pub const fn connection_budget(&self) -> &connection::ConnectionBudget {
+        &self.request.connection_budget
+    }
+
     /// 返回本次 attempt 的 Provider 传输档位。
     #[must_use]
     pub const fn transport(&self) -> AttemptTransport {
@@ -588,6 +620,15 @@ pub struct IntermediateFailure {
     pub upstream_status_code: Option<u16>,
     pub upstream_request_id: Option<String>,
     pub error: ProviderError,
+    pub latency: Duration,
+}
+
+/// 已认证有效请求在执行会话建立前的拒绝；不伪造模型执行或上游 attempt。
+#[derive(Debug)]
+pub struct EntryRejection {
+    pub request_id: ModelRequestId,
+    pub client_key_id: ClientApiKeyId,
+    pub error: GatewayError,
     pub latency: Duration,
 }
 
@@ -701,6 +742,11 @@ pub trait ExecutionStore: Send + Sync {
         &self,
         failure: IntermediateFailure,
     ) -> Result<(), StoreError>;
+    /// 记录路由或准入拒绝；可恢复观测失败不改变客户端结果。
+    async fn record_entry_rejection(&self, _rejection: EntryRejection) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     /// 记录不挂在 `model_requests` 上的账号探测失败；默认丢弃。
     async fn record_probe_failure(&self, _failure: ProbeFailure) -> Result<(), StoreError> {
         Ok(())

@@ -326,6 +326,11 @@ pub const fn gateway_error_contract(
             "server_error",
             "upstream_unavailable",
         ),
+        GatewayErrorKind::MessageTooBig => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request_error",
+            "message_too_big",
+        ),
         GatewayErrorKind::Timeout => (
             StatusCode::GATEWAY_TIMEOUT,
             "server_error",

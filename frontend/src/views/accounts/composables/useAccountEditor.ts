@@ -75,7 +75,7 @@ export function useAccountEditor(options: {
         groupIds: [...new Set(selectedGroupIds.value)],
       })
       showEditModal.value = false
-      await Promise.all([options.reloadAccounts(), options.reloadGroups()])
+      void Promise.allSettled([options.reloadAccounts(), options.reloadGroups()])
       toast.success('账号已更新')
     }, { errorText: '账号更新失败' })
   }

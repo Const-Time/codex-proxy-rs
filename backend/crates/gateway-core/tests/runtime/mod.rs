@@ -328,7 +328,8 @@ fn reconciliation_revision_failure_should_not_suspend_later_committed_refresh() 
             .send(Err(SnapshotStoreError::unavailable()))
             .expect("release failed revision read");
         assert!(reconcile.await.is_err());
-        assert!(handle.acquire().is_err());
+        // 被配置提交取消的后台读取不能暂停仍有效的旧快照。
+        assert_eq!(handle.revision(), Some(revision(9)));
         committed.await;
         assert_eq!(handle.revision(), Some(revision(11)));
     });
@@ -669,4 +670,53 @@ fn empty_snapshot(value: u64) -> RuntimeSnapshot {
 
 fn revision(value: u64) -> ConfigRevision {
     ConfigRevision::new(value).expect("positive revision")
+}
+
+#[test]
+fn committed_scope_change_preempts_slow_catalog_and_reconciles_later() {
+    block_on(async {
+        let catalog = Arc::new(TestCatalog::default());
+        let store = Arc::new(TestSnapshotStore::new(Ok(scoped_facts(10, true))));
+        let compiler = Arc::new(catalog_compiler(store.clone(), catalog.clone()));
+        let handle = RuntimeSnapshotHandle::new(compiler.compile().await.unwrap());
+        let frozen = handle.acquire().unwrap();
+        let publisher = RuntimeSnapshotPublisher::new(
+            compiler,
+            handle.clone(),
+            Arc::new(TestSnapshotSubscriptions::default()),
+        );
+        let (release, gate) = oneshot::channel();
+        *catalog.next_query.lock().unwrap() = Some(gate);
+        let mut background = Box::pin(publisher.refresh());
+        assert!(futures::poll!(background.as_mut()).is_pending());
+        *store.facts.lock().unwrap() = Ok(scoped_facts(11, false));
+        *store.current_revision.lock().unwrap() = Ok(revision(11));
+        let mut committed = publisher.publish_committed(revision(11));
+        assert!(futures::poll!(committed.as_mut()).is_pending());
+        assert!(background.await.is_err());
+        assert!(
+            release.send(()).is_err(),
+            "slow catalog future was cancelled"
+        );
+        committed.await;
+        assert_eq!(
+            catalog.queries.load(Ordering::SeqCst),
+            2,
+            "committed refresh reuses catalog"
+        );
+        assert_eq!(handle.revision(), Some(revision(11)));
+        assert!(!removed_account_allowed(&handle.acquire().unwrap()));
+        assert!(
+            removed_account_allowed(&frozen),
+            "in-flight requests retain frozen scope"
+        );
+        let (task, context) = reconciliation_task(&publisher);
+        task.run_cycle(context).await.unwrap();
+        assert_eq!(
+            catalog.queries.load(Ordering::SeqCst),
+            3,
+            "background reconciles cached catalog"
+        );
+        assert!(!removed_account_allowed(&handle.acquire().unwrap()));
+    });
 }

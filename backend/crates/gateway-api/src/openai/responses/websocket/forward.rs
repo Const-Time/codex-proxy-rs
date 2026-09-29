@@ -13,8 +13,8 @@ use crate::openai::error::{gateway_error_contract, gateway_error_from_engine};
 
 use super::{
     super::{DecodedResponsesRequest, OpenAiResponsesEncoder, PendingExecution, ProtocolErrorBody},
-    connection::{FramePhase, ResponsesWebSocketConnection, WriteContext},
-    protocol::{error_event, response_metadata_event},
+    connection::{ConnectionEvent, FramePhase, ResponsesWebSocketConnection, WriteContext},
+    protocol::{decode_response_interrupt, error_event, response_metadata_event},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -64,7 +64,7 @@ pub(super) async fn forward_execution(
         );
         return send_gateway_error(connection, &error, &request_id).await;
     }
-    let first = match next_active_input(connection, &mut execution).await {
+    let first = match next_active_input(connection, &mut execution, &request_id).await {
         ActiveInput::Event(Ok(Some(event))) => event,
         ActiveInput::Event(Ok(None)) => {
             let error = GatewayError::new(
@@ -162,7 +162,7 @@ pub(super) async fn forward_execution(
     }
 
     loop {
-        match next_active_input(connection, &mut execution).await {
+        match next_active_input(connection, &mut execution, &request_id).await {
             ActiveInput::Event(Ok(Some(delivery))) => {
                 let requirement = delivery.commit_requirement();
                 let mut events = delivery.into_provider_events();
@@ -342,7 +342,7 @@ async fn confirm_completed_execution(
     execution: &mut PendingExecution,
     request_id: &Arc<str>,
 ) -> Result<(), ForwardOutcome> {
-    match next_active_input(connection, execution).await {
+    match next_active_input(connection, execution, request_id).await {
         ActiveInput::Event(Ok(None))
             if execution
                 .session_mut()
@@ -380,22 +380,52 @@ enum ActiveInput {
 async fn next_active_input(
     connection: &mut ResponsesWebSocketConnection,
     execution: &mut PendingExecution,
+    request_id: &Arc<str>,
 ) -> ActiveInput {
     let Some(session) = execution.session_mut() else {
         return ActiveInput::Disconnect;
     };
-    // 与 Codex stream_request 的连接锁一致：本轮结束前不消费下一条请求。
-    // pump 继续接收有界业务帧和处理 Ping/Pong；退出通过独立通知取消本轮。
-    tokio::select! {
-        biased;
-        _ = connection.wait_for_exit() => {
-            session.trace().record("downstream.cancelled", serde_json::json!({
+    let control = session.response_control();
+    let trace = session.trace();
+    // Keep the same execution future alive while processing control frames.
+    // Deferred create frames retain their bounded queue permits until consumed.
+    let next = session.next_event();
+    tokio::pin!(next);
+    let outcome = loop {
+        tokio::select! {
+            event = connection.next_active_event() => {
+                let Some(event) = event else { break ActiveInput::Disconnect; };
+                match &event.event {
+                    ConnectionEvent::Text(payload) => {
+                        let error = match decode_response_interrupt(payload) {
+                            Ok(Some(response_id)) => {
+                                let result = control.as_ref().ok_or(gateway_core::engine::response_control::ResponseInterruptError::Unavailable).and_then(|control| control.interrupt(&response_id));
+                                result.err().map(|_| super::super::RequestDecodeError::InvalidValue { field: "response_id".to_owned() }.protocol_body())
+                            }
+                            Ok(None) => { connection.defer(event); continue; }
+                            Err(error) => Some(error.protocol_body()),
+                        };
+                        if let Some(error) = error
+                            && send_protocol_error(connection, StatusCode::BAD_REQUEST, error, request_id).await == ForwardOutcome::Disconnect
+                        { break ActiveInput::Disconnect; }
+                    }
+                    ConnectionEvent::Expired => {},
+                    ConnectionEvent::Binary => connection.defer(event),
+                    ConnectionEvent::Exited(_) => break ActiveInput::Disconnect,
+                }
+            }
+            event = &mut next => break ActiveInput::Event(event),
+        }
+    };
+    if matches!(outcome, ActiveInput::Disconnect) {
+        trace.record(
+            "downstream.cancelled",
+            serde_json::json!({
                 "reason": "websocket_connection_exit", "connectionId": connection.id(),
-            }));
-            ActiveInput::Disconnect
-        },
-        event = session.next_event() => ActiveInput::Event(event),
+            }),
+        );
     }
+    outcome
 }
 
 pub(super) async fn send_gateway_error(

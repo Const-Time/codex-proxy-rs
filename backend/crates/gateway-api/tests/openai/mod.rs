@@ -24,7 +24,6 @@ use gateway_core::engine::continuation::{
 };
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientApiKeyUsageSink, DefaultExecutionService, ExecutionService,
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
 };
 use gateway_core::engine::provider::ProviderRegistry;
 use gateway_core::engine::{
@@ -104,7 +103,6 @@ pub(super) fn authenticated_client_for_provider(
         Arc::new(UnusedExecutionStore),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(IgnoredClientApiKeyUsage),
     );
@@ -128,7 +126,6 @@ pub(super) fn authenticated_client_with_min_versions(
         Arc::new(UnusedExecutionStore),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(IgnoredClientApiKeyUsage),
     );
@@ -289,31 +286,6 @@ impl ClientAdmissionPort for UnusedAdmissions {
     }
 }
 
-struct UnusedCircuits;
-
-impl ProviderCircuitPort for UnusedCircuits {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(async { unreachable!("authentication fixture does not execute") })
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { unreachable!("authentication fixture does not execute") })
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { unreachable!("authentication fixture does not execute") })
-    }
-}
-
 struct UnusedContinuation;
 
 impl NativeContinuationPort for UnusedContinuation {
@@ -344,7 +316,6 @@ fn api_router_with_config(
             Arc::new(UnusedExecutionStore),
             ProviderRegistry::default(),
             Arc::new(UnusedAdmissions),
-            Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(IgnoredClientApiKeyUsage),
         )),

@@ -29,9 +29,7 @@ use engine::admission::{
     ClientAdmissionPort, ClientAdmissionRecoveryPort, restore_client_admission_startup,
 };
 use engine::continuation::NativeContinuationPort;
-use engine::execution::{
-    ClientApiKeyUsageSink, DefaultExecutionService, ExecutionService, ProviderCircuitPort,
-};
+use engine::execution::{ClientApiKeyUsageSink, DefaultExecutionService, ExecutionService};
 use engine::probe::AccountProbe;
 use engine::provider::ProviderRegistry;
 use health::HealthProbe;
@@ -47,7 +45,6 @@ pub struct CoreStorePorts {
     execution: Arc<dyn ExecutionStore>,
     admissions: Arc<dyn ClientAdmissionPort>,
     admission_recovery: Arc<dyn ClientAdmissionRecoveryPort>,
-    circuits: Arc<dyn ProviderCircuitPort>,
     continuation: Arc<dyn NativeContinuationPort>,
     snapshots: Arc<dyn SnapshotStorePort>,
     snapshot_subscriptions: Arc<dyn SnapshotSubscriptionPort>,
@@ -63,7 +60,6 @@ impl CoreStorePorts {
             Arc<dyn ClientAdmissionPort>,
             Arc<dyn ClientAdmissionRecoveryPort>,
         ),
-        circuits: Arc<dyn ProviderCircuitPort>,
         continuation: Arc<dyn NativeContinuationPort>,
         (snapshots, snapshot_subscriptions): (
             Arc<dyn SnapshotStorePort>,
@@ -75,7 +71,6 @@ impl CoreStorePorts {
             execution,
             admissions,
             admission_recovery,
-            circuits,
             continuation,
             snapshots,
             snapshot_subscriptions,
@@ -158,7 +153,6 @@ pub async fn initialize(
         ports.execution,
         providers,
         ports.admissions,
-        ports.circuits,
         ports.continuation,
         ports.client_api_key_usage,
     );

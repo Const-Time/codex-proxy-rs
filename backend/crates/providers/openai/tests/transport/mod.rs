@@ -49,6 +49,7 @@ mod account_proxy;
 mod canonical;
 mod catalog;
 mod client;
+mod connection;
 mod diagnostics;
 mod endpoints;
 mod fingerprint;

@@ -410,7 +410,6 @@ pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_reques
             credential_observed_at, quota_observed_at, created_at, updated_at
      from provider_accounts
      where provider_kind = $1
-       and enabled
        and has_refresh_token
        and credential_state in ('unknown', 'ready')
        and access_token_expires_at is not null

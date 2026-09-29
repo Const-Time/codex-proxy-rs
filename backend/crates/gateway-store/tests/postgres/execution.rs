@@ -1266,3 +1266,37 @@ async fn diagnostic_trace_is_finalized_atomically_and_available_for_failed_reque
     assert!(detail.related_requests.is_empty());
     database.close().await;
 }
+
+#[tokio::test]
+async fn entry_rejection_is_observed_without_creating_a_model_request() {
+    let Some(database) = TestDatabase::create("entry_rejection").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    store
+        .record_entry_rejection(gateway_core::engine::EntryRejection {
+            request_id: ModelRequestId::new("req_entry_rejected").unwrap(),
+            client_key_id: gateway_core::policy::ClientApiKeyId::new("key_entry_rejected").unwrap(),
+            error: GatewayError::new(GatewayErrorKind::RateLimited, "request exceeds user limits"),
+            latency: std::time::Duration::from_millis(12),
+        })
+        .await
+        .unwrap();
+    let (request_id, component, kind, message): (Option<String>, String, String, String) =
+        sqlx::query_as("select model_request_id, component, failure_kind, message from ops_events")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert!(request_id.is_none());
+    assert_eq!(component, "request_entry");
+    assert_eq!(kind, GatewayErrorKind::RateLimited.as_str());
+    let message: serde_json::Value = serde_json::from_str(&message).unwrap();
+    assert_eq!(message["requestId"], "req_entry_rejected");
+    assert_eq!(message["clientKeyId"], "key_entry_rejected");
+    let count: i64 = sqlx::query_scalar("select count(*) from model_requests")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    database.close().await;
+}

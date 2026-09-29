@@ -1,9 +1,11 @@
 mod admission;
+mod connection;
 mod continuation;
 mod coordinator;
 mod execution;
 mod probe;
 mod provider;
+mod response_control;
 
 use gateway_core::engine::AttemptTrigger;
 

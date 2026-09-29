@@ -393,7 +393,7 @@ mod provider {
     use super::*;
 
     #[tokio::test]
-    async fn provider_public_errors_survive_import_and_refresh_http_handlers() {
+    async fn provider_public_errors_survive_import_credential_and_quota_refresh_handlers() {
         let fixture = AdminTestFixture::new().await;
         fixture.auth.insert_session("valid-session");
         for provider in ["openai", "xai"] {
@@ -438,6 +438,10 @@ mod provider {
                     (
                         "/api/admin/accounts/import",
                         json!({"provider": provider, "data": {"accessToken": "at-synthetic-test"}}),
+                    ),
+                    (
+                        "/api/admin/accounts/quota/refresh",
+                        json!({"accountId": "acct_error_test"}),
                     ),
                 ] {
                     let response = send(&fixture, path, body).await;

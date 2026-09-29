@@ -15,6 +15,30 @@ use super::protocol::responses::CodexResponsesRequest;
 
 const CODEX_RESIDENCY_HEADER: &str = "x-openai-internal-codex-residency";
 
+/// 不透传下游携带的认证、账号及相关身份字段，避免影响网关选定的上游身份。
+/// 上游需要的官方身份头由网关构造；这里也包含通用认证和 Cookie 字段。
+pub(super) fn is_managed_identity_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "x-api-key"
+            | "x-openai-actor-authorization"
+            | "cookie"
+            | "cookie2"
+            | "chatgpt-account-id"
+            | "chatgpt-project-id"
+            | "openai-organization"
+            | "openai-project"
+            | "x-openai-organization"
+            | "x-openai-project"
+            // 工作区路由和合规属性属于认证账号，不能继承下游账号的值。
+            | "x-openai-account-routing-override"
+            | "x-openai-fedramp"
+            // 安装身份由当前账号写入 client_metadata，不继承下游安装头。
+            | "x-codex-installation-id"
+    )
+}
+
 /// 构造 Codex Core 为模型请求设置的稳定身份请求头。
 pub fn build_codex_model_headers(
     profile: &CodexWireProfile,
@@ -188,27 +212,29 @@ impl CodexBackendClient {
         insert_optional_protocol_header(&mut headers, "x-codex-routing-hint", Some(&routing_hint));
         for name in request.passthrough_headers.keys() {
             // 身份与传输字段只由画像/正文生成；其余协议头保留原始多值字节。
-            if matches!(
-                name.as_str(),
-                "originator"
-                    | "user-agent"
-                    | "version"
-                    | "authorization"
-                    | "chatgpt-account-id"
-                    | "cookie"
-                    | "x-openai-internal-codex-residency"
-                    | "openai-beta"
-                    | "accept"
-                    | "content-type"
-                    | "content-encoding"
-                    | "x-codex-routing-hint"
-                    | "x-codex-installation-id"
-                    | "x-codex-turn-id"
-                    | "x-oai-attestation"
-                    | "x-oai-is"
-                    | "x-oai-is-update"
-                    | X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER
-            ) {
+            if is_managed_identity_header(name.as_str())
+                || matches!(
+                    name.as_str(),
+                    "originator"
+                        | "user-agent"
+                        | "version"
+                        | "authorization"
+                        | "chatgpt-account-id"
+                        | "cookie"
+                        | "x-openai-internal-codex-residency"
+                        | "openai-beta"
+                        | "accept"
+                        | "content-type"
+                        | "content-encoding"
+                        | "x-codex-routing-hint"
+                        | "x-codex-installation-id"
+                        | "x-codex-turn-id"
+                        | "x-oai-attestation"
+                        | "x-oai-is"
+                        | "x-oai-is-update"
+                        | X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER
+                )
+            {
                 continue;
             }
             headers.remove(name);

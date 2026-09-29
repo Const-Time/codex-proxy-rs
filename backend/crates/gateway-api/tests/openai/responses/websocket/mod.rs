@@ -1,4 +1,5 @@
 mod connection;
+mod interrupt;
 mod protocol;
 
 use std::sync::{

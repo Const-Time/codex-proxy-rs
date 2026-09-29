@@ -59,6 +59,7 @@ struct PublishingCatalogProvider {
 enum TestCatalogProvider {
     Unavailable,
     Empty,
+    Sourced(Vec<gateway_core::account::ProviderAccountId>),
 }
 
 #[async_trait]
@@ -80,6 +81,20 @@ impl Provider for TestCatalogProvider {
                 UpstreamSendState::NotSent,
             )),
             Self::Empty => Ok(Vec::new()),
+            Self::Sourced(accounts) => Ok(vec![
+                ProviderModelCapabilities::new(
+                    UpstreamModelId::new("upstream-model").unwrap(),
+                    ModelCapabilities::new(
+                        std::collections::BTreeSet::from([OperationKind::Generate]),
+                        None,
+                    ),
+                )
+                .with_presentation(ModelPresentation::new(
+                    Some("Catalog model".to_owned()),
+                    None,
+                ))
+                .with_catalog_accounts(accounts.iter().cloned().collect()),
+            ]),
         }
     }
 
@@ -322,4 +337,71 @@ fn compiler(store: Arc<dyn SnapshotStorePort>) -> RuntimeSnapshotCompiler {
 
 fn revision(value: u64) -> ConfigRevision {
     ConfigRevision::new(value).expect("positive revision")
+}
+
+#[test]
+fn catalog_visibility_requires_a_source_account_in_the_current_scope() {
+    use gateway_core::account::ProviderAccountId;
+    use gateway_core::routing::AccountGroupId;
+    let source = ProviderAccountId::new("acct_source").unwrap();
+    let other = ProviderAccountId::new("acct_other").unwrap();
+    let group = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
+    for (member, visible) in [(source.clone(), true), (other.clone(), false)] {
+        let facts = SnapshotFacts::new(
+            revision(1),
+            revision(1),
+            SnapshotSettingsFacts::new(
+                3,
+                0,
+                "smart",
+                BTreeMap::from([("alias".to_owned(), "upstream-model".to_owned())]),
+                None,
+                None,
+            ),
+            vec![SnapshotClientPolicyFacts::new(
+                ClientApiKeyId::new("key_catalog").unwrap(),
+                PlaintextClientApiKey::new("sk_catalog").unwrap(),
+                vec![group.clone()],
+                RateLimits::unlimited(),
+            )],
+            vec![SnapshotAccountGroupFacts::new(
+                group.clone(),
+                "Catalog scope".to_owned(),
+                true,
+            )],
+            vec![
+                SnapshotProviderAccountFacts::new(source.clone(), "alpha"),
+                SnapshotProviderAccountFacts::new(other.clone(), "alpha"),
+            ],
+            vec![SnapshotAccountGroupMemberFacts::new(group.clone(), member)],
+        );
+        let providers = ProviderRegistry::new([Arc::new(TestCatalogProvider::Sourced(vec![
+            source.clone(),
+        ])) as Arc<dyn Provider>])
+        .unwrap();
+        let snapshot = block_on(
+            RuntimeSnapshotCompiler::new(
+                Arc::new(TestSnapshotStore::new(Ok(facts))),
+                Arc::new(providers),
+            )
+            .compile(),
+        )
+        .unwrap();
+        let scope = snapshot.client_policies().next().unwrap().account_scope();
+        let listed = snapshot.public_models_for_scope(scope);
+        assert_eq!(!listed.is_empty(), visible);
+        for name in ["alias", "upstream-model"] {
+            assert_eq!(
+                snapshot.contains_public_model_for_scope(
+                    &PublicModelId::from_client_wire(name).unwrap(),
+                    scope
+                ),
+                visible
+            );
+        }
+        assert_eq!(
+            !snapshot.public_model_profiles_for_scope(scope).is_empty(),
+            visible
+        );
+    }
 }

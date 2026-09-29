@@ -150,12 +150,6 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
     let admissions: Arc<dyn gateway_core::engine::admission::ClientAdmissionPort> = Arc::new(
         redis::RedisClientAdmissionRepository::new(redis_connection.clone(), REDIS_NAMESPACE)?,
     );
-    let circuits: Arc<dyn gateway_core::engine::execution::ProviderCircuitPort> =
-        Arc::new(redis::RedisProviderCircuitRepository::new(
-            redis_connection.clone(),
-            REDIS_NAMESPACE,
-            gateway_core::engine::execution::ProviderCircuitPolicy::default(),
-        )?);
     // Continuation affinity 是下一轮请求的路由事实，Core 必须直接等待 Redis 确认。
     let continuation: Arc<dyn gateway_core::engine::continuation::NativeContinuationPort> =
         Arc::new(redis::RedisNativeContinuationRepository::new(
@@ -164,7 +158,6 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         )?);
     let (admissions, admission_release_writer) =
         redis::BufferedClientAdmissionPort::new(admissions);
-    let (circuits, circuit_feedback_writer) = redis::BufferedProviderCircuitPort::new(circuits);
     let core_ports = CoreStorePorts::new(
         execution,
         (
@@ -173,7 +166,6 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
                 pool.clone(),
             )),
         ),
-        Arc::new(circuits),
         continuation,
         (
             Arc::new(postgres::PgRuntimeSnapshotRepository::new(pool.clone())),
@@ -218,7 +210,6 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         execution_writer,
         client_key_usage_writer,
         admission_release_writer,
-        circuit_feedback_writer,
         retention,
     )?;
     Ok(StoreBundle {

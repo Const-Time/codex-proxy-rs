@@ -52,6 +52,8 @@ impl CodexBackendClient {
     ) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
+            connection_budget: None,
+            response_control: None,
             direct_client: client.clone(),
             client,
             websocket_origin_key: websocket_origin_key(&base_url),
@@ -122,7 +124,7 @@ impl CodexBackendClient {
         let body = zstd::stream::encode_all(std::io::Cursor::new(body), 3)
             .map_err(CodexClientError::RequestCompression)?;
         let response = self
-            .client
+            .http_opening_client()?
             .post(endpoint)
             .headers(headers)
             .header(CONTENT_ENCODING, HeaderValue::from_static("zstd"))
@@ -267,6 +269,7 @@ impl CodexBackendClient {
                 .map(|(name, value)| (name.as_str(), value.as_bytes())),
             Some(websocket_request.body()),
         );
+        websocket_create.connection.connection_budget = self.connection_budget.clone();
         context.trace.cloned().unwrap_or_default().headers(
             "upstream.request.headers",
             serde_json::json!({"transport": "websocket", "phase": "prepared_opening"}),
@@ -435,6 +438,7 @@ impl CodexBackendClient {
                 let mut exchange = execute_prepared_response_create_request_stream(
                     &websocket_request,
                     prepared,
+                    self.response_control.clone(),
                     context
                         .trace
                         .cloned()
@@ -582,12 +586,11 @@ async fn await_websocket_delivery_boundary(
             }
             Some(Err(error)) => return Err(error),
             None => {
-                return Err(CodexWebSocketExchangeError::closed_before_terminal_on(
-                    exchange.websocket_connection_id,
-                    None,
-                    None,
-                    None,
-                ));
+                return Err(CodexWebSocketExchangeError::StreamEndedBeforeTerminal {
+                    reason: "stream_eof",
+                    timeout: None,
+                    last_event_type: None,
+                });
             }
         }
     }

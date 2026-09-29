@@ -225,7 +225,11 @@ pub struct ProcessSystemOperations {
 
 impl ProcessSystemOperations {
     #[must_use]
-    pub fn new(cancellation: CancellationToken, config: SystemUpdateConfig) -> Self {
+    pub fn new(cancellation: CancellationToken, mut config: SystemUpdateConfig) -> Self {
+        // 更新会重命名旧程序；启动时固定安装路径，重启不能反查备份文件。
+        if config.executable_path.is_none() {
+            config.executable_path = config.executable_path().ok();
+        }
         Self {
             cancellation,
             events: Arc::new(UpdateEvents::default()),

@@ -86,7 +86,7 @@ export function useAccountBatchEditor(options: {
       })
       showBatchEditModal.value = false
       options.selectedIds.value = new Set()
-      await Promise.all([options.reloadAccounts(), options.reloadGroups()])
+      void Promise.allSettled([options.reloadAccounts(), options.reloadGroups()])
       toast.success(`已更新 ${accountIds.length} 个账号`)
     }, { errorText: '批量更新账号失败', onError: () => void options.reloadAccounts() })
   }

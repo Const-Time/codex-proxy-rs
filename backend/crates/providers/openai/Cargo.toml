@@ -50,6 +50,7 @@ tokio = { version = "=1.52.3", default-features = false, features = ["fs", "macr
 tokio-rustls = { version = "=0.26.4", default-features = false }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tower-service = "0.3.3"
+tower-layer = "0.3.3"
 # 官方 Codex WebSocket 需要上游尚未发布的 proxy 与 permessage-deflate 实现，固定到已审计提交。
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186", features = ["proxy", "rustls-tls-native-roots"] }
 tracing = "0.1.44"

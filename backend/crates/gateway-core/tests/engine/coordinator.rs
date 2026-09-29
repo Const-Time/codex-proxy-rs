@@ -4409,7 +4409,7 @@ fn charged_terminal_write_resumes_without_replacing_success_failure_or_send_fact
 }
 
 #[test]
-fn deadline_after_commit_is_incomplete_without_provider_circuit_failure() {
+fn deadline_after_commit_is_incomplete_without_upstream_failure() {
     let operation = generate_operation();
     let route_plan = plan(&operation);
     let (coordinator, store, _) = coordinator(vec![Script::HangingStream {
@@ -4449,7 +4449,7 @@ fn deadline_after_commit_is_incomplete_without_provider_circuit_failure() {
 }
 
 #[test]
-fn deadline_before_first_event_records_no_provider_circuit_failure() {
+fn deadline_before_first_event_records_no_upstream_failure() {
     let operation = generate_operation();
     let route_plan = plan(&operation);
     let (coordinator, store, _) = coordinator(vec![Script::HangingStream {
@@ -4474,4 +4474,53 @@ fn deadline_before_first_event_records_no_provider_circuit_failure() {
     assert_eq!(state.attempts.len(), 1);
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Failed);
     assert!(!state.finalizations[0].committed);
+}
+
+#[test]
+fn connection_retry_requires_not_sent_and_keeps_the_same_account() {
+    for sent in [UpstreamSendState::NotSent, UpstreamSendState::Ambiguous] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let (coordinator, store, provider) = coordinator(vec![
+            Script::Stream {
+                account_id: "acct_first",
+                items: vec![Err(ProviderError::new(ProviderErrorKind::Transport, sent)
+                    .with_connection_retry(AttemptTransport::Fallback))],
+            },
+            Script::Stream {
+                account_id: "acct_first",
+                items: complete_stream(None),
+            },
+        ]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        let result = block_on(session.collect_uncommitted());
+        let contexts = provider.contexts.lock().unwrap();
+        if sent == UpstreamSendState::NotSent {
+            result.unwrap();
+            block_on(session.commit_downstream(Some(200))).unwrap();
+            assert_eq!(contexts.len(), 2);
+            assert_eq!(contexts[1].transport(), AttemptTransport::Fallback);
+            assert_eq!(
+                contexts[1].required_account().unwrap().as_str(),
+                "acct_first"
+            );
+            assert!(contexts[1].excluded_accounts().is_empty());
+            // Every attempt observes the same budget object.
+            contexts[0].connection_budget().complete();
+            assert!(contexts[1].connection_budget().begin().unwrap().is_none());
+            assert_eq!(store.state.lock().unwrap().intermediate_failures, 1);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(contexts.len(), 1);
+            assert_eq!(store.state.lock().unwrap().intermediate_failures, 0);
+        }
+    }
 }

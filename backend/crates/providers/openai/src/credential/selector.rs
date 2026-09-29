@@ -572,12 +572,24 @@ impl CodexCredentialSelector {
                 let quota_exhausted = !diagnostic
                     && statuses.next() == Some(AccountStatus::QuotaExhausted)
                     && statuses.all(|status| status == AccountStatus::QuotaExhausted);
-                return match shortest_retry {
-                    Some(retry_after) => Err(CredentialSelectionError::CapacityUnavailable {
-                        retry_after: Some(retry_after),
-                    }),
-                    None if quota_exhausted => Err(CredentialSelectionError::QuotaExhausted),
-                    None => Err(CredentialSelectionError::NoEligibleCredential),
+                // 用原始排除集区分暂时容量不足与真正无资格账号；租约争用不能伪装成目录缺项。
+                let eligible_capacity = AccountSelector
+                    .capacity_snapshot(
+                        &candidates,
+                        &AccountSelectionContext {
+                            excluded_accounts: base_excluded.clone(),
+                            ..context.clone()
+                        },
+                    )
+                    .is_some();
+                return if eligible_capacity || shortest_retry.is_some() {
+                    Err(CredentialSelectionError::CapacityUnavailable {
+                        retry_after: shortest_retry,
+                    })
+                } else if quota_exhausted {
+                    Err(CredentialSelectionError::QuotaExhausted)
+                } else {
+                    Err(CredentialSelectionError::NoEligibleCredential)
                 };
             };
             affinity.observe_preferred_selection(selection.preferred());

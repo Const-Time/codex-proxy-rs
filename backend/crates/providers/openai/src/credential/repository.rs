@@ -226,9 +226,6 @@ impl CodexCredentialRepository {
         error_reason: Option<AccountErrorReason>,
         message: Option<String>,
     ) -> Result<(), CredentialRepositoryError> {
-        if !account.enabled() {
-            return Ok(());
-        }
         let message = message.filter(|value| !value.trim().is_empty());
         let error_reason = if credential_state == CredentialState::Ready {
             message.as_ref().and(error_reason)
