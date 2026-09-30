@@ -19,6 +19,7 @@
 | #297 / `ae8da004`（仅分类） | 暂时没有并发/间隔名额时返回 CapacityUnavailable，不误判为没有账号 |
 | `bb859455` | 初始化时固定自更新安装路径，替换运行二进制后重启指向新程序 |
 | `a5a844af` | reqwest 恢复默认空闲池/keepalive 策略，避免强制长期保留空闲连接 |
+| `66a3474b`（Core 提取部分） | 从新 CodexCLI.app 路径提取 Desktop Core 版本，拒绝启动脚本、旧路径及重复 Core 条目，修复发布检查失败 |
 
 完整来源为 [zyycn/codex-proxy-rs](https://github.com/zyycn/codex-proxy-rs)。这里是按本地 owner 移植行为，没有整包合并上游。
 
@@ -40,4 +41,6 @@
 - workspace / all-targets / all-features 严格 Clippy（-D warnings）、cargo fmt 和 git diff --check 通过。
 - 前端 49 项 Node 测试、ESLint、Vue/TypeScript 检查及 Vite 生产构建通过。直接执行仓库脚本对应的命令，复用已有依赖，没有变更依赖锁文件。
 - 新增定向验证覆盖目录来源与分组隔离、慢刷新抢占和撤权、饱和容量分类、入口拒绝落库、NotSent 重试边界、原 WS 中断与串行排队，以及重命名运行二进制后的原路径重启。
-- 已发布迁移和原工作目录的三项用户改动保持不变。没有推送、发布或部署；未做真实上游账号在线调用或浏览器交互验收。
+- 已发布迁移和原工作目录的三项用户改动保持不变。本轮随 v3.11.2 发布，发布不自动升级或重启线上实例；未做真实上游账号在线调用或浏览器交互验收。
+
+- Desktop Core 路径修复补充回归，并通过官方发布源实测：Desktop 26.928.20755 安装包提取出 Core 0.159.0。
