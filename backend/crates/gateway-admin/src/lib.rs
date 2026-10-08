@@ -351,6 +351,7 @@ pub async fn initialize(
         plugin_resources: Arc::new(
             use_case::plugin_resources::DefaultPluginResourceService::new(
                 store.account_groups(),
+                store.client_keys(),
                 snapshot.clone(),
             ),
         ),

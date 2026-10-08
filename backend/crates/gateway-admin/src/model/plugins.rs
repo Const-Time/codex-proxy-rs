@@ -178,3 +178,21 @@ pub struct PluginMembersChanged {
     pub added: u64,
     pub removed: u64,
 }
+
+#[derive(Clone)]
+pub struct PluginKeyEnsure {
+    pub resource_key: String,
+    pub name: String,
+    pub group_resource_keys: Vec<String>,
+    pub max_concurrency: u64,
+    pub requests_per_minute: u64,
+    pub daily_limit_usd: String,
+    pub weekly_limit_usd: String,
+}
+pub struct PluginKeyCreate {
+    pub resource_key: String,
+    pub group_resource_key: String,
+    pub key: super::client_keys::NewClientKey,
+    /// Expected effective shared limits; never implicitly rewrites a shared budget.
+    pub budget: gateway_core::engine::budget::ClientBudgetLimits,
+}

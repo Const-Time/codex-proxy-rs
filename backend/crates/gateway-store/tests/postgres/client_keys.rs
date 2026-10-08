@@ -432,3 +432,204 @@ fn client_key_debug_redacts_plaintext() {
     };
     assert!(!format!("{key:?}").contains(&secret));
 }
+
+#[tokio::test]
+async fn plugin_keys_preserve_owner_shared_budgets_idempotency_and_deleted_tombstones() {
+    use gateway_admin::model::{
+        MutationActor, MutationContext, client_keys::NewClientKey, plugins::*,
+    };
+    use gateway_admin::ports::store::AdminStoreErrorKind;
+    let Some(db) = TestDatabase::create("plugin_keys").await else {
+        return;
+    };
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    let group = "grp_00000000000000000000000000000077";
+    sqlx::query(
+        "insert into plugin_artifacts(sha256,info,archive) values($1,'{}',decode('00','hex'))",
+    )
+    .bind("a".repeat(64))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    for id in ["plugin-a", "plugin-b"] {
+        sqlx::query("insert into plugin_instances(id,revision,name,artifact_sha256,enabled,configuration,secrets) values($1,1,$1,$2,true,'{}','{}')").bind(id).bind("a".repeat(64)).execute(&db.pool).await.unwrap();
+    }
+    sqlx::query("insert into account_groups(id,name,color,daily_limit_usd,weekly_limit_usd,created_at,updated_at) values($1,'Plugin','#64748BFF',2,10,now(),now())").bind(group).execute(&db.pool).await.unwrap();
+    sqlx::query("insert into plugin_managed_groups(instance_id,resource_key,group_id) values('plugin-a','main',$1)").bind(group).execute(&db.pool).await.unwrap();
+    sqlx::query("insert into users(id,username,password_hash,role,created_at,updated_at) values('other-owner','other','unused','admin',now(),now())").execute(&db.pool).await.unwrap();
+    let scope = |plugin: &str, owner: &str, revision| PluginMutationScope {
+        instance_id: plugin.into(),
+        revision,
+        actor: MutationContext {
+            actor: MutationActor::AdminSession {
+                admin_user_id: owner.into(),
+            },
+            request_id: "plugin-key-test".into(),
+        },
+    };
+    let command =
+        |resource: &str, id: &str, secret: &str, daily: &str, weekly: &str| PluginKeyCreate {
+            resource_key: resource.into(),
+            group_resource_key: "main".into(),
+            key: NewClientKey {
+                id: ClientApiKeyId::new(id).unwrap(),
+                name: id.into(),
+                label: None,
+                group_ids: vec![],
+                limits: Default::default(),
+                plaintext: format!("sk_{}", secret.repeat(43)),
+            },
+            budget: gateway_core::engine::budget::ClientBudgetLimits {
+                daily_usd: daily.parse().unwrap(),
+                weekly_usd: weekly.parse().unwrap(),
+            },
+        };
+    let mismatch = keys
+        .ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("key", "bad-budget", "z", "3", "10"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(mismatch.kind(), AdminStoreErrorKind::Conflict);
+    let (a, b) = tokio::join!(
+        keys.ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("key", "key_a", "a", "2", "10")
+        ),
+        keys.ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("key", "key_b", "b", "2", "10")
+        )
+    );
+    let a = a.unwrap();
+    assert_eq!(a, b.unwrap());
+    let id = a.value.id.clone();
+    let stored: (String, String) =
+        sqlx::query_as("select owner_user_id,key from client_api_keys where id=$1")
+            .bind(&id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.0, "test-owner");
+    let count: i64 = sqlx::query_scalar("select count(*) from client_api_keys")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    sqlx::query("update client_api_keys set name='Admin edited',enabled=false where id=$1")
+        .bind(&id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let existing = keys
+        .ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("key", "other-id", "x", "0", "0"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(existing.value.name, "Admin edited");
+    assert!(!existing.value.enabled);
+    assert!(
+        keys.ensure_plugin_key(
+            scope("plugin-a", "other-owner", 1),
+            command("key", "foreign-owner", "y", "2", "10")
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        keys.ensure_plugin_key(
+            scope("plugin-b", "test-owner", 1),
+            command("key", "foreign-plugin", "y", "2", "10")
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("update users set group_grants_configured=true where id='test-owner'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        keys.ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("second", "no-grant", "c", "2", "10")
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("insert into user_account_groups(user_id,account_group_id,quota_multiplier) values('test-owner',$1,2)").bind(group).execute(&db.pool).await.unwrap();
+    assert!(
+        keys.ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("second", "wrong-factor", "c", "2", "10")
+        )
+        .await
+        .is_err()
+    );
+    keys.ensure_plugin_key(
+        scope("plugin-a", "test-owner", 1),
+        command("second", "key_second", "c", "4", "20"),
+    )
+    .await
+    .unwrap();
+    let limits: (String, String) = sqlx::query_as(
+        "select daily_limit_usd::text,weekly_limit_usd::text from account_groups where id=$1",
+    )
+    .bind(group)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(limits, ("2.0000000000".into(), "10.0000000000".into()));
+    sqlx::query("delete from client_api_keys where id=$1")
+        .bind(&id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        keys.ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("key", "recreate", "d", "4", "20")
+        )
+        .await
+        .unwrap_err()
+        .kind(),
+        AdminStoreErrorKind::NotFound
+    );
+    sqlx::query("update plugin_instances set revision=2,enabled=false where id='plugin-a'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        keys.ensure_plugin_key(
+            scope("plugin-a", "test-owner", 1),
+            command("third", "stale", "e", "4", "20")
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("delete from plugin_instances where id='plugin-a'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let retained: i64 = sqlx::query_scalar("select count(*) from client_api_keys")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, 1);
+    let windows: i64 = sqlx::query_scalar("select count(*) from user_group_budget_windows")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(windows, 0);
+    let audit: Vec<serde_json::Value> = sqlx::query_scalar(
+        "select to_jsonb(a) from admin_audit_events a where action='plugin.key.ensure'",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit.len(), 2);
+    assert!(!serde_json::to_string(&audit).unwrap().contains(&stored.1));
+    db.close().await;
+}

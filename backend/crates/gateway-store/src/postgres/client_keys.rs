@@ -694,6 +694,122 @@ impl PgAdminClientKeyStore {
 
 #[async_trait]
 impl ClientKeyStore for PgAdminClientKeyStore {
+    async fn ensure_plugin_key(
+        &self,
+        scope: gateway_admin::model::plugins::PluginMutationScope,
+        command: gateway_admin::model::plugins::PluginKeyCreate,
+    ) -> AdminStoreResult<
+        gateway_admin::model::plugins::PluginResourceMutation<
+            gateway_admin::model::plugins::PluginManagedResource,
+        >,
+    > {
+        use gateway_admin::model::plugins::{PluginManagedResource, PluginResourceMutation};
+        let failure = || admin_store_error(ENTITY, postgres_unavailable("plugin key operation"));
+        let mut tx = self.keys.pool.begin().await.map_err(|_| failure())?;
+        super::plugins::lock_plugin_resource(&mut tx, &scope).await?;
+        let audit = mutation_audit(
+            &scope.actor,
+            "plugin.key.ensure",
+            "client_api_key",
+            command.key.id.as_str(),
+            vec!["plugin_resource".into(), "group_ids".into()],
+        );
+        let existing=sqlx::query("select p.client_key_id,p.owner_user_id,k.name,k.enabled from plugin_managed_keys p left join client_api_keys k on k.id=p.client_key_id where p.instance_id=$1 and p.resource_key=$2").bind(&scope.instance_id).bind(&command.resource_key).fetch_optional(&mut *tx).await.map_err(|_|failure())?;
+        if let Some(row) = existing {
+            let owner = authorize_key_mutation(&mut tx, &audit, None, None)
+                .await
+                .map_err(|e| admin_store_error(ENTITY, e))?;
+            let stored_owner: String = row.try_get("owner_user_id").map_err(|_| failure())?;
+            if owner != stored_owner {
+                return Err(admin_store_error(
+                    ENTITY,
+                    invalid("plugin key belongs to another user"),
+                ));
+            }
+            let id: Option<String> = row.try_get("client_key_id").map_err(|_| failure())?;
+            let id = id.ok_or_else(|| {
+                admin_store_error(
+                    ENTITY,
+                    StoreError::NotFound {
+                        entity: ENTITY,
+                        id: "deleted plugin key".into(),
+                    },
+                )
+            })?;
+            let revision = super::plugins::plugin_current_revision(&mut tx).await?;
+            let value = PluginManagedResource {
+                id,
+                name: row.try_get("name").map_err(|_| failure())?,
+                enabled: row.try_get("enabled").map_err(|_| failure())?,
+            };
+            tx.commit().await.map_err(|_| failure())?;
+            return Ok(PluginResourceMutation { revision, value });
+        }
+        let count: i64 =
+            sqlx::query_scalar("select count(*) from plugin_managed_keys where instance_id=$1")
+                .bind(&scope.instance_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| failure())?;
+        if count >= 256 {
+            return Err(admin_store_error(
+                ENTITY,
+                invalid("plugin key capacity reached"),
+            ));
+        }
+        let revision = super::bump_config_revision_in_transaction(&mut tx)
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        let group: Option<Option<String>> = sqlx::query_scalar(
+            "select group_id from plugin_managed_groups where instance_id=$1 and resource_key=$2",
+        )
+        .bind(&scope.instance_id)
+        .bind(&command.group_resource_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| failure())?;
+        let group = group
+            .flatten()
+            .ok_or_else(|| admin_store_error(ENTITY, invalid("plugin group does not exist")))?;
+        let groups = vec![group.clone()];
+        let owner = authorize_key_mutation(&mut tx, &audit, None, Some(&groups))
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        let budget_matches:bool=sqlx::query_scalar("select user_group_quota_limit(daily_limit_usd,$2,id)=$3::text::numeric and user_group_quota_limit(weekly_limit_usd,$2,id)=$4::text::numeric from account_groups where id=$1").bind(&group).bind(&owner).bind(command.budget.daily_usd.canonical()).bind(command.budget.weekly_usd.canonical()).fetch_one(&mut *tx).await.map_err(|_|failure())?;
+        if !budget_matches {
+            return Err(gateway_admin::ports::store::AdminStoreError::new(
+                gateway_admin::ports::store::AdminStoreErrorKind::Conflict,
+                "plugin_key_shared_budget",
+                "requested budget differs from effective user group budget",
+            ));
+        }
+        let key = NewClientApiKey {
+            id: command.key.id.as_str().into(),
+            name: command.key.name,
+            label: command.key.label,
+            group_ids: groups,
+            key: command.key.plaintext,
+            max_concurrency: command.key.limits.max_concurrency,
+            requests_per_minute: command.key.limits.requests_per_minute,
+        };
+        insert_client_api_key_in_transaction(&mut tx, &key, &owner)
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        sqlx::query("insert into plugin_managed_keys(instance_id,resource_key,client_key_id,owner_user_id) values($1,$2,$3,$4)").bind(&scope.instance_id).bind(&command.resource_key).bind(&key.id).bind(&owner).execute(&mut *tx).await.map_err(|_|failure())?;
+        super::append_admin_audit_event_in_transaction(&mut tx, audit, revision)
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        tx.commit().await.map_err(|_| failure())?;
+        Ok(PluginResourceMutation {
+            revision: admin_revision(revision)?,
+            value: PluginManagedResource {
+                id: key.id,
+                name: key.name,
+                enabled: true,
+            },
+        })
+    }
+
     async fn plugin_key_facts(
         &self,
         id: &ClientApiKeyId,

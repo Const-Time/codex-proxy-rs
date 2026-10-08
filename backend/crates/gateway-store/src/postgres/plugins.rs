@@ -318,3 +318,44 @@ impl PluginStore for PgPluginStore {
         Ok(version as u64)
     }
 }
+
+fn plugin_unavailable() -> gateway_admin::ports::store::AdminStoreError {
+    gateway_admin::ports::store::AdminStoreError::new(
+        gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+        "plugin resource",
+        "storage unavailable",
+    )
+}
+pub(super) async fn plugin_current_revision(
+    tx: &mut Transaction<'_, Postgres>,
+) -> gateway_admin::ports::store::AdminStoreResult<gateway_admin::model::Revision> {
+    let revision: i64 =
+        sqlx::query_scalar("select config_revision from runtime_settings where id=1")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|_| plugin_unavailable())?;
+    crate::admin_revision(
+        crate::Revision::new(revision as u64)
+            .map_err(|e| crate::admin_store_error("plugin resource", e))?,
+    )
+}
+pub(super) async fn lock_plugin_resource(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &PluginMutationScope,
+) -> gateway_admin::ports::store::AdminStoreResult<()> {
+    let revision: Option<i64> = sqlx::query_scalar(
+        "select revision from plugin_instances where id=$1 and enabled for update",
+    )
+    .bind(&scope.instance_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| plugin_unavailable())?;
+    if revision.and_then(|v| u64::try_from(v).ok()) != Some(scope.revision) {
+        return Err(gateway_admin::ports::store::AdminStoreError::new(
+            gateway_admin::ports::store::AdminStoreErrorKind::Conflict,
+            "plugin resource",
+            "stale plugin generation",
+        ));
+    }
+    Ok(())
+}

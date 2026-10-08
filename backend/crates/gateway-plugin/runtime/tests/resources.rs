@@ -13,6 +13,22 @@ use std::sync::{Arc, Mutex};
 struct Resources(Mutex<Vec<PluginMutationScope>>);
 #[async_trait]
 impl PluginResourceService for Resources {
+    async fn ensure_key(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginKeyEnsure,
+    ) -> Result<PluginManagedResource, AdminError> {
+        assert_eq!(command.group_resource_keys, ["main"]);
+        assert_eq!(command.daily_limit_usd, "0");
+        assert_eq!(command.weekly_limit_usd, "0");
+        let id = scope.actor.request_id.clone();
+        self.0.lock().unwrap().push(scope);
+        Ok(PluginManagedResource {
+            id,
+            name: command.name,
+            enabled: true,
+        })
+    }
     async fn ensure_group(
         &self,
         scope: PluginMutationScope,
@@ -83,7 +99,7 @@ async fn resource_callbacks_keep_concurrent_host_callers_separate_and_reject_for
     }
     {
         let scopes = resources.0.lock().unwrap();
-        assert_eq!(scopes.len(), 4);
+        assert_eq!(scopes.len(), 6);
         for s in scopes.iter() {
             assert_eq!(s.instance_id, installed.id);
             assert_eq!(s.revision, 1);
@@ -100,7 +116,7 @@ async fn resource_callbacks_keep_concurrent_host_callers_separate_and_reject_for
     let response = manager.handle(&installed.id, 1, r).await.unwrap();
     let value: Value = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(value["error"]["code"], "invalid_input");
-    assert_eq!(resources.0.lock().unwrap().len(), 4);
+    assert_eq!(resources.0.lock().unwrap().len(), 6);
     manager
         .update(
             Some(&installed.id),

@@ -370,6 +370,19 @@ pub trait AuthStore: Send + Sync {
 /// Client API Key 管理写入。
 #[async_trait]
 pub trait ClientKeyStore: Send + Sync {
+    async fn ensure_plugin_key(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _command: crate::model::plugins::PluginKeyCreate,
+    ) -> AdminStoreResult<
+        crate::model::plugins::PluginResourceMutation<crate::model::plugins::PluginManagedResource>,
+    > {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin key",
+            "not configured",
+        ))
+    }
     async fn plugin_key_facts(
         &self,
         _id: &gateway_core::policy::ClientApiKeyId,

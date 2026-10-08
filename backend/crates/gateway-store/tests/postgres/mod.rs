@@ -257,6 +257,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "plugin_artifacts",
             "plugin_instances",
             "plugin_managed_groups",
+            "plugin_managed_keys",
             "plugin_private_state",
             "provider_accounts",
             "runtime_settings",
