@@ -120,6 +120,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    settings: crate::routing::RequestSettings,
     attempt_middleware: Option<Arc<dyn super::attempt_middleware::AttemptMiddleware>>,
     client: AuthenticatedClient,
     request_id: ModelRequestId,
@@ -129,6 +130,26 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn settings(&self) -> &crate::routing::RequestSettings {
+        &self.settings
+    }
+
+    /// Apply a request branch without accepting another request's authorization or snapshot.
+    pub fn with_settings(
+        mut self,
+        settings: crate::routing::RequestSettings,
+    ) -> Result<Self, GatewayError> {
+        self.validate()?;
+        if !settings.has_baseline(&self.client.snapshot) {
+            return Err(GatewayError::new(
+                GatewayErrorKind::InvalidRequest,
+                "request settings belong to a different host snapshot",
+            ));
+        }
+        self.settings = settings;
+        Ok(self)
+    }
+
     pub fn with_attempt_middleware(
         mut self,
         middleware: Arc<dyn super::attempt_middleware::AttemptMiddleware>,
@@ -492,14 +513,14 @@ impl DefaultExecutionService {
         let account_scope = Arc::clone(request.prepared.client.policy.account_scope());
         let plan = match &request.target {
             ExecutionTarget::ProviderEndpoint(provider) => {
-                request.prepared.client.snapshot.plan_provider_endpoint(
+                request.prepared.settings.snapshot().plan_provider_endpoint(
                     provider,
                     &request.operation,
                     account_scope,
                     &routing_context,
                 )
             }
-            ExecutionTarget::Model(public_model) => request.prepared.client.snapshot.plan(
+            ExecutionTarget::Model(public_model) => request.prepared.settings.snapshot().plan(
                 public_model,
                 &request.operation,
                 account_scope,
@@ -611,6 +632,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         let PreparedRootExecution {
+            settings: _,
             attempt_middleware,
             client,
             request_id,
@@ -1221,6 +1243,7 @@ impl ExecutionService for DefaultExecutionService {
         })?;
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            settings: crate::routing::RequestSettings::new(client.snapshot.clone()),
             attempt_middleware: None,
             client,
             request_id: new_request_id()?,

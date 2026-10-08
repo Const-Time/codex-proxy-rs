@@ -2145,3 +2145,128 @@ fn bound_execution_revocation_preserves_charges_and_cancelling_one_request_prese
         }
     });
 }
+
+#[test]
+fn prepared_runtime_settings_route_the_request_without_mutating_identity_or_other_requests() {
+    use gateway_core::engine::execution::PreparedExecutionRequest;
+    block_on(async {
+        for transport in [
+            ClientTransport::HttpJson,
+            ClientTransport::HttpSse,
+            ClientTransport::WebSocket,
+        ] {
+            let admissions = Arc::new(Admissions::default());
+            let budget = Arc::new(Budget {
+                active: admissions.active.clone(),
+                ..Default::default()
+            });
+            let store = Arc::new(TrackingExecutionStore::default());
+            let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+            let service = DefaultExecutionService::new(
+                snapshots.clone(),
+                store.clone(),
+                ProviderRegistry::new([
+                    Arc::new(ChargedProvider { fail: false }) as Arc<dyn Provider>
+                ])
+                .unwrap(),
+                admissions.clone(),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            )
+            .with_budget(budget.clone());
+            let input = request(&service, transport);
+            let prepared = service.prepare_execution(input.client).unwrap();
+            let request_id = prepared.request_id().clone();
+            let start = prepared.started_at();
+            let deadline = prepared.deadline_at();
+            let policy = prepared.client().policy().clone();
+            let original = prepared.client().snapshot().clone();
+            let replacement = prepared
+                .settings()
+                .values()
+                .clone()
+                .with_model_mappings(BTreeMap::from([("alias".into(), "gpt-start".into())]));
+            let settings = prepared
+                .settings()
+                .replace(replacement, "mapping-plugin")
+                .unwrap();
+            let prepared = prepared.with_settings(settings).unwrap();
+            assert_eq!(prepared.client().policy(), &policy);
+            assert!(Arc::ptr_eq(prepared.client().snapshot(), &original));
+            assert_eq!(prepared.request_id(), &request_id);
+            assert_eq!(prepared.started_at(), start);
+            assert_eq!(prepared.deadline_at(), deadline);
+            assert_eq!(snapshots.acquire().unwrap().mapped_model("alias"), "alias");
+            assert_eq!(
+                service
+                    .prepare_execution(service.authenticate("sk_start_test").unwrap())
+                    .unwrap()
+                    .settings()
+                    .snapshot()
+                    .mapped_model("alias"),
+                "alias"
+            );
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: PublicModelId::new("alias").unwrap(),
+                        operation: start_operation_for_model("alias"),
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            consume_charged_prefix(started.session.as_mut()).await;
+            started.session.detach_finalize().await;
+            assert_cleanup_completed(&admissions, &budget, &request_id);
+            let rows = store.requests.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, request_id);
+            assert_eq!(rows[0].started_at, start);
+            assert_eq!(rows[0].deadline_at, deadline);
+            assert_eq!(rows[0].client_api_key_ref, policy.key_id().clone());
+        }
+    });
+}
+
+#[test]
+fn prepared_runtime_settings_reject_foreign_baselines_and_preserve_revocation() {
+    for cause in ["foreign", "key", "cancel"] {
+        let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+        let admissions = Arc::new(Admissions::default());
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            snapshots.clone(),
+            store.clone(),
+            ProviderRegistry::default(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let prepared = service
+            .prepare_execution(service.authenticate("sk_start_test").unwrap())
+            .unwrap();
+        let settings = if cause == "foreign" {
+            gateway_core::routing::RequestSettings::new(Arc::new(start_snapshot()))
+        } else {
+            prepared.settings().clone()
+        };
+        if cause == "key" {
+            snapshots.publish(start_snapshot_with_policy(
+                2,
+                false,
+                RateLimits::unlimited(),
+            ));
+        }
+        if cause == "cancel" {
+            prepared.cancellation().cancel();
+        }
+        let result = prepared.with_settings(settings);
+        assert!(
+            matches!(result,Err(e) if e.kind()==match cause { "foreign"=>GatewayErrorKind::InvalidRequest, "key"=>GatewayErrorKind::Unauthorized, _=>GatewayErrorKind::Cancelled })
+        );
+        assert!(admissions.limits.lock().unwrap().is_empty());
+        assert!(!store.touched.load(Ordering::SeqCst));
+    }
+}

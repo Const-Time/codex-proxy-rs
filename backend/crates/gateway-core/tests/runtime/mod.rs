@@ -1,3 +1,4 @@
+use gateway_core::settings::SettingsValues;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -13,8 +14,8 @@ use gateway_core::lifecycle::CancellationToken;
 use gateway_core::policy::{ClientApiKeyId, PlaintextClientApiKey, RateLimits};
 use gateway_core::routing::snapshot::{
     RuntimeSnapshotCompiler, SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts,
-    SnapshotClientPolicyFacts, SnapshotFacts, SnapshotProviderAccountFacts, SnapshotSettingsFacts,
-    SnapshotStoreError, SnapshotStorePort,
+    SnapshotClientPolicyFacts, SnapshotFacts, SnapshotProviderAccountFacts, SnapshotStoreError,
+    SnapshotStorePort,
 };
 use gateway_core::routing::{
     AccountGroupId, ConfigRevision, ProviderCatalogGeneration, ProviderCatalogPort,
@@ -596,7 +597,7 @@ fn scoped_facts(value: u64, allow_removed: bool) -> SnapshotFacts {
     SnapshotFacts::new(
         revision(value),
         revision(value),
-        SnapshotSettingsFacts::new(3, 0, "smart", BTreeMap::new(), None, None),
+        SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None),
         vec![SnapshotClientPolicyFacts::new(
             ClientApiKeyId::new("key_audit_synthetic").expect("key ID"),
             PlaintextClientApiKey::new("sk_audit_synthetic_not_a_real_key").expect("synthetic key"),
@@ -629,7 +630,7 @@ fn facts(config_revision: u64, observed_current_revision: u64) -> SnapshotFacts 
     SnapshotFacts::new(
         revision(config_revision),
         revision(observed_current_revision),
-        SnapshotSettingsFacts::new(
+        SettingsValues::new(
             3,
             50,
             "smart",

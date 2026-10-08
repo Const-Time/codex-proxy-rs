@@ -1,5 +1,6 @@
 //! 终态配置表的一致性 `RuntimeSnapshot` 输入读取。
 
+use gateway_core::settings::SettingsValues;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -8,8 +9,7 @@ use gateway_core::routing::{
     AccountGroupId, ConfigRevision,
     snapshot::{
         SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts, SnapshotClientPolicyFacts,
-        SnapshotFacts, SnapshotProviderAccountFacts, SnapshotSettingsFacts, SnapshotStoreError,
-        SnapshotStorePort,
+        SnapshotFacts, SnapshotProviderAccountFacts, SnapshotStoreError, SnapshotStorePort,
     },
 };
 use sqlx::{PgPool, Postgres, Transaction};
@@ -142,7 +142,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 .map_err(|_| SnapshotStoreError::unavailable())?;
             let config_revision = core_revision(data.config_revision)?;
             let observed_current_revision = core_revision(data.observed_current_revision)?;
-            let settings = SnapshotSettingsFacts::new(
+            let settings = SettingsValues::new(
                 data.settings.max_concurrent_per_account,
                 data.settings.request_interval_ms,
                 data.settings.rotation_strategy,

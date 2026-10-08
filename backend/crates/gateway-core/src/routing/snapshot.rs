@@ -3,17 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::future::BoxFuture;
 
 use super::{ProviderCatalogGeneration, ProviderCatalogPort};
-use crate::account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy};
+use crate::account::{AccountSelectionPolicy, ProviderAccountId};
 use crate::operation::Operation;
 use crate::policy::{
-    ClientApiKeyId, ClientPolicy, CodexClientMinVersions, CodexClientVersion,
-    PlaintextClientApiKey, RateLimits,
+    ClientApiKeyId, ClientPolicy, CodexClientMinVersions, PlaintextClientApiKey, RateLimits,
 };
+use crate::settings::{InvalidSettings, SettingsValues};
 use crate::validation::RoutingError;
 
 use super::{
@@ -25,46 +24,6 @@ use super::{
 const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
 
 type ModelCatalogAccounts = BTreeMap<ProviderKind, BTreeMap<String, BTreeSet<ProviderAccountId>>>;
-
-/// Store 在一个一致性读取中提供的调度设置事实。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotSettingsFacts {
-    pricing: Arc<crate::metering::PricingOverrides>,
-    max_concurrent_per_account: u32,
-    request_interval_ms: u64,
-    rotation_strategy: String,
-    model_mappings: BTreeMap<String, String>,
-    min_codex_desktop_version: Option<String>,
-    min_codex_cli_version: Option<String>,
-}
-
-impl SnapshotSettingsFacts {
-    #[must_use]
-    pub fn with_pricing(mut self, pricing: crate::metering::PricingOverrides) -> Self {
-        self.pricing = Arc::new(pricing);
-        self
-    }
-
-    #[must_use]
-    pub fn new(
-        max_concurrent_per_account: u32,
-        request_interval_ms: u64,
-        rotation_strategy: impl Into<String>,
-        model_mappings: BTreeMap<String, String>,
-        min_codex_desktop_version: Option<String>,
-        min_codex_cli_version: Option<String>,
-    ) -> Self {
-        Self {
-            pricing: Arc::default(),
-            max_concurrent_per_account,
-            request_interval_ms,
-            rotation_strategy: rotation_strategy.into(),
-            model_mappings,
-            min_codex_desktop_version,
-            min_codex_cli_version,
-        }
-    }
-}
 
 /// Store 读取到的一个启用 Client API Key 策略事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,7 +122,7 @@ impl SnapshotAccountGroupMemberFacts {
 pub struct SnapshotFacts {
     config_revision: ConfigRevision,
     observed_current_revision: ConfigRevision,
-    settings: SnapshotSettingsFacts,
+    settings: SettingsValues,
     client_policies: Vec<SnapshotClientPolicyFacts>,
     account_groups: Vec<SnapshotAccountGroupFacts>,
     provider_accounts: Vec<SnapshotProviderAccountFacts>,
@@ -175,7 +134,7 @@ impl SnapshotFacts {
     pub fn new(
         config_revision: ConfigRevision,
         observed_current_revision: ConfigRevision,
-        settings: SnapshotSettingsFacts,
+        settings: SettingsValues,
         client_policies: Vec<SnapshotClientPolicyFacts>,
         account_groups: Vec<SnapshotAccountGroupFacts>,
         provider_accounts: Vec<SnapshotProviderAccountFacts>,
@@ -419,31 +378,10 @@ async fn compile_runtime_snapshot(
     }
     let account_directory = Arc::new(RuntimeAccountDirectory::new(accounts));
 
-    let model_mappings = facts.settings.model_mappings;
-    let min_client_versions = CodexClientMinVersions::new(
-        facts
-            .settings
-            .min_codex_desktop_version
-            .as_deref()
-            .map(CodexClientVersion::parse)
-            .transpose()
-            .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?,
-        facts
-            .settings
-            .min_codex_cli_version
-            .as_deref()
-            .map(CodexClientVersion::parse)
-            .transpose()
-            .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?,
-    );
-    let rotation_strategy = RotationStrategy::parse(facts.settings.rotation_strategy.as_str())
-        .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
-    let selection_policy = AccountSelectionPolicy::new(
-        rotation_strategy,
-        NonZeroU32::new(facts.settings.max_concurrent_per_account)
-            .ok_or(RuntimeSnapshotCompileError::InvalidData)?,
-        Duration::from_millis(facts.settings.request_interval_ms),
-    );
+    let compiled = facts
+        .settings
+        .compile()
+        .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?;
     let mut client_policies = Vec::with_capacity(facts.client_policies.len());
     for policy in facts.client_policies {
         let account_scope = if policy.group_ids.is_empty() {
@@ -492,7 +430,7 @@ async fn compile_runtime_snapshot(
 
     RuntimeSnapshot::new(
         facts.config_revision,
-        selection_policy,
+        compiled.selection,
         provider_kinds,
         provider_models,
         client_policies,
@@ -500,26 +438,23 @@ async fn compile_runtime_snapshot(
     .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
     .map(|snapshot| {
         snapshot
-            .with_pricing(facts.settings.pricing)
-            .with_model_mappings(model_mappings)
+            .with_values(facts.settings, compiled)
             .with_account_directory(account_directory)
             .with_known_provider_catalogs(known_provider_catalogs)
             .with_model_catalog_accounts(catalog_accounts)
-            .with_min_codex_client_versions(min_client_versions)
     })
 }
 
 /// 数据面使用的不可变配置快照。
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
-    pricing: Arc<crate::metering::PricingOverrides>,
+    values: Arc<SettingsValues>,
     revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     providers: Arc<BTreeSet<ProviderKind>>,
     provider_models: Arc<BTreeMap<ProviderKind, BTreeMap<UpstreamModelId, ModelCapabilities>>>,
     provider_model_presentations:
         Arc<BTreeMap<ProviderKind, BTreeMap<UpstreamModelId, super::ModelPresentation>>>,
-    model_mappings: Arc<BTreeMap<String, String>>,
     provider_catalog_generations: Arc<BTreeMap<ProviderKind, ProviderCatalogGeneration>>,
     known_provider_catalogs: Arc<BTreeSet<ProviderKind>>,
     model_catalog_accounts: Arc<ModelCatalogAccounts>,
@@ -529,9 +464,30 @@ pub struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    pub fn settings(&self) -> &SettingsValues {
+        &self.values
+    }
+
+    /// Derive settings without refreshing catalogs, identities, permissions or the host revision.
+    pub fn resolve_settings(&self, values: SettingsValues) -> Result<Arc<Self>, InvalidSettings> {
+        let compiled = values.compile()?;
+        Ok(Arc::new(self.clone().with_values(values, compiled)))
+    }
+
+    fn with_values(
+        mut self,
+        values: SettingsValues,
+        compiled: crate::settings::CompiledSettings,
+    ) -> Self {
+        self.values = Arc::new(values);
+        self.account_selection_policy = compiled.selection;
+        self.min_codex_client_versions = compiled.min_versions;
+        self
+    }
+
     #[must_use]
     pub fn with_pricing(mut self, pricing: Arc<crate::metering::PricingOverrides>) -> Self {
-        self.pricing = pricing;
+        Arc::make_mut(&mut self.values).pricing = pricing;
         self
     }
 
@@ -543,6 +499,12 @@ impl RuntimeSnapshot {
         provider_models: Vec<ProviderModel>,
         client_policies: Vec<ClientPolicy>,
     ) -> Result<Self, RoutingError> {
+        let interval = account_selection_policy.request_interval();
+        let interval_ms =
+            u64::try_from(interval.as_millis()).map_err(|_| RoutingError::InvalidSettings)?;
+        if std::time::Duration::from_millis(interval_ms) != interval {
+            return Err(RoutingError::InvalidSettings);
+        }
         let mut provider_set = BTreeSet::new();
         for provider in providers {
             if !provider_set.insert(provider.clone()) {
@@ -603,13 +565,19 @@ impl RuntimeSnapshot {
         client_policy_map.retain(|_, policy| policy.enabled());
 
         Ok(Self {
-            pricing: Arc::default(),
+            values: Arc::new(SettingsValues::new(
+                account_selection_policy.max_concurrent_per_account().get(),
+                interval_ms,
+                account_selection_policy.strategy().as_str(),
+                BTreeMap::new(),
+                None,
+                None,
+            )),
             revision,
             account_selection_policy,
             providers: Arc::new(provider_set),
             provider_models: Arc::new(model_map),
             provider_model_presentations: Arc::new(presentation_map),
-            model_mappings: Arc::new(BTreeMap::new()),
             provider_catalog_generations: Arc::new(BTreeMap::new()),
             known_provider_catalogs: Arc::new(known_provider_catalogs),
             model_catalog_accounts: Arc::default(),
@@ -621,7 +589,7 @@ impl RuntimeSnapshot {
 
     #[must_use]
     pub fn with_model_mappings(mut self, mappings: BTreeMap<String, String>) -> Self {
-        self.model_mappings = Arc::new(mappings);
+        Arc::make_mut(&mut self.values).model_mappings = mappings;
         self
     }
 
@@ -633,6 +601,9 @@ impl RuntimeSnapshot {
 
     #[must_use]
     pub fn with_min_codex_client_versions(mut self, versions: CodexClientMinVersions) -> Self {
+        let values = Arc::make_mut(&mut self.values);
+        values.min_codex_desktop_version = versions.desktop().map(ToString::to_string);
+        values.min_codex_cli_version = versions.cli().map(ToString::to_string);
         self.min_codex_client_versions = versions;
         self
     }
@@ -689,7 +660,8 @@ impl RuntimeSnapshot {
             );
         }
         models.extend(
-            self.model_mappings
+            self.values
+                .model_mappings
                 .keys()
                 .filter_map(|model| PublicModelId::new(model.clone()).ok()),
         );
@@ -711,7 +683,7 @@ impl RuntimeSnapshot {
                 profiles.insert(public_model, presentation.clone());
             }
         }
-        for alias in self.model_mappings.keys() {
+        for alias in self.values.model_mappings.keys() {
             let target = self.mapped_model(alias);
             let Some(presentation) = presentations.iter().find_map(|(model, presentation)| {
                 (model.as_str() == target).then_some(presentation)
@@ -835,7 +807,7 @@ impl RuntimeSnapshot {
         let mut current = original.to_owned();
         let mut seen = BTreeSet::new();
         for _ in 0..20 {
-            let Some(target) = self.model_mappings.get(&current).map(String::as_str) else {
+            let Some(target) = self.values.model_mappings.get(&current).map(String::as_str) else {
                 return current;
             };
             if !seen.insert(current.clone()) || seen.contains(target) {
@@ -887,7 +859,7 @@ impl RuntimeSnapshot {
             }
             let requested_model = public_model.as_str();
             let mapped_model = self.mapped_model(requested_model);
-            let upstream_model = if self.model_mappings.contains_key(requested_model) {
+            let upstream_model = if self.values.model_mappings.contains_key(requested_model) {
                 UpstreamModelId::new(mapped_model)
             } else {
                 UpstreamModelId::from_client_wire(mapped_model)
@@ -936,7 +908,7 @@ impl RuntimeSnapshot {
 
         Ok(RoutingPlan {
             config_revision: self.revision,
-            pricing: Arc::clone(&self.pricing),
+            pricing: Arc::clone(&self.values.pricing),
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
             max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
@@ -978,7 +950,7 @@ impl RuntimeSnapshot {
         };
         Ok(RoutingPlan {
             config_revision: self.revision,
-            pricing: Arc::clone(&self.pricing),
+            pricing: Arc::clone(&self.values.pricing),
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
             max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)

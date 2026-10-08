@@ -160,3 +160,10 @@ Responses JSON/SSE/WS 的 request 层已接通 SDK `declare_capabilities`。声�
 Core 路由仍校验改写后正文中的全部需求，并继承链入口中未声明处理的需求及各层额外 `required`。后层重新引入的功能会恢复检查，不能取消前层的额外上游要求；原生续接不能声明为已处理。attempt 重解码保留继承的声明，但继续独立比较实际正文的能力，不能在已选路由后借声明修改能力范围。声明仅用于 Responses request；attempt、Images 和 Search 会明确拒绝。
 
 这项接线经过 SDK 子进程、嵌套 next 与本地 Core 路由验证，覆盖 HTTP JSON/SSE 和 WebSocket 两层组合。它不解除 middleware 生产启用门禁：请求级执行设置、宿主模型调用及其余声明范围仍在实施。
+
+
+### 请求级运行设置基础
+
+Core 已建立与持久化快照共用的 `SettingsValues`，覆盖本地已有的价格、模型映射、账号调度和最低客户端版本事实。`RequestSettings` 为每条调用分支保存宿主基线、有效快照及逐字段的插件来源/顺序；嵌套替换不修改父分支或其他请求，切换宿主基线时只继承显式改写，映射对象整体替换。
+
+`PreparedRootExecution` 已能在原身份、权限、取消和期限下使用派生快照规划模型或固定 Provider 端点；不会重新认证、更新全局 revision 或建立另一个账本。基线不匹配和已撤销请求会被拒绝。此处仍是 Core 接入阶段：SDK `settings` 改写继续明确返回不支持，完整执行设置的 Fast 三态、客户端准入、可变期限及 RPC/attempt 视图尚待接线，不能据此认为上游设置插件已经可直接使用。
