@@ -9,8 +9,9 @@ use axum::{
 use futures::{StreamExt, stream};
 use gateway_core::{
     engine::{CommitRequirement, middleware::*},
-    event::ProviderResponseHeader,
+    event::{GatewayEvent, ProviderResponseHeader},
     lifecycle::ConnectionGuard,
+    operation::ProviderSessionState,
 };
 use gateway_protocol::openai::sse::{
     DONE_SSE_FRAME, parse_sse_events, response_failed_sse_event_with_id,
@@ -24,10 +25,14 @@ struct Batch {
     requirement: Option<CommitRequirement>,
     terminal: bool,
 }
-struct Delivery {
+pub(super) struct Delivery {
     body: Option<Box<dyn MiddlewareBody>>,
     status: u16,
+    valid: bool,
     streaming: bool,
+    websocket: bool,
+    original_response_id: Option<String>,
+    provider_state: Option<ProviderSessionState>,
     committed: bool,
     finished: bool,
     pending: VecDeque<Bytes>,
@@ -36,6 +41,127 @@ struct Delivery {
     _connection: Option<Box<dyn ConnectionGuard>>,
 }
 impl Delivery {
+    pub(super) fn new(
+        response: MiddlewareResponse,
+        format: super::WireFormat,
+        connection: Option<Box<dyn ConnectionGuard>>,
+    ) -> (Self, Vec<MiddlewareHeader>) {
+        let (protocol, status, headers, body, _) = response.into_parts();
+        let delivery = Self {
+            body: Some(body),
+            status,
+            valid: protocol == "openai" && (200..=599).contains(&status),
+            streaming: format.streaming() && (200..300).contains(&status),
+            websocket: format.websocket(),
+            original_response_id: None,
+            provider_state: None,
+            committed: false,
+            finished: false,
+            pending: VecDeque::new(),
+            response_id: None,
+            wire_terminal: false,
+            _connection: connection,
+        };
+        (delivery, headers)
+    }
+    pub(super) fn validate(&self) -> Result<(), MiddlewareError> {
+        if self.valid {
+            Ok(())
+        } else {
+            Err(MiddlewareError::InvalidState)
+        }
+    }
+    pub(super) async fn record_client_status(&mut self, status: u16) {
+        if let Ok(body) = self.body() {
+            let _ = body.record_client_status(status).await;
+        }
+    }
+    pub(super) fn status(&self) -> u16 {
+        self.status
+    }
+    pub(super) fn take_output(&mut self) -> (Vec<Bytes>, bool) {
+        (self.pending.drain(..).collect(), self.finished)
+    }
+    pub(super) fn replay(&self) -> Option<(String, Option<ProviderSessionState>)> {
+        self.original_response_id
+            .as_ref()
+            .map(|id| (id.clone(), self.provider_state.clone()))
+    }
+    pub(super) async fn document(&mut self) -> Result<Vec<u8>, MiddlewareError> {
+        let mut bytes = Vec::new();
+        let mut batches = Vec::new();
+        while let Some(batch) = self.batch().await? {
+            for chunk in &batch.bytes {
+                if bytes.len().saturating_add(chunk.len()) > MAX_BATCH_BYTES {
+                    return Err(MiddlewareError::InvalidState);
+                }
+                bytes.extend_from_slice(chunk);
+            }
+            let terminal = batch.terminal;
+            batches.push(batch);
+            if terminal {
+                // JSON's Core terminal is exhausted but deliberately uncommitted.
+                if self.body()?.next_frame().await?.is_some() {
+                    return Err(MiddlewareError::InvalidState);
+                }
+                break;
+            }
+        }
+        if ((200..300).contains(&self.status) || self.websocket)
+            && serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
+        {
+            return Err(MiddlewareError::InvalidState);
+        }
+        if self.websocket
+            && !serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map_err(|_| MiddlewareError::InvalidState)?
+                .is_object()
+        {
+            return Err(MiddlewareError::InvalidState);
+        }
+        for batch in &batches {
+            self.acknowledge(batch).await?;
+        }
+        if !self.is_finalized() {
+            return Err(MiddlewareError::InvalidState);
+        }
+        Ok(bytes)
+    }
+    fn observe_message(&mut self, payload: &[u8]) -> Result<(), MiddlewareError> {
+        if self.wire_terminal {
+            return Err(MiddlewareError::InvalidState);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(payload).map_err(|_| MiddlewareError::InvalidState)?;
+        let kind = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or(MiddlewareError::InvalidState)?;
+        self.wire_terminal = matches!(
+            kind,
+            "response.completed" | "response.incomplete" | "response.failed" | "error"
+        );
+        Ok(())
+    }
+    fn validate_message_identity(&self, payloads: &VecDeque<Bytes>) -> Result<(), MiddlewareError> {
+        if !self.websocket {
+            return Ok(());
+        }
+        let Some(expected) = self.original_response_id.as_deref() else {
+            return Ok(());
+        };
+        for payload in payloads {
+            let value: serde_json::Value =
+                serde_json::from_slice(payload).map_err(|_| MiddlewareError::InvalidState)?;
+            for id in [value.pointer("/response/id"), value.get("response_id")] {
+                if id.is_some_and(|v| v.as_str() != Some(expected)) {
+                    return Err(MiddlewareError::InvalidState);
+                }
+            }
+        }
+        Ok(())
+    }
     fn body(&mut self) -> Result<&mut (dyn MiddlewareBody + 'static), MiddlewareError> {
         self.body
             .as_deref_mut()
@@ -44,7 +170,7 @@ impl Delivery {
     fn is_finalized(&self) -> bool {
         self.body.as_ref().is_none_or(|body| body.is_finalized())
     }
-    async fn close(&mut self) {
+    pub(super) async fn close(&mut self) {
         if let Some(body) = self.body.take() {
             body.close().await;
         }
@@ -75,12 +201,45 @@ impl Delivery {
             }
             if !payload.is_empty() {
                 if self.streaming {
-                    if framing != MiddlewareFraming::SseEvent {
-                        return Err(MiddlewareError::InvalidState);
+                    if self.websocket {
+                        if framing != MiddlewareFraming::JsonDocument {
+                            return Err(MiddlewareError::InvalidState);
+                        }
+                        self.observe_message(&payload)?;
+                    } else {
+                        if framing != MiddlewareFraming::SseEvent {
+                            return Err(MiddlewareError::InvalidState);
+                        }
+                        self.observe_sse(&payload)?;
                     }
-                    self.observe_sse(&payload)?;
                 }
                 bytes.push_back(payload);
+            }
+            if self.websocket
+                && let Some(envelope) = envelope.as_ref()
+            {
+                for event in envelope.events() {
+                    if let Some(state) = event.session_update() {
+                        self.provider_state = Some(state.clone());
+                    }
+                    for fact in event.canonical_facts() {
+                        if let GatewayEvent::Started(meta) | GatewayEvent::Completed(meta) = fact {
+                            self.original_response_id = Some(meta.response_id().to_owned());
+                        }
+                    }
+                    // Match the original WS encoder's wire-first response identity.
+                    if let Some(id) = event
+                        .wire_event()
+                        .and_then(|wire| {
+                            wire.data()
+                                .pointer("/response/id")
+                                .or_else(|| wire.data().get("response_id"))
+                        })
+                        .and_then(|id| id.as_str())
+                    {
+                        self.original_response_id = Some(id.to_owned());
+                    }
+                }
             }
             let requirement = envelope
                 .as_ref()
@@ -89,6 +248,7 @@ impl Delivery {
                 if host_events && requirement.is_none() {
                     return Err(MiddlewareError::InvalidState);
                 }
+                self.validate_message_identity(&bytes)?;
                 return Ok(Some(Batch {
                     bytes,
                     requirement,
@@ -145,7 +305,7 @@ impl Delivery {
         self.finished = true;
         Ok(())
     }
-    async fn advance(&mut self) -> Result<(), MiddlewareError> {
+    pub(super) async fn advance(&mut self) -> Result<(), MiddlewareError> {
         match self.batch().await? {
             Some(batch) => {
                 if batch.terminal && !self.wire_terminal {
@@ -170,7 +330,7 @@ impl Delivery {
                 self.finished = true;
             }
         }
-        if self.finished {
+        if self.finished && !self.websocket {
             self.pending
                 .push_back(Bytes::from_static(DONE_SSE_FRAME.as_bytes()));
         }
@@ -185,23 +345,15 @@ pub async fn deliver_middleware_response(
     streaming: bool,
     connection: Option<Box<dyn ConnectionGuard>>,
 ) -> Response {
-    let (protocol, status, headers, body, _) = response.into_parts();
-    let stream = streaming && (200..300).contains(&status);
-    let mut delivery = Delivery {
-        body: Some(body),
-        status,
-        streaming: stream,
-        committed: false,
-        finished: false,
-        pending: VecDeque::new(),
-        response_id: None,
-        wire_terminal: false,
-        _connection: connection,
-    };
+    let (mut delivery, headers) = Delivery::new(
+        response,
+        super::WireFormat::Responses { streaming },
+        connection,
+    );
+    let status = delivery.status;
+    let stream = delivery.streaming;
     let result = async {
-        if protocol != "openai" || !(200..=599).contains(&status) {
-            return Err(MiddlewareError::InvalidState);
-        }
+        delivery.validate()?;
         if stream {
             delivery.advance().await?;
             if delivery.pending.is_empty() {
@@ -209,37 +361,7 @@ pub async fn deliver_middleware_response(
             }
             return Ok(None);
         }
-        let mut bytes = Vec::new();
-        let mut batches = Vec::new();
-        while let Some(batch) = delivery.batch().await? {
-            for chunk in &batch.bytes {
-                if bytes.len().saturating_add(chunk.len()) > MAX_BATCH_BYTES {
-                    return Err(MiddlewareError::InvalidState);
-                }
-                bytes.extend_from_slice(chunk);
-            }
-            let terminal = batch.terminal;
-            batches.push(batch);
-            if terminal {
-                // JSON's Core terminal is exhausted but deliberately uncommitted.
-                if delivery.body()?.next_frame().await?.is_some() {
-                    return Err(MiddlewareError::InvalidState);
-                }
-                break;
-            }
-        }
-        if (200..300).contains(&status)
-            && serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
-        {
-            return Err(MiddlewareError::InvalidState);
-        }
-        for batch in &batches {
-            delivery.acknowledge(batch).await?;
-        }
-        if !delivery.is_finalized() {
-            return Err(MiddlewareError::InvalidState);
-        }
-        Ok(Some(bytes))
+        delivery.document().await.map(Some)
     }
     .await;
     match result {

@@ -1,8 +1,8 @@
 //! OpenAI Responses WebSocket 的升级、连接与串行 session 编排。
 
 pub mod connection;
-mod forward;
-mod protocol;
+pub(in crate::openai) mod forward;
+pub(in crate::openai) mod protocol;
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -227,29 +227,37 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
             expire_connection(&mut connection).await;
             break;
         }
-        let start = async {
-            if let Some(registry) = service.middleware_registry() {
-                crate::openai::middleware::websocket::start(
-                    &service,
-                    registry,
-                    client.clone(),
+        if let Some(registry) = service.middleware_registry() {
+            let outcome = crate::openai::middleware::websocket::respond(
+                &mut connection,
+                &mut replay,
+                service.clone(),
+                registry,
+                crate::openai::middleware::websocket::Ingress {
+                    client: client.clone(),
                     decoded,
-                )
-                .await
-                .map(|(started, revocation)| (started, Some(revocation)))
-            } else {
-                service
-                    .start_response(
-                        client.clone(),
-                        decoded,
-                        ClientTransport::WebSocket,
-                        "/v1/responses",
-                    )
-                    .await
-                    .map(|started| (started, None))
+                    payload,
+                    correlation_id: correlation_id.clone(),
+                    request_index: request_count,
+                },
+            )
+            .await;
+            if outcome == ForwardOutcome::Disconnect {
+                break;
             }
-        };
-        let (started, middleware_revocation) = match start.await {
+            if connection.is_expired() {
+                expire_connection(&mut connection).await;
+                break;
+            }
+            continue;
+        }
+        let start = service.start_response(
+            client.clone(),
+            decoded,
+            ClientTransport::WebSocket,
+            "/v1/responses",
+        );
+        let started = match start.await {
             Ok(started) => started,
             Err(error) => {
                 trace_rejected_request(
@@ -276,7 +284,7 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
             .trace()
             .capture("client.request.body", payload.as_bytes());
 
-        if forward_execution(&mut connection, started, &mut replay, middleware_revocation).await
+        if forward_execution(&mut connection, started, &mut replay, None).await
             == ForwardOutcome::Disconnect
         {
             break;

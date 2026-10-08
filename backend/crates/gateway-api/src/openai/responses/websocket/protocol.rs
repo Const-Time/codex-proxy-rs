@@ -125,7 +125,7 @@ impl ResponseCreateFrameError {
     }
 }
 
-pub(super) fn response_metadata_event(
+pub(in crate::openai) fn response_metadata_event(
     request_id: &str,
     response_headers: &[ProviderResponseHeader],
 ) -> String {
