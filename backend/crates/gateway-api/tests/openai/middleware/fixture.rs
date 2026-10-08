@@ -248,6 +248,8 @@ pub(super) struct Effects {
     pub(super) charges: Mutex<Vec<ClientBudgetCharge>>,
     pub(super) finalizations: Mutex<Vec<ModelRequestFinalization>>,
     pub(super) requests: Mutex<Vec<(String, String, String, SystemTime)>>,
+    pub(super) raw_requests: Mutex<Vec<Operation>>,
+    pub(super) raw_response: Mutex<Option<Bytes>>,
 }
 impl ClientAdmissionPort for Effects {
     fn admit(
@@ -373,7 +375,7 @@ impl Provider for Effects {
     ) -> Result<ProviderStream, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let Operation::Generate(generate) = request.operation() else {
-            panic!("Responses operation")
+            return self.raw_execute(request, context).await;
         };
         let payload = generate.protocol_payload();
         let opaque = payload
@@ -547,5 +549,78 @@ impl Fixture {
         assert_eq!(charges[0].key_id.as_str(), "key_api_test");
         assert_eq!(charges[0].scope.as_ref().unwrap().user_id, "original-user");
         assert!(charges[0].amount_usd > Decimal::ZERO);
+    }
+}
+
+impl Effects {
+    async fn raw_execute(
+        &self,
+        request: ProviderRequest,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        assert!(request.candidate().upstream_model().is_none());
+        assert_eq!(context.client_api_key_ref().as_str(), "key_api_test");
+        self.raw_requests
+            .lock()
+            .unwrap()
+            .push(request.operation().clone());
+        let meta = ProviderCallMetadata::for_provider_endpoint(
+            request.candidate().provider().clone(),
+            ProviderAccountId::new("acct_api_test").unwrap(),
+            UpstreamTransport::new("http").unwrap(),
+        );
+        let observation = ProviderEvent::observation(
+            gateway_core::event::ProviderResponseObservation::new(
+                UpstreamTransport::new("http").unwrap(),
+            )
+            .with_status_code(202),
+        );
+        let cost = ProviderEvent::canonical(GatewayEvent::ProviderCost(
+            ProviderReportedCost::from_usd_ticks(25).unwrap(),
+        ));
+        let wire = ProviderEvent::wire(
+            ProtocolWireEvent::raw_json(
+                "openai",
+                self.raw_response
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| Bytes::from_static(b"{ \"data\": [1], \"data\": [2] }\n")),
+            )
+            .unwrap(),
+        );
+        let wait = self.completion.lock().unwrap().clone();
+        let meta_response = ResponseMeta::for_provider_endpoint(context.request_id().as_str());
+        let started = ProviderEvent::canonical(GatewayEvent::Started(meta_response.clone()));
+        let completed = ProviderEvent::canonical(GatewayEvent::Completed(meta_response));
+        let stream = futures::stream::iter([Ok(observation), Ok(started), Ok(cost)])
+            .chain(futures::stream::once(async move {
+                if let Some(wait) = wait {
+                    wait.notified().await;
+                }
+                Ok(wire)
+            }))
+            .chain(futures::stream::iter([Ok(completed)]));
+        Ok(ProviderStream::new(meta, stream, ()))
+    }
+}
+impl Fixture {
+    pub(super) async fn raw_request(&self, endpoint: &str) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::post(endpoint)
+                    .header("authorization", "Bearer sk_middleware")
+                    .header("content-type", "application/json")
+                    .header("x-codex-image-turn-id", "image-turn-original")
+                    .header("session_id", "session-original")
+                    .header("x-custom", "original")
+                    .body(Body::from(
+                        "{ \"prompt\": \"original\", \"unknown\": [1, 2] } ",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 }

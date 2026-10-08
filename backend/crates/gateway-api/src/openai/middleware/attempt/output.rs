@@ -16,18 +16,20 @@ struct Output {
     pending: VecDeque<ProviderEvent>,
     streaming: bool,
     raw_error: bool,
+    raw_json: bool,
     wire_terminal: bool,
     finished: bool,
 }
 pub(super) fn decode(
     response: MiddlewareResponse,
-    streaming: bool,
+    format: super::super::WireFormat,
 ) -> Result<AttemptOutput, MiddlewareError> {
     let (protocol, status, headers, body, _) = response.into_parts();
     let output = Output {
         body: Some(body),
         pending: VecDeque::new(),
-        streaming: streaming && (200..300).contains(&status),
+        streaming: format.streaming() && (200..300).contains(&status),
+        raw_json: format.raw_json(),
         raw_error: !(200..300).contains(&status),
         wire_terminal: false,
         finished: false,
@@ -158,7 +160,13 @@ impl Output {
         let mut facts: Vec<GatewayEvent> = vec![];
         for _ in 0..MAX_FRAMES {
             let Some(frame) = self.body()?.next_frame().await? else {
-                let wire = if self.raw_error {
+                if self.raw_json
+                    && !self.raw_error
+                    && serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
+                {
+                    return Err(MiddlewareError::InvalidState);
+                }
+                let wire = if self.raw_error || self.raw_json {
                     ProtocolWireEvent::raw_json("openai", Bytes::from(bytes))
                         .map_err(|_| MiddlewareError::InvalidState)?
                 } else {

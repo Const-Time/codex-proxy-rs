@@ -78,12 +78,20 @@ impl Provider for Execution {
     ) -> Result<ProviderStream, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(context.client_api_key_ref().as_str(), "key_original");
-        let metadata = ProviderCallMetadata::new(
-            request.candidate().provider().clone(),
-            request.candidate().upstream_model().unwrap().clone(),
-            ProviderAccountId::new("acct_one").unwrap(),
-            UpstreamTransport::new("http").unwrap(),
-        );
+        let metadata = if let Some(model) = request.candidate().upstream_model() {
+            ProviderCallMetadata::new(
+                request.candidate().provider().clone(),
+                model.clone(),
+                ProviderAccountId::new("acct_one").unwrap(),
+                UpstreamTransport::new("http").unwrap(),
+            )
+        } else {
+            ProviderCallMetadata::for_provider_endpoint(
+                request.candidate().provider().clone(),
+                ProviderAccountId::new("acct_one").unwrap(),
+                UpstreamTransport::new("http").unwrap(),
+            )
+        };
         let mut events = vec![Ok(ProviderEvent::observation(
             ProviderResponseObservation::new(UpstreamTransport::new("http").unwrap())
                 .with_status_code(200)
@@ -92,6 +100,30 @@ impl Provider for Execution {
                     Bytes::from_static(b"original"),
                 )]),
         ))];
+        if !matches!(request.operation(), Operation::Generate(_)) {
+            let meta = ResponseMeta::for_provider_endpoint(context.request_id().as_str());
+            events.extend([
+                Ok(ProviderEvent::canonical(GatewayEvent::Started(
+                    meta.clone(),
+                ))),
+                Ok(ProviderEvent::canonical(GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(123).unwrap(),
+                ))),
+                Ok(ProviderEvent::wire(
+                    ProtocolWireEvent::raw_json(
+                        "openai",
+                        Bytes::from_static(b"{ \"data\": [1], \"data\": [2] }\n"),
+                    )
+                    .unwrap(),
+                )),
+                Ok(ProviderEvent::canonical(GatewayEvent::Completed(meta))),
+            ]);
+            return Ok(ProviderStream::new(
+                metadata,
+                futures::stream::iter(events),
+                (),
+            ));
+        }
         for (kind, facts) in [
             (
                 "response.created",
@@ -143,7 +175,7 @@ fn routing(operation: &Operation) -> RoutingPlan {
         ),
         vec![provider.clone()],
         vec![ProviderModel::new(
-            provider,
+            provider.clone(),
             UpstreamModelId::new("gpt-5").unwrap(),
             ModelCapabilities::new(BTreeSet::from([operation.kind()]), Some(32000))
                 .with_upstream_feature_validation(),
@@ -152,6 +184,19 @@ fn routing(operation: &Operation) -> RoutingPlan {
     )
     .unwrap()
     .with_account_directory(directory.clone());
+    if !matches!(operation, Operation::Generate(_)) {
+        return snapshot
+            .plan_provider_endpoint(
+                &provider,
+                operation,
+                Arc::new(FrozenAccountScope::new(
+                    directory,
+                    ClientRoutingScope::all_accounts(),
+                )),
+                &RoutingContext::default(),
+            )
+            .unwrap();
+    }
     snapshot
         .plan(
             &PublicModelId::new("gpt-5").unwrap(),
@@ -224,7 +269,7 @@ async fn sdk_attempt_bridge_preserves_receipts_across_pass_mapping_expansion_and
         .unwrap();
         let operation = decoded.into_parts().0;
         let execution = Arc::new(Execution::default());
-        let adapter = gateway_api::openai::responses::responses_attempt_middleware(
+        let adapter = gateway_api::openai::middleware::responses_attempt_middleware(
             Arc::new(install.manager.middleware_registry().unwrap()),
             context.clone(),
         );
@@ -296,6 +341,109 @@ async fn sdk_attempt_bridge_preserves_receipts_across_pass_mapping_expansion_and
             rows[0].upstream_response_id.as_deref(),
             Some("resp_original")
         );
+    }
+    install.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn sdk_raw_endpoint_attempt_bridge_preserves_bytes_and_receipts() {
+    use gateway_core::operation::{
+        ImageRequest, ImageRequestKind, RawJsonPayload, StandaloneSearchRequest,
+    };
+    let install = Installation::new().await;
+    let mut command = install.command(0, 0);
+    command.middleware.as_mut().unwrap().mounts = vec![PluginMiddlewareMount::Attempt];
+    install
+        .manager
+        .update(None, command, &actor())
+        .await
+        .unwrap();
+    for endpoint in [
+        "/v1/images/generations",
+        "/v1/images/edits",
+        "/v1/alpha/search",
+    ] {
+        for mode in ["short", "pass", "inspect", "map"] {
+            let payload = RawJsonPayload::new(
+                "openai",
+                Bytes::from(json!({"mode":mode,"prompt":"original"}).to_string()),
+            )
+            .unwrap();
+            let operation = match endpoint {
+                "/v1/images/generations" => Operation::GenerateImage(ImageRequest::from_raw_json(
+                    ImageRequestKind::Generation,
+                    payload,
+                )),
+                "/v1/images/edits" => Operation::GenerateImage(ImageRequest::from_raw_json(
+                    ImageRequestKind::Edit,
+                    payload,
+                )),
+                _ => Operation::Search(StandaloneSearchRequest::from_raw_json(payload)),
+            };
+            let mut context = context(false);
+            context.operation = operation.kind();
+            context.endpoint = endpoint.into();
+            context.model = None;
+            let execution = Arc::new(Execution::default());
+            let adapter = gateway_api::openai::middleware::raw_json_attempt_middleware(
+                Arc::new(install.manager.middleware_registry().unwrap()),
+                context.clone(),
+            );
+            let coordinator = AttemptCoordinator::new(GatewayEngine::new(
+                execution.clone(),
+                ProviderRegistry::new([execution.clone() as Arc<dyn Provider>]).unwrap(),
+            ))
+            .with_attempt_middleware(Some(adapter));
+            let mut row = request_row(&context, &operation);
+            row.endpoint = endpoint.into();
+            row.requested_model = None;
+            let mut session = coordinator
+                .start(
+                    row,
+                    operation.clone(),
+                    routing(&operation),
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let events =
+                tokio::time::timeout(Duration::from_secs(5), session.collect_uncommitted())
+                    .await
+                    .expect("raw SDK/Core rendezvous must not deadlock")
+                    .unwrap();
+            let bodies: Vec<_> = events
+                .iter()
+                .filter_map(|event| event.wire_event().and_then(|wire| wire.raw_json_body()))
+                .collect();
+            assert_eq!(bodies.len(), 1);
+            let expected: &[u8] = match mode {
+                "short" => b"denied",
+                "map" => b"{\"mapped\":true}",
+                _ => b"{ \"data\": [1], \"data\": [2] }\n",
+            };
+            assert_eq!(&bodies[0][..], expected, "{endpoint} {mode}");
+            let status = if mode == "short" { 403 } else { 200 };
+            assert_eq!(
+                session.middleware_response_head().unwrap().status_code,
+                status
+            );
+            session.commit_downstream(Some(status)).await.unwrap();
+            assert_eq!(
+                execution.calls.load(Ordering::SeqCst),
+                usize::from(mode != "short")
+            );
+            assert_eq!(
+                execution.commits.load(Ordering::SeqCst),
+                usize::from(mode != "short")
+            );
+            assert_eq!(
+                session.budget_charge().amount_usd.scaled(),
+                if mode == "short" { 0 } else { 123 }
+            );
+            assert_eq!(execution.rows.lock().unwrap().len(), 1);
+        }
     }
     install.manager.shutdown().await;
 }

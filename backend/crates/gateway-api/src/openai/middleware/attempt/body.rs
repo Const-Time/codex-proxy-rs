@@ -1,5 +1,5 @@
 //! Encode only events already observed by the owning Core attempt.
-use super::super::super::OpenAiResponsesEncoder;
+use crate::openai::responses::OpenAiResponsesEncoder;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::{
@@ -20,8 +20,9 @@ pub(super) struct SourceBody {
 impl SourceBody {
     pub(super) async fn response(
         source: AttemptSource,
-        streaming: bool,
+        format: super::super::WireFormat,
     ) -> Result<MiddlewareResponse, MiddlewareError> {
+        let streaming = format.streaming();
         let metadata = source.metadata().clone();
         let mut body = Self {
             source,
@@ -31,6 +32,7 @@ impl SourceBody {
             streaming,
         };
         let mut headers = vec![];
+        let mut status = 200;
         let mut events = vec![];
         let mut size = 0usize;
         loop {
@@ -39,6 +41,10 @@ impl SourceBody {
                 break;
             };
             if let Some(observation) = event.response_observation() {
+                status = observation
+                    .status_code()
+                    .filter(|status| (200..300).contains(status))
+                    .unwrap_or(status);
                 headers = observation
                     .client_headers()
                     .iter()
@@ -55,8 +61,17 @@ impl SourceBody {
                     return Err(MiddlewareError::InvalidState);
                 }
             } else {
-                for frame in body.encoder.push_sse(&event) {
-                    size = size.saturating_add(frame.len());
+                if format.raw_json() {
+                    size = size.saturating_add(
+                        event
+                            .wire_event()
+                            .and_then(|wire| wire.raw_json_body())
+                            .map_or(0, Bytes::len),
+                    );
+                } else {
+                    for frame in body.encoder.push_sse(&event) {
+                        size = size.saturating_add(frame.len());
+                    }
                 }
                 if size > MAX_DOCUMENT_BYTES || events.len() >= MAX_DOCUMENT_EVENTS {
                     return Err(MiddlewareError::InvalidState);
@@ -65,18 +80,25 @@ impl SourceBody {
             }
         }
         if !streaming {
-            let encoded = serde_json::to_vec(
-                &std::mem::take(&mut body.encoder)
-                    .finish()
+            let encoded = if format.raw_json() {
+                crate::openai::endpoint::raw_json_body(&events)
+                    .ok_or(MiddlewareError::InvalidState)?
+            } else {
+                Bytes::from(
+                    serde_json::to_vec(
+                        &std::mem::take(&mut body.encoder)
+                            .finish()
+                            .map_err(|_| MiddlewareError::InvalidState)?,
+                    )
                     .map_err(|_| MiddlewareError::InvalidState)?,
-            )
-            .map_err(|_| MiddlewareError::InvalidState)?;
+                )
+            };
             if encoded.len() > MAX_DOCUMENT_BYTES {
                 return Err(MiddlewareError::InvalidState);
             }
             let last = events.pop().ok_or(MiddlewareError::InvalidState)?;
             let frame = MiddlewareFrame::from_provider_event(
-                Bytes::from(encoded),
+                encoded,
                 MiddlewareFraming::JsonDocument,
                 true,
                 last,
@@ -91,7 +113,7 @@ impl SourceBody {
             );
         }
         Ok(
-            MiddlewareResponse::new("openai".into(), 200, headers, Box::new(body))
+            MiddlewareResponse::new("openai".into(), status, headers, Box::new(body))
                 .with_provider_metadata(metadata),
         )
     }

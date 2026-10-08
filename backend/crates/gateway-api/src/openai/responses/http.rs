@@ -97,10 +97,10 @@ pub(crate) async fn responses_at_endpoint(
         None
     };
     if let Some(registry) = service.middleware_registry() {
-        return super::middleware::request::respond(
+        return crate::openai::middleware::request::respond(
             service.clone(),
             registry,
-            super::middleware::request::Ingress {
+            crate::openai::middleware::request::Ingress {
                 client,
                 decoded,
                 headers,

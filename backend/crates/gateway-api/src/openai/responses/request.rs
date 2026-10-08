@@ -339,7 +339,7 @@ const MAX_DECOMPRESSED_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 ///
 /// 未压缩与 `identity` 借用原始正文；压缩正文在读取过程中限制展开大小，
 /// 避免先完整分配再检查。只接受单一编码，重复头和叠加编码不能只解释第一项。
-pub(super) fn decompress_request_body<'a>(
+pub(in crate::openai) fn decompress_request_body<'a>(
     body: &'a [u8],
     headers: &HeaderMap,
 ) -> Result<Cow<'a, [u8]>, RequestDecodeError> {
@@ -519,7 +519,7 @@ fn passthrough_headers(headers: &HeaderMap) -> Vec<Value> {
         .collect()
 }
 
-pub(super) fn forwarded_request_headers(
+pub(in crate::openai) fn forwarded_request_headers(
     headers: &HeaderMap,
 ) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
     let connection_headers = headers

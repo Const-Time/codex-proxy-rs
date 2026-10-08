@@ -5,6 +5,7 @@ mod endpoint;
 pub mod error;
 mod execution;
 pub mod images;
+pub mod middleware;
 pub mod models;
 pub mod responses;
 pub mod router;

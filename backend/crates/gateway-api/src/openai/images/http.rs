@@ -80,6 +80,21 @@ async fn handle_image_request(
         Ok(operation) => operation,
         Err(error) => return gateway_error_response(&error),
     };
+    if let Some(registry) = service.middleware_registry() {
+        return crate::openai::middleware::raw::respond(
+            service.clone(),
+            registry,
+            crate::openai::middleware::raw::Ingress {
+                client,
+                operation,
+                headers,
+                client_ip,
+                user_agent,
+                endpoint,
+            },
+        )
+        .await;
+    }
     let access = client.bound_access();
     let started = match service
         .start_provider_endpoint(client, operation, client_ip, user_agent, endpoint)
@@ -95,7 +110,7 @@ async fn handle_image_request(
     }
 }
 
-fn image_operation(
+pub(in crate::openai) fn image_operation(
     body: Bytes,
     headers: &HeaderMap,
     kind: ImageRequestKind,
