@@ -21,6 +21,7 @@ pub struct PluginArtifact {
 }
 #[derive(Clone, PartialEq)]
 pub struct PluginRecord {
+    pub frontend_authentication: Option<PluginAuthenticationBinding>,
     pub id: String,
     pub revision: u64,
     pub name: String,
@@ -32,6 +33,7 @@ pub struct PluginRecord {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginUpdate {
+    pub frontend_authentication: Option<PluginAuthenticationBinding>,
     pub revision: u64,
     pub name: String,
     pub artifact_sha256: String,
@@ -53,6 +55,7 @@ pub struct PluginPage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
+    pub frontend_authentication: Option<PluginAuthenticationBinding>,
     pub id: String,
     pub revision: u64,
     pub name: String,
@@ -103,6 +106,14 @@ pub struct PluginResource {
 #[derive(Clone, Default)]
 pub struct PluginAccess(gateway_core::lifecycle::CancellationToken);
 impl PluginAccess {
+    pub fn cancellation(&self) -> gateway_core::lifecycle::CancellationToken {
+        self.0.clone()
+    }
+    pub fn linked(access: impl IntoIterator<Item = Self>) -> Self {
+        Self(gateway_core::lifecycle::CancellationToken::linked(
+            access.into_iter().map(|a| a.0),
+        ))
+    }
     pub fn revoke(&self) {
         self.0.cancel();
     }
@@ -231,4 +242,55 @@ pub struct PluginGroupBudget {
 pub struct PluginBudgetReset {
     pub event_id: String,
     pub targets: Vec<super::users::SubscriptionTarget>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginAuthenticationBinding {
+    pub failure_policy: PluginAuthenticationPolicy,
+    pub identities: BTreeMap<String, String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginAuthenticationPolicy {
+    Reject,
+    Delegate,
+}
+impl PluginAuthenticationBinding {
+    pub fn validate(&self) -> Result<(), super::AdminError> {
+        if self.identities.is_empty()
+            || self.identities.len() > 256
+            || self.identities.iter().any(|(principal, key)| {
+                !valid_plugin_principal(principal)
+                    || gateway_core::policy::ClientApiKeyId::new(key).is_err()
+            })
+        {
+            return Err(super::AdminError::invalid(
+                "外部身份映射需包含 1～256 个有效 principal 和 Key ID",
+            ));
+        }
+        Ok(())
+    }
+}
+pub fn valid_plugin_principal(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+pub enum PluginAuthenticationResult {
+    Authenticated(String),
+    NotMatched,
+    Rejected,
+}
+/// A host decision, not a plugin-supplied Key ID. The epoch also guards builtin delegation.
+pub enum PluginAuthenticationDecision {
+    Builtin {
+        access: PluginAccess,
+    },
+    Authenticated {
+        key: gateway_core::policy::ClientApiKeyId,
+        access: PluginAccess,
+    },
+    Rejected,
 }

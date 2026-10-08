@@ -53,7 +53,7 @@ pub(crate) async fn responses_websocket(
     websocket: WebSocketUpgrade,
 ) -> Response {
     let service = state.openai().clone();
-    let client = match authenticate_client(&service, &headers) {
+    let client = match authenticate_client(&service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
@@ -154,7 +154,14 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
         "Responses WebSocket connected"
     );
     let _connection_guard = connection_guard;
-    let cancellation = lifecycle.cancellation();
+    let access = client.bound_access();
+    let cancellation = match &access {
+        Some(access) => gateway_core::lifecycle::CancellationToken::linked([
+            lifecycle.cancellation(),
+            access.cancellation(),
+        ]),
+        None => lifecycle.cancellation(),
+    };
     let request_headers =
         request_headers.with_downstream_websocket_connection_id(connection_id.clone());
     let mut connection = ResponsesWebSocketConnection::new(socket, connection_id, cancellation);

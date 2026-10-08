@@ -94,6 +94,22 @@ pub(super) fn authenticated_client(plaintext: &str) -> AuthenticatedClient {
     authenticated_client_for_provider(plaintext, "openai")
 }
 
+pub(crate) fn bound_client(
+    snapshots: RuntimeSnapshotHandle,
+    key: &ClientApiKeyId,
+    revocation: gateway_core::lifecycle::CancellationToken,
+) -> Result<AuthenticatedClient, gateway_core::engine::execution::ClientAuthenticationError> {
+    DefaultExecutionService::new(
+        snapshots,
+        Arc::new(UnusedExecutionStore),
+        ProviderRegistry::default(),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedContinuation),
+        Arc::new(IgnoredClientApiKeyUsage),
+    )
+    .authenticate_bound_key(key, revocation)
+}
+
 pub(super) fn authenticated_client_for_provider(
     plaintext: &str,
     provider_name: &str,

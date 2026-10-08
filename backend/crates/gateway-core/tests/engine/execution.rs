@@ -1839,6 +1839,58 @@ fn host_bound_identity_requires_an_enabled_key_and_never_reuses_revoked_authoriz
         gateway_core::engine::execution::ClientAuthenticationError::SnapshotUnavailable
     );
 }
+
+#[test]
+fn delegated_builtin_authentication_cannot_upgrade_an_old_secret_to_a_rotated_policy() {
+    struct RotateOnUse(RuntimeSnapshotHandle, AtomicBool);
+    impl ClientApiKeyUsageSink for RotateOnUse {
+        fn record_used(&self, _: &ClientApiKeyId) {
+            if self.1.swap(false, Ordering::SeqCst) {
+                self.0.publish(start_snapshot_with_clients(
+                    2,
+                    vec![ClientPolicy::new(
+                        ClientApiKeyId::new("key_start_test").unwrap(),
+                        PlaintextClientApiKey::new("sk_rotated").unwrap(),
+                        account_scope(&ProviderKind::new("openai").unwrap(), "acct_start"),
+                        true,
+                        RateLimits::unlimited(),
+                    )],
+                ));
+            }
+        }
+    }
+    let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+    let service = DefaultExecutionService::new(
+        snapshots.clone(),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        Arc::new(Admissions::default()),
+        Arc::new(UnusedContinuation),
+        Arc::new(RotateOnUse(snapshots, AtomicBool::new(true))),
+    );
+    let epoch = gateway_core::lifecycle::CancellationToken::new();
+    assert!(
+        service
+            .authenticate_revocable("sk_start_test", epoch.clone())
+            .is_err()
+    );
+    let current = service
+        .authenticate_revocable("sk_rotated", epoch.clone())
+        .unwrap();
+    assert_eq!(
+        current.policy().plaintext_key().expose_for_auth(),
+        "sk_rotated"
+    );
+    epoch.cancel();
+    assert!(
+        current
+            .bound_access()
+            .unwrap()
+            .cancellation()
+            .is_cancelled()
+    );
+    assert!(service.authenticate_revocable("sk_rotated", epoch).is_err());
+}
 #[test]
 fn bound_execution_revocation_preserves_charges_and_cancelling_one_request_preserves_parent() {
     block_on(async {

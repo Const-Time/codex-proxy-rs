@@ -66,10 +66,16 @@ pub(crate) async fn responses_at_endpoint(
     endpoint: &'static str,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let authentication = if endpoint == "/api/admin/plugins/models/responses" {
+        crate::openai::auth::authenticate_builtin_client(service, &headers)
+    } else {
+        authenticate_client(service, &headers).await
+    };
+    let client = match authentication {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
+    let access = client.bound_access();
     let decoded = match decode_request_with_headers(&body, &headers) {
         Ok(decoded) => decoded,
         Err(error) => {
@@ -124,7 +130,10 @@ pub(crate) async fn responses_at_endpoint(
     if let Some(id) = request_id_header {
         response.headers_mut().insert("x-gateway-request-id", id);
     }
-    response
+    match access {
+        Some(access) => crate::openai::revocation::protect(response, access),
+        None => response,
+    }
 }
 
 /// 从 socket 与标准转发头提取旧 Usage 页面使用的诊断事实。

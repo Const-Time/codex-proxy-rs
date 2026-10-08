@@ -129,9 +129,10 @@ pub fn initialize(
     config.validate().map_err(ApiError::Config)?;
     let request_id_header = HeaderName::from_str(&config.request_id_header)
         .map_err(|_| ApiError::Config(ApiConfigError::InvalidRequestIdHeader))?;
+    let openai = OpenAiService::new(execution, lifecycle).with_administration(admin.clone());
     let state = ApiState {
         admin,
-        openai: OpenAiService::new(execution, lifecycle),
+        openai,
         health: HealthStatus::new(probes, worker_health),
     };
     let index = config.asset_directory.join("index.html");

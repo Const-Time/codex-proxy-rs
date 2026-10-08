@@ -137,7 +137,12 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
     manifest
         .contributes
         .iter()
-        .filter(|(cap, decl)| **cap != Capability::Management || decl.version != 1)
+        .filter(|(cap, decl)| {
+            !matches!(
+                cap,
+                Capability::Management | Capability::FrontendAuthentication
+            ) || decl.version != 1
+        })
         .map(|(cap, _)| cap.identifier().into())
         .collect()
 }
@@ -191,6 +196,16 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if let Some(binding) = &record.frontend_authentication {
+            binding.validate()?;
+            if manifest
+                .contributes
+                .get(&Capability::FrontendAuthentication)
+                .is_none_or(|v| v.version != 1)
+            {
+                return Err(AdminError::invalid("此制品未提供入口认证能力"));
+            }
+        }
         if record.enabled && !unsupported(&manifest).is_empty() {
             return Err(AdminError::invalid(format!(
                 "此宿主尚未开放插件能力：{}",
@@ -292,6 +307,12 @@ impl PluginRuntime for PluginEngine {
         if !reply.payload.is_empty() || registration.contributes != manifest.contributes {
             return Err(AdminError::invalid("插件注册结果与清单不符"));
         }
+        let authentication = session
+            .capability_version(Capability::FrontendAuthentication)
+            .is_some();
+        if authentication {
+            crate::authentication::register(&session).await?;
+        }
         let mut management = ManagementRegistration {
             routes: vec![],
             resources: vec![],
@@ -352,6 +373,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            authentication,
             calls,
             session,
             access,
@@ -362,6 +384,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    authentication: bool,
     calls: Arc<crate::resources::ManagementCalls>,
     access: PluginAccess,
     session: Arc<RpcSession>,
@@ -371,6 +394,20 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn authenticate(
+        &self,
+        authorization: String,
+    ) -> Result<PluginAuthenticationResult, AdminError> {
+        if !self.authentication || self.status() != "ready" || self.access.is_revoked() {
+            return Err(AdminError::unavailable("认证器不可用"));
+        }
+        let result = crate::authentication::authenticate(&self.session, authorization).await?;
+        if self.access.is_revoked() || self.status() != "ready" {
+            return Err(AdminError::unavailable("认证器已失效"));
+        }
+        Ok(result)
+    }
+
     fn access(&self) -> PluginAccess {
         self.access.clone()
     }

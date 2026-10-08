@@ -34,6 +34,10 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn authenticate(&self, _authorization: String) -> Result<PluginAuthenticationResult> {
+        Err(AdminError::unavailable("认证器不可用"))
+    }
+
     fn access(&self) -> PluginAccess;
     fn status(&self) -> &'static str;
     fn pages(&self) -> Vec<PluginPage>;
@@ -62,6 +66,10 @@ pub trait PluginRuntime: Send + Sync {
 }
 #[async_trait]
 pub trait PluginService: Send + Sync {
+    async fn authenticate(&self, _authorization: String) -> Result<PluginAuthenticationDecision> {
+        Err(AdminError::unavailable("认证器不可用"))
+    }
+
     fn access(&self, id: &str, revision: u64) -> Result<PluginAccess>;
     async fn artifacts(&self) -> Result<Vec<PluginArtifactInfo>>;
     async fn delete_artifact(&self, digest: &str, actor: &MutationContext) -> Result<()>;

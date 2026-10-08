@@ -9,3 +9,5 @@ pub mod responses;
 pub mod router;
 pub mod search;
 pub(crate) mod service;
+
+mod revocation;

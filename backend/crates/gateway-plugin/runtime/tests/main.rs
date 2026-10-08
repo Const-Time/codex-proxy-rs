@@ -4,3 +4,5 @@ mod resources;
 mod support;
 
 mod quota;
+
+mod authentication;

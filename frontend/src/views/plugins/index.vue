@@ -31,6 +31,9 @@ async function searchKeys() {
 }
 const digest = ref('')
 const configuration = ref('{}')
+const authenticationEnabled = ref(false)
+const authenticationPolicy = ref<'reject' | 'delegate'>('reject')
+const authenticationIdentities = ref('{}')
 const secrets = ref<Record<string, string>>({})
 const removeSecrets = ref<Record<string, boolean>>({})
 const trust = ref(false)
@@ -85,6 +88,9 @@ function edit(item?: PluginInstance) {
   name.value = item?.name ?? ''
   digest.value = item?.artifact.sha256 ?? artifacts.value[0]?.sha256 ?? ''
   configuration.value = JSON.stringify(item?.configuration ?? {}, null, 2)
+  authenticationEnabled.value = !!item?.frontendAuthentication
+  authenticationPolicy.value = item?.frontendAuthentication?.failurePolicy ?? 'reject'
+  authenticationIdentities.value = JSON.stringify(item?.frontendAuthentication?.identities ?? {}, null, 2)
   secrets.value = {}
   removeSecrets.value = {}
   trust.value = false
@@ -114,7 +120,7 @@ async function save(enabled: boolean) {
       else if (secrets.value[key])
         values[key] = secrets.value[key]!
     }
-    await savePlugin(editing.value?.id, { revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+    await savePlugin(editing.value?.id, { frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
     editOpen.value = false
     secrets.value = {}
   })
@@ -122,7 +128,7 @@ async function save(enabled: boolean) {
 async function disable(item: PluginInstance) {
   selected.value = undefined
   await perform(async () => {
-    await savePlugin(item.id, { revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
+    await savePlugin(item.id, { frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
   })
 }
 onMounted(() => perform(async () => { }))
@@ -168,6 +174,21 @@ onMounted(() => perform(async () => { }))
         <label :for="`plugin-secret-${field}`" class="block">{{ field }}<BaseInput :id="`plugin-secret-${field}`" v-model="secrets[field]" type="password" autocomplete="new-password" :placeholder="editing?.configuredSecrets.includes(field) ? '已配置，留空保留' : '填写敏感配置'" :disabled="busy || !artifact?.manifest.secretFields.includes(field)" /></label>
         <BaseCheckbox v-if="editing?.configuredSecrets.includes(field)" v-model="removeSecrets[field]" show-label :label="`清除 ${field}`" :disabled="busy" />
       </div>
+      <details class="space-y-3">
+        <summary>外部认证</summary>
+        <p class="text-sm text-cp-text-secondary">
+          仅用于声明入口认证能力的插件。同一时间只能启用一个认证器；此配置不会发送给插件。变更或停用会撤销旧授权。
+        </p>
+        <BaseCheckbox v-model="authenticationEnabled" show-label label="使用此插件认证客户端请求" :disabled="busy" />
+        <template v-if="authenticationEnabled">
+          <BaseSelect v-model="authenticationPolicy" aria-label="不匹配时的认证行为" :options="[{ label: '拒绝所有未匹配请求', value: 'reject' }, { label: '仅对明确未匹配的请求尝试普通 Key', value: 'delegate' }]" :disabled="busy" />
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label for="plugin-auth-identities" class="block">外部身份到本地 Key 的映射（JSON）<BaseTextarea id="plugin-auth-identities" v-model="authenticationIdentities" :rows="5" :disabled="busy" placeholder="{&quot;external-user&quot;: &quot;key_id&quot;}" /></label>
+          <p class="text-sm text-cp-text-secondary">
+            填写 Key ID，不要填写密钥。映射身份将使用该 Key 所属用户的分组权限、倍率与共享额度。认证器超时、拒绝或返回未知身份时不会回退。
+          </p>
+        </template>
+      </details>
       <p class="text-sm text-cp-text-secondary">
         插件进程以网关的系统身份运行，可访问主机文件、凭据和网络。仅安装可信来源的插件。
       </p>

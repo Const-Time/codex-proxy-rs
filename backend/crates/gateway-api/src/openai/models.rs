@@ -32,7 +32,7 @@ pub(crate) async fn models(
     headers: HeaderMap,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let client = match authenticate_client(service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
@@ -123,7 +123,7 @@ pub(crate) async fn model_detail(
     Path(model_id): Path<String>,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let client = match authenticate_client(service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };

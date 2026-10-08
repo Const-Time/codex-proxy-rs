@@ -6,6 +6,101 @@ use gateway_admin::{
 use gateway_store::postgres::PgPluginStore;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
+
+#[tokio::test]
+async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_commit() {
+    let Some(db) = TestDatabase::create("plugin_authentication").await else {
+        return;
+    };
+    let store = PgPluginStore::new(db.pool.clone());
+    let actor = MutationContext {
+        actor: MutationActor::System,
+        request_id: "auth-binding-test".into(),
+    };
+    let digest = "c".repeat(64);
+    store
+        .put_artifact(
+            PluginArtifact {
+                info: PluginArtifactInfo {
+                    sha256: digest.clone(),
+                    plugin_id: "local.auth".into(),
+                    version: "1.0.0".into(),
+                    display_name: "auth".into(),
+                    manifest: json!({}),
+                    unsupported_capabilities: vec![],
+                    version_warning: None,
+                },
+                archive: Arc::from(b"fixture".as_slice()),
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+    let mut first = PluginRecord {
+        id: "auth-a".into(),
+        revision: 1,
+        name: "auth".into(),
+        artifact_sha256: digest,
+        enabled: true,
+        configuration: json!({}),
+        secrets: BTreeMap::new(),
+        frontend_authentication: Some(PluginAuthenticationBinding {
+            failure_policy: PluginAuthenticationPolicy::Reject,
+            identities: BTreeMap::from([("private-principal".into(), "key_owner".into())]),
+        }),
+    };
+    let mut second = first.clone();
+    second.id = "auth-b".into();
+    let (a, b) = tokio::join!(
+        store.save(&first, 0, &actor),
+        store.save(&second, 0, &actor)
+    );
+    assert_ne!(
+        a.is_ok(),
+        b.is_ok(),
+        "DB uniqueness arbitrates concurrent writers"
+    );
+    let rows = PgPluginStore::new(db.pool.clone()).list().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].frontend_authentication == first.frontend_authentication);
+    let winner = rows[0].id.clone();
+    if winner != first.id {
+        std::mem::swap(&mut first, &mut second);
+    }
+    second.enabled = false;
+    store.save(&second, 0, &actor).await.unwrap();
+    second.enabled = true;
+    second.revision = 2;
+    assert_eq!(
+        store.save(&second, 1, &actor).await.err().unwrap().kind(),
+        AdminErrorKind::Conflict
+    );
+    first.enabled = false;
+    first.revision = 2;
+    store.save(&first, 1, &actor).await.unwrap();
+    store.save(&second, 1, &actor).await.unwrap();
+    assert_eq!(
+        store
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.enabled && r.frontend_authentication.is_some())
+            .count(),
+        1
+    );
+    let audit: Vec<serde_json::Value> =
+        sqlx::query_scalar("select to_jsonb(a) from admin_audit_events a")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !serde_json::to_string(&audit)
+            .unwrap()
+            .contains("private-principal")
+    );
+    db.close().await;
+}
 #[tokio::test]
 async fn plugin_facts_project_current_bindings_and_paginate_without_credentials() {
     use gateway_admin::ports::store::{AccountStore as _, ClientKeyStore as _};
@@ -132,6 +227,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         "local.fixture"
     );
     let mut record = PluginRecord {
+        frontend_authentication: None,
         id: "plugin-a".into(),
         revision: 1,
         name: "test".into(),

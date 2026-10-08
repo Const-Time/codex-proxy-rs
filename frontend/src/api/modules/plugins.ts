@@ -20,7 +20,9 @@ export interface PluginManagementView {
   pages: PluginManagementPage[]
   resources: PluginManagementResource[]
 }
+export interface PluginAuthenticationBinding { failurePolicy: 'reject' | 'delegate', identities: Record<string, string> }
 export interface PluginInstance {
+  frontendAuthentication: PluginAuthenticationBinding | null
   id: string
   revision: number
   name: string
@@ -33,6 +35,7 @@ export interface PluginInstance {
   resources: PluginManagementResource[]
 }
 export interface PluginUpdate {
+  frontendAuthentication: PluginAuthenticationBinding | null
   revision: number
   name: string
   artifactSha256: string

@@ -12,6 +12,26 @@ impl PluginHandler for Worker {
         Box::pin(async move {
             match call.method.as_str() {
             "plugin.register" if !self.fail=>Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![])),
+            "frontend_auth.identifier"=>Ok(CallReply::unary(json!({"identifier":"fixture-auth"}),vec![])),
+            "frontend_auth.authenticate"=>{
+                let input:gateway_plugin_sdk::call::frontend_authentication::FrontendAuthenticationRequest=serde_json::from_slice(&call.payload).unwrap();
+                assert_eq!(call.context.stage,gateway_plugin_sdk::Stage::Authentication);
+                let value=match input.authorization.as_str() {
+                    "Bearer external-alice"=>json!({"outcome":"authenticated","principal":"alice"}),
+                    "Bearer external-unknown"=>json!({"outcome":"authenticated","principal":"unknown"}),
+                    "Bearer external-rejected"=>json!({"outcome":"rejected"}),
+                    "Bearer external-forged"=>json!({"outcome":"authenticated","principal":"alice","client_key_id":"forged"}),
+                    "Bearer external-fault"=>return Err(PluginFault::new(ErrorCode::Fault,"sensitive credential detail")),
+                    "Bearer external-crash"=>std::process::exit(2),
+                    "Bearer external-state"=>{
+                        call.host.call("host.state.put",json!({"namespace":"counter","key":"auth","value":1,"expected_version":null}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                        assert!(call.host.call("host.data.keys.get",json!({}),b"{}".to_vec()).await.is_err());
+                        json!({"outcome":"authenticated","principal":"alice"})
+                    },
+                    _=>json!({"outcome":"not_matched"}),
+                };
+                Ok(CallReply::unary(json!({}),serde_json::to_vec(&value).unwrap()))
+            },
             "management.register"=>Ok(CallReply::unary(json!({}),serde_json::to_vec(&json!({
                 "routes":[{"method":"POST","path":"echo","request_content_types":["application/json"],"response_content_types":["application/json"]}],
                 "resources":[{"path":"index.html","public":false}],"pages":[{"id":"home","title":"Counter","entry":"index.html","icon":null}],"callbacks":[]

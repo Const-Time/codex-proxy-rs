@@ -83,7 +83,7 @@ mod client_keys;
 mod errors;
 mod observability;
 mod operations;
-mod plugin_models;
+pub(crate) mod plugin_models;
 mod plugins;
 mod proxies;
 mod settings;
