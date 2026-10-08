@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, fmt, net::IpAddr};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload, ProviderSessionState};
 use gateway_protocol::openai::{
@@ -339,7 +339,7 @@ const MAX_DECOMPRESSED_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 ///
 /// 未压缩与 `identity` 借用原始正文；压缩正文在读取过程中限制展开大小，
 /// 避免先完整分配再检查。只接受单一编码，重复头和叠加编码不能只解释第一项。
-fn decompress_request_body<'a>(
+pub(super) fn decompress_request_body<'a>(
     body: &'a [u8],
     headers: &HeaderMap,
 ) -> Result<Cow<'a, [u8]>, RequestDecodeError> {
@@ -509,6 +509,19 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn passthrough_headers(headers: &HeaderMap) -> Vec<Value> {
+    forwarded_request_headers(headers)
+        .map(|(name, value)| {
+            Value::Array(vec![
+                Value::String(name.as_str().to_owned()),
+                Value::String(STANDARD.encode(value.as_bytes())),
+            ])
+        })
+        .collect()
+}
+
+pub(super) fn forwarded_request_headers(
+    headers: &HeaderMap,
+) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
     let connection_headers = headers
         .get_all("connection")
         .iter()
@@ -521,14 +534,7 @@ fn passthrough_headers(headers: &HeaderMap) -> Vec<Value> {
 
     headers
         .iter()
-        .filter(|(name, _)| passthrough_header_name(name.as_str(), &connection_headers))
-        .map(|(name, value)| {
-            Value::Array(vec![
-                Value::String(name.as_str().to_owned()),
-                Value::String(STANDARD.encode(value.as_bytes())),
-            ])
-        })
-        .collect()
+        .filter(move |(name, _)| passthrough_header_name(name.as_str(), &connection_headers))
 }
 
 fn passthrough_header_name(name: &str, connection_headers: &[String]) -> bool {

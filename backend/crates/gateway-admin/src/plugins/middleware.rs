@@ -9,17 +9,21 @@ use gateway_core::{
 };
 use std::collections::BTreeSet;
 
+#[derive(Clone)]
 struct Entry {
     binding: PluginMiddlewareBinding,
     process: Option<Arc<dyn PluginProcess>>,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Publication {
     entries: BTreeMap<String, Entry>,
     blocked: BTreeSet<String>,
     epoch: PluginAccess,
 }
 impl Publication {
+    pub(super) fn snapshot(&self) -> PluginMiddlewareRegistry {
+        PluginMiddlewareRegistry(self.clone())
+    }
     pub(super) fn publish(
         &mut self,
         record: &PluginRecord,
@@ -98,6 +102,15 @@ impl Publication {
         }
         context.cancellation = CancellationToken::linked(tokens);
         Ok(PluginMiddlewarePlan { context, processes })
+    }
+}
+
+/// A single publication snapshot, captured before request preparation. A version
+/// switch revokes it even if preparation has not yet entered the first layer.
+pub struct PluginMiddlewareRegistry(Publication);
+impl PluginMiddlewareRegistry {
+    pub fn freeze(&self, context: MiddlewareContext) -> Result<PluginMiddlewarePlan, AdminError> {
+        self.0.freeze(context)
     }
 }
 

@@ -211,6 +211,7 @@ impl MiddlewareFrame {
             transformed,
             envelope: Some(MiddlewareFrameEnvelope {
                 event,
+                preceding: Vec::new(),
                 batch_end: None,
             }),
         }
@@ -235,10 +236,19 @@ impl fmt::Debug for MiddlewareFrame {
 /// 该类型故意不实现 `Clone`，防止同一 usage/cost 在一对多响应中被复制
 pub struct MiddlewareFrameEnvelope {
     event: ProviderEvent,
+    preceding: Vec<ProviderEvent>,
     batch_end: Option<CommitRequirement>,
 }
 
 impl MiddlewareFrameEnvelope {
+    /// Whole-document adapters retain every original event without duplicating receipts.
+    pub fn with_preceding_events(mut self, events: Vec<ProviderEvent>) -> Self {
+        self.preceding = events;
+        self
+    }
+    pub fn events(&self) -> impl Iterator<Item = &ProviderEvent> {
+        self.preceding.iter().chain(std::iter::once(&self.event))
+    }
     pub fn with_batch_end(mut self, requirement: CommitRequirement) -> Self {
         self.batch_end = Some(requirement);
         self

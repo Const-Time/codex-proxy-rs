@@ -48,6 +48,31 @@ pub(crate) fn execution(event: &ProviderEvent) -> Result<ExecutionFacts, PluginF
     })
 }
 
+pub(crate) fn envelope(
+    value: &gateway_core::engine::middleware::MiddlewareFrameEnvelope,
+) -> Result<ExecutionEvent, PluginFault> {
+    let mut result = snapshot(value.event())?;
+    result.facts.clear();
+    let host = result.host.as_mut().ok_or_else(|| {
+        PluginFault::new(ErrorCode::Fault, "execution snapshot has no host facts")
+    })?;
+    host.costs.clear();
+    for event in value.events() {
+        let part = snapshot(event)?;
+        result.facts.extend(part.facts);
+        if let Some(part) = part.host {
+            host.costs.extend(part.costs);
+            if part.observation.is_some() {
+                host.observation = part.observation;
+            }
+            if part.session_update.is_some() {
+                host.session_update = part.session_update;
+            }
+        }
+    }
+    Ok(result)
+}
+
 pub(crate) fn metadata(value: &ProviderCallMetadata) -> facts::ProviderCallMetadata {
     facts::ProviderCallMetadata {
         provider: value.provider().as_str().to_owned(),

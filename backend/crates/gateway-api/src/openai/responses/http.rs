@@ -96,6 +96,23 @@ pub(crate) async fn responses_at_endpoint(
     } else {
         None
     };
+    if let Some(registry) = service.middleware_registry() {
+        return super::middleware::request::respond(
+            service.clone(),
+            registry,
+            super::middleware::request::Ingress {
+                client,
+                decoded,
+                headers,
+                body,
+                endpoint,
+                connection: connection_guard,
+                ingress_id: ingress_id
+                    .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned)),
+            },
+        )
+        .await;
+    }
     let started = match service
         .start_response(
             client,
@@ -418,6 +435,11 @@ pub(in crate::openai) struct PendingExecution {
 }
 
 impl PendingExecution {
+    pub(in crate::openai) fn is_finalized(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_none_or(|session| session.is_finalized())
+    }
     pub(in crate::openai) fn new(session: Box<dyn ExecutionSession>) -> Self {
         Self {
             session: Some(session),

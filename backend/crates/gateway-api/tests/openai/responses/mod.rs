@@ -1,4 +1,5 @@
 mod http;
+mod middleware;
 mod request;
 mod websocket;
 

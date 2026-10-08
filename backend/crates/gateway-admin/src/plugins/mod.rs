@@ -174,6 +174,14 @@ impl PluginManager {
 }
 #[async_trait]
 impl PluginService for PluginManager {
+    fn middleware_registry(&self) -> Option<middleware::PluginMiddlewareRegistry> {
+        Some(
+            self.middleware
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot(),
+        )
+    }
     fn freeze_middleware(
         &self,
         context: gateway_core::engine::middleware::MiddlewareContext,
