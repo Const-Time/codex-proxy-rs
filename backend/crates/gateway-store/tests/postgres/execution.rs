@@ -1300,3 +1300,234 @@ async fn entry_rejection_is_observed_without_creating_a_model_request() {
     assert_eq!(count, 0);
     database.close().await;
 }
+
+#[tokio::test]
+async fn recovery_renewal_respects_deadlines_and_never_creates_or_revives_records() {
+    let Some(database) = TestDatabase::create("execution_recovery_renewal").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    let ttl = std::time::Duration::from_secs(120);
+    assert!(
+        store
+            .renew_model_request("req_absent", None, ttl)
+            .await
+            .unwrap()
+    );
+    let count: i64 = sqlx::query_scalar("select count(*) from model_requests")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    seed_running_request(&database.pool, "req_live")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .renew_model_request("req_live", None, ttl)
+            .await
+            .unwrap()
+    );
+    let first = recovery_expiry(&database.pool, "req_live").await;
+    assert!(first > Utc::now() + Duration::seconds(110));
+    assert!(
+        store
+            .renew_model_request("req_live", None, std::time::Duration::from_secs(1))
+            .await
+            .unwrap()
+    );
+    assert_eq!(recovery_expiry(&database.pool, "req_live").await, first);
+    let deadline = Utc::now() + Duration::seconds(30);
+    assert!(
+        store
+            .renew_model_request("req_live", Some(deadline), ttl)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        recovery_expiry(&database.pool, "req_live")
+            .await
+            .timestamp_micros(),
+        deadline.timestamp_micros()
+    );
+    assert!(
+        !store
+            .renew_model_request("req_live", Some(Utc::now() - Duration::seconds(1)), ttl)
+            .await
+            .unwrap()
+    );
+    for invalid in [
+        std::time::Duration::ZERO,
+        std::time::Duration::from_nanos(1),
+        std::time::Duration::MAX,
+    ] {
+        assert!(
+            store
+                .renew_model_request("req_live", None, invalid)
+                .await
+                .is_err()
+        );
+    }
+    ExecutionStore::finalize_model_request(&store, successful_core_finalization("req_live"))
+        .await
+        .unwrap();
+    let finalized = recovery_expiry(&database.pool, "req_live").await;
+    assert!(
+        !store
+            .renew_model_request("req_live", None, ttl)
+            .await
+            .unwrap()
+    );
+    assert_eq!(recovery_expiry(&database.pool, "req_live").await, finalized);
+    seed_running_request(&database.pool, "req_expired")
+        .await
+        .unwrap();
+    sqlx::query("update model_requests set started_at = now() - interval '2 seconds', deadline_at = now() - interval '1 second' where id = 'req_expired'").execute(&database.pool).await.unwrap();
+    assert!(
+        !store
+            .renew_model_request("req_expired", None, ttl)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .recover_expired_model_requests(Utc::now())
+            .await
+            .unwrap()
+            .requests,
+        1
+    );
+    assert!(
+        !store
+            .renew_model_request("req_expired", None, ttl)
+            .await
+            .unwrap()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn recovery_guard_handles_delayed_creation_and_crash_expiry() {
+    let Some(database) = TestDatabase::create("execution_recovery_guard").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    let request = ModelRequestId::new("req_delayed").unwrap();
+    let guard = store.maintain_request(&request, None, std::time::Duration::from_millis(900));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select count(*) from model_requests")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    seed_running_request(&database.pool, request.as_str())
+        .await
+        .unwrap();
+    sqlx::query(
+        "update model_requests set deadline_at = now() + interval '600 milliseconds' where id = $1",
+    )
+    .bind(request.as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+    assert_eq!(
+        store
+            .recover_expired_model_requests(Utc::now())
+            .await
+            .unwrap()
+            .requests,
+        0
+    );
+    assert!(recovery_expiry(&database.pool, request.as_str()).await > Utc::now());
+    drop(guard);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        store
+            .recover_expired_model_requests(Utc::now())
+            .await
+            .unwrap()
+            .requests,
+        1
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn recovery_guard_stops_at_explicit_execution_deadline() {
+    let Some(database) = TestDatabase::create("execution_recovery_deadline").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    seed_running_request(&database.pool, "req_bounded")
+        .await
+        .unwrap();
+    let deadline = std::time::SystemTime::now() + std::time::Duration::from_millis(900);
+    let guard = store.maintain_request(
+        &ModelRequestId::new("req_bounded").unwrap(),
+        Some(deadline),
+        std::time::Duration::from_millis(600),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    assert_eq!(
+        recovery_expiry(&database.pool, "req_bounded")
+            .await
+            .timestamp_micros(),
+        chrono::DateTime::<Utc>::from(deadline).timestamp_micros()
+    );
+    assert_eq!(
+        store
+            .recover_expired_model_requests(Utc::now())
+            .await
+            .unwrap()
+            .requests,
+        1
+    );
+    drop(guard);
+    database.close().await;
+}
+
+async fn recovery_expiry(pool: &sqlx::PgPool, request: &str) -> chrono::DateTime<Utc> {
+    sqlx::query_scalar("select deadline_at from model_requests where id = $1")
+        .bind(request)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn recovery_renewal_does_not_revive_a_lease_that_expires_while_waiting_for_its_row_lock() {
+    let Some(database) = TestDatabase::create("execution_recovery_lock").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    seed_running_request(&database.pool, "req_locked")
+        .await
+        .unwrap();
+    sqlx::query("update model_requests set deadline_at = now() + interval '1 second' where id = 'req_locked'").execute(&database.pool).await.unwrap();
+    let expiry = recovery_expiry(&database.pool, "req_locked").await;
+    let mut transaction = database.pool.begin().await.unwrap();
+    sqlx::query("select id from model_requests where id = 'req_locked' for update")
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    let renewal = tokio::spawn(async move {
+        store
+            .renew_model_request("req_locked", None, std::time::Duration::from_secs(60))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock')").fetch_one(&database.pool).await.unwrap();
+            if blocked { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("renewal is waiting on the row lock");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    transaction.commit().await.unwrap();
+    assert!(!renewal.await.unwrap().unwrap());
+    assert_eq!(recovery_expiry(&database.pool, "req_locked").await, expiry);
+    database.close().await;
+}

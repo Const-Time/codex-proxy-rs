@@ -1721,6 +1721,15 @@ impl TrackingExecutionStore {
 
 #[async_trait]
 impl ExecutionStore for TrackingExecutionStore {
+    fn maintain_request(
+        &self,
+        _: &gateway_core::engine::ModelRequestId,
+        _: Option<std::time::SystemTime>,
+        _: std::time::Duration,
+    ) -> Box<dyn gateway_core::engine::ExecutionRecoveryLeaseGuard> {
+        Box::new(TestExecutionRecoveryLease)
+    }
+
     async fn record_entry_rejection(
         &self,
         rejection: gateway_core::engine::EntryRejection,
@@ -2518,3 +2527,6 @@ impl Drop for CountingAdmissionLease {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
+
+struct TestExecutionRecoveryLease;
+impl gateway_core::engine::ExecutionRecoveryLeaseGuard for TestExecutionRecoveryLease {}

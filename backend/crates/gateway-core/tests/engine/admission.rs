@@ -116,6 +116,15 @@ impl RecoveryStore {
 
 #[async_trait]
 impl ExecutionStore for RecoveryStore {
+    fn maintain_request(
+        &self,
+        _: &gateway_core::engine::ModelRequestId,
+        _: Option<std::time::SystemTime>,
+        _: std::time::Duration,
+    ) -> Box<dyn gateway_core::engine::ExecutionRecoveryLeaseGuard> {
+        Box::new(TestExecutionRecoveryLease)
+    }
+
     async fn create_model_request(&self, _: NewModelRequest) -> Result<(), StoreError> {
         unreachable!()
     }
@@ -225,3 +234,6 @@ impl ClientAdmissionPort for RecordingAdmissions {
 
 struct TestAdmissionLease;
 impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissionLease {}
+
+struct TestExecutionRecoveryLease;
+impl gateway_core::engine::ExecutionRecoveryLeaseGuard for TestExecutionRecoveryLease {}

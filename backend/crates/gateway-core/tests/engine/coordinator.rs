@@ -105,6 +105,7 @@ struct StoreState {
 
 #[derive(Default)]
 struct FakeStore {
+    recovery_leases: Arc<AtomicUsize>,
     state: Mutex<StoreState>,
     failures: BTreeSet<StoreWriteFailure>,
     create_gate: Mutex<Option<oneshot::Receiver<()>>>,
@@ -137,6 +138,16 @@ impl FakeStore {
 
 #[async_trait]
 impl ExecutionStore for FakeStore {
+    fn maintain_request(
+        &self,
+        _: &gateway_core::engine::ModelRequestId,
+        _: Option<std::time::SystemTime>,
+        _: std::time::Duration,
+    ) -> Box<dyn gateway_core::engine::ExecutionRecoveryLeaseGuard> {
+        self.recovery_leases.fetch_add(1, Ordering::SeqCst);
+        Box::new(TestExecutionRecoveryLease(self.recovery_leases.clone()))
+    }
+
     async fn create_model_request(&self, _request: NewModelRequest) -> Result<(), StoreError> {
         self.fails(StoreWriteFailure::Create)?;
         self.state.lock().expect("store lock").created += 1;
@@ -4177,6 +4188,7 @@ fn interrupted_early_finalization_resumes_the_same_write_and_keeps_the_original_
                     assert!(futures::poll!(next.as_mut()).is_pending());
                     drop(next);
                     assert!(!session.is_finalized());
+                    assert_eq!(store.recovery_leases.load(Ordering::SeqCst), 1);
                     assert_eq!(provider.contexts.lock().unwrap().len(), 1);
                 }
                 let completed_at = session.budget_charge().completed_at;
@@ -4189,6 +4201,7 @@ fn interrupted_early_finalization_resumes_the_same_write_and_keeps_the_original_
                     assert!(session.next_event().await.unwrap().is_none());
                 }
                 assert!(session.is_finalized());
+                assert_eq!(store.recovery_leases.load(Ordering::SeqCst), 0);
                 session.cancel_and_finalize().await.unwrap();
                 assert_eq!(session.budget_charge().completed_at, completed_at);
                 let state = store.state.lock().unwrap();
@@ -5502,4 +5515,36 @@ fn fast_defaults_precede_attempt_middleware_on_every_retry_and_do_not_overwrite_
         assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
         assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
     }
+}
+
+struct TestExecutionRecoveryLease(Arc<AtomicUsize>);
+impl Drop for TestExecutionRecoveryLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl gateway_core::engine::ExecutionRecoveryLeaseGuard for TestExecutionRecoveryLease {}
+
+#[test]
+fn dropping_unpolled_session_stops_recovery_maintenance() {
+    block_on(async {
+        let operation = generate_operation();
+        let (coordinator, store, _) =
+            coordinator_with_store(vec![], Arc::new(FakeStore::default()));
+        let session = coordinator
+            .start(
+                model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                operation.clone(),
+                plan(&operation),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.recovery_leases.load(Ordering::SeqCst), 1);
+        drop(session);
+        assert_eq!(store.recovery_leases.load(Ordering::SeqCst), 0);
+        assert_eq!(store.state.lock().unwrap().created, 0);
+    });
 }

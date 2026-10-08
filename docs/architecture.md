@@ -577,3 +577,6 @@ Provider 的同步 `prepare_operation` 只形成原生请求默认值，不执�
 
 
 准入续期由 Store 的 Redis adapter 拥有，Core 为每个已准入的 Key/用户共享作用域持有独立 guard。续期只延长仍存活的并发槽位，不重写 RPM，不缩短已有期限，不复活过期或已释放成员。续期失败、超时或发现成员丢失时取消原执行；释放队列不承接续期。取消和终态费用结算期间继续持有 guard，进入释放前停止续期；丢弃 guard 终止后台任务，遗漏释放由 TTL 收敛。此机制为可变执行期限提供准入基础；执行截止时间和 PostgreSQL 恢复期限仍为既有固定合同，尚未开放无限时请求。
+
+
+`ExecutionStore::maintain_request` 为同一 `model_requests` 行续期异常回收时间；Core 会话持有 guard，取消等待不丢失 guard，终态写入完成或会话丢弃时停止。PostgreSQL 仅更新未过期的 running 行，缺失的队列观测不补造，已终态/已过期行不复活；显式执行截止时间限制续期上界。BufferedExecutionStore 直接委派续期而不进入可丢失观测队列，观测续期故障按原 best-effort 合同重试，不改变推理结果或费用。`REQUEST_LEASE_TTL` 是恢复租约时长，与执行超时分开命名；恢复端口已经支持无显式截止的 guard，但公开执行仍保留固定期限，需后续统一 Core/Provider/RPC 的可选截止时间。

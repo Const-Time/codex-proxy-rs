@@ -229,6 +229,16 @@ impl<S> ExecutionStore for BufferedExecutionStore<S>
 where
     S: ExecutionStore + ?Sized,
 {
+    fn maintain_request(
+        &self,
+        request_id: &ModelRequestId,
+        execution_deadline: Option<SystemTime>,
+        lease_ttl: std::time::Duration,
+    ) -> Box<dyn gateway_core::engine::ExecutionRecoveryLeaseGuard> {
+        self.inner
+            .maintain_request(request_id, execution_deadline, lease_ttl)
+    }
+
     async fn create_model_request(&self, request: NewModelRequest) -> Result<(), StoreError> {
         self.enqueue(ExecutionObservationWrite::Create(Box::new(request)));
         Ok(())
