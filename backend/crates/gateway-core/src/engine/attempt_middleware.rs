@@ -8,7 +8,10 @@ use super::{
     middleware::MiddlewareError,
     provider::{ProviderCallMetadata, ProviderRequest},
 };
-use crate::{event::ProviderEvent, operation::Operation};
+use crate::{
+    event::{ProviderEvent, ProviderResponseHeader},
+    operation::Operation,
+};
 use futures::{
     Stream,
     channel::{mpsc, oneshot},
@@ -22,6 +25,22 @@ use std::{
 };
 
 pub type AttemptEvents = BoxStream<'static, Result<ProviderEvent, MiddlewareError>>;
+/// Client-facing projection, separate from authoritative upstream observations.
+#[derive(Clone)]
+pub struct AttemptResponseHead {
+    pub status_code: u16,
+    pub headers: Vec<ProviderResponseHeader>,
+}
+pub struct AttemptOutput {
+    pub events: AttemptEvents,
+    pub head: Option<AttemptResponseHead>,
+}
+impl From<AttemptEvents> for AttemptOutput {
+    fn from(events: AttemptEvents) -> Self {
+        Self { events, head: None }
+    }
+}
+
 pub type AttemptNext = crate::middleware::Next<Operation, AttemptSource, MiddlewareError>;
 
 /// One immutable root binding creates a fresh invocation for each real attempt.
@@ -33,7 +52,7 @@ pub trait AttemptMiddleware: Send + Sync {
         request: ProviderRequest,
         context: AttemptContext,
         next: AttemptNext,
-    ) -> BoxFuture<'static, Result<AttemptEvents, MiddlewareError>>;
+    ) -> BoxFuture<'static, Result<AttemptOutput, MiddlewareError>>;
 }
 
 /// Host-authorized source. Its read future may be dropped and resumed without
@@ -110,7 +129,7 @@ impl NextRequest {
 }
 
 enum State {
-    Calling(BoxFuture<'static, Result<AttemptEvents, MiddlewareError>>),
+    Calling(BoxFuture<'static, Result<AttemptOutput, MiddlewareError>>),
     Output(AttemptEvents),
     Closed,
 }
@@ -123,6 +142,7 @@ pub(super) enum Step {
 pub(super) struct Invocation {
     state: State,
     commands: mpsc::UnboundedReceiver<Command>,
+    pub(super) head: Option<AttemptResponseHead>,
     pub(super) source_complete: bool,
     pub(super) original_error: Option<crate::error::ProviderError>,
 }
@@ -149,6 +169,7 @@ impl Invocation {
         Self {
             state: State::Calling(middleware.invoke(request, context, next)),
             commands: receiver,
+            head: None,
             source_complete: false,
             original_error: None,
         }
@@ -160,8 +181,9 @@ impl Invocation {
         loop {
             match &mut self.state {
                 State::Calling(future) => match future.as_mut().poll(cx) {
-                    Poll::Ready(Ok(events)) => {
-                        self.state = State::Output(events);
+                    Poll::Ready(Ok(output)) => {
+                        self.head = output.head;
+                        self.state = State::Output(output.events);
                         continue;
                     }
                     Poll::Ready(Err(error)) => {

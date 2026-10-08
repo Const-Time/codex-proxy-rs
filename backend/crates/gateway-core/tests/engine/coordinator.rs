@@ -4680,7 +4680,7 @@ impl gateway_core::engine::attempt_middleware::AttemptMiddleware for TestAttempt
     ) -> futures::future::BoxFuture<
         'static,
         Result<
-            gateway_core::engine::attempt_middleware::AttemptEvents,
+            gateway_core::engine::attempt_middleware::AttemptOutput,
             gateway_core::engine::middleware::MiddlewareError,
         >,
     > {
@@ -4688,7 +4688,10 @@ impl gateway_core::engine::attempt_middleware::AttemptMiddleware for TestAttempt
         let mode = self.mode;
         let store = self.store.clone();
         self.contexts.lock().unwrap().push(context.clone());
-        Box::pin(async move {
+        let future: futures::future::BoxFuture<
+            'static,
+            Result<gateway_core::engine::attempt_middleware::AttemptEvents, MiddlewareError>,
+        > = Box::pin(async move {
             if matches!(mode, AttemptMiddlewareMode::ShortCircuit)
                 || (matches!(mode, AttemptMiddlewareMode::ShortCircuitAfterRetry)
                     && context.attempt_index().get() > 1)
@@ -4777,7 +4780,8 @@ impl gateway_core::engine::attempt_middleware::AttemptMiddleware for TestAttempt
             }
             Ok(Box::pin(futures::stream::iter(projected))
                 as gateway_core::engine::attempt_middleware::AttemptEvents)
-        })
+        });
+        Box::pin(async move { future.await.map(Into::into) })
     }
 }
 fn costed_attempt() -> Script {

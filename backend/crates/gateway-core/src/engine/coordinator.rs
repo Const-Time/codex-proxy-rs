@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use super::attempt_middleware::{
-    AttemptMiddleware, Command as MiddlewareCommand, Invocation, NextRequest,
+    AttemptMiddleware, AttemptResponseHead, Command as MiddlewareCommand, Invocation, NextRequest,
     Step as MiddlewareStep,
 };
 use super::middleware::MiddlewareError;
@@ -180,6 +180,7 @@ where
         let mut session = ResponseExecutionSession {
             engine: Arc::clone(&self.engine),
             attempt_middleware: self.middleware.clone(),
+            middleware_response_head: None,
             middleware_invocation: None,
             middleware_preparation: None,
             middleware_provider: None,
@@ -297,6 +298,7 @@ struct PendingAttemptRetry {
 /// `model_requests` 写回均留在本类型内。
 pub struct ResponseExecutionSession<S: ?Sized> {
     attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
+    middleware_response_head: Option<AttemptResponseHead>,
     middleware_invocation: Option<Invocation>,
     middleware_preparation: Option<MiddlewarePreparation>,
     middleware_provider: Option<BoxFuture<'static, ProviderBoundary>>,
@@ -593,11 +595,18 @@ where
     /// 返回最终选中 attempt 已公开给协议层的安全响应头。
     #[must_use]
     pub fn response_headers(&self) -> &[ProviderResponseHeader] {
+        if let Some(head) = &self.middleware_response_head {
+            return &head.headers;
+        }
         self.current
             .as_ref()
             .and_then(|current| current.response_observation.as_ref())
             .map(ProviderResponseObservation::client_headers)
             .unwrap_or_default()
+    }
+
+    pub fn middleware_response_head(&self) -> Option<&AttemptResponseHead> {
+        self.middleware_response_head.as_ref()
     }
 
     /// 返回最终选中 attempt 观察到的上游 HTTP 状态码。
@@ -854,6 +863,13 @@ where
             };
             poll_middleware(invocation, source, self.cancellation.clone(), self.deadline).await
         };
+        if let Some(head) = self
+            .middleware_invocation
+            .as_mut()
+            .and_then(|inv| inv.head.take())
+        {
+            self.middleware_response_head = Some(head);
+        }
         let step = match boundary {
             MiddlewareBoundary::Cancelled | MiddlewareBoundary::Deadline => {
                 let error = if matches!(boundary, MiddlewareBoundary::Cancelled) {
@@ -1117,6 +1133,7 @@ where
         let mut provider_request = ProviderRequest::new(self.operation.clone(), candidate.clone());
         if let Some(middleware) = self.attempt_middleware.clone() {
             if self.middleware_invocation.is_none() {
+                self.middleware_response_head = None;
                 self.middleware_source_started = false;
                 self.middleware_session_update = None;
                 self.middleware_invocation = Some(Invocation::new(
@@ -1135,6 +1152,13 @@ where
                     self.deadline,
                 )
                 .await;
+                if let Some(head) = self
+                    .middleware_invocation
+                    .as_mut()
+                    .and_then(|inv| inv.head.take())
+                {
+                    self.middleware_response_head = Some(head);
+                }
                 match boundary {
                     MiddlewareBoundary::Step(MiddlewareStep::Command(MiddlewareCommand::Next(
                         request,

@@ -67,11 +67,37 @@ pub(in crate::openai::responses) async fn respond(
         cancellation: prepared.cancellation(),
         deadline_at: prepared.deadline_at(),
     };
+    let registry = std::sync::Arc::new(registry);
+    let attempt_context = MiddlewareContext {
+        mount: MiddlewareMount::Attempt,
+        ..context.clone()
+    };
+    let attempts = match registry.freeze(attempt_context.clone()) {
+        Ok(plan) => plan,
+        Err(_) => return runtime_unavailable_response().into_response(),
+    };
+    let has_attempts = !attempts.is_empty();
+    let prepared = prepared.with_revocation(attempts.cancellation());
+    let prepared = if has_attempts {
+        prepared.with_attempt_middleware(super::responses_attempt_middleware(
+            registry.clone(),
+            attempt_context,
+        ))
+    } else {
+        prepared
+    };
+    let context = MiddlewareContext {
+        cancellation: prepared.cancellation(),
+        ..context
+    };
     let plan = match registry.freeze(context) {
         Ok(plan) => plan,
         Err(_) => return runtime_unavailable_response().into_response(),
     };
-    let cancellation = plan.cancellation();
+    let cancellation = gateway_core::lifecycle::CancellationToken::linked([
+        plan.cancellation(),
+        attempts.cancellation(),
+    ]);
     let access = prepared
         .client()
         .bound_access()
@@ -79,7 +105,7 @@ pub(in crate::openai::responses) async fn respond(
     let prepared = prepared.with_revocation(cancellation);
     let request_id = prepared.request_id().as_str().to_owned();
     // Empty plans keep the existing transparent response path and its size contract.
-    let mut response = if plan.is_empty() {
+    let mut response = if plan.is_empty() && !has_attempts {
         match service
             .start_prepared_response(prepared, input.decoded, transport, input.endpoint)
             .await
@@ -132,17 +158,7 @@ pub(in crate::openai::responses) async fn respond(
                 if request.protocol() != "openai" {
                     return Err(MiddlewareError::InvalidState);
                 }
-                let mut headers = HeaderMap::new();
-                for header in request.headers() {
-                    let name = HeaderName::from_bytes(header.name().as_bytes())
-                        .map_err(|_| MiddlewareError::InvalidState)?;
-                    let value = HeaderValue::from_bytes(header.value())
-                        .map_err(|_| MiddlewareError::InvalidState)?;
-                    headers.append(name, value);
-                }
-                let headers = forwarded_request_headers(&headers)
-                    .map(|(name, value)| (name.clone(), value.clone()))
-                    .collect::<HeaderMap>();
+                let headers = filtered_headers(request.headers())?;
                 let decoded = decode_request_with_headers(request.body(), &headers)
                     .map_err(|_| {
                         MiddlewareError::Gateway(GatewayError::new(
@@ -189,4 +205,18 @@ pub(in crate::openai::responses) async fn respond(
         response = crate::openai::revocation::protect(response, access);
     }
     response
+}
+
+pub(super) fn filtered_headers(input: &[MiddlewareHeader]) -> Result<HeaderMap, MiddlewareError> {
+    let mut headers = HeaderMap::new();
+    for header in input {
+        let name = HeaderName::from_bytes(header.name().as_bytes())
+            .map_err(|_| MiddlewareError::InvalidState)?;
+        let value =
+            HeaderValue::from_bytes(header.value()).map_err(|_| MiddlewareError::InvalidState)?;
+        headers.append(name, value);
+    }
+    Ok(forwarded_request_headers(&headers)
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect())
 }

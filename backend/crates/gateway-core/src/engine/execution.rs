@@ -248,6 +248,9 @@ pub trait ExecutionSession: Send {
     fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>>;
     fn collect_uncommitted(&mut self) -> BoxFuture<'_, Result<Vec<ProviderEvent>, EngineError>>;
     fn response_headers(&self) -> &[ProviderResponseHeader];
+    fn middleware_response_head(&self) -> Option<&super::attempt_middleware::AttemptResponseHead> {
+        None
+    }
     fn response_status_code(&self) -> Option<u16> {
         None
     }
@@ -1416,6 +1419,9 @@ impl ExecutionSession for DefaultExecutionSession {
 
     fn response_headers(&self) -> &[ProviderResponseHeader] {
         self.core.response_headers()
+    }
+    fn middleware_response_head(&self) -> Option<&super::attempt_middleware::AttemptResponseHead> {
+        self.core.middleware_response_head()
     }
 
     fn response_status_code(&self) -> Option<u16> {
