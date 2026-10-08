@@ -301,6 +301,7 @@ pub struct GenerateRequest {
 struct GeneratePayload {
     protocol_payload: ProtocolPayload,
     provider_session_state: Option<ProviderSessionState>,
+    inherited_capability_requirements: Option<CapabilityRequirements>,
 }
 
 impl GenerateRequest {
@@ -314,6 +315,7 @@ impl GenerateRequest {
             payload: Arc::new(GeneratePayload {
                 protocol_payload,
                 provider_session_state: None,
+                inherited_capability_requirements: None,
             }),
         }
     }
@@ -385,9 +387,20 @@ impl GenerateRequest {
         &self.payload.protocol_payload
     }
 
+    /// Protocol re-decoding during an attempt retains only inherited declarations, not body-derived features.
+    pub fn inherit_capability_requirements(&mut self, original: &Self) {
+        Arc::make_mut(&mut self.payload).inherited_capability_requirements =
+            original.payload.inherited_capability_requirements.clone();
+    }
+
     fn requirements(&self) -> CapabilityRequirements {
         let mut requirements = CapabilityRequirements::new(OperationKind::Generate)
             .with_requested_output_tokens(self.max_output_tokens());
+        if let Some(inherited) = &self.payload.inherited_capability_requirements {
+            for feature in inherited.features() {
+                requirements = requirements.require(*feature);
+            }
+        }
         if self
             .body()
             .get("tools")
@@ -546,6 +559,19 @@ pub enum Operation {
 }
 
 impl Operation {
+    pub(crate) fn with_inherited_capability_requirements(
+        self,
+        inherited: CapabilityRequirements,
+    ) -> Result<Self, OperationError> {
+        let Self::Generate(mut request) = self else {
+            return Err(OperationError::EmptyField {
+                field: "middleware capabilities",
+            });
+        };
+        Arc::make_mut(&mut request.payload).inherited_capability_requirements = Some(inherited);
+        Ok(Self::Generate(request))
+    }
+
     /// 附着协议连接持有的 Provider 私有状态；非生成 operation 保持不变。
     #[must_use]
     pub fn with_provider_session_state(self, state: ProviderSessionState) -> Self {

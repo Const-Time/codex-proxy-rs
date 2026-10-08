@@ -36,6 +36,7 @@ use headers::{apply_header_mutations, wire_headers};
 
 pub(crate) struct MiddlewareInvocation {
     transport: ClientTransport,
+    capabilities_allowed: bool,
     state: Mutex<InvocationState>,
     downstream_error: Arc<Mutex<Option<MiddlewareError>>>,
 }
@@ -83,6 +84,9 @@ impl MiddlewareInvocation {
     ) -> Arc<Self> {
         Arc::new(Self {
             transport: context.transport,
+            capabilities_allowed: context.mount
+                == gateway_core::engine::middleware::MiddlewareMount::Request
+                && context.operation == gateway_core::operation::OperationKind::Generate,
             state: Mutex::new(InvocationState {
                 closed: false,
                 original_request: request,
@@ -234,13 +238,58 @@ impl MiddlewareInvocation {
         request: MiddlewareNextRequest,
         payload: Vec<u8>,
     ) -> Result<MiddlewareRequest, PluginFault> {
-        if request.settings.is_some() || request.capabilities.is_some() {
+        if request.settings.is_some() {
             return Err(PluginFault::new(
                 ErrorCode::Unsupported,
-                "execution setting and capability rewrites are not wired at this boundary",
+                "execution setting rewrites are not wired at this boundary",
             ));
         }
-        let (mut protocol, mut headers, original_body) = original.into_parts();
+        let declaration = request
+            .capabilities
+            .map(|declaration| {
+                if !self.capabilities_allowed || request.body != MiddlewareRequestBody::Replace {
+                    return Err(invalid());
+                }
+                let feature = |feature| match feature {
+                    gateway_plugin_sdk::call::middleware::RequestFeature::Tools => {
+                        gateway_core::operation::Feature::Tools
+                    }
+                    gateway_plugin_sdk::call::middleware::RequestFeature::Vision => {
+                        gateway_core::operation::Feature::Vision
+                    }
+                    gateway_plugin_sdk::call::middleware::RequestFeature::Reasoning => {
+                        gateway_core::operation::Feature::Reasoning
+                    }
+                    gateway_plugin_sdk::call::middleware::RequestFeature::JsonSchema => {
+                        gateway_core::operation::Feature::JsonSchema
+                    }
+                };
+                let handled = declaration
+                    .handled
+                    .iter()
+                    .copied()
+                    .map(feature)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let required = declaration
+                    .required
+                    .iter()
+                    .copied()
+                    .map(feature)
+                    .collect::<std::collections::BTreeSet<_>>();
+                if handled.len() != declaration.handled.len()
+                    || required.len() != declaration.required.len()
+                {
+                    return Err(invalid());
+                }
+                Ok(
+                    gateway_core::engine::middleware::MiddlewareCapabilityDeclaration {
+                        handled,
+                        required,
+                    },
+                )
+            })
+            .transpose()?;
+        let (mut protocol, mut headers, original_body) = original.clone().into_parts();
         if let Some(replacement) = request.protocol {
             validate_protocol(&replacement)?;
             protocol = replacement;
@@ -253,7 +302,9 @@ impl MiddlewareInvocation {
             MiddlewareRequestBody::Preserve => return Err(invalid()),
             MiddlewareRequestBody::Replace => Bytes::from(payload),
         };
-        Ok(MiddlewareRequest::new(protocol, headers, body))
+        original
+            .replace_parts(protocol, headers, body, declaration)
+            .map_err(|_| invalid())
     }
 
     async fn call_body_facts(

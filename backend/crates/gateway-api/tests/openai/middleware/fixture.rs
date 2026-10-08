@@ -103,6 +103,9 @@ pub(super) enum Mode {
     WaitBeforeNext,
     WaitAfterNext,
     ChangeContinuation,
+    HandleTools,
+    RequireReasoning,
+    FalseHandleTools,
 }
 pub(super) struct Plugin {
     pub(super) access: PluginAccess,
@@ -173,6 +176,7 @@ impl PluginProcess for Plugin {
         if matches!(self.mode, Mode::WaitBeforeNext) {
             return futures::future::pending().await;
         }
+        let original = request.clone();
         let (_, mut headers, body) = request.into_parts();
         let mut body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if !attempt || matches!(self.mode, Mode::InvalidModel) {
@@ -219,13 +223,36 @@ impl PluginProcess for Plugin {
                 Bytes::from_static(value.as_bytes()),
             ));
         }
-        let response = next
-            .run(MiddlewareRequest::new(
-                "openai",
-                headers,
-                Bytes::from(body.to_string()),
-            ))
-            .await?;
+        let declaration = if !attempt {
+            match self.mode {
+                Mode::HandleTools => {
+                    body.as_object_mut().unwrap().remove("tools");
+                    body.as_object_mut().unwrap().remove("reasoning");
+                    Some(MiddlewareCapabilityDeclaration {
+                        handled: [gateway_core::operation::Feature::Tools].into(),
+                        required: Default::default(),
+                    })
+                }
+                Mode::RequireReasoning => Some(MiddlewareCapabilityDeclaration {
+                    handled: Default::default(),
+                    required: [gateway_core::operation::Feature::Reasoning].into(),
+                }),
+                Mode::FalseHandleTools => Some(MiddlewareCapabilityDeclaration {
+                    handled: [gateway_core::operation::Feature::Tools].into(),
+                    required: Default::default(),
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let request = original.replace_parts(
+            "openai".into(),
+            headers,
+            Bytes::from(body.to_string()),
+            declaration,
+        )?;
+        let response = next.run(request).await?;
         if matches!(self.mode, Mode::WaitAfterNext) {
             let _hold_response = response;
             return futures::future::pending().await;
@@ -504,6 +531,13 @@ impl Fixture {
         .await
     }
     pub(super) async fn with_mounts(mode: Mode, mounts: Vec<PluginMiddlewareMount>) -> Self {
+        Self::with_features(mode, mounts, &[]).await
+    }
+    pub(super) async fn with_features(
+        mode: Mode,
+        mounts: Vec<PluginMiddlewareMount>,
+        features: &[gateway_core::operation::Feature],
+    ) -> Self {
         let plugin = Arc::new(Plugin {
             access: PluginAccess::default(),
             mode,
@@ -540,14 +574,22 @@ impl Fixture {
                 RuntimeSnapshotHandle::new(snapshot_with_capabilities(
                     "sk_middleware",
                     "openai",
-                    gateway_core::routing::ModelCapabilities::new(
-                        [gateway_core::operation::OperationKind::Generate].into(),
-                        Some(16000),
-                    )
-                    .with_feature(
-                        gateway_core::operation::Feature::NativeContinuation,
-                        gateway_core::routing::SupportLevel::Native,
-                    ),
+                    features
+                        .iter()
+                        .copied()
+                        .chain([gateway_core::operation::Feature::NativeContinuation])
+                        .fold(
+                            gateway_core::routing::ModelCapabilities::new(
+                                [gateway_core::operation::OperationKind::Generate].into(),
+                                Some(16000),
+                            ),
+                            |caps, feature| {
+                                caps.with_feature(
+                                    feature,
+                                    gateway_core::routing::SupportLevel::Native,
+                                )
+                            },
+                        ),
                 )),
                 effects.clone(),
                 ProviderRegistry::new([effects.clone() as Arc<dyn Provider>]).unwrap(),

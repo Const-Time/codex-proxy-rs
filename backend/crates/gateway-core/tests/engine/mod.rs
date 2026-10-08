@@ -3,6 +3,7 @@ mod connection;
 mod continuation;
 mod coordinator;
 mod execution;
+mod middleware;
 mod probe;
 mod provider;
 mod response_control;
