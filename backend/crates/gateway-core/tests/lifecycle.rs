@@ -177,8 +177,13 @@ fn cancellation_wakes_all_live_waiters_after_other_waits_are_dropped() {
 
 #[test]
 fn cancellation_racing_with_wait_registration_and_drop_does_not_lose_wakeup() {
-    for _ in 0..256 {
-        let token = CancellationToken::new();
+    for index in 0..256 {
+        let parent = CancellationToken::new();
+        let token = if index % 2 == 0 {
+            parent.clone()
+        } else {
+            CancellationToken::linked([parent.clone()])
+        };
         let mut dropped_wait = Box::pin(token.cancelled());
         assert!(dropped_wait.as_mut().now_or_never().is_none());
         let start = Barrier::new(2);
@@ -189,7 +194,7 @@ fn cancellation_racing_with_wait_registration_and_drop_does_not_lose_wakeup() {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 start.wait();
-                token.cancel();
+                parent.cancel();
                 finished.wait();
             });
 
@@ -211,4 +216,68 @@ fn cancellation_racing_with_wait_registration_and_drop_does_not_lose_wakeup() {
         assert!(token.is_cancelled());
         assert_eq!(Arc::strong_count(&counter), 2);
     }
+}
+
+#[test]
+fn linked_cancellation_wakes_on_either_parent_without_revoking_siblings() {
+    let first = CancellationToken::new();
+    let second = CancellationToken::new();
+    let child = CancellationToken::linked([first.clone(), second.clone()]);
+    let sibling = CancellationToken::linked([first.clone()]);
+    assert!(!child.is_cancelled());
+    assert!(child.cancelled().now_or_never().is_none());
+    child.cancel();
+    assert!(child.is_cancelled());
+    assert!(!first.is_cancelled());
+    assert!(!second.is_cancelled());
+    assert!(!sibling.is_cancelled());
+    first.cancel();
+    assert!(sibling.is_cancelled());
+    for selected in 0..2 {
+        let parents = [CancellationToken::new(), CancellationToken::new()];
+        let child = CancellationToken::linked(parents.clone());
+        let future = child.cancelled();
+        futures::pin_mut!(future);
+        assert!(future.as_mut().now_or_never().is_none());
+        parents[selected].cancel();
+        assert!(future.now_or_never().is_some());
+        assert!(child.is_cancelled());
+        assert!(!parents[1 - selected].is_cancelled());
+    }
+}
+#[test]
+fn linked_cancellation_observes_ancestors_and_cancelled_parents_without_a_runtime() {
+    let root = CancellationToken::new();
+    let middle = CancellationToken::linked([root.clone()]);
+    let leaf = CancellationToken::linked([middle.clone()]);
+    for _ in 0..1000 {
+        assert!(leaf.cancelled().now_or_never().is_none());
+    }
+    let future = leaf.cancelled();
+    futures::pin_mut!(future);
+    assert!(future.as_mut().now_or_never().is_none());
+    root.cancel();
+    assert!(future.now_or_never().is_some());
+    assert!(middle.is_cancelled());
+    let late = CancellationToken::linked([root]);
+    assert!(late.cancelled().now_or_never().is_some());
+    let independent = CancellationToken::linked([]);
+    assert!(!independent.is_cancelled());
+    independent.cancel();
+    assert!(independent.cancelled().now_or_never().is_some());
+}
+
+#[test]
+fn discarded_linked_cancellation_waits_release_all_registrations() {
+    let parents = [CancellationToken::new(), CancellationToken::new()];
+    let child = CancellationToken::linked(parents);
+    discard_cancellation_branch(&child);
+    let allocations = allocation_counter::measure(|| {
+        for _ in 0..10000 {
+            discard_cancellation_branch(&child);
+        }
+    });
+    assert_eq!(allocations.count_current, 0, "{allocations:?}");
+    assert_eq!(allocations.bytes_current, 0, "{allocations:?}");
+    assert!(!child.is_cancelled());
 }

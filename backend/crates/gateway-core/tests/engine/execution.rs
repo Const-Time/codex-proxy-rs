@@ -1791,3 +1791,130 @@ fn start_operation_for_model(model: &str) -> Operation {
             .expect("OpenAI payload"),
     ))
 }
+
+#[test]
+fn host_bound_identity_requires_an_enabled_key_and_never_reuses_revoked_authorization() {
+    let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+    let admissions = Arc::new(Admissions::default());
+    let usage = Arc::new(RecordingClientApiKeyUsage::default());
+    let service = DefaultExecutionService::new(
+        snapshots.clone(),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        admissions.clone(),
+        Arc::new(UnusedContinuation),
+        usage,
+    );
+    let revocation = gateway_core::lifecycle::CancellationToken::new();
+    let key = ClientApiKeyId::new("key_start_test").unwrap();
+    assert!(
+        service
+            .authenticate_bound_key(&ClientApiKeyId::new("missing").unwrap(), revocation.clone())
+            .is_err()
+    );
+    let client = service
+        .authenticate_bound_key(&key, revocation.clone())
+        .unwrap();
+    assert_eq!(client.policy().key_id(), &key);
+    let access = service.client_access(&client).unwrap();
+    revocation.cancel();
+    assert!(access.cancellation().is_cancelled());
+    assert!(service.authenticate_bound_key(&key, revocation).is_err());
+    let mut r = request(&service, ClientTransport::WebSocket);
+    r.client = client;
+    assert!(
+        matches!(block_on(service.start(r)),Err(e) if e.kind()==GatewayErrorKind::Unauthorized)
+    );
+    assert!(admissions.limits.lock().unwrap().is_empty());
+    let fresh = gateway_core::lifecycle::CancellationToken::new();
+    snapshots.publish(start_snapshot_with_policy(
+        2,
+        false,
+        RateLimits::unlimited(),
+    ));
+    assert!(service.authenticate_bound_key(&key, fresh.clone()).is_err());
+    snapshots.suspend();
+    assert_eq!(
+        service.authenticate_bound_key(&key, fresh).unwrap_err(),
+        gateway_core::engine::execution::ClientAuthenticationError::SnapshotUnavailable
+    );
+}
+#[test]
+fn bound_execution_revocation_preserves_charges_and_cancelling_one_request_preserves_parent() {
+    block_on(async {
+        for policy_revocation in [false, true] {
+            for transport in [
+                ClientTransport::HttpJson,
+                ClientTransport::HttpSse,
+                ClientTransport::WebSocket,
+            ] {
+                let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+                let admissions = Arc::new(Admissions::default());
+                let budget = Arc::new(Budget {
+                    active: admissions.active.clone(),
+                    ..Default::default()
+                });
+                let service = DefaultExecutionService::new(
+                    snapshots.clone(),
+                    Arc::new(TrackingExecutionStore::default()),
+                    ProviderRegistry::new([
+                        Arc::new(ChargedProvider { fail: false }) as Arc<dyn Provider>
+                    ])
+                    .unwrap(),
+                    admissions.clone(),
+                    Arc::new(UnusedContinuation),
+                    Arc::new(RecordingClientApiKeyUsage::default()),
+                )
+                .with_budget(budget.clone());
+                let parent = gateway_core::lifecycle::CancellationToken::new();
+                let client = service
+                    .authenticate_bound_key(
+                        &ClientApiKeyId::new("key_start_test").unwrap(),
+                        parent.clone(),
+                    )
+                    .unwrap();
+                let mut next = request(&service, transport);
+                next.client = client;
+                let mut started = service.start(next).await.unwrap();
+                consume_charged_prefix(started.session.as_mut()).await;
+                if policy_revocation {
+                    // The start consumed the only client; the live session must retain its guard.
+                    snapshots.publish(start_snapshot_with_policy(
+                        2,
+                        false,
+                        RateLimits::unlimited(),
+                    ));
+                } else {
+                    parent.cancel();
+                }
+                assert!(matches!(
+                    started.session.next_event().await,
+                    Err(gateway_core::engine::EngineError::Cancelled)
+                ));
+                started.session.detach_finalize().await;
+                assert_cleanup_completed(&admissions, &budget, &started.request_id);
+                if policy_revocation {
+                    assert!(!parent.is_cancelled());
+                }
+            }
+        }
+        let admissions = Arc::new(Admissions::default());
+        let service = charged_service(admissions.clone(), None, false);
+        let parent = gateway_core::lifecycle::CancellationToken::new();
+        let client = service
+            .authenticate_bound_key(
+                &ClientApiKeyId::new("key_start_test").unwrap(),
+                parent.clone(),
+            )
+            .unwrap();
+        for _ in 0..2 {
+            let mut next = request(&service, ClientTransport::WebSocket);
+            next.client = client.clone();
+            let started = service.start(next).await.unwrap();
+            started.session.cancel();
+            started.session.detach_finalize().await;
+            assert!(!parent.is_cancelled());
+            assert!(!admissions.active.load(Ordering::SeqCst));
+        }
+    });
+}

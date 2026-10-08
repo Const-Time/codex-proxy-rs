@@ -520,3 +520,5 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 插件 Key 资源由 ClientKeyStore 在同一事务内校验实例代次、本人身份与单分组权限，调用正常 Key 插入逻辑并写入 `plugin_managed_keys` 幂等登记。SDK 的预算参数校验本人分组的有效共享额度，不改变限额或用量。密钥由 Admin 的共用生成函数创建，仅留在宿主，不进入插件结果。
 
 插件额度由 `PluginQuotaService` 以显式用户＋分组范围编排：AccountGroupStore 比较全局配置 revision 后更新基础限额，AuthStore 读取保留窗口或使用既有 `reset_user_subscriptions` 重置明确订阅。事务内按实例、配置、用户及账本锁顺序校验代次和管理员权限，沿用原有倍率与结算流水。重置事件以实例＋UUIDv4 标识永久幂等，回放不重复审计或改写后续用量。SDK 本地扩展与上游 Key 独立预算 wire 分开命名，不添加第二套额度权威。
+
+外部认证的 Core 接入使用宿主绑定到现有 Key ID 的授权，而不是插件选择的新执行身份。`authenticate_bound_key` 重新检查当前 Key 策略，并将认证器撤销信号与快照权限撤销合并；长连接后续请求继续保留这份授权。执行会话持有权限注册直到清理完成，使用单向传播的取消信号，单个请求取消不会撤销认证器或其他请求。已取得费用仍由正常结算路径处理。该入口只供可信宿主适配器调用，HTTP 外部认证路由尚待接入。

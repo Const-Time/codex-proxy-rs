@@ -9,6 +9,7 @@ use event_listener::Event;
 struct CancellationState {
     cancelled: AtomicBool,
     event: Event,
+    parents: Vec<CancellationToken>,
 }
 
 /// 可克隆的请求、任务与连接取消信号。
@@ -36,6 +37,18 @@ impl CancellationToken {
         Self(Arc::new(CancellationState {
             cancelled: AtomicBool::new(false),
             event: Event::new(),
+            parents: Vec::new(),
+        }))
+    }
+
+    /// A local cancellation scope revoked by any parent. Cancelling the child never
+    /// cancels a parent or sibling, and no background propagation task is required.
+    #[must_use]
+    pub fn linked(parents: impl IntoIterator<Item = Self>) -> Self {
+        Self(Arc::new(CancellationState {
+            cancelled: AtomicBool::new(false),
+            event: Event::new(),
+            parents: parents.into_iter().collect(),
         }))
     }
 
@@ -48,7 +61,17 @@ impl CancellationToken {
 
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.cancelled.load(Ordering::Acquire)
+        if self.0.cancelled.load(Ordering::Acquire) {
+            return true;
+        }
+        let mut pending: Vec<_> = self.0.parents.iter().collect();
+        while let Some(token) = pending.pop() {
+            if token.0.cancelled.load(Ordering::Acquire) {
+                return true;
+            }
+            pending.extend(&token.0.parents);
+        }
+        false
     }
 
     pub async fn cancelled(&self) {
@@ -61,7 +84,23 @@ impl CancellationToken {
         if self.is_cancelled() {
             return;
         }
-        listener.await;
+        if self.0.parents.is_empty() {
+            listener.await;
+            return;
+        }
+        use futures::{StreamExt as _, stream::FuturesUnordered};
+        let mut listeners = FuturesUnordered::new();
+        listeners.push(listener);
+        let mut pending: Vec<_> = self.0.parents.iter().collect();
+        while let Some(token) = pending.pop() {
+            let listener = token.0.event.listen();
+            if token.0.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            listeners.push(listener);
+            pending.extend(&token.0.parents);
+        }
+        listeners.next().await;
     }
 }
 
