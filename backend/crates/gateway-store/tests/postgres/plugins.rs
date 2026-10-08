@@ -37,6 +37,13 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
         .await
         .unwrap();
     let mut first = PluginRecord {
+        middleware: Some(PluginMiddlewareBinding {
+            order: 12,
+            mounts: vec![PluginMiddlewareMount::Request],
+            scope: PluginMiddlewareScope::Keys {
+                ids: vec!["key_owner".into()],
+            },
+        }),
         id: "auth-a".into(),
         revision: 1,
         name: "auth".into(),
@@ -63,6 +70,7 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
     let rows = PgPluginStore::new(db.pool.clone()).list().await.unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].frontend_authentication == first.frontend_authentication);
+    assert!(rows[0].middleware == first.middleware);
     let winner = rows[0].id.clone();
     if winner != first.id {
         std::mem::swap(&mut first, &mut second);
@@ -227,6 +235,14 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         "local.fixture"
     );
     let mut record = PluginRecord {
+        middleware: Some(PluginMiddlewareBinding {
+            order: -1,
+            mounts: vec![
+                PluginMiddlewareMount::Request,
+                PluginMiddlewareMount::Attempt,
+            ],
+            scope: PluginMiddlewareScope::All {},
+        }),
         frontend_authentication: None,
         id: "plugin-a".into(),
         revision: 1,
@@ -237,6 +253,20 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         secrets: BTreeMap::from([("token".into(), "not-in-audit".into())]),
     };
     store.save(&record, 0, &actor).await.unwrap();
+    assert!(store.list().await.unwrap()[0].middleware == record.middleware);
+    let mut invalid_binding = record.clone();
+    invalid_binding.revision += 1;
+    invalid_binding.middleware.as_mut().unwrap().mounts.clear();
+    assert_eq!(
+        store
+            .save(&invalid_binding, record.revision, &actor)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Invalid
+    );
+    assert!(store.list().await.unwrap()[0].middleware == record.middleware);
     assert!(store.delete_artifact(&info.sha256, &actor).await.is_err());
     let scope = PluginStateScope {
         instance_id: record.id.clone(),
@@ -290,6 +320,20 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
     );
     record.id = "plugin-b".into();
     store.save(&record, 0, &actor).await.unwrap();
+    assert!(store.list().await.unwrap()[0].middleware == record.middleware);
+    let mut invalid_binding = record.clone();
+    invalid_binding.revision += 1;
+    invalid_binding.middleware.as_mut().unwrap().mounts.clear();
+    assert_eq!(
+        store
+            .save(&invalid_binding, record.revision, &actor)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Invalid
+    );
+    assert!(store.list().await.unwrap()[0].middleware == record.middleware);
     let other = PluginStateScope {
         instance_id: "plugin-b".into(),
         ..scope

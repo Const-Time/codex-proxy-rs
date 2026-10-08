@@ -34,6 +34,17 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn middleware(
+        &self,
+        _context: gateway_core::engine::middleware::MiddlewareContext,
+        _request: gateway_core::engine::middleware::MiddlewareRequest,
+        _next: gateway_core::engine::middleware::MiddlewareNext,
+    ) -> std::result::Result<
+        gateway_core::engine::middleware::MiddlewareResponse,
+        gateway_core::engine::middleware::MiddlewareError,
+    > {
+        Err(gateway_core::engine::middleware::MiddlewareError::Fault)
+    }
     async fn authenticate(&self, _authorization: String) -> Result<PluginAuthenticationResult> {
         Err(AdminError::unavailable("认证器不可用"))
     }
@@ -66,6 +77,12 @@ pub trait PluginRuntime: Send + Sync {
 }
 #[async_trait]
 pub trait PluginService: Send + Sync {
+    fn freeze_middleware(
+        &self,
+        _context: gateway_core::engine::middleware::MiddlewareContext,
+    ) -> Result<crate::plugins::middleware::PluginMiddlewarePlan> {
+        Err(AdminError::unavailable("中间件执行入口未接入"))
+    }
     async fn authenticate(&self, _authorization: String) -> Result<PluginAuthenticationDecision> {
         Err(AdminError::unavailable("认证器不可用"))
     }

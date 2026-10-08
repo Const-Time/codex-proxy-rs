@@ -1,3 +1,4 @@
+mod plan;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::{
