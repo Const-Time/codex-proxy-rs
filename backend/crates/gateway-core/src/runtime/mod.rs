@@ -80,10 +80,20 @@ struct ClientAccess {
 }
 /// Live authorization for delegated calls; it never changes the execution's frozen billing facts.
 #[derive(Clone)]
-pub struct ClientAccessGuard(Arc<ClientAccess>);
+pub struct ClientAccessGuard {
+    access: Arc<ClientAccess>,
+    cancellation: CancellationToken,
+}
 impl ClientAccessGuard {
     pub fn cancellation(&self) -> CancellationToken {
-        self.0.cancellation.clone()
+        self.cancellation.clone()
+    }
+    #[must_use]
+    pub fn with_revocation(self, revocation: CancellationToken) -> Self {
+        Self {
+            access: self.access,
+            cancellation: CancellationToken::linked([self.cancellation, revocation]),
+        }
     }
 }
 
@@ -160,7 +170,10 @@ impl RuntimeSnapshotHandle {
             cancellation: CancellationToken::new(),
         });
         current.access.push(Arc::downgrade(&access));
-        Ok(ClientAccessGuard(access))
+        Ok(ClientAccessGuard {
+            cancellation: access.cancellation.clone(),
+            access,
+        })
     }
     /// 冻结当前 Arc；后续发布不改变已经开始的请求。
     pub fn acquire(&self) -> Result<Arc<RuntimeSnapshot>, RuntimeSnapshotUnavailable> {

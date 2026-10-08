@@ -80,6 +80,7 @@ pub struct ExecutionRequestMetadata {
 pub struct AuthenticatedClient {
     snapshot: Arc<RuntimeSnapshot>,
     policy: ClientPolicy,
+    bound_authorization: Option<crate::runtime::ClientAccessGuard>,
 }
 
 impl AuthenticatedClient {
@@ -197,6 +198,15 @@ pub trait ExecutionService: Send + Sync {
         &self,
         plaintext: &str,
     ) -> Result<AuthenticatedClient, ClientAuthenticationError>;
+    /// Trusted host entry after an external principal has been mapped to a local Key.
+    /// This is not an API for accepting an untrusted client-supplied Key ID.
+    fn authenticate_bound_key(
+        &self,
+        _key: &ClientApiKeyId,
+        _revocation: CancellationToken,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        Err(ClientAuthenticationError::InvalidKey)
+    }
     fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId>;
     fn client_model_catalog<'a>(
         &'a self,
@@ -309,6 +319,18 @@ impl DefaultExecutionService {
         &self,
         mut request: PendingStartExecution,
     ) -> Result<StartedExecution, GatewayError> {
+        // A socket cannot outlive the host binding that admitted it. Preserve this
+        // lease when refreshing the local Key policy for each new execution.
+        let bound_authorization = request.client.bound_authorization.clone();
+        if bound_authorization
+            .as_ref()
+            .is_some_and(|access| access.cancellation().is_cancelled())
+        {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Unauthorized,
+                "client authorization was revoked",
+            ));
+        }
         // 长连接每次执行都重新鉴权并冻结当前策略，确保限额和授权变更对新请求生效。
         request.client = self
             .authenticate(request.client.policy.plaintext_key().expose_for_auth())
@@ -321,6 +343,7 @@ impl DefaultExecutionService {
                     "runtime snapshot is unavailable",
                 ),
             })?;
+        request.client.bound_authorization = bound_authorization;
         let started_at = SystemTime::now();
         let deadline_at = started_at
             .checked_add(MODEL_REQUEST_DEADLINE)
@@ -618,7 +641,12 @@ impl DefaultExecutionService {
                 plan,
                 None,
                 continuation,
-                CancellationToken::new(),
+                client
+                    .bound_authorization
+                    .as_ref()
+                    .map_or_else(CancellationToken::new, |access| {
+                        CancellationToken::linked([access.cancellation()])
+                    }),
             )
             .await
         {
@@ -650,6 +678,7 @@ impl DefaultExecutionService {
                 admission,
                 Arc::clone(&self.continuation),
                 self.budget.clone(),
+                client.bound_authorization,
             )),
         })
     }
@@ -897,7 +926,11 @@ impl ExecutionService for DefaultExecutionService {
         &self,
         client: &AuthenticatedClient,
     ) -> Option<crate::runtime::ClientAccessGuard> {
-        self.snapshots.client_access(client.policy()).ok()
+        let access = self.snapshots.client_access(client.policy()).ok()?;
+        Some(match &client.bound_authorization {
+            Some(bound) => access.with_revocation(bound.cancellation()),
+            None => access,
+        })
     }
     fn authenticate(
         &self,
@@ -916,7 +949,44 @@ impl ExecutionService for DefaultExecutionService {
             .cloned()
             .ok_or(ClientAuthenticationError::InvalidKey)?;
         self.client_api_key_usage.record_used(policy.key_id());
-        Ok(AuthenticatedClient { snapshot, policy })
+        Ok(AuthenticatedClient {
+            snapshot,
+            policy,
+            bound_authorization: None,
+        })
+    }
+
+    fn authenticate_bound_key(
+        &self,
+        key: &ClientApiKeyId,
+        revocation: CancellationToken,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        if revocation.is_cancelled() {
+            return Err(ClientAuthenticationError::InvalidKey);
+        }
+        let snapshot = self
+            .snapshots
+            .acquire()
+            .map_err(|_| ClientAuthenticationError::SnapshotUnavailable)?;
+        let policy = snapshot
+            .client_policies()
+            .find(|p| p.key_id() == key && p.authorize().is_ok())
+            .cloned()
+            .ok_or(ClientAuthenticationError::InvalidKey)?;
+        let bound = self
+            .snapshots
+            .client_access(&policy)
+            .map_err(|_| ClientAuthenticationError::SnapshotUnavailable)?
+            .with_revocation(revocation);
+        if bound.cancellation().is_cancelled() {
+            return Err(ClientAuthenticationError::InvalidKey);
+        }
+        self.client_api_key_usage.record_used(policy.key_id());
+        Ok(AuthenticatedClient {
+            snapshot,
+            policy,
+            bound_authorization: Some(bound),
+        })
     }
 
     fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId> {
@@ -1061,6 +1131,8 @@ impl AdmissionLease {
 }
 
 struct DefaultExecutionSession {
+    // Retain snapshot revocation registration after the request's AuthenticatedClient is consumed.
+    _authorization: Option<crate::runtime::ClientAccessGuard>,
     core: ResponseExecutionSession<dyn ExecutionStore>,
     admission: Option<AdmissionLease>,
     cleanup: Option<BoxFuture<'static, ()>>,
@@ -1075,8 +1147,10 @@ impl DefaultExecutionSession {
         admission: AdmissionLease,
         continuation: Arc<dyn NativeContinuationPort>,
         budget: Option<Arc<dyn ClientBudgetPort>>,
+        authorization: Option<crate::runtime::ClientAccessGuard>,
     ) -> Self {
         Self {
+            _authorization: authorization,
             core,
             admission: Some(admission),
             cleanup: None,
