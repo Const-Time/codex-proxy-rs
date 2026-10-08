@@ -19,9 +19,9 @@ use gateway_core::engine::{
 /// delegates cancellation and settlement to the existing PendingExecution owner.
 pub async fn execution_middleware_response(
     session: Box<dyn ExecutionSession>,
-    streaming: bool,
+    transport: gateway_core::engine::execution::ClientTransport,
 ) -> Result<MiddlewareResponse, MiddlewareError> {
-    body::ExecutionBody::response(session, WireFormat::Responses { streaming }).await
+    body::ExecutionBody::response(session, WireFormat::responses(transport)).await
 }
 
 /// Bind the Responses wire adapter to a frozen, root-scoped publication snapshot.
@@ -31,13 +31,7 @@ pub fn responses_attempt_middleware(
     mut context: gateway_core::engine::middleware::MiddlewareContext,
 ) -> std::sync::Arc<dyn gateway_core::engine::attempt_middleware::AttemptMiddleware> {
     context.mount = gateway_core::engine::middleware::MiddlewareMount::Attempt;
-    let format = match context.transport {
-        gateway_core::engine::execution::ClientTransport::WebSocket => WireFormat::WebSocket,
-        gateway_core::engine::execution::ClientTransport::HttpSse => {
-            WireFormat::Responses { streaming: true }
-        }
-        _ => WireFormat::Responses { streaming: false },
-    };
+    let format = WireFormat::responses(context.transport);
     std::sync::Arc::new(attempt::ResponsesAttempt {
         registry,
         context,
@@ -52,6 +46,16 @@ pub(super) enum WireFormat {
     WebSocket,
 }
 impl WireFormat {
+    fn responses(transport: gateway_core::engine::execution::ClientTransport) -> Self {
+        use gateway_core::engine::execution::ClientTransport;
+        match transport {
+            ClientTransport::WebSocket => Self::WebSocket,
+            ClientTransport::HttpSse => Self::Responses { streaming: true },
+            ClientTransport::HttpJson | ClientTransport::InternalProbe => {
+                Self::Responses { streaming: false }
+            }
+        }
+    }
     fn streaming(self) -> bool {
         matches!(self, Self::Responses { streaming: true } | Self::WebSocket)
     }

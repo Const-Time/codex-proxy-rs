@@ -7,7 +7,7 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use gateway_core::{engine::middleware::MiddlewareError, operation::Operation};
 
-pub(super) fn decode(
+pub(in crate::openai::middleware) fn decode(
     original: &Operation,
     body: &Bytes,
     headers: &HeaderMap,

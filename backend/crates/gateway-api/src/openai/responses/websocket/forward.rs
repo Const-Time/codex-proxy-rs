@@ -18,19 +18,22 @@ use super::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ForwardOutcome {
+pub(in crate::openai) enum ForwardOutcome {
     Continue,
     Disconnect,
 }
 
-#[derive(Default)]
-pub(super) struct ConnectionReplaySnapshot {
+#[derive(Clone, Default)]
+pub(in crate::openai) struct ConnectionReplaySnapshot {
     last_response_id: Option<String>,
     provider_state: Option<ProviderSessionState>,
 }
 
 impl ConnectionReplaySnapshot {
-    pub(super) fn prepare(&self, request: DecodedResponsesRequest) -> DecodedResponsesRequest {
+    pub(in crate::openai) fn prepare(
+        &self,
+        request: DecodedResponsesRequest,
+    ) -> DecodedResponsesRequest {
         match (
             request.metadata().continuation().previous_response_id(),
             self.last_response_id.as_deref(),
@@ -43,13 +46,17 @@ impl ConnectionReplaySnapshot {
         }
     }
 
-    fn commit(&mut self, response_id: String, provider_state: Option<ProviderSessionState>) {
+    pub(in crate::openai) fn commit(
+        &mut self,
+        response_id: String,
+        provider_state: Option<ProviderSessionState>,
+    ) {
         self.last_response_id = Some(response_id);
         self.provider_state = provider_state;
     }
 }
 
-pub(super) async fn forward_execution(
+pub(in crate::openai) async fn forward_execution(
     connection: &mut ResponsesWebSocketConnection,
     started: StartedExecution,
     replay: &mut ConnectionReplaySnapshot,
@@ -297,6 +304,19 @@ async fn send_initial_engine_error(
     error: &EngineError,
     request_id: &Arc<str>,
 ) -> ForwardOutcome {
+    let headers = execution
+        .session_mut()
+        .map(|session| session.response_headers().to_vec())
+        .unwrap_or_default();
+    send_engine_error(connection, error, &headers, request_id).await
+}
+
+pub(in crate::openai) async fn send_engine_error(
+    connection: &mut ResponsesWebSocketConnection,
+    error: &EngineError,
+    response_headers: &[gateway_core::event::ProviderResponseHeader],
+    request_id: &Arc<str>,
+) -> ForwardOutcome {
     // A safe continuation replay is a client projection, not a replacement of the
     // original quota failure used for isolation and accounting. Use its status
     // and headers instead of re-deriving 429 from the underlying error kind.
@@ -332,37 +352,30 @@ async fn send_initial_engine_error(
             ForwardOutcome::Disconnect
         };
     }
-    let response_headers = execution
-        .session_mut()
-        .map(|session| session.response_headers().to_vec())
-        .unwrap_or_default();
     if !response_headers.is_empty()
         && !send_metadata(
             connection,
             request_id,
-            response_metadata_event(request_id, &response_headers),
+            response_metadata_event(request_id, response_headers),
         )
         .await
     {
         return ForwardOutcome::Disconnect;
     }
-    let capacity = matches!(error, EngineError::Provider(provider)
-        if provider.kind() == gateway_core::error::ProviderErrorKind::UpstreamCapacityUnavailable);
+    let status = StatusCode::from_u16(engine_error_status(error))
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let error = gateway_error_from_engine(error);
-    if capacity {
-        let (_, default_type, default_code) = gateway_error_contract(error.kind());
-        return send_error(
-            connection,
-            StatusCode::SERVICE_UNAVAILABLE,
-            error.client_error_type().unwrap_or(default_type),
-            error.client_error_code().unwrap_or(default_code),
-            error.client_message(),
-            None,
-            request_id,
-        )
-        .await;
-    }
-    send_gateway_error(connection, &error, request_id).await
+    let (_, default_type, default_code) = gateway_error_contract(error.kind());
+    send_error(
+        connection,
+        status,
+        error.client_error_type().unwrap_or(default_type),
+        error.client_error_code().unwrap_or(default_code),
+        error.client_message(),
+        None,
+        request_id,
+    )
+    .await
 }
 
 fn commit_connection_replay(
@@ -425,19 +438,41 @@ async fn next_active_input(
     };
     let control = session.response_control();
     let trace = session.trace();
+    match await_active(
+        connection,
+        session.next_event(),
+        || control.clone(),
+        &trace,
+        request_id,
+    )
+    .await
+    {
+        Some(event) => ActiveInput::Event(event),
+        None => ActiveInput::Disconnect,
+    }
+}
+
+/// Keep one future pinned while servicing controls and retaining queued create permits.
+pub(in crate::openai) async fn await_active<T>(
+    connection: &mut ResponsesWebSocketConnection,
+    future: impl std::future::Future<Output = T>,
+    control: impl Fn() -> Option<gateway_core::engine::response_control::ResponseControl>,
+    trace: &gateway_core::diagnostics::TraceContext,
+    request_id: &Arc<str>,
+) -> Option<T> {
     // Keep the same execution future alive while processing control frames.
     // Deferred create frames retain their bounded queue permits until consumed.
-    let next = session.next_event();
+    let next = future;
     tokio::pin!(next);
     let outcome = loop {
         tokio::select! {
             event = connection.next_active_event() => {
-                let Some(event) = event else { break ActiveInput::Disconnect; };
+                let Some(event) = event else { break None; };
                 match &event.event {
                     ConnectionEvent::Text(payload) => {
                         let error = match decode_response_interrupt(payload) {
                             Ok(Some(response_id)) => {
-                                let result = control.as_ref().ok_or(gateway_core::engine::response_control::ResponseInterruptError::Unavailable).and_then(|control| control.interrupt(&response_id));
+                                let result = control().as_ref().ok_or(gateway_core::engine::response_control::ResponseInterruptError::Unavailable).and_then(|control| control.interrupt(&response_id));
                                 result.err().map(|_| super::super::RequestDecodeError::InvalidValue { field: "response_id".to_owned() }.protocol_body())
                             }
                             Ok(None) => { connection.defer(event); continue; }
@@ -445,17 +480,17 @@ async fn next_active_input(
                         };
                         if let Some(error) = error
                             && send_protocol_error(connection, StatusCode::BAD_REQUEST, error, request_id).await == ForwardOutcome::Disconnect
-                        { break ActiveInput::Disconnect; }
+                        { break None; }
                     }
                     ConnectionEvent::Expired => {},
                     ConnectionEvent::Binary => connection.defer(event),
-                    ConnectionEvent::Exited(_) => break ActiveInput::Disconnect,
+                    ConnectionEvent::Exited(_) => break None,
                 }
             }
-            event = &mut next => break ActiveInput::Event(event),
+            event = &mut next => break Some(event),
         }
     };
-    if matches!(outcome, ActiveInput::Disconnect) {
+    if outcome.is_none() {
         trace.record(
             "downstream.cancelled",
             serde_json::json!({
@@ -466,7 +501,7 @@ async fn next_active_input(
     outcome
 }
 
-pub(super) async fn send_gateway_error(
+pub(in crate::openai) async fn send_gateway_error(
     connection: &mut ResponsesWebSocketConnection,
     error: &GatewayError,
     request_id: &Arc<str>,
@@ -484,7 +519,7 @@ pub(super) async fn send_gateway_error(
     .await
 }
 
-pub(super) async fn send_protocol_error(
+pub(in crate::openai) async fn send_protocol_error(
     connection: &mut ResponsesWebSocketConnection,
     status: StatusCode,
     body: ProtocolErrorBody,
@@ -526,7 +561,7 @@ async fn send_error(
     }
 }
 
-async fn send_metadata(
+pub(in crate::openai) async fn send_metadata(
     connection: &mut ResponsesWebSocketConnection,
     request_id: &Arc<str>,
     message: String,
@@ -540,7 +575,7 @@ async fn send_metadata(
         .is_ok()
 }
 
-async fn send_messages(
+pub(in crate::openai) async fn send_messages(
     connection: &mut ResponsesWebSocketConnection,
     messages: Vec<String>,
     request_id: &Arc<str>,
@@ -568,7 +603,7 @@ async fn send_messages(
     true
 }
 
-fn log_terminal_write_success(
+pub(in crate::openai) fn log_terminal_write_success(
     connection: &ResponsesWebSocketConnection,
     request_id: &Arc<str>,
     provider_terminal_to_write: std::time::Duration,
@@ -583,7 +618,7 @@ fn log_terminal_write_success(
     );
 }
 
-fn log_terminal_write_failure(
+pub(in crate::openai) fn log_terminal_write_failure(
     connection: &ResponsesWebSocketConnection,
     request_id: &Arc<str>,
     provider_terminal_to_write: std::time::Duration,
@@ -596,4 +631,22 @@ fn log_terminal_write_failure(
         provider_succeeded_but_terminal_write_failed = true,
         "Provider execution succeeded before the terminal WebSocket frame write failed"
     );
+}
+
+pub(in crate::openai) fn engine_error_status(error: &EngineError) -> u16 {
+    if let EngineError::Provider(provider) = error {
+        if provider.continuation_recovery_disposition()
+            == Some(ContinuationRecoveryDisposition::ClientReplayRequired)
+            && provider.client_visible_upstream_error().is_some()
+            && let Some(projected) = provider.client_visible_upstream_response()
+        {
+            return projected.status();
+        }
+        if provider.kind() == gateway_core::error::ProviderErrorKind::UpstreamCapacityUnavailable {
+            return 503;
+        }
+    }
+    gateway_error_contract(gateway_error_from_engine(error).kind())
+        .0
+        .as_u16()
 }

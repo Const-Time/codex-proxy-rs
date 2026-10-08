@@ -5,9 +5,12 @@ use futures::StreamExt;
 #[tokio::test]
 async fn rewritten_json_commits_original_execution_once() {
     let trace = Arc::new(Trace::default());
-    let response = execution_middleware_response(Box::new(Session::json(trace.clone())), false)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(Session::json(trace.clone())),
+        gateway_core::engine::execution::ClientTransport::HttpJson,
+    )
+    .await
+    .unwrap();
     let response = deliver_middleware_response(rewrite(response, Rewrite::Json), false, None).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -22,9 +25,12 @@ async fn rewritten_json_commits_original_execution_once() {
 #[tokio::test]
 async fn invalid_json_never_commits_and_records_actual_error_status() {
     let trace = Arc::new(Trace::default());
-    let response = execution_middleware_response(Box::new(Session::json(trace.clone())), false)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(Session::json(trace.clone())),
+        gateway_core::engine::execution::ClientTransport::HttpJson,
+    )
+    .await
+    .unwrap();
     let response =
         deliver_middleware_response(rewrite(response, Rewrite::Invalid), false, None).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -41,9 +47,12 @@ async fn atomic_first_sse_batch_is_validated_before_any_commit() {
         trace.clone(),
         vec![vec![event("response.created"), event("response.completed")]],
     );
-    let response = execution_middleware_response(Box::new(session), true)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(session),
+        gateway_core::engine::execution::ClientTransport::HttpSse,
+    )
+    .await
+    .unwrap();
     let response =
         deliver_middleware_response(rewrite(response, Rewrite::InvalidSecond), true, None).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -62,9 +71,12 @@ async fn empty_first_sse_batch_cannot_acknowledge_delivery() {
             vec![event("response.completed")],
         ],
     );
-    let response = execution_middleware_response(Box::new(session), true)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(session),
+        gateway_core::engine::execution::ClientTransport::HttpSse,
+    )
+    .await
+    .unwrap();
     let response = deliver_middleware_response(rewrite(response, Rewrite::Empty), true, None).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert!(trace.commits.lock().unwrap().is_empty());
@@ -75,9 +87,12 @@ async fn empty_first_sse_batch_cannot_acknowledge_delivery() {
 async fn sse_terminal_requires_client_consumable_terminal() {
     let trace = Arc::new(Trace::default());
     let session = Session::sse(trace.clone(), vec![vec![event("response.completed")]]);
-    let response = execution_middleware_response(Box::new(session), true)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(session),
+        gateway_core::engine::execution::ClientTransport::HttpSse,
+    )
+    .await
+    .unwrap();
     let response =
         deliver_middleware_response(rewrite(response, Rewrite::MissingTerminal), true, None).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -94,10 +109,12 @@ async fn valid_sse_commits_once_for_single_and_multiple_batches() {
         ],
     ] {
         let trace = Arc::new(Trace::default());
-        let response =
-            execution_middleware_response(Box::new(Session::sse(trace.clone(), batches)), true)
-                .await
-                .unwrap();
+        let response = execution_middleware_response(
+            Box::new(Session::sse(trace.clone(), batches)),
+            gateway_core::engine::execution::ClientTransport::HttpSse,
+        )
+        .await
+        .unwrap();
         let response =
             deliver_middleware_response(rewrite(response, Rewrite::Pass), true, None).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -121,9 +138,12 @@ async fn midstream_failure_closes_source_before_emitting_failure() {
             vec![event("response.completed")],
         ],
     );
-    let response = execution_middleware_response(Box::new(session), true)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(session),
+        gateway_core::engine::execution::ClientTransport::HttpSse,
+    )
+    .await
+    .unwrap();
     let response =
         deliver_middleware_response(rewrite(response, Rewrite::InvalidSecond), true, None).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -142,9 +162,12 @@ async fn failed_original_commit_does_not_expose_rewritten_json() {
     let trace = Arc::new(Trace::default());
     let mut session = Session::json(trace.clone());
     session.fail_commit = true;
-    let response = execution_middleware_response(Box::new(session), false)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(session),
+        gateway_core::engine::execution::ClientTransport::HttpJson,
+    )
+    .await
+    .unwrap();
     let response = deliver_middleware_response(rewrite(response, Rewrite::Json), false, None).await;
     assert!(response.status().is_server_error());
     assert!(!String::from_utf8_lossy(&bytes(response).await).contains("resp_rewritten"));
@@ -162,9 +185,12 @@ async fn finalized_terminal_expansion_is_validated_as_one_batch() {
             vec![event("response.completed")],
         ],
     );
-    let response = execution_middleware_response(Box::new(session), true)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(session),
+        gateway_core::engine::execution::ClientTransport::HttpSse,
+    )
+    .await
+    .unwrap();
     let response = deliver_middleware_response(
         rewrite(response, Rewrite::ExpandInvalidTerminal),
         true,

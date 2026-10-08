@@ -2,7 +2,7 @@
 mod body;
 mod output;
 mod raw;
-mod request;
+pub(super) mod request;
 
 use crate::openai::responses::request::forwarded_request_headers;
 use bytes::Bytes;

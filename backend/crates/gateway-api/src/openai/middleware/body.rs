@@ -13,6 +13,7 @@ pub(super) struct ExecutionBody {
     encoder: OpenAiResponsesEncoder,
     pending: VecDeque<MiddlewareFrame>,
     streaming: bool,
+    format: super::WireFormat,
     exhausted: bool,
     committed: bool,
     terminal: bool,
@@ -29,6 +30,7 @@ impl ExecutionBody {
             encoder: OpenAiResponsesEncoder::new(),
             pending: VecDeque::new(),
             streaming,
+            format,
             exhausted: false,
             committed: false,
             terminal: false,
@@ -43,7 +45,7 @@ impl ExecutionBody {
                 return Err(MiddlewareError::InvalidState);
             }
             let status = body.response_status()?;
-            if (200..300).contains(&status) {
+            if (200..300).contains(&status) || format.websocket() {
                 body.encode_batch(batch)?;
             } else {
                 // An attempt may project a JSON error even for an SSE request.
@@ -145,7 +147,15 @@ impl ExecutionBody {
         let events = batch.into_provider_events();
         let count = events.len();
         for (index, event) in events.into_iter().enumerate() {
-            let frames = self.encoder.push_sse(&event);
+            let frames = if self.format.websocket() {
+                self.encoder
+                    .push_websocket(&event)
+                    .into_iter()
+                    .map(Bytes::from)
+                    .collect()
+            } else {
+                self.encoder.push_sse(&event)
+            };
             self.terminal |= self.encoder.is_completed() || self.encoder.has_wire_failure();
             self.encode_event(event, frames, (index + 1 == count).then_some(requirement));
         }
@@ -160,18 +170,20 @@ impl ExecutionBody {
         mut frames: Vec<Bytes>,
         boundary: Option<CommitRequirement>,
     ) {
+        let message_framing = if self.format.websocket() {
+            MiddlewareFraming::JsonDocument
+        } else {
+            MiddlewareFraming::SseEvent
+        };
         let last = frames.pop().unwrap_or_default();
         for bytes in frames {
-            self.pending.push_back(MiddlewareFrame::new(
-                bytes,
-                MiddlewareFraming::SseEvent,
-                false,
-            ));
+            self.pending
+                .push_back(MiddlewareFrame::new(bytes, message_framing, false));
         }
         let framing = if last.is_empty() {
             MiddlewareFraming::RawBytes
         } else {
-            MiddlewareFraming::SseEvent
+            message_framing
         };
         let frame = MiddlewareFrame::from_provider_event(
             last,

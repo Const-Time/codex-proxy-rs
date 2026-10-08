@@ -159,7 +159,16 @@ impl MiddlewareBody for Rewriter {
                     last = last.with_envelope(envelope);
                 }
                 self.pending = Some(last);
-                return Ok(Some(MiddlewareFrame::new(Bytes::from_static(b"event: response.output_text.delta\ndata: {\"delta\":\"must-not-leak\"}\n\n"), MiddlewareFraming::SseEvent, false).with_transformed(true)));
+                let bytes = if framing == MiddlewareFraming::JsonDocument {
+                    Bytes::from_static(
+                        br#"{"type":"response.output_text.delta","delta":"must-not-leak"}"#,
+                    )
+                } else {
+                    Bytes::from_static(b"event: response.output_text.delta\ndata: {\"delta\":\"must-not-leak\"}\n\n")
+                };
+                return Ok(Some(
+                    MiddlewareFrame::new(bytes, framing, false).with_transformed(true),
+                ));
             }
             let bytes = match self.mode {
                 Rewrite::MessageJson | Rewrite::MessageIdentity if !bytes.is_empty() => {

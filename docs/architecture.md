@@ -553,4 +553,9 @@ attempt 来源正文只编码 Core 已观察的事件。SDK 的正文展开必�
 Images 与 standalone Search 复用 `gateway-api::openai::middleware` 的发布快照冻结、根请求撤销、Core 未提交正文和外层交付逻辑。原生端点使用 RawJson 表达，不经过 Responses 文档编码；请求改写按原入口重建 operation，保留图片生成/编辑类型及端点既有会话头合同。attempt 的原来源先由 Core 观测，再将唯一原始 JSON 与全部事实封套交给插件；投影输出仍为 raw JSON，费用与上游状态不由投影更新。无匹配计划直接调用原始收集路径，不施加插件文档上限。响应访问守卫仅关联授权/插件撤销，不能关联正常完成时会取消的 Core 请求信号。
 
 
-WebSocket attempt 复用同一 PreparedRootExecution 和冻结中间件发布快照，Core 会话仍由现有 WebSocket forwarder 驱动。协议桥使用逐消息 JsonDocument，先检查完整改写批次的 JSON 类型、终态与宿主响应 ID，之后才允许原交付屏障提交。重解码保留宿主的下游连接 ID 和已选择的 `use_websocket` 标记，Provider 私有状态由原请求附回；投影不能改变续接、冻结模型或客户端 stream 合同。原控制帧 pump 始终持有同一读取 future，错误中断和排队 create 不重复执行插件或 Provider。转发器额外持有独立于 Core 正常完成的插件撤销信号，覆盖上游结束后仍等待下游写入的阶段；撤销竞争前先建立原 PendingExecution 清理守卫，确保内层 future 尚未轮询就被丢弃时仍能释放准入并结算。WebSocket request 层尚待接线，匹配的必需层明确拒绝，生产总能力门禁不开放。
+WebSocket attempt 复用同一 PreparedRootExecution 和冻结中间件发布快照，Core 会话仍由现有 WebSocket forwarder 驱动。协议桥使用逐消息 JsonDocument，先检查完整改写批次的 JSON 类型、终态与宿主响应 ID，之后才允许原交付屏障提交。重解码保留宿主的下游连接 ID 和已选择的 `use_websocket` 标记，Provider 私有状态由原请求附回；投影不能改变续接、冻结模型或客户端 stream 合同。原控制帧 pump 始终持有同一读取 future，错误中断和排队 create 不重复执行插件或 Provider。转发器额外持有独立于 Core 正常完成的插件撤销信号，覆盖上游结束后仍等待下游写入的阶段；撤销竞争前先建立原 PendingExecution 清理守卫，确保内层 future 尚未轮询就被丢弃时仍能释放准入并结算。WebSocket request 层也使用同一 Core 正文和外层 Delivery，生产总能力门禁仍等待其余声明范围。
+
+
+WebSocket request/attempt 使用相同冻结计划与根身份。API 的 ExecutionBody 按 ClientTransport 输出 JSON 文档、SSE 或 WS JSON 消息，Delivery 复用原批次上限与 commit/finalization 校验；WS 不添加 SSE 结束帧。响应 ID、Provider 续接状态只从宿主来源信封读取，并在完整批次通过校验且原执行终结后更新连接快照。request 改写后的续接 ID 再匹配原快照，不能把旧状态附给另一响应。
+
+WS 控制帧等待函数同时用于原会话读取、插件调用及外层正文读取，整个等待期间固定同一个 future；只共享当前 Core 的 ResponseControl 句柄，不新增执行或账本。根撤销覆盖等待插件和下游写入，原 PendingExecution 与 RPC 正文 owner 负责取消后的清理。request 错误短路发生在 Core 准入前，不创建费用记录；真实执行的费用与原始终态仍由唯一 Core 会话处理。

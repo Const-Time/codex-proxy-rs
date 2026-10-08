@@ -100,6 +100,9 @@ pub(super) enum Mode {
     ExpandInvalid,
     MessageRewrite,
     MessageIdentity,
+    WaitBeforeNext,
+    WaitAfterNext,
+    ChangeContinuation,
 }
 pub(super) struct Plugin {
     pub(super) access: PluginAccess,
@@ -167,6 +170,9 @@ impl PluginProcess for Plugin {
         let attempt = context.mount == MiddlewareMount::Attempt;
         self.seen.lock().unwrap().push(context);
         *self.headers.lock().unwrap() = request.headers().iter().map(|h| h.name().into()).collect();
+        if matches!(self.mode, Mode::WaitBeforeNext) {
+            return futures::future::pending().await;
+        }
         let (_, mut headers, body) = request.into_parts();
         let mut body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if !attempt || matches!(self.mode, Mode::InvalidModel) {
@@ -192,6 +198,12 @@ impl PluginProcess for Plugin {
                 )))),
             ));
         }
+        if !attempt
+            && matches!(self.mode, Mode::ChangeContinuation)
+            && body.get("previous_response_id").is_some()
+        {
+            body["previous_response_id"] = json!("resp_other");
+        }
         body["input"] = json!("changed input");
         if matches!(self.mode, Mode::Transport) {
             body["stream"] = json!(!websocket);
@@ -214,6 +226,10 @@ impl PluginProcess for Plugin {
                 Bytes::from(body.to_string()),
             ))
             .await?;
+        if matches!(self.mode, Mode::WaitAfterNext) {
+            let _hold_response = response;
+            return futures::future::pending().await;
+        }
         if matches!(self.mode, Mode::Head) {
             let (protocol, _, mut headers, body, envelope) = response.into_parts();
             headers.push(MiddlewareHeader::new(
@@ -250,6 +266,7 @@ impl PluginProcess for Plugin {
 }
 #[derive(Default)]
 pub(super) struct Effects {
+    pub(super) provider_failure: Mutex<Option<fn() -> ProviderError>>,
     pub(super) active: AtomicUsize,
     pub(super) calls: AtomicUsize,
     pub(super) commits: AtomicUsize,
@@ -387,6 +404,9 @@ impl Provider for Effects {
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(failure) = *self.provider_failure.lock().unwrap() {
+            return Err(failure());
+        }
         self.operations
             .lock()
             .unwrap()

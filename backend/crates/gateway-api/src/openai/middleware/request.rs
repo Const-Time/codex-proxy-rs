@@ -156,7 +156,7 @@ pub(in crate::openai) async fn respond(
                     .session
                     .trace()
                     .capture("client.request.body", &input.body);
-                super::execution_middleware_response(started.session, streaming).await
+                super::execution_middleware_response(started.session, transport).await
             })
         });
         match plan.run(request, next).await {

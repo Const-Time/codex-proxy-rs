@@ -3,9 +3,12 @@ use super::*;
 #[tokio::test]
 async fn json_envelope_keeps_all_original_events_until_outer_commit() {
     let trace = Arc::new(Trace::default());
-    let response = execution_middleware_response(Box::new(Session::json(trace.clone())), false)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(Session::json(trace.clone())),
+        gateway_core::engine::execution::ClientTransport::HttpJson,
+    )
+    .await
+    .unwrap();
     assert!(trace.commits.lock().unwrap().is_empty());
     let (_, _, _, mut body, _) = response.into_parts();
     let frame = body.next_frame().await.unwrap().unwrap();
@@ -28,9 +31,12 @@ async fn json_envelope_keeps_all_original_events_until_outer_commit() {
 #[tokio::test]
 async fn dropping_prefetched_response_retains_original_cleanup_owner() {
     let trace = Arc::new(Trace::default());
-    let response = execution_middleware_response(Box::new(Session::json(trace.clone())), false)
-        .await
-        .unwrap();
+    let response = execution_middleware_response(
+        Box::new(Session::json(trace.clone())),
+        gateway_core::engine::execution::ClientTransport::HttpJson,
+    )
+    .await
+    .unwrap();
     drop(response);
     tokio::task::yield_now().await;
     assert!(trace.cancelled.load(Ordering::SeqCst));

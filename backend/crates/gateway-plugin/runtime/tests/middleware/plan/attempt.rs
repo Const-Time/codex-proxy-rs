@@ -535,3 +535,162 @@ async fn sdk_websocket_attempt_preserves_json_framing_identity_and_original_rece
     }
     install.manager.shutdown().await;
 }
+
+// Test composition delegates every lifecycle operation to the real Core coordinator.
+struct CoreSession(ResponseExecutionSession<Execution>);
+impl gateway_core::engine::execution::ExecutionSession for CoreSession {
+    fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>> {
+        Box::pin(async move { self.0.next_event().await })
+    }
+    fn collect_uncommitted(&mut self) -> BoxFuture<'_, Result<Vec<ProviderEvent>, EngineError>> {
+        Box::pin(async move { self.0.collect_uncommitted().await })
+    }
+    fn response_headers(&self) -> &[ProviderResponseHeader] {
+        self.0.response_headers()
+    }
+    fn middleware_response_head(&self) -> Option<&attempt_middleware::AttemptResponseHead> {
+        self.0.middleware_response_head()
+    }
+    fn response_status_code(&self) -> Option<u16> {
+        self.0.response_status_code()
+    }
+    fn commit_downstream(&mut self, status: Option<u16>) -> BoxFuture<'_, Result<(), EngineError>> {
+        Box::pin(async move { self.0.commit_downstream(status).await })
+    }
+    fn record_client_status(&mut self, status: u16) -> BoxFuture<'_, Result<(), EngineError>> {
+        Box::pin(async move { self.0.record_client_status(status).await })
+    }
+    fn is_finalized(&self) -> bool {
+        self.0.is_finalized()
+    }
+    fn cancel(&self) {
+        self.0.cancel();
+    }
+    fn detach_finalize(mut self: Box<Self>) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let _ = self.0.cancel_and_finalize().await;
+        })
+    }
+}
+
+#[tokio::test]
+async fn sdk_websocket_request_and_attempt_share_core_delivery_and_receipts() {
+    let install = Installation::new().await;
+    install
+        .manager
+        .update(None, install.command(0, 0), &actor())
+        .await
+        .unwrap();
+    for mode in ["pass", "inspect", "ws-map", "ws-expand", "ws-short"] {
+        let mut context = context(true);
+        context.transport = ClientTransport::WebSocket;
+        let registry = Arc::new(install.manager.middleware_registry().unwrap());
+        let plan = registry.freeze(context.clone()).unwrap();
+        let execution = Arc::new(Execution::default());
+        let adapter = gateway_api::openai::middleware::responses_attempt_middleware(
+            registry,
+            context.clone(),
+        );
+        let coordinator = AttemptCoordinator::new(GatewayEngine::new(
+            execution.clone(),
+            ProviderRegistry::new([execution.clone() as Arc<dyn Provider>]).unwrap(),
+        ))
+        .with_attempt_middleware(Some(adapter));
+        let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
+            Box::pin(async move {
+                let mut value: Value = serde_json::from_slice(request.body()).unwrap();
+                value["type"] = json!("response.create");
+                let decoded = gateway_api::openai::responses::decode_response_create_with_context(
+                    &value.to_string(),
+                    &Default::default(),
+                )
+                .unwrap();
+                let operation = decoded.into_parts().0;
+                let mut row = request_row(&context, &operation);
+                row.client_transport = "websocket".into();
+                let session = coordinator
+                    .start(
+                        row,
+                        operation.clone(),
+                        routing(&operation),
+                        None,
+                        None,
+                        CancellationToken::new(),
+                    )
+                    .await?;
+                gateway_api::openai::middleware::execution_middleware_response(
+                    Box::new(CoreSession(session)),
+                    ClientTransport::WebSocket,
+                )
+                .await
+            })
+        });
+        let request = MiddlewareRequest::new(
+            "openai",
+            vec![],
+            Bytes::from(json!({"model":"gpt-5","mode":mode}).to_string()),
+        );
+        let response = tokio::time::timeout(Duration::from_secs(5), plan.run(request, next))
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, status, _, mut body, _) = response.into_parts();
+        let mut values = vec![];
+        let mut receipts = 0;
+        let mut boundaries = 0;
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), body.next_frame())
+                .await
+                .unwrap()
+                .unwrap();
+            let Some(frame) = frame else {
+                break;
+            };
+            let (bytes, framing, _, envelope) = frame.into_parts();
+            if !bytes.is_empty() {
+                assert_eq!(framing, MiddlewareFraming::JsonDocument);
+                values.push(serde_json::from_slice::<Value>(&bytes).unwrap());
+            }
+            if let Some(envelope) = envelope {
+                for fact in envelope.events().flat_map(|e| e.canonical_facts()) {
+                    if let GatewayEvent::ProviderCost(cost) = fact {
+                        assert_eq!(cost.total().amount().scaled(), 123);
+                        receipts += 1;
+                    }
+                }
+                if envelope.batch_end() == Some(CommitRequirement::CommitBeforeDelivery) {
+                    assert_eq!(execution.commits.load(Ordering::SeqCst), 0);
+                    body.commit_downstream(Some(status)).await.unwrap();
+                    boundaries += 1;
+                }
+            }
+        }
+        assert!(body.is_finalized());
+        if mode == "ws-short" {
+            assert_eq!(status, 403);
+            assert_eq!(values[0]["error"]["message"], "blocked");
+            assert_eq!(execution.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(receipts, 0);
+            assert_eq!(boundaries, 0);
+            assert!(execution.rows.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(values.last().unwrap()["type"], "response.completed");
+            assert_eq!(values.last().unwrap()["response"]["id"], "resp_original");
+            if mode == "ws-map" {
+                assert!(values.iter().all(|v| v["plugin"] == true));
+            }
+            if mode == "ws-expand" {
+                assert_eq!(values.iter().filter(|v| v["delta"] == "prefix").count(), 6);
+            }
+            assert_eq!(boundaries, 1);
+            assert_eq!(receipts, 1);
+            assert_eq!(execution.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(execution.commits.load(Ordering::SeqCst), 1);
+            let rows = execution.rows.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cost.total().unwrap().amount().scaled(), 123);
+        }
+        body.close().await;
+    }
+    install.manager.shutdown().await;
+}

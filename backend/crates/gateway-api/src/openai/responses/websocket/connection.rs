@@ -252,7 +252,7 @@ impl ResponsesWebSocketConnection {
         )
     }
 
-    pub(super) fn id(&self) -> &str {
+    pub(in crate::openai) fn id(&self) -> &str {
         &self.connection_id
     }
 
