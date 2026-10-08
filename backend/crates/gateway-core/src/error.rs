@@ -433,6 +433,7 @@ pub struct ProviderError {
     continuation_recovery_disposition: Option<ContinuationRecoveryDisposition>,
     failure_observation: Option<Box<ProviderErrorFailureObservation>>,
     replay_safe: bool,
+    retry_prohibited: bool,
     pre_delivery_retry: Option<Box<PreDeliveryRetry>>,
     credential_recovery_required: bool,
     retry_same_account: bool,
@@ -473,6 +474,7 @@ impl ProviderError {
             continuation_recovery_disposition: None,
             failure_observation: None,
             replay_safe: false,
+            retry_prohibited: false,
             pre_delivery_retry: None,
             credential_recovery_required: false,
             retry_same_account: false,
@@ -568,6 +570,19 @@ impl ProviderError {
     pub const fn with_replay_safe(mut self) -> Self {
         self.replay_safe = true;
         self
+    }
+
+    /// 标记必须交付客户端的终止拒绝，即使 payload 未发送也不自动重试
+    #[must_use]
+    pub const fn with_retry_prohibited(mut self) -> Self {
+        self.retry_prohibited = true;
+        self
+    }
+
+    /// 返回 Provider 是否明确禁止本请求的重试与传输回退
+    #[must_use]
+    pub const fn retry_is_prohibited(&self) -> bool {
+        self.retry_prohibited
     }
 
     /// 原地标记 Provider 已证明本次失败可从已交付的状态检查点安全恢复。
@@ -871,6 +886,7 @@ impl Clone for ProviderError {
             continuation_recovery_disposition: self.continuation_recovery_disposition,
             failure_observation: self.failure_observation.clone(),
             replay_safe: self.replay_safe,
+            retry_prohibited: self.retry_prohibited,
             pre_delivery_retry: self.pre_delivery_retry.clone(),
             credential_recovery_required: self.credential_recovery_required,
             retry_same_account: self.retry_same_account,
@@ -900,6 +916,7 @@ impl fmt::Debug for ProviderError {
                 &self.upstream_request_id().map(|_| "<classified-safe>"),
             )
             .field("retry_after", &self.retry_after)
+            .field("retry_prohibited", &self.retry_prohibited)
             .field("continuation_failure", &self.continuation_failure)
             .field(
                 "continuation_recovery_disposition",

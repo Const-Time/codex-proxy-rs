@@ -437,10 +437,11 @@ pub(super) fn decode_request_object(
         });
     }
     let model = model.to_owned();
-    let stream = object
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    // 缺省值只决定下游交付方式，不补写正文或改变 Provider 的上游流式执行。
+    let stream = match object.get("stream") {
+        Some(value) => value.as_bool().unwrap_or(true),
+        None => matches!(source, RequestDecodeSource::WebSocketFrame),
+    };
     let store = object
         .get("store")
         .and_then(Value::as_bool)

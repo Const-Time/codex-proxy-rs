@@ -1,4 +1,5 @@
 use gateway_protocol::openai::is_transport_managed_request_header;
+use gateway_protocol::openai::parse_retry_after_seconds;
 
 #[test]
 fn transport_headers_should_include_proxy_namespaces_and_compression() {
@@ -65,4 +66,35 @@ fn transport_headers_should_leave_business_extensions_to_the_protocol_owner() {
             "unexpected {name}"
         );
     }
+}
+
+#[test]
+fn retry_after_should_accept_nonnegative_seconds_and_http_dates() {
+    for (header, expected) in [
+        (" 30 ", Some(30)),
+        ("0", Some(0)),
+        ("Sun, 06 Nov 1994 08:49:37 GMT", Some(0)),
+        ("Sunday, 06-Nov-94 08:49:37 GMT", Some(0)),
+        ("Sun Nov  6 08:49:37 1994", Some(0)),
+        ("+30", None),
+        ("-1", None),
+        ("1.5", None),
+        ("18446744073709551616", None),
+        ("", None),
+        ("later", None),
+    ] {
+        assert_eq!(parse_retry_after_seconds(header), expected, "{header}");
+    }
+}
+
+#[test]
+fn retry_after_http_date_should_not_round_down_the_remaining_delay() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let retry_at = UNIX_EPOCH + Duration::from_secs(now.as_secs() + 60);
+    let header = httpdate::fmt_http_date(retry_at);
+    let seconds = parse_retry_after_seconds(&header).expect("HTTP date");
+    let remaining = retry_at.duration_since(SystemTime::now()).unwrap();
+    assert!(Duration::from_secs(seconds) >= remaining);
+    assert!(seconds <= 60);
 }

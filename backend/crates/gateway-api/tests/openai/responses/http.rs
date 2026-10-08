@@ -499,6 +499,71 @@ async fn http_request_with_body(
 }
 
 #[tokio::test]
+async fn http_requests_should_honor_stream_preference() {
+    for stream in [None, Some(false), Some(true)] {
+        let trace = Arc::new(Trace::default());
+        let streaming = stream == Some(true);
+        let session = if streaming {
+            FakeSession::streaming(
+                Arc::clone(&trace),
+                vec![
+                    NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+                    NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
+                    NextStep::FinalizeSuccess,
+                ],
+            )
+        } else {
+            FakeSession::buffered(Arc::clone(&trace), vec![started(), completed()])
+        };
+        let execution = Arc::new(SessionExecution {
+            client: authenticated_client_for_provider("sk_stream_test", "openai"),
+            session: Mutex::new(Some(Box::new(session))),
+        });
+        let mut body = json!({"model": "model-a", "input": "hello"});
+        if let Some(stream) = stream {
+            body["stream"] = json!(stream);
+        }
+        let response = api_router(execution)
+            .await
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header(AUTHORIZATION, "Bearer sk_stream_test")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "stream={stream:?}");
+        assert_eq!(
+            response.headers()[CONTENT_TYPE],
+            if streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+            "stream={stream:?}",
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if streaming {
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(body.contains("event: response.completed\n"));
+            assert!(body.ends_with("data: [DONE]\n\n"));
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({
+                    "id": "resp_test", "model": "public-model", "status": "completed", "output": []
+                }),
+            );
+            assert_eq!(trace.snapshot(), vec!["collect", "commit"]);
+        }
+        assert!(!trace.is_cancelled());
+    }
+}
+
+#[tokio::test]
 async fn compressed_http_requests_should_preserve_execution_context_without_transport_headers() {
     let body = json!({
         "model": "model-a", "input": "hello", "previous_response_id": "resp_previous",
@@ -1965,4 +2030,45 @@ async fn buffered_rate_limit_should_persist_the_returned_429_status() {
 fn response_status_from_body(body: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     value.pointer("/error/code")?.as_str().map(str::to_owned)
+}
+
+struct SessionExecution {
+    client: AuthenticatedClient,
+    session: Mutex<Option<Box<dyn ExecutionSession>>>,
+}
+
+impl ExecutionService for SessionExecution {
+    fn authenticate(&self, _: &str) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        Ok(self.client.clone())
+    }
+
+    fn public_models(&self, _: &AuthenticatedClient) -> Vec<PublicModelId> {
+        Vec::new()
+    }
+
+    fn contains_public_model(&self, _: &AuthenticatedClient, _: &PublicModelId) -> bool {
+        true
+    }
+
+    fn start(
+        &self,
+        request: StartExecution,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async move {
+            Ok(StartedExecution {
+                request_id: gateway_core::engine::ModelRequestId::new("req_stream_contract")
+                    .unwrap(),
+                created_at: std::time::SystemTime::now(),
+                stream: request.metadata.stream,
+                session: self.session.lock().unwrap().take().expect("one execution"),
+            })
+        })
+    }
+
+    fn start_provider_endpoint(
+        &self,
+        _: StartProviderExecution,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async { panic!("Responses must use model execution") })
+    }
 }

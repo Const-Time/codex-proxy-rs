@@ -227,6 +227,24 @@ fn provider_and_quota_with_affinity_and_base_url_and_leases(
     leases: Arc<TestLeaseCoordinator>,
     stream_max_retries: u32,
 ) -> (CodexProvider, Arc<CodexCredentialQuotaService>) {
+    provider_and_quota_with_cooldowns(
+        store,
+        session_affinity,
+        base_url,
+        leases,
+        stream_max_retries,
+        Arc::new(MemoryCooldownPort::new()),
+    )
+}
+
+fn provider_and_quota_with_cooldowns(
+    store: &Arc<MemoryAccountStore>,
+    session_affinity: Arc<MemorySessionAffinity>,
+    base_url: String,
+    leases: Arc<TestLeaseCoordinator>,
+    stream_max_retries: u32,
+    cooldowns: Arc<MemoryCooldownPort>,
+) -> (CodexProvider, Arc<CodexCredentialQuotaService>) {
     let profile = wire_profile();
     let http = reqwest::Client::builder()
         .no_proxy()
@@ -245,7 +263,7 @@ fn provider_and_quota_with_affinity_and_base_url_and_leases(
         profile.clone(),
         http.clone(),
         base_url.clone(),
-        Arc::new(MemoryCooldownPort::new()),
+        cooldowns,
     ));
     let account_feedback = Arc::new(AccountFeedbackStats::default());
     let selector = Arc::new(CodexCredentialSelector::new(
@@ -6133,7 +6151,7 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
             assert!(
                 matches!(error.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry {
                 max_retries, initial_delay, max_delay,
-            }) if max_retries.get() == 3 && initial_delay == Duration::from_secs(8) && max_delay == Duration::from_secs(8))
+            }) if max_retries.get() == 3 && initial_delay == Duration::from_millis(500) && max_delay == Duration::from_secs(8))
             );
             assert!(!provider_openai::openai_failure_affects_account_score(
                 &error
@@ -8785,4 +8803,70 @@ pub(crate) async fn assert_local_connection_capacity_is_not_an_upstream_failure(
         Some("local_connection_capacity")
     );
     assert!(failure.pre_delivery_retry().is_none());
+}
+
+#[tokio::test]
+async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_down_accounts() {
+    use gateway_core::provider_ports::ProviderCooldownPort as _;
+    for use_websocket in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = "acct_provider_contract";
+        create_account(&store, account_id).await;
+        let cooldowns = Arc::new(MemoryCooldownPort::new());
+        let server = MockServer::start().await;
+        let body = json!({"error":{"type":"resource_unavailable","code":"flex_unavailable","message":"Flex capacity unavailable."}});
+        Mock::given(method(if use_websocket { "GET" } else { "POST" }))
+            .and(path("/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "300")
+                    .set_body_json(&body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let operation = if use_websocket {
+            generate_operation()
+        } else {
+            http_generate_operation()
+        };
+        let (provider, _) = provider_and_quota_with_cooldowns(
+            &store,
+            Arc::new(MemorySessionAffinity::default()),
+            server.uri(),
+            Arc::new(TestLeaseCoordinator::default()),
+            2,
+            Arc::clone(&cooldowns),
+        );
+        let mut stream = provider
+            .execute(
+                planned_request("openai", operation),
+                context("req_flex", CancellationToken::new()),
+            )
+            .await
+            .unwrap();
+        let error = loop {
+            match stream.next().await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => break error,
+                None => panic!("expected Flex failure"),
+            }
+        };
+        assert_eq!(error.kind(), ProviderErrorKind::Unavailable);
+        assert_eq!(
+            error.upstream_code().map(|code| code.as_str()),
+            Some("flex_unavailable")
+        );
+        assert!(!error.replay_is_safe());
+        assert!(error.pre_delivery_retry().is_none());
+        assert!(error.retry_is_prohibited());
+
+        let response = error.client_visible_upstream_response().unwrap();
+        assert_eq!(response.status(), 429);
+        assert_eq!(response.body().as_ref(), body.to_string().as_bytes());
+        let account = store.account(account_id).unwrap();
+        assert_eq!(account.credential_state(), CredentialState::Ready);
+        assert_eq!(account.quota().access(), QuotaAccessState::Unknown);
+        assert!(cooldowns.read(account.id()).await.unwrap().is_none());
+    }
 }

@@ -131,6 +131,10 @@ WebSocket message 和 frame 不设置网关私有长度上限；协议可接受�
 | `GET` | `/v1/models` | 返回当前 Client Key 账号范围内各 Provider 的可用公开模型并集；有两种响应形态，见下 |
 | `GET` | `/v1/models/{model_id}` | 返回 OpenAI 兼容的单模型详情 |
 
+HTTP Responses 省略 `stream` 时返回完整 JSON；显式 `true` 返回 SSE，显式 `false` 返回 JSON。
+WebSocket `response.create` 省略该字段时仍按流式交付。缺省值只影响下游交付，不向原始请求体补写字段；
+非布尔值保留给上游进行语义校验。
+
 Codex 的 review 等子代理请求仍使用 `/v1/responses`，并通过 `x-openai-subagent` 请求头携带子代理类型；
 网关不提供独立的子代理请求路径。
 

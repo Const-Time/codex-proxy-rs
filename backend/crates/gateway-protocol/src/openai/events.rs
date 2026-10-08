@@ -246,7 +246,9 @@ pub fn retry_after_seconds_from_value(value: &Value) -> Option<u64> {
         .pointer("/response/error")
         .or_else(|| value.get("error"))
         .unwrap_or(value);
-    retry_after_seconds_field(error)
+    retry_after_seconds_header(error)
+        .or_else(|| retry_after_seconds_header(value))
+        .or_else(|| retry_after_seconds_field(error))
         .or_else(|| {
             error
                 .get("resets_in_seconds")
@@ -255,7 +257,6 @@ pub fn retry_after_seconds_from_value(value: &Value) -> Option<u64> {
         })
         .or_else(|| retry_after_seconds_from_resets_at(error))
         .or_else(|| retry_after_seconds_field(value))
-        .or_else(|| retry_after_seconds_header(value))
         .or_else(|| retry_after_seconds_from_rate_limit_message(error))
 }
 
@@ -278,7 +279,7 @@ fn retry_after_seconds_header(value: &Value) -> Option<u64> {
         .and_then(|headers| {
             headers.iter().find_map(|(name, value)| {
                 if name.eq_ignore_ascii_case("retry-after") {
-                    json_value_as_positive_u64(value)
+                    json_value_as_retry_after_seconds(value)
                 } else {
                     None
                 }
@@ -286,14 +287,13 @@ fn retry_after_seconds_header(value: &Value) -> Option<u64> {
         })
 }
 
-fn json_value_as_positive_u64(value: &Value) -> Option<u64> {
-    let seconds = match value {
-        Value::Number(value) => value.as_u64()?,
-        Value::String(value) => value.trim().parse::<u64>().ok()?,
-        Value::Array(values) => values.first().and_then(json_value_as_positive_u64)?,
-        Value::Null | Value::Bool(_) | Value::Object(_) => return None,
-    };
-    (seconds > 0).then_some(seconds)
+fn json_value_as_retry_after_seconds(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => super::headers::parse_retry_after_seconds(value),
+        Value::Array(values) => values.first().and_then(json_value_as_retry_after_seconds),
+        Value::Null | Value::Bool(_) | Value::Object(_) => None,
+    }
 }
 
 /// 标准化的单个限流窗口。

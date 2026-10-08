@@ -1,5 +1,8 @@
-use std::sync::Arc;
+use futures::FutureExt as _;
+use std::future::Future as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::task::{Context, Wake, Waker};
 
 use gateway_core::lifecycle::CancellationToken;
 
@@ -100,4 +103,112 @@ fn connection_lifecycle_contract_is_object_safe() {
     let object: &dyn ConnectionLifecycle = &lifecycle;
 
     assert!(!object.is_draining());
+}
+
+#[test]
+fn discarded_cancellation_branches_release_allocations() {
+    let token = CancellationToken::new();
+    // 预热一次，允许取消信号保留固定大小的通知状态。
+    discard_cancellation_branch(&token);
+
+    let allocations = allocation_counter::measure(|| {
+        for _ in 0..10_000 {
+            discard_cancellation_branch(&token);
+        }
+    });
+
+    assert_eq!(allocations.count_current, 0, "{allocations:?}");
+    assert_eq!(allocations.bytes_current, 0, "{allocations:?}");
+    assert!(!token.is_cancelled());
+}
+
+fn discard_cancellation_branch(token: &CancellationToken) {
+    // select 先轮询取消分支，再由另一个就绪分支获胜并丢弃取消等待。
+    let selected = futures::future::select(Box::pin(token.cancelled()), futures::future::ready(()))
+        .now_or_never();
+    assert!(matches!(selected, Some(futures::future::Either::Right(_))));
+}
+
+#[derive(Default)]
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn cancellation_wakes_all_live_waiters_after_other_waits_are_dropped() {
+    let token = CancellationToken::new();
+    let shared = token.clone();
+    let tokens = [&token, &shared];
+    let mut waiters = Vec::new();
+
+    for token in tokens.into_iter().cycle().take(64) {
+        let counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut waiting = Box::pin(token.cancelled());
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        waiters.push((waiting, counter));
+    }
+    for _ in 0..100 {
+        discard_cancellation_branch(&token);
+    }
+
+    shared.cancel();
+    token.cancel();
+
+    for (waiting, counter) in waiters {
+        assert!(counter.0.load(Ordering::Relaxed) > 0);
+        assert!(waiting.now_or_never().is_some());
+        assert_eq!(Arc::strong_count(&counter), 1);
+    }
+}
+
+#[test]
+fn cancellation_racing_with_wait_registration_and_drop_does_not_lose_wakeup() {
+    for _ in 0..256 {
+        let token = CancellationToken::new();
+        let mut dropped_wait = Box::pin(token.cancelled());
+        assert!(dropped_wait.as_mut().now_or_never().is_none());
+        let start = Barrier::new(2);
+        let finished = Barrier::new(2);
+        let counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(Arc::clone(&counter));
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                token.cancel();
+                finished.wait();
+            });
+
+            start.wait();
+            drop(dropped_wait);
+            let mut waiting = Box::pin(token.cancelled());
+            let pending = waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending();
+            finished.wait();
+
+            // 取消完成后再检查，既验证就绪结果，也验证 Pending 路径实际收到唤醒。
+            if pending {
+                assert!(counter.0.load(Ordering::Relaxed) > 0);
+                assert!(waiting.now_or_never().is_some());
+            }
+        });
+        assert!(token.is_cancelled());
+        assert_eq!(Arc::strong_count(&counter), 2);
+    }
 }

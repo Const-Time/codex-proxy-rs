@@ -120,6 +120,26 @@ fn decoder_should_preserve_the_openai_body_and_only_derive_stable_routing_facts(
 }
 
 #[test]
+fn decoder_should_default_omitted_http_stream_to_json_without_rewriting_body() {
+    let body = json!({"model": "smart-code", "input": "hello"});
+    let decoded = generate_request(body.clone());
+
+    assert!(!decoded.metadata().stream());
+    assert_eq!(openai_wire_body(&decoded), body.as_object().unwrap());
+}
+
+#[test]
+fn decoder_should_preserve_explicit_http_stream_values() {
+    for stream in [false, true] {
+        let body = json!({"model": "smart-code", "input": "hello", "stream": stream});
+        let decoded = generate_request(body.clone());
+
+        assert_eq!(decoded.metadata().stream(), stream);
+        assert_eq!(openai_wire_body(&decoded), body.as_object().unwrap());
+    }
+}
+
+#[test]
 fn decoder_should_preserve_opaque_client_model_values() {
     for model in [
         format!("future-{}", "x".repeat(512)),
@@ -484,6 +504,7 @@ fn decoder_should_leave_openai_semantic_validation_to_the_upstream() {
         "future_official_field": [1, 2, 3]
     }));
 
+    assert!(decoded.metadata().stream());
     assert_eq!(
         Value::Object(openai_wire_body(&decoded).clone()),
         json!({
