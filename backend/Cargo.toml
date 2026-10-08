@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "apps/gateway",
+    "apps/plugin-cli",
+    "crates/gateway-plugin/sdk",
+    "crates/gateway-plugin/runtime",
     "crates/gateway-admin",
     "crates/gateway-api",
     "crates/gateway-core",

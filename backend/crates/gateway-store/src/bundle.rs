@@ -7,6 +7,7 @@ use super::*;
 
 /// 已完成连接、迁移与 hydration 的 Store 能力集合。
 pub struct StoreBundle {
+    plugins: Arc<dyn gateway_admin::ports::plugins::PluginStore>,
     turn_state: Arc<dyn gateway_admin::ports::turn_state::TurnStateStore>,
     admin_ports: AdminStorePorts,
     core_ports: CoreStorePorts,
@@ -17,6 +18,10 @@ pub struct StoreBundle {
 }
 
 impl StoreBundle {
+    pub fn plugin_store(&self) -> Arc<dyn gateway_admin::ports::plugins::PluginStore> {
+        self.plugins.clone()
+    }
+
     pub fn turn_state_store(&self) -> Arc<dyn gateway_admin::ports::turn_state::TurnStateStore> {
         Arc::clone(&self.turn_state)
     }
@@ -213,6 +218,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         retention,
     )?;
     Ok(StoreBundle {
+        plugins: Arc::new(postgres::PgPluginStore::new(pool.clone())),
         turn_state: Arc::new(postgres::PgTurnStateStore::new(pool)),
         admin_ports,
         core_ports,

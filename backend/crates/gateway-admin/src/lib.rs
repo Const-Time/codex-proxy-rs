@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 pub mod backup;
 pub mod model;
+pub mod plugins;
 pub mod ports;
 mod pricing_task;
 mod subscription_task;
@@ -150,6 +151,7 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    plugins: Option<Arc<dyn ports::plugins::PluginService>>,
     turn_state: Option<Arc<dyn ports::turn_state::TurnStateService>>,
     proxies: Arc<dyn ProxiesService>,
     auth: Arc<dyn AuthService>,
@@ -166,6 +168,16 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    pub fn with_plugins(mut self, service: Arc<dyn ports::plugins::PluginService>) -> Self {
+        self.plugins = Some(service);
+        self
+    }
+    pub fn plugins(&self) -> Result<&dyn ports::plugins::PluginService, AdminError> {
+        self.plugins
+            .as_deref()
+            .ok_or_else(|| AdminError::unavailable("插件管理未初始化"))
+    }
+
     #[must_use]
     pub fn with_turn_state(
         mut self,
@@ -328,6 +340,7 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        plugins: None,
         turn_state: None,
         proxies: Arc::new(use_case::proxies::DefaultProxiesService::new(
             store.proxies(),

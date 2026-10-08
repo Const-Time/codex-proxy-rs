@@ -63,6 +63,9 @@ pub async fn run() -> Result<(), BootstrapError> {
         xai,
     } = config;
 
+    let plugin_cache = host.runtime_data_dir().join("plugins");
+    let plugin_version = semver::Version::parse(host.system_update.version.trim_start_matches('v'))
+        .map_err(|_| ConfigError::InvalidField("host.system_update.version"))?;
     let host = gateway_host::initialize(host).await?;
     host.report_startup_ready("Host");
     let mut store = gateway_store::initialize(store).await?;
@@ -99,6 +102,16 @@ pub async fn run() -> Result<(), BootstrapError> {
     )
     .await?;
     host.report_startup_ready("Admin");
+    let plugins = Arc::new(gateway_admin::plugins::PluginManager::new(
+        store.plugin_store(),
+        Arc::new(gateway_plugin_runtime::PluginEngine::new(
+            plugin_cache,
+            plugin_version,
+            store.plugin_store(),
+        )),
+    ));
+    plugins.restore().await?;
+    host.report_startup_ready("Plugins");
 
     let mut probes = store.health_probes();
     probes.extend(core.health_probes());
@@ -108,7 +121,8 @@ pub async fn run() -> Result<(), BootstrapError> {
         core.execution_service(),
         admin
             .services()
-            .with_turn_state(openai.turn_state_service()),
+            .with_turn_state(openai.turn_state_service())
+            .with_plugins(plugins.clone()),
         probes,
         host.worker_health(),
         host.connection_lifecycle(),
@@ -122,7 +136,9 @@ pub async fn run() -> Result<(), BootstrapError> {
     plan.extend(admin.take_worker_contributions());
     host.start_workers(plan, store.worker_leader_lease())?;
     host.report_startup_ready("Workers");
-    host.serve(api.router()).await?;
+    let result = host.serve(api.router()).await;
+    plugins.shutdown().await;
+    result?;
     Ok(())
 }
 

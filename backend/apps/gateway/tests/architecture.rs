@@ -11,6 +11,9 @@ use syn::{Item, visit::Visit};
 /// workspace 成员冻结清单;新增 crate 必须同步扩展本文件的依赖规则。
 pub(super) const WORKSPACE_MEMBERS: &[&str] = &[
     "apps/gateway",
+    "apps/plugin-cli",
+    "crates/gateway-plugin/sdk",
+    "crates/gateway-plugin/runtime",
     "crates/gateway-admin",
     "crates/gateway-api",
     "crates/gateway-core",
@@ -164,6 +167,9 @@ fn gateway_admin_stays_free_of_infrastructure_dependencies() {
 /// workspace 包名到冻结成员路径的映射。
 const PACKAGE_TO_MEMBER: &[(&str, &str)] = &[
     ("codex-proxy-rs", "apps/gateway"),
+    ("codex-proxy-plugin-cli", "apps/plugin-cli"),
+    ("gateway-plugin-sdk", "crates/gateway-plugin/sdk"),
+    ("gateway-plugin-runtime", "crates/gateway-plugin/runtime"),
     ("gateway-admin", "crates/gateway-admin"),
     ("gateway-api", "crates/gateway-api"),
     ("gateway-core", "crates/gateway-core"),
@@ -183,6 +189,7 @@ const ADAPTER_PUBLIC_MODULES: &[(&str, &[&str])] = &[
             "client_distribution",
             "config",
             "pricing",
+            "process",
             "proxy_probe",
             "serve",
             "system_update",
@@ -203,12 +210,18 @@ const ADAPTER_PUBLIC_MODULES: &[(&str, &[&str])] = &[
 /// 不对应单一生产模块、而是校验 crate/workspace 整体契约的根级测试场景。
 const ROOT_TEST_SCENARIOS: &[(&str, &[&str])] = &[
     ("apps/gateway", &["architecture"]),
+    ("crates/gateway-plugin/runtime", &["installation"]),
     ("crates/gateway-api", &["architecture"]),
 ];
 
 /// 冻结的 workspace 内部运行时依赖边；新增/删除任何边都必须同步本表。
 const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("codex-proxy-rs", "gateway-admin"),
+    ("codex-proxy-rs", "gateway-plugin-runtime"),
+    ("codex-proxy-plugin-cli", "gateway-plugin-sdk"),
+    ("gateway-plugin-runtime", "gateway-plugin-sdk"),
+    ("gateway-plugin-runtime", "gateway-admin"),
+    ("gateway-plugin-runtime", "gateway-host"),
     ("codex-proxy-rs", "gateway-api"),
     ("codex-proxy-rs", "gateway-core"),
     ("codex-proxy-rs", "gateway-host"),
@@ -356,7 +369,7 @@ fn workspace_modules_follow_conventional_file_layout() {
 
         let tests = member_root.join("tests");
         if tests.is_dir() {
-            assert_module_tree(&tests, &["main.rs"]);
+            assert_module_tree(&tests, &test_crate_roots(member));
         }
     }
 }
@@ -377,7 +390,7 @@ fn integration_tests_mirror_production_module_tree() {
         }
 
         let production = module_layouts(&member_root.join("src"), &["lib.rs", "main.rs"]);
-        let tests = module_layouts(&tests_root, &["main.rs"]);
+        let tests = module_layouts(&tests_root, &test_crate_roots(member));
         for (module, test_layout) in tests {
             if module == Path::new("support") {
                 continue;
@@ -407,6 +420,22 @@ fn integration_tests_mirror_production_module_tree() {
             );
         }
     }
+}
+
+// Real subprocess fixtures are separate Cargo binary roots, not modules in tests/main.rs.
+fn test_crate_roots(member: &str) -> Vec<&'static str> {
+    let binary = match member {
+        "crates/gateway-host" => Some("support/process_worker.rs"),
+        "crates/gateway-plugin/runtime" => Some("worker.rs"),
+        _ => None,
+    };
+    let mut roots = vec!["main.rs"];
+    if let Some(binary) = binary {
+        let manifest = fs::read_to_string(backend_root().join(member).join("Cargo.toml")).unwrap();
+        assert!(manifest.contains(&format!("path = \"tests/{binary}\"")));
+        roots.push(binary);
+    }
+    roots
 }
 
 fn module_layouts(root: &Path, crate_roots: &[&str]) -> BTreeMap<PathBuf, ModuleLayout> {

@@ -63,6 +63,9 @@ flowchart LR
 | `gateway-host` | 配置加载、日志、HTTP 生命周期、Worker 监督和系统更新 |
 | `providers/openai` | OpenAI OAuth、账号选择、目录、额度、Responses/Images/Search transport |
 | `providers/xai` | xAI OAuth session、账号选择、目录、额度和 Grok/Responses 转换 |
+| `gateway-plugin/sdk` | 上游 manifest / RPC / 能力线协议，不拥有本地业务策略 |
+| `gateway-plugin/runtime` | 制品校验、RPC 会话、私有状态回调和管理能力适配，依赖 Admin 端口与 Host 进程管理 |
+| `backend/apps/plugin-cli` | 制品打包命令，仅依赖 SDK |
 | `frontend` | Vue 管理端，仅通过 Admin API 读写状态 |
 
 依赖方向遵守四条规则：
@@ -501,3 +504,9 @@ OpenAI 在允许 HTTP 的请求上发送前估算 WS create 大小，过大时�
 每次执行持有自己的 ResponseControl。Provider 在确认 response ID 后注册目标，并在终态/退出时释放；
 API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发送中断。后续 response.create 仍有界串行排队。
 控制帧处理期间保留同一个执行读取 future，不取消正在进行的结算与正文处理。
+
+## 插件生命周期
+
+组合根在 Store 初始化后装配 PluginManager 和 PluginEngine，在 API 启动前恢复启用实例，并在关机时回收插件进程。Admin 是实例配置与版本切换的业务 owner；Store 保存制品、敏感配置和私有状态；Host 负责进程容量与终止回收；Runtime 负责协议和能力适配。数据库 CAS 提交先于新实例发布，旧 revision 的入口和私有状态写入随切换失效。
+
+插件私有状态与用户共享账本相互独立。当前仅开放管理员管理能力和私有状态，不提供绕过 Core 的模型调用或预算修改入口。支持矩阵、可信进程边界和恢复操作见 [插件文档](plugins.md)。

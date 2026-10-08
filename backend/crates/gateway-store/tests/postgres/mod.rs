@@ -21,6 +21,7 @@ mod execution_buffer;
 mod health;
 mod observability;
 mod ops_events;
+mod plugins;
 mod pricing;
 mod provider_accounts;
 mod proxies;
@@ -253,6 +254,9 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "operation_logs",
             "ops_events",
             "outbound_proxies",
+            "plugin_artifacts",
+            "plugin_instances",
+            "plugin_private_state",
             "provider_accounts",
             "runtime_settings",
             "subscription_group_cycles",

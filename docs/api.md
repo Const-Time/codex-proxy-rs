@@ -946,3 +946,21 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 - 模型列表、详情及模型画像只显示当前 Key 范围内来源账号允许的模型；别名使用映射后的模型 ID 判断。
 - 停用 OAuth 账号仍可后台轮换凭据，刷新不会重新启用账号。额度查询失败返回安全管理错误，不能据此改写 credential/quota 状态。
 - 路由或准入拒绝记录为入口观测，不伪造 model_requests 或上游 attempt；观测失败不改变客户端原本应收到的错误。
+
+## 插件管理
+
+以下接口全部要求现有管理员会话，普通用户返回 403，未登录返回 401。响应沿用 Admin envelope。
+
+| 方法 | 路径 | 请求 |
+| --- | --- | --- |
+| GET / POST | `/api/admin/plugins` | 列表 / 创建实例 |
+| POST | `/api/admin/plugins/update` | `id` 加实例配置 |
+| POST | `/api/admin/plugins/uninstall` | `id, revision`，仅允许停用实例 |
+| GET / POST | `/api/admin/plugins/artifacts` | 制品列表 / 原始 gzip 正文，最多 32 MiB |
+| POST | `/api/admin/plugins/artifacts/remove` | `sha256`，只能删除没有实例引用的制品 |
+| GET | `/api/admin/plugins/resource` | query `id, revision, path` |
+| POST | `/api/admin/plugins/invoke` | `id, revision, method, path, query, contentType, body` |
+
+实例配置包括 `revision, name, artifactSha256, enabled, trustedProcess, configuration, secrets`。创建 revision 为 0；修改必须提交读取时的 revision。启用必须显式信任所选制品。secrets 是字段名到字符串或 null 的对象：省略保留，null 清除；响应仅含 configuredSecrets 字段名，不返回敏感值。
+
+资源与调用的 body 为 base64，响应 data 是 `{status, contentType, body}`；HTML 始终通过 JSON envelope 返回，由父页面注入隔离 iframe，不作为同源 HTML 直接响应。请求头和自定义响应头未开放。失效 revision 返回冲突；业务调用失败不自动重试，结果可能已经生效。能力与大小限制见 [插件支持矩阵](plugins.md)。

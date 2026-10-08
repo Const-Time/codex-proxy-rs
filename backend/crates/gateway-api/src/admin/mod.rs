@@ -16,6 +16,7 @@ pub mod client_keys;
 mod extract;
 pub mod observability;
 pub mod operations;
+pub mod plugins;
 pub mod presenter;
 pub mod proxies;
 pub mod settings;
@@ -39,6 +40,7 @@ where
     Router::new()
         .merge(account_groups::router::<S>())
         .merge(proxies::router::<S>())
+        .merge(plugins::router::<S>())
         .merge(accounts::router::<S>())
         .merge(auth::router::<S>())
         .merge(users::router::<S>())

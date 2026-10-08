@@ -1,0 +1,186 @@
+//! 状态回调使用宿主保存的实例/revision，不接受插件指定另一个 owner。
+use crate::{CallbackHandler, RpcReply};
+use futures::future::BoxFuture;
+use gateway_admin::{
+    model::{AdminErrorKind, plugins::*},
+    ports::plugins::PluginStore,
+};
+use gateway_plugin_sdk::{
+    CallContext, ErrorCode, Manifest, PluginFault, Stage, StateNamespace, call::host::*,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+struct Namespace {
+    declaration: StateNamespace,
+    schema: jsonschema::Validator,
+}
+pub(crate) struct Callbacks {
+    store: Arc<dyn PluginStore>,
+    id: String,
+    revision: u64,
+    active: Arc<AtomicBool>,
+    namespaces: Arc<BTreeMap<String, Namespace>>,
+}
+impl Callbacks {
+    pub(crate) fn new(
+        store: Arc<dyn PluginStore>,
+        record: &PluginRecord,
+        manifest: &Manifest,
+        active: Arc<AtomicBool>,
+    ) -> Result<Self, gateway_admin::model::AdminError> {
+        let namespaces = manifest
+            .state
+            .iter()
+            .map(|s| {
+                Ok((
+                    s.namespace.clone(),
+                    Namespace {
+                        declaration: s.clone(),
+                        schema: crate::engine::schema(&s.schema)?,
+                    },
+                ))
+            })
+            .collect::<Result<_, gateway_admin::model::AdminError>>()?;
+        Ok(Self {
+            store,
+            id: record.id.clone(),
+            revision: record.revision,
+            active,
+            namespaces: Arc::new(namespaces),
+        })
+    }
+}
+fn invalid() -> PluginFault {
+    PluginFault::new(ErrorCode::InvalidInput, "invalid plugin state input")
+}
+fn encode(value: impl serde::Serialize) -> Result<RpcReply, PluginFault> {
+    Ok(RpcReply {
+        result: serde_json::to_value(value).map_err(|_| invalid())?,
+        payload: vec![],
+    })
+}
+fn store_error(error: gateway_admin::model::AdminError) -> PluginFault {
+    PluginFault::new(
+        match error.kind() {
+            AdminErrorKind::Conflict => ErrorCode::Conflict,
+            AdminErrorKind::Invalid => ErrorCode::Capacity,
+            _ => ErrorCode::Fault,
+        },
+        "plugin state operation failed",
+    )
+}
+impl CallbackHandler for Callbacks {
+    fn call(
+        &self,
+        context: CallContext,
+        method: String,
+        params: Value,
+        payload: Vec<u8>,
+    ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
+        let store = self.store.clone();
+        let id = self.id.clone();
+        let revision = self.revision;
+        let active = self.active.clone();
+        let namespaces = self.namespaces.clone();
+        Box::pin(async move {
+            if !active.load(Ordering::Acquire)
+                || context.instance_id != id
+                || context.generation != revision
+                || context.stage != Stage::Management
+            {
+                return Err(PluginFault::new(
+                    ErrorCode::PermissionDenied,
+                    "plugin generation is not active",
+                ));
+            }
+            if !matches!(
+                method.as_str(),
+                "host.state.get" | "host.state.put" | "host.state.delete"
+            ) {
+                return Err(PluginFault::new(
+                    ErrorCode::Unsupported,
+                    "host callback is not implemented by this host",
+                ));
+            }
+            if !payload.is_empty() {
+                return Err(invalid());
+            }
+            let namespace = params
+                .get("namespace")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let ns = namespaces.get(namespace).ok_or_else(invalid)?;
+            let key = params
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            if key.is_empty() || key.len() > 256 || key.chars().any(char::is_control) {
+                return Err(invalid());
+            }
+            let scope = PluginStateScope {
+                instance_id: id,
+                revision,
+                namespace: namespace.into(),
+                schema_version: ns.declaration.schema_version,
+                maximum_records: ns.declaration.maximum_records,
+                maximum_bytes: ns.declaration.maximum_bytes,
+            };
+            match method.as_str() {
+                "host.state.get" => {
+                    let request: StateGetRequest =
+                        serde_json::from_value(params).map_err(|_| invalid())?;
+                    let record = store
+                        .state_get(&scope, &request.key)
+                        .await
+                        .map_err(store_error)?;
+                    encode(StateGetResult {
+                        record: record.map(|r| StateRecord {
+                            value: r.value,
+                            version: r.version,
+                            schema_version: r.schema_version,
+                        }),
+                    })
+                }
+                "host.state.put" => {
+                    let request: StatePutRequest =
+                        serde_json::from_value(params).map_err(|_| invalid())?;
+                    if serde_json::to_vec(&request.value)
+                        .map_err(|_| invalid())?
+                        .len()
+                        > ns.declaration.maximum_value_bytes as usize
+                        || !ns.schema.is_valid(&request.value)
+                    {
+                        return Err(invalid());
+                    }
+                    let version = store
+                        .state_put(
+                            &scope,
+                            &request.key,
+                            request.expected_version,
+                            Some(request.value),
+                        )
+                        .await
+                        .map_err(store_error)?;
+                    encode(StatePutResult { version })
+                }
+                "host.state.delete" => {
+                    let request: StateDeleteRequest =
+                        serde_json::from_value(params).map_err(|_| invalid())?;
+                    store
+                        .state_put(&scope, &request.key, Some(request.expected_version), None)
+                        .await
+                        .map_err(store_error)?;
+                    encode(StateDeleteResult { deleted: true })
+                }
+                _ => encode(json!({})),
+            }
+        })
+    }
+}

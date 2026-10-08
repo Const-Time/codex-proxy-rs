@@ -83,6 +83,7 @@ mod client_keys;
 mod errors;
 mod observability;
 mod operations;
+mod plugins;
 mod proxies;
 mod settings;
 mod system;

@@ -24,6 +24,7 @@
     "@vueuse/core": "^14.4.0",
     "@vueuse/integrations": "^14.4.0",
     "axios": "^1.20.0",
+    "css-tree": "^3.2.1",
     "dayjs": "^1.11.23",
     "dompurify": "^3.4.14",
     "echarts": "^6.1.0",
@@ -39,6 +40,7 @@
   "devDependencies": {
     "@antfu/eslint-config": "^9.5.1",
     "@tailwindcss/vite": "^4.3.3",
+    "@types/css-tree": "^2.3.11",
     "@types/node": "^26.4.1",
     "@types/sortablejs": "^1.15.9",
     "@vitejs/plugin-vue": "^6.0.8",
