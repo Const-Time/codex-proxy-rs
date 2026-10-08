@@ -22,6 +22,8 @@ struct Namespace {
     schema: jsonschema::Validator,
 }
 pub(crate) struct Callbacks {
+    resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
+    pub(crate) calls: Arc<crate::resources::ManagementCalls>,
     store: Arc<dyn PluginStore>,
     id: String,
     revision: u64,
@@ -30,6 +32,13 @@ pub(crate) struct Callbacks {
     data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl Callbacks {
+    pub(crate) fn with_resources(
+        mut self,
+        resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
+    ) -> Self {
+        self.resources = resources;
+        self
+    }
     pub(crate) fn new(
         store: Arc<dyn PluginStore>,
         record: &PluginRecord,
@@ -51,6 +60,8 @@ impl Callbacks {
             })
             .collect::<Result<_, gateway_admin::model::AdminError>>()?;
         Ok(Self {
+            resources: None,
+            calls: Arc::default(),
             store,
             id: record.id.clone(),
             revision: record.revision,
@@ -93,6 +104,8 @@ impl CallbackHandler for Callbacks {
         let active = self.active.clone();
         let namespaces = self.namespaces.clone();
         let data = self.data.clone();
+        let resources = self.resources.clone();
+        let calls = self.calls.clone();
         Box::pin(async move {
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
@@ -103,6 +116,33 @@ impl CallbackHandler for Callbacks {
                     ErrorCode::PermissionDenied,
                     "plugin generation is not active",
                 ));
+            }
+            if matches!(
+                method.as_str(),
+                gateway_plugin_sdk::call::resources::GROUP_ENSURE
+                    | gateway_plugin_sdk::call::resources::GROUP_MEMBERS
+            ) {
+                let actor = calls.actor(&context.resource_scope_id).ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "management caller is no longer active",
+                    )
+                })?;
+                let resources = resources.ok_or_else(|| {
+                    PluginFault::new(ErrorCode::Unsupported, "resource service is not configured")
+                })?;
+                return crate::resources::call(
+                    resources.as_ref(),
+                    PluginMutationScope {
+                        instance_id: id,
+                        revision,
+                        actor,
+                    },
+                    &method,
+                    params,
+                    &payload,
+                )
+                .await;
             }
             if matches!(
                 method.as_str(),

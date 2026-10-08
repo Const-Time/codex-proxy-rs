@@ -94,3 +94,17 @@ pub trait PluginDataService: Send + Sync {
     async fn accounts(&self, query: PluginAccountQuery) -> Result<PluginAccountPage>;
     async fn quota(&self, id: &str) -> Result<crate::model::provider_credentials::ProviderQuota>;
 }
+
+#[async_trait]
+pub trait PluginResourceService: Send + Sync {
+    async fn ensure_group(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginGroupEnsure,
+    ) -> Result<PluginManagedResource>;
+    async fn change_members(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginGroupMembers,
+    ) -> Result<PluginMembersChanged>;
+}

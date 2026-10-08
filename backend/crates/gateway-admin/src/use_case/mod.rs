@@ -9,6 +9,7 @@ pub mod client_keys;
 pub mod observability;
 pub mod openai;
 pub(crate) mod plugin_data;
+pub(crate) mod plugin_resources;
 pub mod proxies;
 pub mod settings;
 pub mod system;

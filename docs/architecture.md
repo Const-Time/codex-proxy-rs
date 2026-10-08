@@ -514,3 +514,5 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 插件页面推理经 API 的静态 `/api/admin/plugins/models/responses` 入口，以本人会话解析本人 Key，再进入现有 Responses delivery 与 Core 执行。Core 的 `RuntimeSnapshotHandle` 在同一次快照发布中撤销失效策略的 `ClientAccessGuard`；插件实例代次由 Admin/Runtime 的 `PluginAccess` 撤销。API 持有两种授权，使用有界正文转发并在撤销/断连时丢弃原执行正文，沿用既有取消、费用结算与准入释放。授权有效期和冻结的请求计费快照各有职责，不新增账本。
 
 插件事实读取由 Admin 的 `PluginDataService` 校验查询，Store 仅投影账户摘要与 Key 分组；Provider 仍负责缓存额度的解释。Runtime 只转换 SDK wire，不导出凭据或 Provider 内部字段。只读额度入口不经过管理页的预测与订阅观测写入逻辑，也不触发刷新。
+
+插件分组资源的实例归属和幂等键由 `plugin_managed_groups` 保存，真实分组与成员仍由 AccountGroupStore 管理。分组写入与实例代次校验、配置 revision 和真实操作者审计同事务提交；Admin 负责提交后的快照发布，即使管理调用断开也完成收尾。删除分组保留资源 tombstone，卸载实例保留真实分组，不建立插件专用账本。

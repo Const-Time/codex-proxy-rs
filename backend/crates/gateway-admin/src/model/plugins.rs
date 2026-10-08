@@ -65,6 +65,8 @@ pub struct PluginView {
     pub resources: Vec<PluginResource>,
 }
 pub struct PluginHttpRequest {
+    /// Supplied by API authentication; never decoded from plugin input.
+    pub actor: super::MutationContext,
     pub method: String,
     pub path: String,
     pub query: String,
@@ -139,4 +141,40 @@ pub struct PluginAccountFacts {
 pub struct PluginAccountPage {
     pub accounts: Vec<PluginAccountFacts>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct PluginMutationScope {
+    pub instance_id: String,
+    pub revision: u64,
+    pub actor: super::MutationContext,
+}
+#[derive(Clone)]
+pub struct PluginGroupEnsure {
+    pub resource_key: String,
+    pub name: String,
+    pub color: String,
+    pub description: Option<String>,
+}
+#[derive(Clone)]
+pub struct PluginGroupMembers {
+    pub resource_key: String,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManagedResource {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginResourceMutation<T> {
+    pub revision: super::Revision,
+    pub value: T,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMembersChanged {
+    pub added: u64,
+    pub removed: u64,
 }

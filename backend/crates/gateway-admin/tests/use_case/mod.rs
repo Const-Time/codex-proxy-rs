@@ -81,6 +81,7 @@ use gateway_core::{
 };
 
 pub(super) struct AdminHarness {
+    snapshot: Arc<dyn SnapshotControl>,
     default_password: String,
     session_ttl_minutes: u64,
     accounts: Arc<dyn AccountStore>,
@@ -102,6 +103,7 @@ impl AdminHarness {
     pub(super) fn new() -> Self {
         let unavailable = Arc::new(UnavailableStore);
         Self {
+            snapshot: Arc::new(NoopSnapshot),
             default_password: "strong-test-password".to_owned(),
             session_ttl_minutes: 60,
             accounts: unavailable.clone(),
@@ -232,7 +234,7 @@ impl AdminHarness {
             ),
             gateway_admin::AdminRuntimePorts {
                 providers: self.providers,
-                snapshot: Arc::new(NoopSnapshot),
+                snapshot: self.snapshot,
                 probes: (self.probe, Arc::new(proxies::TestProxies::default())),
                 client_distribution: Arc::new(NoopClientDistribution),
                 system: self.system,
