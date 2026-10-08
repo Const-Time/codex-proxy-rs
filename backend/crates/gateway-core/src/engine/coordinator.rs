@@ -45,6 +45,7 @@ use futures_timer::Delay;
 /// Request 级协调器；不会创建或写入 `request_attempts`。
 pub struct AttemptCoordinator<S: ?Sized> {
     middleware: Option<Arc<dyn AttemptMiddleware>>,
+    request_settings: Option<crate::routing::RequestSettings>,
     engine: Arc<GatewayEngine<S>>,
 }
 
@@ -76,7 +77,13 @@ where
         Self {
             engine: Arc::new(engine),
             middleware: None,
+            request_settings: None,
         }
+    }
+
+    pub fn with_request_settings(mut self, settings: crate::routing::RequestSettings) -> Self {
+        self.request_settings = Some(settings);
+        self
     }
 
     /// Bind a root-scoped adapter before a session or Provider attempt exists.
@@ -84,6 +91,7 @@ where
         Self {
             engine: Arc::clone(&self.engine),
             middleware,
+            request_settings: self.request_settings.clone(),
         }
     }
 
@@ -185,6 +193,7 @@ where
             )),
             engine: Arc::clone(&self.engine),
             attempt_middleware: self.middleware.clone(),
+            request_settings: self.request_settings.clone(),
             middleware_response_head: None,
             middleware_invocation: None,
             middleware_preparation: None,
@@ -299,6 +308,7 @@ struct PendingAttemptRetry {
 pub struct ResponseExecutionSession<S: ?Sized> {
     recovery_lease: Option<Box<dyn super::ExecutionRecoveryLeaseGuard>>,
     attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
+    request_settings: Option<crate::routing::RequestSettings>,
     middleware_response_head: Option<AttemptResponseHead>,
     middleware_invocation: Option<Invocation>,
     middleware_preparation: Option<MiddlewarePreparation>,
@@ -1076,6 +1086,7 @@ where
                     self.request_id.clone(),
                     self.client_api_key_ref.clone(),
                 )
+                .with_request_settings(self.request_settings.clone())
                 .with_pricing(self.plan.pricing())
                 .with_fast_mode(self.plan.fast_mode())
                 .with_connection_budget(self.connection_budget.clone())

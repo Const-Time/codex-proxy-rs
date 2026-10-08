@@ -118,7 +118,8 @@ pub(in crate::openai) async fn respond(
                 })
                 .collect(),
             body,
-        );
+        )
+        .with_settings(prepared.settings().clone());
         let ip = input.decoded.metadata().client_ip();
         let agent = input.decoded.metadata().user_agent().map(str::to_owned);
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
@@ -126,6 +127,12 @@ pub(in crate::openai) async fn respond(
                 if request.protocol() != "openai" {
                     return Err(MiddlewareError::InvalidState);
                 }
+                let prepared = prepared.with_settings(
+                    request
+                        .settings()
+                        .ok_or(MiddlewareError::InvalidState)?
+                        .clone(),
+                )?;
                 let headers = super::headers::filtered_headers(request.headers())?;
                 let decoded = decode_request_with_headers(request.body(), &headers)
                     .map_err(|_| {

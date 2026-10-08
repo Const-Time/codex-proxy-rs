@@ -67,6 +67,10 @@ impl AttemptMiddleware for ResponsesAttempt {
                     .collect(),
                 body,
             );
+            let request = match attempt.settings() {
+                Some(settings) => request.with_settings(settings.clone()),
+                None => request,
+            };
             let terminal =
                 gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
                     Box::pin(async move {

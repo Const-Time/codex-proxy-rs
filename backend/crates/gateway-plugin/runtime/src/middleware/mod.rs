@@ -37,6 +37,8 @@ use headers::{apply_header_mutations, wire_headers};
 pub(crate) struct MiddlewareInvocation {
     transport: ClientTransport,
     capabilities_allowed: bool,
+    settings_allowed: bool,
+    instance_id: String,
     state: Mutex<InvocationState>,
     downstream_error: Arc<Mutex<Option<MiddlewareError>>>,
 }
@@ -79,11 +81,15 @@ pub(crate) enum MiddlewareCompletionBody {
 impl MiddlewareInvocation {
     pub(crate) fn new(
         context: &MiddlewareContext,
+        instance_id: String,
         request: MiddlewareRequest,
         next: MiddlewareNext,
     ) -> Arc<Self> {
         Arc::new(Self {
             transport: context.transport,
+            instance_id,
+            settings_allowed: context.mount
+                == gateway_core::engine::middleware::MiddlewareMount::Request,
             capabilities_allowed: context.mount
                 == gateway_core::engine::middleware::MiddlewareMount::Request
                 && context.operation == gateway_core::operation::OperationKind::Generate,
@@ -238,12 +244,22 @@ impl MiddlewareInvocation {
         request: MiddlewareNextRequest,
         payload: Vec<u8>,
     ) -> Result<MiddlewareRequest, PluginFault> {
-        if request.settings.is_some() {
-            return Err(PluginFault::new(
-                ErrorCode::Unsupported,
-                "execution setting rewrites are not wired at this boundary",
-            ));
-        }
+        let original = if let Some(values) = request.settings {
+            if !self.settings_allowed {
+                return Err(PluginFault::new(
+                    ErrorCode::Unsupported,
+                    "execution settings are read-only at this boundary",
+                ));
+            }
+            let settings = original.settings().ok_or_else(invalid)?;
+            let values = serde_json::from_value(values).map_err(|_| invalid())?;
+            let updated = settings
+                .replace_execution(&values, &self.instance_id)
+                .map_err(|_| invalid())?;
+            original.with_settings(updated)
+        } else {
+            original
+        };
         let declaration = request
             .capabilities
             .map(|declaration| {

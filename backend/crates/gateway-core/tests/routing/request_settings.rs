@@ -294,14 +294,22 @@ fn execution_settings_keep_scope_and_field_provenance_without_cross_key_leaks() 
 }
 
 #[test]
-fn execution_settings_reject_missing_scope_invalid_types_and_zero_timeout() {
+fn execution_settings_reject_missing_scope_invalid_types_and_preserve_zero_timeout() {
     let policy = client_policy("a", "sk_a", true);
     let root = RequestSettings::new(Arc::new(snapshot()));
     let scoped = root.clone().with_execution(&policy, Some(600_000));
     let mut values = scoped.execution_values().unwrap();
     assert!(root.replace_execution(&values, "a").is_err());
     values.timeout_ms = Some(0);
-    assert!(scoped.replace_execution(&values, "a").is_err());
+    assert_eq!(
+        scoped
+            .replace_execution(&values, "a")
+            .unwrap()
+            .execution_values()
+            .unwrap()
+            .timeout_ms,
+        Some(0)
+    );
     let mut json = serde_json::to_value(scoped.execution_values().unwrap()).unwrap();
     json["fast_mode"] = json!(true);
     assert!(serde_json::from_value::<gateway_core::routing::ExecutionSettings>(json).is_err());

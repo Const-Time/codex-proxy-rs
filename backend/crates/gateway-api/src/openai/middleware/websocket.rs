@@ -117,12 +117,19 @@ pub(in crate::openai) async fn respond(
                 })
                 .collect(),
             body,
-        );
+        )
+        .with_settings(root.prepared.settings().clone());
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
             Box::pin(async move {
                 if request.protocol() != "openai" {
                     return Err(MiddlewareError::InvalidState);
                 }
+                let prepared = root.prepared.with_settings(
+                    request
+                        .settings()
+                        .ok_or(MiddlewareError::InvalidState)?
+                        .clone(),
+                )?;
                 let headers = super::headers::filtered_headers(request.headers())?;
                 let decoded = super::attempt::request::decode(
                     input.decoded.operation(),
@@ -138,7 +145,7 @@ pub(in crate::openai) async fn respond(
                 let decoded = snapshot.prepare(decoded.with_middleware_capabilities(&request)?);
                 let started = service
                     .start_prepared_response(
-                        root.prepared,
+                        prepared,
                         decoded,
                         ClientTransport::WebSocket,
                         "/v1/responses",

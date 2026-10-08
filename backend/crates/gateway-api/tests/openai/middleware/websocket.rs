@@ -540,3 +540,25 @@ async fn ws_request_capabilities_preserve_routing_constraints_across_both_layers
         }
     }
 }
+
+#[tokio::test]
+async fn websocket_request_settings_reach_each_attempt() {
+    let f = Fixture::with_mounts(
+        Mode::Settings,
+        vec![
+            PluginMiddlewareMount::Request,
+            PluginMiddlewareMount::Attempt,
+        ],
+    )
+    .await;
+    let (_server, mut socket) = connect(&f).await;
+    send(&mut socket, create()).await;
+    assert_eq!(event(&mut socket).await["type"], "response.created");
+    assert_eq!(event(&mut socket).await["type"], "response.completed");
+    released(&f).await;
+    assert_eq!(
+        serde_json::to_value(f.effects.settings.lock().unwrap()[0].values()).unwrap()["request_interval_ms"],
+        137
+    );
+    f.manager.shutdown().await;
+}

@@ -563,12 +563,12 @@ WS 控制帧等待函数同时用于原会话读取、插件调用及外层正�
 
 中间件能力声明由 Core 的 MiddlewareRequest 保存链入口正文和累计 handled/required，Runtime 只把 SDK 声明转换为此合同，并限制为 Generate 的 request 挂载和显式正文替换。每层的 handled 必须来自本层改写前的需求，并在改写后消失；NativeContinuation 不允许被处理声明豁免。最终解码后，API 将原入口未处理的需求和额外 required 交给 GenerateRequest 的继承约束；实际正文需求始终取并集，Router 仍是能力准入 owner。声明不影响身份、账号范围、预算或计费 owner。
 
-attempt 解码只从原 GenerateRequest 附回继承约束，不复制原正文的推导需求；因此正文功能改变仍会触发已冻结能力比较。多个 SDK next 保留同一个链入口及累计声明，普通正文/头透传不会抹掉前层约束。此机制不把执行设置 JSON 当作协议正文参数；请求级设置模型仍需独立接入。
+attempt 解码只从原 GenerateRequest 附回继承约束，不复制原正文的推导需求；因此正文功能改变仍会触发已冻结能力比较。多个 SDK next 保留同一个链入口及累计声明，普通正文/头透传不会抹掉前层约束。执行设置通过独立的 RequestSettings 传递，不作为协议正文参数。
 
 
 运行设置由 Core `settings::SettingsValues` 统一表达，Store 的一致性读取直接构造该值；RuntimeSnapshot 保存原值并编译账号调度和最低版本约束，价格与映射从同一值读取。请求派生只替换该快照的设置及编译结果，保留原 Provider 目录、账号目录、Key 策略、权限与配置 revision，不发布到 RuntimeSnapshotHandle。
 
-`routing::RequestSettings` 保存基线、有效快照和逐字段改写来源。来源标记由调用层传入，完整替换只记录实际变化的字段；恢复到旧值仍是显式覆盖，后续 rebase 不会误当默认值丢弃。`PreparedRootExecution` 校验基线和活跃授权后持有该分支，规划读取有效快照，认证事实始终保留原始快照；开始时间、期限和取消链不因设置替换而重建。Fast、Key 准入与可选执行期限已经接入该 Core 分支，插件 wire 执行设置仍待 RPC 合同接通后开放。
+`routing::RequestSettings` 保存基线、有效快照和逐字段改写来源。来源标记由调用层传入，完整替换只记录实际变化的字段；恢复到旧值仍是显式覆盖，后续 rebase 不会误当默认值丢弃。`PreparedRootExecution` 校验基线和活跃授权后持有该分支，规划读取有效快照，认证事实始终保留原始快照；开始时间、期限和取消链不因设置替换而重建。Fast、Key 准入与可选执行期限已经接入该 Core 分支，插件 wire 执行设置已通过 MiddlewareRequest 传递，Runtime 从受管 RPC 会话写入来源，API 终端通过 PreparedRoot 校验并应用；attempt 从 Core 的请求上下文读取最终冻结来源，不接受设置改写。
 
 
 执行覆盖与运行覆盖共享来源顺序，但执行覆盖绑定当前 Client Key。有效 Key 限额只传给原准入端口，不替换认证策略或共享用户限额；Fast 冻结在 RoutingPlan，传入每次 AttemptContext。模型候选保存该次路由的展示能力快照，使 Provider 的 Fast 启用判断与所选上游模型的目录证据一致。
@@ -585,3 +585,5 @@ Provider 的同步 `prepare_operation` 只形成原生请求默认值，不执�
 `lifecycle::Deadline` 保存可选绝对截止时间，None 的等待保持 pending；有限期限等待分段使用有界 timer，避免远期时间溢出。PreparedRoot 的超时覆盖从原 started_at 推导，不重置计时或复活已超时请求。普通请求默认 None，诊断探测保留显式期限；连接、握手、空闲与插件 RPC 的局部预算不受影响。数据库执行记录的 deadline_at 是恢复过期时间，由有限 lease 和显式执行上界决定。
 
 ProviderSchedulingLeaseRequest 同时携带 Deadline 与原请求取消信号。Redis ProviderAccount guard 按已有成员和 fencing token 续期，不重新准入或写 last_started；Drop/显式释放先停止续期。失去槽位取消该执行，有限期限到达不抢先转换为 cancelled；Core 保留 timeout 归类权。OAuth 刷新/互斥租约仍走原专属生命周期。
+
+SDK timeout_ms 为 0 表示立即到期，PreparedRoot 返回 Timeout 并阻止准入；null 不设总期限。插件修改来源展示对象不会进入宿主设置事实，未知字段按本地 ExecutionSettings 合同拒绝。

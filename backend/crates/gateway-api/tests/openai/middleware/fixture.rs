@@ -106,6 +106,8 @@ pub(super) enum Mode {
     HandleTools,
     RequireReasoning,
     FalseHandleTools,
+    Settings,
+    ZeroTimeout,
 }
 pub(super) struct Plugin {
     pub(super) access: PluginAccess,
@@ -175,6 +177,34 @@ impl PluginProcess for Plugin {
         *self.headers.lock().unwrap() = request.headers().iter().map(|h| h.name().into()).collect();
         if matches!(self.mode, Mode::WaitBeforeNext) {
             return futures::future::pending().await;
+        }
+        let request = if !attempt && matches!(self.mode, Mode::Settings | Mode::ZeroTimeout) {
+            let settings = request.settings().unwrap();
+            let mut values = settings.execution_values().unwrap();
+            values.fast_mode = gateway_core::account::FastMode::Enabled;
+            let mut runtime = serde_json::to_value(&values.runtime).unwrap();
+            runtime["request_interval_ms"] = json!(137);
+            values.runtime = serde_json::from_value(runtime).unwrap();
+            values.timeout_ms = Some(if matches!(self.mode, Mode::ZeroTimeout) {
+                0
+            } else {
+                60_000
+            });
+            let changed = settings.replace_execution(&values, "fixture").unwrap();
+            request.with_settings(changed)
+        } else {
+            request
+        };
+        if attempt && matches!(self.mode, Mode::Settings) {
+            let settings = request.settings().unwrap();
+            assert_eq!(
+                settings.execution_values().unwrap().fast_mode,
+                gateway_core::account::FastMode::Enabled
+            );
+            assert_eq!(
+                settings.inspect()["execution"]["fast_mode"]["instance_id"],
+                "fixture"
+            );
         }
         let original = request.clone();
         let (_, mut headers, body) = request.into_parts();
@@ -304,6 +334,7 @@ pub(super) struct Effects {
     pub(super) raw_requests: Mutex<Vec<Operation>>,
     pub(super) revoke_after_start: Mutex<Option<PluginAccess>>,
     pub(super) operations: Mutex<Vec<Operation>>,
+    pub(super) settings: Mutex<Vec<gateway_core::routing::RequestSettings>>,
     pub(super) interrupt: AtomicBool,
     pub(super) state: Mutex<Option<gateway_core::operation::ProviderSessionState>>,
     pub(super) raw_response: Mutex<Option<Bytes>>,
@@ -450,6 +481,9 @@ impl Provider for Effects {
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(settings) = context.settings() {
+            self.settings.lock().unwrap().push(settings.clone());
+        }
         if let Some(failure) = *self.provider_failure.lock().unwrap() {
             return Err(failure());
         }

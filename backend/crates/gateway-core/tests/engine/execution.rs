@@ -2331,7 +2331,7 @@ fn prepared_runtime_settings_reject_foreign_baselines_and_preserve_revocation() 
         }
         let result = prepared.with_settings(settings);
         assert!(
-            matches!(result,Err(e) if e.kind()==match cause { "foreign" | "timeout" | "key_scope"=>GatewayErrorKind::InvalidRequest, "key"=>GatewayErrorKind::Unauthorized, _=>GatewayErrorKind::Cancelled })
+            matches!(result,Err(e) if e.kind()==match cause { "foreign" | "key_scope"=>GatewayErrorKind::InvalidRequest, "timeout"=>GatewayErrorKind::Timeout, "key"=>GatewayErrorKind::Unauthorized, _=>GatewayErrorKind::Cancelled })
         );
         assert!(admissions.limits.lock().unwrap().is_empty());
         assert!(!store.touched.load(Ordering::SeqCst));
