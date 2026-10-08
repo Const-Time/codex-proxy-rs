@@ -696,6 +696,12 @@ impl DefaultExecutionService {
         }
         let admission_decision_ms = duration_ms(admission_started_at.elapsed());
         let mut admission = AdmissionLease {
+            renewals: vec![self.admissions.maintain(
+                client.policy.key_id(),
+                &request_id,
+                MODEL_REQUEST_DEADLINE,
+                cancellation.clone(),
+            )],
             port: Arc::clone(&self.admissions),
             scopes: vec![client.policy.key_id().clone()],
             model_request_id: request_id.clone(),
@@ -711,7 +717,15 @@ impl DefaultExecutionService {
                 })
                 .await;
             match decision {
-                Ok(ClientAdmissionDecision::Granted) => admission.scopes.push(scope.clone()),
+                Ok(ClientAdmissionDecision::Granted) => {
+                    admission.renewals.push(self.admissions.maintain(
+                        scope,
+                        &request_id,
+                        MODEL_REQUEST_DEADLINE,
+                        cancellation.clone(),
+                    ));
+                    admission.scopes.push(scope.clone());
+                }
                 Ok(ClientAdmissionDecision::Rejected(_)) => {
                     admission.release().await;
                     return Err(GatewayError::new(
@@ -1339,6 +1353,7 @@ impl AccountProbe for DefaultExecutionService {
 }
 
 struct AdmissionLease {
+    renewals: Vec<Box<dyn super::admission::ClientAdmissionLeaseGuard>>,
     port: Arc<dyn ClientAdmissionPort>,
     scopes: Vec<ClientApiKeyId>,
     model_request_id: ModelRequestId,
@@ -1351,7 +1366,8 @@ async fn settle_budget(port: &dyn ClientBudgetPort, charge: ClientBudgetCharge) 
 }
 
 impl AdmissionLease {
-    async fn release(self) {
+    async fn release(mut self) {
+        self.renewals.clear();
         for scope in &self.scopes {
             if let Err(error) = self.port.release(scope, &self.model_request_id).await {
                 tracing::warn!(%error, "Client admission 释放失败，依赖租约 TTL 收敛");

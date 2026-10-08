@@ -288,6 +288,16 @@ impl ExecutionStore for UnusedExecutionStore {
 struct UnusedAdmissions;
 
 impl ClientAdmissionPort for UnusedAdmissions {
+    fn maintain(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &gateway_core::engine::ModelRequestId,
+        _: std::time::Duration,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        Box::new(TestAdmissionLease)
+    }
+
     fn admit(
         &self,
         _: ClientAdmissionRequest,
@@ -404,3 +414,6 @@ async fn api_should_serve_resolved_assets_with_relative_environment_override() {
         .unwrap();
     assert_eq!(body.as_ref(), b"resolved-web-assets");
 }
+
+struct TestAdmissionLease;
+impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissionLease {}

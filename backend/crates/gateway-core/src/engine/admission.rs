@@ -57,7 +57,19 @@ pub struct ClientAdmissionRestoreResult {
 #[error("client admission store is unavailable")]
 pub struct ClientAdmissionError;
 
+/// Keeps already admitted concurrency slots alive until dropped, including during settlement.
+/// Implementations cancel the execution if ownership is lost; renewal never consumes RPM.
+pub trait ClientAdmissionLeaseGuard: Send + Sync {}
+
 pub trait ClientAdmissionPort: Send + Sync {
+    fn maintain(
+        &self,
+        key: &ClientApiKeyId,
+        request: &ModelRequestId,
+        lease_ttl: Duration,
+        cancellation: crate::lifecycle::CancellationToken,
+    ) -> Box<dyn ClientAdmissionLeaseGuard>;
+
     fn admit(
         &self,
         request: ClientAdmissionRequest,

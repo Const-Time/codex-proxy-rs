@@ -574,3 +574,6 @@ attempt 解码只从原 GenerateRequest 附回继承约束，不复制原正文�
 执行覆盖与运行覆盖共享来源顺序，但执行覆盖绑定当前 Client Key。有效 Key 限额只传给原准入端口，不替换认证策略或共享用户限额；Fast 冻结在 RoutingPlan，传入每次 AttemptContext。模型候选保存该次路由的展示能力快照，使 Provider 的 Fast 启用判断与所选上游模型的目录证据一致。
 
 Provider 的同步 `prepare_operation` 只形成原生请求默认值，不执行网络、选号或租约操作。Coordinator 在 attempt 中间件之前调用；OpenAI 解释 Fast/service_tier，Core 不解释该协议字段。正文替换保留原非 wire 上下文、私有会话状态与继承能力。每次重试从原请求重新形成基线；已进入中间件的 attempt 恢复轮询不重做准备，Provider 终端也不再次覆盖中间件输出。原 Provider 解码器仍按上游实际费用事实结算。
+
+
+准入续期由 Store 的 Redis adapter 拥有，Core 为每个已准入的 Key/用户共享作用域持有独立 guard。续期只延长仍存活的并发槽位，不重写 RPM，不缩短已有期限，不复活过期或已释放成员。续期失败、超时或发现成员丢失时取消原执行；释放队列不承接续期。取消和终态费用结算期间继续持有 guard，进入释放前停止续期；丢弃 guard 终止后台任务，遗漏释放由 TTL 收敛。此机制为可变执行期限提供准入基础；执行截止时间和 PostgreSQL 恢复期限仍为既有固定合同，尚未开放无限时请求。

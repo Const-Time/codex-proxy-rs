@@ -176,3 +176,6 @@ Core 已建立与持久化快照共用的 `SettingsValues`，覆盖本地已有�
 OpenAI Provider 在 attempt 插件之前形成应用 Fast 策略的原生正文：`default` 原样保留，`enabled` 只在冻结模型目录明确提供 priority 且客户端未指定档位或使用 default/null 时改为 priority，`disabled` 把 priority/fast 改为 default；flex、auto 和其他显式值保留。attempt 插件的后续显式改写不再被 Fast 覆盖。原协议上下文、私有续接和继承能力约束保留；其他协议及 Images/Search 不应用 OpenAI 文本档位规则。费用仍取上游实际档位，缺少实际档位时按最终发送档位计算。
 
 HTTP、WebSocket wire 与费用回归已覆盖这些规则，Core 验证重试、唯一结算和共享用户限额。SDK 的执行设置入口及生产 middleware 门禁仍未开放；超时改写目前明确拒绝，需要接入期限和租约续期后才能支持，包括上游的 null 无总时限语义。
+
+
+准入租约已接入持续续期，覆盖 Key 与用户共享并发作用域。取消后的异步结算仍保留槽位；租约丢失会取消原执行，已释放或过期槽位不会通过续期重建。当前固定执行期限继续生效；SDK 超时改写仍明确拒绝，须完成执行期限、持久化恢复及 RPC 合同后才能开放。

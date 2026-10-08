@@ -51,6 +51,22 @@ extend_ttl(KEYS[2], 120000)
 return 0
 "#;
 
+// Only the original live member can be extended. An expired or released slot is never recreated.
+const RENEW_SCRIPT: &str = r#"
+local clock = redis.call('TIME')
+local now_ms = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
+local expiry = now_ms + tonumber(ARGV[2])
+if expiry > tonumber(ARGV[3]) then return -1 end
+local current = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if not current or tonumber(current) <= now_ms then return 0 end
+expiry = math.max(expiry, tonumber(current))
+redis.call('ZADD', KEYS[1], 'XX', expiry, ARGV[1])
+local tail = redis.call('ZRANGE', KEYS[1], -1, -1, 'WITHSCORES')
+local ttl = math.max(120000, tonumber(tail[2]) - now_ms + 60000)
+if redis.call('PTTL', KEYS[1]) < ttl then redis.call('PEXPIRE', KEYS[1], ttl) end
+return 1
+"#;
+
 const RESTORE_SCRIPT: &str = r#"
 local clock = redis.call('TIME')
 local now_ms = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
@@ -221,6 +237,13 @@ pub trait ClientAdmissionRepository: Send + Sync {
         &self,
         request: &ClientAdmissionRequest,
     ) -> StoreResult<ClientAdmissionDecision>;
+    /// Extend a live slot without consuming RPM or recreating a released/expired lease.
+    async fn renew_client_request(
+        &self,
+        client_api_key_ref: &str,
+        model_request_id: &str,
+        lease_ttl: Duration,
+    ) -> StoreResult<bool>;
     async fn release_client_request(
         &self,
         client_api_key_ref: &str,
@@ -298,6 +321,30 @@ impl ClientAdmissionRepository for RedisClientAdmissionRepository {
             )),
             3 => Err(invalid("lease expiry is outside the supported range")),
             _ => Err(invalid("Redis returned an unknown admission decision")),
+        }
+    }
+
+    async fn renew_client_request(
+        &self,
+        client_api_key_ref: &str,
+        model_request_id: &str,
+        lease_ttl: Duration,
+    ) -> StoreResult<bool> {
+        require_nonempty("client admission", "model_request_id", model_request_id)?;
+        let ttl = redis_duration_millis(lease_ttl)?;
+        let keys = self.keys(client_api_key_ref)?;
+        let code = Script::new(RENEW_SCRIPT)
+            .key(&keys[0])
+            .arg(model_request_id)
+            .arg(ttl)
+            .arg(MAX_REDIS_EXACT_INTEGER)
+            .invoke_async::<i64>(&mut self.connection.clone())
+            .await
+            .map_err(|_| redis_unavailable("renew client admission"))?;
+        match code {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(invalid("lease expiry is outside the supported range")),
         }
     }
 
@@ -380,7 +427,50 @@ impl ClientAdmissionRepository for RedisClientAdmissionRepository {
     }
 }
 
+struct RedisAdmissionLeaseGuard(tokio::task::JoinHandle<()>);
+
+impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for RedisAdmissionLeaseGuard {}
+
+impl Drop for RedisAdmissionLeaseGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl ClientAdmissionPort for RedisClientAdmissionRepository {
+    fn maintain(
+        &self,
+        key: &gateway_core::policy::ClientApiKeyId,
+        request: &gateway_core::engine::ModelRequestId,
+        lease_ttl: Duration,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        let repository = self.clone();
+        let key = key.as_str().to_owned();
+        let request = request.as_str().to_owned();
+        Box::new(RedisAdmissionLeaseGuard(tokio::spawn(async move {
+            if redis_duration_millis(lease_ttl).is_err() {
+                cancellation.cancel();
+                return;
+            }
+            let interval = lease_ttl / 3;
+            loop {
+                // Request cancellation does not end maintenance: settlement still owns the slot.
+                tokio::time::sleep(interval).await;
+                let renewed = tokio::time::timeout(
+                    interval,
+                    repository.renew_client_request(&key, &request, lease_ttl),
+                )
+                .await;
+                if !matches!(renewed, Ok(Ok(true))) {
+                    cancellation.cancel();
+                    tracing::warn!("Client admission lease lost; execution cancelled");
+                    return;
+                }
+            }
+        })))
+    }
+
     fn admit(
         &self,
         request: CoreAdmissionRequest,
@@ -470,6 +560,11 @@ fn validate_recovery_request_id(model_request_id: &str) -> StoreResult<()> {
 fn redis_duration_millis(duration: Duration) -> StoreResult<u64> {
     let milliseconds =
         u64::try_from(duration.as_millis()).map_err(|_| invalid("lease TTL is too large"))?;
+    if milliseconds == 0 || !duration.subsec_nanos().is_multiple_of(1_000_000) {
+        return Err(invalid(
+            "lease TTL must be a positive whole number of milliseconds",
+        ));
+    }
     redis_integer(milliseconds, "lease TTL")
 }
 

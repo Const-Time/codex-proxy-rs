@@ -34,6 +34,17 @@ impl RecordingCoordination {
 }
 
 impl ClientAdmissionPort for RecordingCoordination {
+    fn maintain(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &gateway_core::engine::ModelRequestId,
+        _: std::time::Duration,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        self.record("maintain");
+        Box::new(TestAdmissionLease)
+    }
+
     fn admit(
         &self,
         _: ClientAdmissionRequest,
@@ -134,4 +145,23 @@ where
     T: gateway_core::task::DaemonTask + 'static,
 {
     tokio::spawn(async move { writer.run(cancellation).await })
+}
+
+struct TestAdmissionLease;
+impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissionLease {}
+
+#[tokio::test]
+async fn renewal_bypasses_release_queue_and_delegates_to_the_authoritative_port() {
+    let inner = Arc::new(RecordingCoordination::default());
+    let (admissions, writer) = BufferedClientAdmissionPort::new(inner.clone());
+    drop(writer);
+    let guard = gateway_core::engine::admission::ClientAdmissionPort::maintain(
+        &admissions,
+        &ClientApiKeyId::new("key_renewal").unwrap(),
+        &ModelRequestId::new("req_renewal").unwrap(),
+        Duration::from_secs(30),
+        CancellationToken::new(),
+    );
+    assert_eq!(inner.operations(), vec!["maintain"]);
+    drop(guard);
 }
