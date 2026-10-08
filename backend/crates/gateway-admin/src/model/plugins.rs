@@ -111,3 +111,32 @@ impl PluginAccess {
         self.0.cancelled().await;
     }
 }
+
+/// Non-secret projections for trusted management plugins; no credentials or shared ledger mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginKeyFacts {
+    pub id: String,
+    pub enabled: bool,
+    pub group_ids: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAccountQuery {
+    pub provider: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAccountFacts {
+    pub id: String,
+    pub provider: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub group_ids: Vec<String>,
+    pub enabled: bool,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAccountPage {
+    pub accounts: Vec<PluginAccountFacts>,
+    pub next_cursor: Option<String>,
+}

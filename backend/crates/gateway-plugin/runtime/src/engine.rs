@@ -26,6 +26,7 @@ pub struct PluginEngine {
     store: Arc<dyn PluginStore>,
     processes: ProcessSupervisor,
     validators: Arc<tokio::sync::Semaphore>,
+    data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
@@ -35,7 +36,15 @@ impl PluginEngine {
             store,
             processes: ProcessSupervisor::default(),
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
+            data: None,
         }
+    }
+    pub fn with_data(
+        mut self,
+        data: Arc<dyn gateway_admin::ports::plugins::PluginDataService>,
+    ) -> Self {
+        self.data = Some(data);
+        self
     }
     async fn package(
         &self,
@@ -217,6 +226,7 @@ impl PluginRuntime for PluginEngine {
             record,
             &manifest,
             active.clone(),
+            self.data.clone(),
         )?);
         let session = Arc::new(
             RpcSession::start_supervised(

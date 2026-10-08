@@ -28,6 +28,17 @@ impl PluginHandler for Worker {
                     match call.host.call("host.keys.reset_budget",json!({"client_key_id":"must-not-reset","period":"all"}),vec![]).await {
                         Ok(_) => json!({"unexpected":true}), Err(error)=>json!({"code":error.into_plugin_fault().code})
                     }
+                } else if input["operation"]=="facts" {
+                    use gateway_plugin_sdk::call::data::*;
+                    let key=call.host.key_facts(ClientKeyFactsQuery{client_key_id:"key_test".into()}).await?;
+                    let accounts=call.host.account_facts(AccountFactsQuery{provider_id:Some("openai".into()),cursor:None,limit:1}).await?;
+                    let quota=call.host.quota_facts(QuotaFactsQuery{account_id:"acct_test".into()}).await?;
+                    json!({"key":key,"accounts":accounts,"quota":quota})
+                } else if input["operation"]=="facts-raw" {
+                    match call.host.call(input["method"].as_str().unwrap(),input["params"].clone(),serde_json::to_vec(&input["payload"]).unwrap()).await {
+                        Ok(reply)=>json!({"result":serde_json::from_slice::<serde_json::Value>(&reply.payload).unwrap()}),
+                        Err(error)=>json!({"error":error.into_plugin_fault()})
+                    }
                 } else if input["operation"]=="crash" { std::process::exit(2); }
                 else { input };
                 Ok(CallReply::unary(json!({"status":200,"content_type":"application/json","headers":[]}),serde_json::to_vec(&result).unwrap()))

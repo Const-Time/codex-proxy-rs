@@ -87,6 +87,16 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
+    async fn plugin_account_facts(
+        &self,
+        _query: crate::model::plugins::PluginAccountQuery,
+    ) -> AdminStoreResult<crate::model::plugins::PluginAccountPage> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin account facts",
+            "not configured",
+        ))
+    }
     async fn load_quota_forecast_history(
         &self,
         _window: &crate::model::accounts::AccountUsageWindowQuery,
@@ -360,6 +370,16 @@ pub trait AuthStore: Send + Sync {
 /// Client API Key 管理写入。
 #[async_trait]
 pub trait ClientKeyStore: Send + Sync {
+    async fn plugin_key_facts(
+        &self,
+        _id: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Option<crate::model::plugins::PluginKeyFacts>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin key facts",
+            "not configured",
+        ))
+    }
     async fn list_client_keys(
         &self,
         owner: &str,

@@ -7,6 +7,98 @@ use gateway_store::postgres::PgPluginStore;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 #[tokio::test]
+async fn plugin_facts_project_current_bindings_and_paginate_without_credentials() {
+    use gateway_admin::ports::store::{AccountStore as _, ClientKeyStore as _};
+    use gateway_core::policy::ClientApiKeyId;
+    use gateway_store::postgres::PgAdminClientKeyStore;
+    let Some(db) = TestDatabase::create("plugin_facts").await else {
+        return;
+    };
+    let group = "grp_00000000000000000000000000000099";
+    sqlx::query("insert into users(id,username,password_hash,created_at,updated_at) values('facts-user','facts-user','unused',now(),now())").execute(&db.pool).await.unwrap();
+    sqlx::query("insert into account_groups(id,name,color,created_at,updated_at) values($1,'facts','#64748BFF',now(),now())").bind(group).execute(&db.pool).await.unwrap();
+    sqlx::query(
+        "insert into user_account_groups(user_id,account_group_id) values('facts-user',$1)",
+    )
+    .bind(group)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("insert into client_api_keys(id,owner_user_id,name,key,enabled,created_at,updated_at) values('key_facts','facts-user','facts',$1,false,now(),now())").bind(format!("sk_{}","x".repeat(43))).execute(&db.pool).await.unwrap();
+    sqlx::query("insert into client_api_key_groups(client_api_key_id,account_group_id,created_at) values('key_facts',$1,now())").bind(group).execute(&db.pool).await.unwrap();
+    for (id, provider) in [
+        ("acct_001", "openai"),
+        ("acct_002", "xai"),
+        ("acct_003", "openai"),
+    ] {
+        sqlx::query("insert into provider_accounts(id,provider_kind,name,authentication_kind,provider_credentials_json,has_refresh_token,credential_observed_at,created_at,updated_at) values($1,$2,'Facts','oauth','{\"test-secret\":\"never-return\"}',false,now(),now(),now())").bind(id).bind(provider).execute(&db.pool).await.unwrap();
+    }
+    sqlx::query("insert into account_group_accounts(account_group_id,provider_account_id,created_at) values($1,'acct_001',now())").bind(group).execute(&db.pool).await.unwrap();
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    let key = ClientApiKeyId::new("key_facts").unwrap();
+    let facts = keys.plugin_key_facts(&key).await.unwrap().unwrap();
+    assert!(!facts.enabled);
+    assert_eq!(facts.group_ids, [group]);
+    assert!(
+        keys.plugin_key_facts(&ClientApiKeyId::new("missing").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let accounts = super::admin_account_store(&db.pool);
+    let query = |provider: Option<&str>, cursor: Option<String>, limit| PluginAccountQuery {
+        provider: provider.map(str::to_owned),
+        cursor,
+        limit,
+    };
+    let first = accounts
+        .plugin_account_facts(query(Some("openai"), None, 1))
+        .await
+        .unwrap();
+    assert_eq!(first.accounts.len(), 1);
+    assert_eq!(first.accounts[0].id, "acct_001");
+    assert_eq!(first.accounts[0].group_ids, [group]);
+    assert_eq!(first.next_cursor.as_deref(), Some("acct_001"));
+    let next = accounts
+        .plugin_account_facts(query(Some("openai"), first.next_cursor, 1))
+        .await
+        .unwrap();
+    assert_eq!(next.accounts[0].id, "acct_003");
+    assert!(next.next_cursor.is_none());
+    assert!(next.accounts[0].group_ids.is_empty());
+    let all = accounts
+        .plugin_account_facts(query(None, None, 100))
+        .await
+        .unwrap();
+    assert_eq!(
+        all.accounts
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct_001", "acct_002", "acct_003"]
+    );
+    assert!(all.next_cursor.is_none());
+    assert!(
+        accounts
+            .plugin_account_facts(query(None, None, 0))
+            .await
+            .is_err()
+    );
+    sqlx::query("delete from client_api_key_groups where client_api_key_id='key_facts'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        keys.plugin_key_facts(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .group_ids
+            .is_empty()
+    );
+    db.close().await;
+}
+#[tokio::test]
 async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touching_budgets() {
     let Some(db) = TestDatabase::create("plugins").await else {
         return;

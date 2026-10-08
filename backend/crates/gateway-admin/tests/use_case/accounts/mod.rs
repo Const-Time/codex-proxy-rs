@@ -2932,3 +2932,71 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
         .unwrap();
     assert!(page.items[0].quota.windows[0].estimated_quota.is_none());
 }
+
+#[tokio::test]
+async fn plugin_facts_read_cached_quota_without_forecast_or_subscription_mutation() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events);
+    let mut quota = empty_quota();
+    quota.observed_at = Some(Utc::now());
+    provider.set_quota(quota.clone());
+    let services = accounts_service(provider.clone(), store.clone()).await;
+    assert_eq!(
+        services.plugin_data().quota("acct_test").await.unwrap(),
+        quota
+    );
+    let requests = provider.quota_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].refresh);
+    assert!(requests[0].rolling_usage.is_none());
+    assert!(store.estimate_observations.lock().unwrap().is_empty());
+    assert!(store.subscription_observations.lock().unwrap().is_empty());
+    assert!(store.quota_window_queries().is_empty());
+}
+
+#[tokio::test]
+async fn plugin_facts_validate_inputs_before_querying_stores() {
+    use gateway_admin::model::{AdminErrorKind, plugins::PluginAccountQuery};
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events);
+    let services = accounts_service(provider.clone(), store).await;
+    let data = services.plugin_data();
+    for query in [
+        PluginAccountQuery {
+            provider: None,
+            cursor: None,
+            limit: 0,
+        },
+        PluginAccountQuery {
+            provider: None,
+            cursor: None,
+            limit: 101,
+        },
+        PluginAccountQuery {
+            provider: Some("unknown".into()),
+            cursor: None,
+            limit: 1,
+        },
+        PluginAccountQuery {
+            provider: None,
+            cursor: Some("".into()),
+            limit: 1,
+        },
+    ] {
+        assert_eq!(
+            data.accounts(query).await.unwrap_err().kind(),
+            AdminErrorKind::Invalid
+        );
+    }
+    assert_eq!(
+        data.key("").await.unwrap_err().kind(),
+        AdminErrorKind::Invalid
+    );
+    assert_eq!(
+        data.quota("").await.unwrap_err().kind(),
+        AdminErrorKind::Invalid
+    );
+    assert!(provider.quota_requests().is_empty());
+}
