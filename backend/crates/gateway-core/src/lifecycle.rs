@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use event_listener::Event;
 
+/// Maximum interval of recoverable request ownership after its maintenance guard is lost.
+/// This is independent of the explicit execution timeout.
+pub const REQUEST_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 struct CancellationState {
     cancelled: AtomicBool,
     event: Event,

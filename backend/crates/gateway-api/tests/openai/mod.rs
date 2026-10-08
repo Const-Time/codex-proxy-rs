@@ -243,6 +243,15 @@ struct UnusedExecutionStore;
 
 #[async_trait]
 impl ExecutionStore for UnusedExecutionStore {
+    fn maintain_request(
+        &self,
+        _: &gateway_core::engine::ModelRequestId,
+        _: Option<std::time::SystemTime>,
+        _: std::time::Duration,
+    ) -> Box<dyn gateway_core::engine::ExecutionRecoveryLeaseGuard> {
+        Box::new(TestExecutionRecoveryLease)
+    }
+
     async fn create_model_request(&self, _: NewModelRequest) -> Result<(), StoreError> {
         unreachable!("authentication fixture does not execute")
     }
@@ -417,3 +426,6 @@ async fn api_should_serve_resolved_assets_with_relative_environment_override() {
 
 struct TestAdmissionLease;
 impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissionLease {}
+
+struct TestExecutionRecoveryLease;
+impl gateway_core::engine::ExecutionRecoveryLeaseGuard for TestExecutionRecoveryLease {}

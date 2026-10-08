@@ -717,9 +717,21 @@ pub struct RecoveryReport {
     pub requests: u64,
 }
 
+/// Owns maintenance of the existing request recovery record; dropping stops renewal.
+pub trait ExecutionRecoveryLeaseGuard: Send + Sync {}
+
 /// `model_requests` 与必要 `ops_events` 的唯一 Core port。
 #[async_trait]
 pub trait ExecutionStore: Send + Sync {
+    /// Renew only the recovery expiry of live rows. Missing queued rows must not be created,
+    /// terminal/expired rows must not be revived, and observation failures never cancel inference.
+    fn maintain_request(
+        &self,
+        request_id: &ModelRequestId,
+        execution_deadline: Option<SystemTime>,
+        lease_ttl: Duration,
+    ) -> Box<dyn ExecutionRecoveryLeaseGuard>;
+
     async fn create_model_request(&self, request: NewModelRequest) -> Result<(), StoreError>;
     async fn record_attempt(&self, attempt: AttemptRecord) -> Result<(), StoreError>;
     /// 请求插入与首次 attempt 合并持久化；两者写同一行，支持合并写的

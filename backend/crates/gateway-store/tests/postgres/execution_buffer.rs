@@ -47,6 +47,16 @@ impl RecordingStore {
 
 #[async_trait]
 impl ExecutionStore for RecordingStore {
+    fn maintain_request(
+        &self,
+        _: &gateway_core::engine::ModelRequestId,
+        _: Option<std::time::SystemTime>,
+        _: std::time::Duration,
+    ) -> Box<dyn gateway_core::engine::ExecutionRecoveryLeaseGuard> {
+        self.record("maintain").unwrap();
+        Box::new(TestExecutionRecoveryLease)
+    }
+
     async fn create_model_request(&self, _: NewModelRequest) -> Result<(), StoreError> {
         self.record("create")
     }
@@ -265,4 +275,24 @@ async fn observation_byte_budget_drops_payload_without_waiting_for_the_database(
     assert!(inner.operations.lock().expect("operations lock").is_empty());
     assert_eq!(store.stats().queued_items, 0);
     assert_eq!(store.stats().dropped_total, 1);
+}
+
+struct TestExecutionRecoveryLease;
+impl gateway_core::engine::ExecutionRecoveryLeaseGuard for TestExecutionRecoveryLease {}
+
+#[tokio::test]
+async fn recovery_renewal_bypasses_observation_queue() {
+    let inner = Arc::new(RecordingStore::default());
+    let (store, writer) =
+        BufferedExecutionStore::with_capacity(inner.clone(), NonZeroUsize::new(1).unwrap());
+    drop(writer);
+    let guard = store.maintain_request(
+        &ModelRequestId::new("req_renewal").unwrap(),
+        None,
+        Duration::from_secs(30),
+    );
+    assert_eq!(*inner.operations.lock().unwrap(), vec!["maintain"]);
+    assert_eq!(store.stats().queued_items, 0);
+    assert_eq!(store.stats().dropped_total, 0);
+    drop(guard);
 }

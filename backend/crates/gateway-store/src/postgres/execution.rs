@@ -972,8 +972,104 @@ impl ModelRequestRepository for PgExecutionStore {
     }
 }
 
+struct PgRequestRecoveryLease(tokio::task::JoinHandle<()>);
+impl gateway_core::engine::ExecutionRecoveryLeaseGuard for PgRequestRecoveryLease {}
+impl Drop for PgRequestRecoveryLease {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl PgExecutionStore {
+    /// Extend a live recovery record; absent buffered observations remain absent.
+    /// A missing row keeps maintenance alive until queued creation or guard release.
+    pub async fn renew_model_request(
+        &self,
+        request_id: &str,
+        execution_deadline: Option<DateTime<Utc>>,
+        lease_ttl: std::time::Duration,
+    ) -> StoreResult<bool> {
+        require_nonempty(ENTITY, "request_id", request_id)?;
+        let ttl_ms = recovery_lease_millis(lease_ttl)?;
+        sqlx::query_scalar(
+            "with locked as materialized (
+               select id, outcome, deadline_at from model_requests where id = $1 for update
+             ), renewed as (
+               update model_requests as mr
+               set deadline_at = least(
+                   greatest(locked.deadline_at, clock_timestamp() + $2 * interval '1 millisecond'),
+                   coalesce($3::timestamptz, 'infinity'::timestamptz))
+               from locked
+               where mr.id = locked.id and locked.outcome = 'running'
+                 and locked.deadline_at > clock_timestamp()
+                 and ($3::timestamptz is null or $3 > clock_timestamp())
+               returning mr.id
+             ) select exists(select 1 from renewed) or not exists(select 1 from locked)",
+        )
+        .bind(request_id)
+        .bind(ttl_ms)
+        .bind(execution_deadline)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| postgres_unavailable("renew model request recovery lease"))
+    }
+}
+
+fn recovery_lease_millis(ttl: std::time::Duration) -> StoreResult<i64> {
+    let invalid = || StoreError::InvalidData {
+        entity: ENTITY,
+        message: "recovery lease TTL must be positive whole milliseconds".into(),
+    };
+    if ttl.is_zero() || !ttl.subsec_nanos().is_multiple_of(1_000_000) {
+        return Err(invalid());
+    }
+    i64::try_from(ttl.as_millis()).map_err(|_| invalid())
+}
+
 #[async_trait]
 impl ExecutionStore for PgExecutionStore {
+    fn maintain_request(
+        &self,
+        request_id: &ModelRequestId,
+        execution_deadline: Option<std::time::SystemTime>,
+        lease_ttl: std::time::Duration,
+    ) -> Box<dyn gateway_core::engine::ExecutionRecoveryLeaseGuard> {
+        let repository = self.clone();
+        let request_id = request_id.as_str().to_owned();
+        Box::new(PgRequestRecoveryLease(tokio::spawn(async move {
+            if recovery_lease_millis(lease_ttl).is_err() {
+                return;
+            }
+            let interval = lease_ttl / 3;
+            let deadline = execution_deadline.map(DateTime::<Utc>::from);
+            loop {
+                let now = std::time::SystemTime::now();
+                let remaining = execution_deadline
+                    .map_or(lease_ttl, |at| at.duration_since(now).unwrap_or_default());
+                if remaining.is_zero() {
+                    return;
+                }
+                let result = tokio::time::timeout(
+                    remaining.min(interval),
+                    repository.renew_model_request(&request_id, deadline, lease_ttl),
+                )
+                .await;
+                let delay = match result {
+                    Ok(Ok(true)) => interval,
+                    Ok(Ok(false)) => return,
+                    _ => {
+                        // Observation availability must not change the client's execution result.
+                        tracing::warn!(
+                            "Model request recovery renewal failed; retrying while owned"
+                        );
+                        interval.min(std::time::Duration::from_secs(1))
+                    }
+                };
+                tokio::time::sleep(delay.min(remaining)).await;
+            }
+        })))
+    }
+
     async fn create_model_request(
         &self,
         request: CoreNewModelRequest,

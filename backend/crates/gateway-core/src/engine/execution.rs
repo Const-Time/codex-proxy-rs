@@ -669,7 +669,7 @@ impl DefaultExecutionService {
         let admission_request = ClientAdmissionRequest {
             model_request_id: request_id.clone(),
             client_api_key_id: client.policy.key_id().clone(),
-            lease_ttl: MODEL_REQUEST_DEADLINE,
+            lease_ttl: crate::lifecycle::REQUEST_LEASE_TTL,
             limits: settings.client_limits,
         };
         let admission_started_at = Instant::now();
@@ -699,7 +699,7 @@ impl DefaultExecutionService {
             renewals: vec![self.admissions.maintain(
                 client.policy.key_id(),
                 &request_id,
-                MODEL_REQUEST_DEADLINE,
+                crate::lifecycle::REQUEST_LEASE_TTL,
                 cancellation.clone(),
             )],
             port: Arc::clone(&self.admissions),
@@ -712,7 +712,7 @@ impl DefaultExecutionService {
                 .admit(ClientAdmissionRequest {
                     model_request_id: request_id.clone(),
                     client_api_key_id: scope.clone(),
-                    lease_ttl: MODEL_REQUEST_DEADLINE,
+                    lease_ttl: crate::lifecycle::REQUEST_LEASE_TTL,
                     limits: *limits,
                 })
                 .await;
@@ -721,7 +721,7 @@ impl DefaultExecutionService {
                     admission.renewals.push(self.admissions.maintain(
                         scope,
                         &request_id,
-                        MODEL_REQUEST_DEADLINE,
+                        crate::lifecycle::REQUEST_LEASE_TTL,
                         cancellation.clone(),
                     ));
                     admission.scopes.push(scope.clone());
@@ -1036,9 +1036,20 @@ struct ProbeObservation {
 }
 
 struct TransientExecutionStore;
+impl super::ExecutionRecoveryLeaseGuard for TransientExecutionStore {}
 
 #[async_trait::async_trait]
 impl ExecutionStore for TransientExecutionStore {
+    fn maintain_request(
+        &self,
+        _: &ModelRequestId,
+        _: Option<SystemTime>,
+        _: Duration,
+    ) -> Box<dyn super::ExecutionRecoveryLeaseGuard> {
+        // Internal probes intentionally have no durable model request record.
+        Box::new(Self)
+    }
+
     async fn create_model_request(&self, _: NewModelRequest) -> Result<(), StoreError> {
         Ok(())
     }

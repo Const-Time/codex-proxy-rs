@@ -178,6 +178,11 @@ where
         );
         let image_generation_requested = operation.image_generation_requested();
         let mut session = ResponseExecutionSession {
+            recovery_lease: Some(self.engine.store().maintain_request(
+                &request_id,
+                Some(deadline),
+                crate::lifecycle::REQUEST_LEASE_TTL,
+            )),
             engine: Arc::clone(&self.engine),
             attempt_middleware: self.middleware.clone(),
             middleware_response_head: None,
@@ -297,6 +302,7 @@ struct PendingAttemptRetry {
 /// API 只能提交下游 delivery 边界；账号重试、断流终结与
 /// `model_requests` 写回均留在本类型内。
 pub struct ResponseExecutionSession<S: ?Sized> {
+    recovery_lease: Option<Box<dyn super::ExecutionRecoveryLeaseGuard>>,
     attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
     middleware_response_head: Option<AttemptResponseHead>,
     middleware_invocation: Option<Invocation>,
@@ -2216,6 +2222,7 @@ where
         if let Some(RequestFinalization::Pending(write)) = self.finalization.as_mut() {
             self.request_persisted = write.await;
             self.finalization = Some(RequestFinalization::Complete);
+            self.recovery_lease.take();
         }
     }
 
