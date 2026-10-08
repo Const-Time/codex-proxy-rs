@@ -97,6 +97,11 @@ pub trait PluginDataService: Send + Sync {
 
 #[async_trait]
 pub trait PluginResourceService: Send + Sync {
+    async fn ensure_key(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginKeyEnsure,
+    ) -> Result<PluginManagedResource>;
     async fn ensure_group(
         &self,
         scope: PluginMutationScope,

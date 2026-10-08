@@ -516,3 +516,5 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 插件事实读取由 Admin 的 `PluginDataService` 校验查询，Store 仅投影账户摘要与 Key 分组；Provider 仍负责缓存额度的解释。Runtime 只转换 SDK wire，不导出凭据或 Provider 内部字段。只读额度入口不经过管理页的预测与订阅观测写入逻辑，也不触发刷新。
 
 插件分组资源的实例归属和幂等键由 `plugin_managed_groups` 保存，真实分组与成员仍由 AccountGroupStore 管理。分组写入与实例代次校验、配置 revision 和真实操作者审计同事务提交；Admin 负责提交后的快照发布，即使管理调用断开也完成收尾。删除分组保留资源 tombstone，卸载实例保留真实分组，不建立插件专用账本。
+
+插件 Key 资源由 ClientKeyStore 在同一事务内校验实例代次、本人身份与单分组权限，调用正常 Key 插入逻辑并写入 `plugin_managed_keys` 幂等登记。SDK 的预算参数校验本人分组的有效共享额度，不改变限额或用量。密钥由 Admin 的共用生成函数创建，仅留在宿主，不进入插件结果。

@@ -32,7 +32,8 @@ impl PluginHandler for Worker {
                     use gateway_plugin_sdk::call::resources::*;
                     let group=call.host.ensure_group(GroupEnsureRequest{resource_key:"main".into(),name:"Group".into(),color:"#2563EBFF".into(),description:None}).await?;
                     let members=call.host.change_group_members(GroupMembersChange{resource_key:"main".into(),add:vec!["acct_001".into()],remove:vec![]}).await?;
-                    json!({"group":group,"members":members})
+                    let key=call.host.ensure_key(KeyEnsureRequest{resource_key:"key".into(),name:"Key".into(),group_resource_keys:vec!["main".into()],max_concurrency:1,requests_per_minute:2,daily_limit_usd:"0".into(),weekly_limit_usd:"0".into()}).await?;
+                    json!({"group":group,"members":members,"key":key})
                 } else if input["operation"]=="facts" {
                     use gateway_plugin_sdk::call::data::*;
                     let key=call.host.key_facts(ClientKeyFactsQuery{client_key_id:"key_test".into()}).await?;

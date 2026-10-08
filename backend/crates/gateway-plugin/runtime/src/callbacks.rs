@@ -120,6 +120,7 @@ impl CallbackHandler for Callbacks {
             if matches!(
                 method.as_str(),
                 gateway_plugin_sdk::call::resources::GROUP_ENSURE
+                    | gateway_plugin_sdk::call::resources::KEY_ENSURE
                     | gateway_plugin_sdk::call::resources::GROUP_MEMBERS
             ) {
                 let actor = calls.actor(&context.resource_scope_id).ok_or_else(|| {

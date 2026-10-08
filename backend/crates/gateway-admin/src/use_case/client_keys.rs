@@ -98,24 +98,11 @@ impl ClientKeyService for DefaultClientKeyService {
         context: &MutationContext,
         command: CreateClientKey,
     ) -> Result<CreatedClientKey, AdminError> {
-        let id = ClientApiKeyId::new(format!("key_{}", Uuid::now_v7().simple()))
-            .map_err(|_| AdminError::internal("创建 Client API Key ID 失败"))?;
-        let mut bytes = [0_u8; 32];
-        OsRng.fill_bytes(&mut bytes);
-        let plaintext = format!("sk_{}", URL_SAFE_NO_PAD.encode(bytes));
+        let key = new_key(command)?;
+        let plaintext = key.plaintext.clone();
         let (config_revision, record) = self
             .store
-            .create_client_key(
-                NewClientKey {
-                    id,
-                    name: command.name,
-                    label: command.label,
-                    group_ids: command.group_ids,
-                    limits: command.limits,
-                    plaintext: plaintext.clone(),
-                },
-                context,
-            )
+            .create_client_key(key, context)
             .await
             .map_err(|error| map_store_error(error, "client API key"))?;
         publish_committed(self.snapshot.as_ref(), config_revision).await?;
@@ -213,4 +200,19 @@ fn validate_cursor(query: &ClientKeyListQuery) -> Result<(), AdminError> {
     } else {
         Err(AdminError::invalid("Client API Key 游标不合法"))
     }
+}
+
+pub(super) fn new_key(command: CreateClientKey) -> Result<NewClientKey, AdminError> {
+    let id = ClientApiKeyId::new(format!("key_{}", Uuid::now_v7().simple()))
+        .map_err(|_| AdminError::internal("创建 Client API Key ID 失败"))?;
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    Ok(NewClientKey {
+        id,
+        name: command.name,
+        label: command.label,
+        group_ids: command.group_ids,
+        limits: command.limits,
+        plaintext: format!("sk_{}", URL_SAFE_NO_PAD.encode(bytes)),
+    })
 }

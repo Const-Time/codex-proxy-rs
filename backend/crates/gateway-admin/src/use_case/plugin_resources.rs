@@ -14,14 +14,20 @@ use std::{collections::BTreeSet, sync::Arc};
 
 pub(crate) struct DefaultPluginResourceService {
     groups: Arc<dyn AccountGroupStore>,
+    keys: Arc<dyn crate::ports::store::ClientKeyStore>,
     snapshot: Arc<dyn SnapshotControl>,
 }
 impl DefaultPluginResourceService {
     pub(crate) fn new(
         groups: Arc<dyn AccountGroupStore>,
+        keys: Arc<dyn crate::ports::store::ClientKeyStore>,
         snapshot: Arc<dyn SnapshotControl>,
     ) -> Self {
-        Self { groups, snapshot }
+        Self {
+            groups,
+            keys,
+            snapshot,
+        }
     }
 }
 fn resource_key(key: &str) -> Result<(), AdminError> {
@@ -32,6 +38,71 @@ fn resource_key(key: &str) -> Result<(), AdminError> {
 }
 #[async_trait]
 impl PluginResourceService for DefaultPluginResourceService {
+    async fn ensure_key(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginKeyEnsure,
+    ) -> Result<PluginManagedResource, AdminError> {
+        if !matches!(
+            &scope.actor.actor,
+            crate::model::MutationActor::AdminSession { .. }
+        ) {
+            return Err(AdminError::invalid("创建个人 Key 需要本人管理会话"));
+        }
+        resource_key(&command.resource_key)?;
+        if command.group_resource_keys.len() != 1 {
+            return Err(AdminError::invalid("本地 Key 必须绑定一个分组"));
+        }
+        let group_resource_key = command.group_resource_keys.into_iter().next().unwrap();
+        resource_key(&group_resource_key)?;
+        let budget = gateway_core::engine::budget::ClientBudgetLimits {
+            daily_usd: command
+                .daily_limit_usd
+                .parse()
+                .map_err(|_| AdminError::invalid("日额度格式无效"))?,
+            weekly_usd: command
+                .weekly_limit_usd
+                .parse()
+                .map_err(|_| AdminError::invalid("周额度格式无效"))?,
+        };
+        let key = super::client_keys::new_key(crate::model::client_keys::CreateClientKey {
+            name: command.name,
+            label: None,
+            group_ids: vec![],
+            limits: gateway_core::policy::RateLimits {
+                max_concurrency: command.max_concurrency,
+                requests_per_minute: command.requests_per_minute,
+            },
+        })?;
+        let keys = self.keys.clone();
+        let snapshot = self.snapshot.clone();
+        tokio::spawn(async move {
+            let result = keys
+                .ensure_plugin_key(
+                    scope,
+                    PluginKeyCreate {
+                        resource_key: command.resource_key,
+                        group_resource_key,
+                        key,
+                        budget,
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    if e.resource() == "plugin_key_shared_budget" {
+                        AdminError::conflict(
+                            "插件请求额度与本人分组共享额度不一致，请先显式配置分组额度",
+                        )
+                    } else {
+                        map_store_error(e, "plugin key")
+                    }
+                })?;
+            publish_committed(snapshot.as_ref(), result.revision).await?;
+            Ok(result.value)
+        })
+        .await
+        .map_err(|_| AdminError::internal("插件 Key 操作中断，请使用相同资源标识重试"))?
+    }
     async fn ensure_group(
         &self,
         scope: PluginMutationScope,

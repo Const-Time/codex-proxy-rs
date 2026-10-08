@@ -68,6 +68,30 @@ pub(crate) async fn call(
         )
     };
     let payload = match method {
+        resources::KEY_ENSURE => {
+            let v: resources::KeyEnsureRequest =
+                serde_json::from_slice(payload).map_err(|_| invalid())?;
+            let r = service
+                .ensure_key(
+                    scope,
+                    PluginKeyEnsure {
+                        resource_key: v.resource_key,
+                        name: v.name,
+                        group_resource_keys: v.group_resource_keys,
+                        max_concurrency: v.max_concurrency,
+                        requests_per_minute: v.requests_per_minute,
+                        daily_limit_usd: v.daily_limit_usd,
+                        weekly_limit_usd: v.weekly_limit_usd,
+                    },
+                )
+                .await
+                .map_err(error)?;
+            serde_json::to_vec(&resources::ManagedResource {
+                id: r.id,
+                name: r.name,
+                enabled: r.enabled,
+            })
+        }
         resources::GROUP_ENSURE => {
             let v: resources::GroupEnsureRequest =
                 serde_json::from_slice(payload).map_err(|_| invalid())?;

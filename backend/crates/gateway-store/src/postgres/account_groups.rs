@@ -25,6 +25,7 @@ use crate::{
     postgres_unavailable,
 };
 
+use super::plugins::{lock_plugin_resource, plugin_current_revision};
 use gateway_admin::model::plugins::*;
 
 use super::{
@@ -878,30 +879,4 @@ async fn insert_group(
 
 fn plugin_unavailable() -> AdminStoreError {
     admin_store_error(ENTITY, unavailable("plugin group operation"))
-}
-async fn plugin_current_revision(
-    tx: &mut Transaction<'_, Postgres>,
-) -> AdminStoreResult<gateway_admin::model::Revision> {
-    let revision: i64 =
-        sqlx::query_scalar("select config_revision from runtime_settings where id=1")
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|_| plugin_unavailable())?;
-    admin_revision(crate::Revision::new(revision as u64).map_err(|e| admin_store_error(ENTITY, e))?)
-}
-async fn lock_plugin_resource(
-    tx: &mut Transaction<'_, Postgres>,
-    scope: &PluginMutationScope,
-) -> AdminStoreResult<()> {
-    let revision: Option<i64> = sqlx::query_scalar(
-        "select revision from plugin_instances where id=$1 and enabled for update",
-    )
-    .bind(&scope.instance_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| plugin_unavailable())?;
-    if revision.and_then(|v| u64::try_from(v).ok()) != Some(scope.revision) {
-        return Err(admin_store_error(ENTITY, conflict("plugin generation")));
-    }
-    Ok(())
 }
