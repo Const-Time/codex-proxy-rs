@@ -297,6 +297,7 @@ enum Script {
 }
 
 struct ScriptedProvider {
+    preparations: AtomicUsize,
     scripts: Mutex<VecDeque<Script>>,
     contexts: Mutex<Vec<AttemptContext>>,
     operations: Mutex<Vec<Operation>>,
@@ -314,6 +315,7 @@ impl Drop for TrackedLease {
 impl ScriptedProvider {
     fn new(scripts: Vec<Script>) -> Self {
         Self {
+            preparations: AtomicUsize::new(0),
             scripts: Mutex::new(scripts.into()),
             contexts: Mutex::new(Vec::new()),
             operations: Mutex::new(Vec::new()),
@@ -324,6 +326,24 @@ impl ScriptedProvider {
 
 #[async_trait]
 impl Provider for ScriptedProvider {
+    fn prepare_operation(
+        &self,
+        operation: Operation,
+        _candidate: &gateway_core::routing::ProviderCandidate,
+        mode: gateway_core::account::FastMode,
+    ) -> Operation {
+        if mode == gateway_core::account::FastMode::Default {
+            return operation;
+        }
+        self.preparations.fetch_add(1, Ordering::SeqCst);
+        let Operation::Generate(request) = operation else {
+            panic!("generate expected");
+        };
+        let mut body = request.protocol_payload().body().clone();
+        body.insert("service_tier".into(), json!("priority"));
+        Operation::Generate(request.with_protocol_body(body))
+    }
+
     fn name(&self) -> &'static str {
         "openai"
     }
@@ -4652,6 +4672,7 @@ fn connection_retry_requires_not_sent_and_keeps_the_same_account() {
 
 #[derive(Clone, Copy)]
 enum AttemptMiddlewareMode {
+    OverrideFast,
     Pass,
     RewriteFacts,
     FailAfterRead,
@@ -4706,7 +4727,22 @@ impl gateway_core::engine::attempt_middleware::AttemptMiddleware for TestAttempt
             if matches!(mode, AttemptMiddlewareMode::WaitBeforeNext) {
                 futures_timer::Delay::new(Duration::from_millis(10)).await;
             }
-            let operation = if matches!(mode, AttemptMiddlewareMode::RequireImage) {
+            let operation = if matches!(mode, AttemptMiddlewareMode::OverrideFast) {
+                assert_eq!(
+                    context.fast_mode(),
+                    gateway_core::account::FastMode::Enabled
+                );
+                let Operation::Generate(request) = request.operation() else {
+                    panic!("generate expected");
+                };
+                assert_eq!(
+                    request.protocol_payload().body()["service_tier"],
+                    "priority"
+                );
+                let mut body = request.protocol_payload().body().clone();
+                body.insert("service_tier".into(), json!("flex"));
+                Operation::Generate(request.clone().with_protocol_body(body))
+            } else if matches!(mode, AttemptMiddlewareMode::RequireImage) {
                 image_generate_operation()
             } else {
                 request.operation().clone()
@@ -5407,4 +5443,63 @@ fn attempt_middleware_short_circuit_after_unsent_retry_keeps_not_sent() {
         UpstreamSendState::NotSent
     );
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
+}
+
+#[test]
+fn fast_defaults_precede_attempt_middleware_on_every_retry_and_do_not_overwrite_it() {
+    for with_middleware in [false, true] {
+        let operation = generate_operation();
+        let (coordinator, store, provider) = coordinator(vec![
+            Script::Stream {
+                account_id: "acct_one",
+                items: vec![Err(ProviderError::new(
+                    ProviderErrorKind::RateLimited,
+                    UpstreamSendState::NotSent,
+                )
+                .with_status(429))],
+            },
+            costed_attempt(),
+        ]);
+        let coordinator = if with_middleware {
+            coordinator.with_attempt_middleware(Some(attempt_hook(
+                AttemptMiddlewareMode::OverrideFast,
+                &store,
+            )))
+        } else {
+            coordinator
+        };
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation.clone(),
+            plan(&operation).with_fast_mode(gateway_core::account::FastMode::Enabled),
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        block_on(session.collect_uncommitted()).unwrap();
+        block_on(session.commit_downstream(Some(200))).unwrap();
+        assert_eq!(provider.preparations.load(Ordering::SeqCst), 2);
+        let operations = provider.operations.lock().unwrap();
+        assert_eq!(operations.len(), 2);
+        for operation in operations.iter() {
+            let Operation::Generate(request) = operation else {
+                panic!("generate");
+            };
+            assert_eq!(
+                request.protocol_payload().body()["service_tier"],
+                if with_middleware { "flex" } else { "priority" }
+            );
+        }
+        assert!(
+            provider
+                .contexts
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|context| context.fast_mode() == gateway_core::account::FastMode::Enabled)
+        );
+        assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+        assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+    }
 }

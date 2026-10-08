@@ -618,6 +618,35 @@ impl CodexResponsesRequest {
         self.body.get("service_tier").and_then(Value::as_str)
     }
 
+    /// 只改写顶层档位；开启需要目录证据，其他显式档位保留客户端选择
+    pub(crate) fn apply_fast_policy(
+        &mut self,
+        mode: gateway_core::account::FastMode,
+        supports_priority: bool,
+    ) -> bool {
+        let tier = self.service_tier().map(str::trim);
+        let target = match mode {
+            gateway_core::account::FastMode::Disabled
+                if tier.is_some_and(|tier| {
+                    tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast")
+                }) =>
+            {
+                "default"
+            }
+            gateway_core::account::FastMode::Enabled
+                if supports_priority
+                    && (matches!(self.body.get("service_tier"), None | Some(Value::Null))
+                        || tier.is_some_and(|tier| tier.eq_ignore_ascii_case("default"))) =>
+            {
+                "priority"
+            }
+            _ => return false,
+        };
+        self.body
+            .insert("service_tier".to_owned(), Value::String(target.to_owned()));
+        true
+    }
+
     /// 前一个 response ID。
     pub fn previous_response_id(&self) -> Option<&str> {
         self.body

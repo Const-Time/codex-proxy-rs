@@ -140,10 +140,17 @@ impl PreparedRootExecution {
         settings: crate::routing::RequestSettings,
     ) -> Result<Self, GatewayError> {
         self.validate()?;
-        if !settings.has_baseline(&self.client.snapshot) {
+        if !settings.has_baseline(&self.client.snapshot)
+            || !settings.is_for(self.client.policy.key_id())
+            || settings.execution_values().map(|value| value.timeout_ms)
+                != self
+                    .settings
+                    .execution_values()
+                    .map(|value| value.timeout_ms)
+        {
             return Err(GatewayError::new(
                 GatewayErrorKind::InvalidRequest,
-                "request settings belong to a different host snapshot",
+                "request settings do not match the prepared scope",
             ));
         }
         self.settings = settings;
@@ -527,7 +534,20 @@ impl DefaultExecutionService {
                 &routing_context,
             ),
         }
-        .map_err(map_routing_error)?;
+        .map_err(map_routing_error)?
+        .with_fast_mode(
+            request
+                .prepared
+                .settings
+                .execution_values()
+                .ok_or_else(|| {
+                    GatewayError::new(
+                        GatewayErrorKind::Internal,
+                        "execution settings are unavailable",
+                    )
+                })?
+                .fast_mode,
+        );
         let continuation = match request.metadata.previous_response_id.as_ref() {
             Some(previous) => {
                 let resolve = self
@@ -632,7 +652,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         let PreparedRootExecution {
-            settings: _,
+            settings,
             attempt_middleware,
             client,
             request_id,
@@ -640,11 +660,17 @@ impl DefaultExecutionService {
             deadline_at,
             cancellation,
         } = prepared;
+        let settings = settings.execution_values().ok_or_else(|| {
+            GatewayError::new(
+                GatewayErrorKind::Internal,
+                "execution settings are unavailable",
+            )
+        })?;
         let admission_request = ClientAdmissionRequest {
             model_request_id: request_id.clone(),
             client_api_key_id: client.policy.key_id().clone(),
             lease_ttl: MODEL_REQUEST_DEADLINE,
-            limits: client.policy.limits(),
+            limits: settings.client_limits,
         };
         let admission_started_at = Instant::now();
         match self
@@ -1243,7 +1269,10 @@ impl ExecutionService for DefaultExecutionService {
         })?;
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
-            settings: crate::routing::RequestSettings::new(client.snapshot.clone()),
+            settings: crate::routing::RequestSettings::new(client.snapshot.clone()).with_execution(
+                &client.policy,
+                Some(MODEL_REQUEST_DEADLINE.as_secs() * 1_000),
+            ),
             attempt_middleware: None,
             client,
             request_id: new_request_id()?,

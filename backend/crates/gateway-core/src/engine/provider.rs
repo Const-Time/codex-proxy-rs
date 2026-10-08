@@ -477,6 +477,18 @@ impl fmt::Debug for ProviderRequest {
 /// 新的 attempt 再次调用。
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Pure Provider-owned defaults applied before attempt middleware. Must not perform I/O,
+    /// acquire credentials, change identity, or change the operation's routing requirements.
+    /// The terminal executes the resulting operation without reapplying these defaults.
+    fn prepare_operation(
+        &self,
+        operation: Operation,
+        _candidate: &ProviderCandidate,
+        _fast_mode: crate::account::FastMode,
+    ) -> Operation {
+        operation
+    }
+
     /// 返回编译期注册名称。
     fn name(&self) -> &'static str;
 

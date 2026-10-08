@@ -84,7 +84,8 @@ impl fmt::Debug for PlaintextClientApiKey {
 }
 
 /// 零表示对应维度不额外限制。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimits {
     pub max_concurrency: u64,
     pub requests_per_minute: u64,

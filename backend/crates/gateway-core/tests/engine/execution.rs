@@ -2232,7 +2232,7 @@ fn prepared_runtime_settings_route_the_request_without_mutating_identity_or_othe
 
 #[test]
 fn prepared_runtime_settings_reject_foreign_baselines_and_preserve_revocation() {
-    for cause in ["foreign", "key", "cancel"] {
+    for cause in ["foreign", "key", "cancel", "timeout", "key_scope"] {
         let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
         let admissions = Arc::new(Admissions::default());
         let store = Arc::new(TrackingExecutionStore::default());
@@ -2252,6 +2252,20 @@ fn prepared_runtime_settings_reject_foreign_baselines_and_preserve_revocation() 
         } else {
             prepared.settings().clone()
         };
+        let settings = if cause == "timeout" {
+            settings.with_execution(prepared.client().policy(), None)
+        } else if cause == "key_scope" {
+            let other = ClientPolicy::new(
+                ClientApiKeyId::new("other").unwrap(),
+                PlaintextClientApiKey::new("sk_other").unwrap(),
+                prepared.client().policy().account_scope().clone(),
+                true,
+                RateLimits::unlimited(),
+            );
+            settings.with_execution(&other, Some(600_000))
+        } else {
+            settings
+        };
         if cause == "key" {
             snapshots.publish(start_snapshot_with_policy(
                 2,
@@ -2264,9 +2278,185 @@ fn prepared_runtime_settings_reject_foreign_baselines_and_preserve_revocation() 
         }
         let result = prepared.with_settings(settings);
         assert!(
-            matches!(result,Err(e) if e.kind()==match cause { "foreign"=>GatewayErrorKind::InvalidRequest, "key"=>GatewayErrorKind::Unauthorized, _=>GatewayErrorKind::Cancelled })
+            matches!(result,Err(e) if e.kind()==match cause { "foreign" | "timeout" | "key_scope"=>GatewayErrorKind::InvalidRequest, "key"=>GatewayErrorKind::Unauthorized, _=>GatewayErrorKind::Cancelled })
         );
         assert!(admissions.limits.lock().unwrap().is_empty());
         assert!(!store.touched.load(Ordering::SeqCst));
     }
+}
+
+struct ExecutionSettingsProbe {
+    observed: Mutex<Vec<gateway_core::account::FastMode>>,
+}
+#[async_trait]
+impl Provider for ExecutionSettingsProbe {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![])
+    }
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.observed.lock().unwrap().push(context.fast_mode());
+        ChargedProvider { fail: false }
+            .execute(request, context)
+            .await
+    }
+}
+#[test]
+fn prepared_execution_passes_fast_and_key_limits_without_changing_the_authenticated_policy() {
+    use gateway_core::{account::FastMode, engine::execution::PreparedExecutionRequest};
+    block_on(async {
+        for mode in [FastMode::Default, FastMode::Enabled, FastMode::Disabled] {
+            for transport in [
+                ClientTransport::HttpJson,
+                ClientTransport::HttpSse,
+                ClientTransport::WebSocket,
+            ] {
+                let admissions = Arc::new(Admissions::default());
+                let budget = Arc::new(Budget {
+                    active: admissions.active.clone(),
+                    ..Default::default()
+                });
+                let provider = Arc::new(ExecutionSettingsProbe {
+                    observed: Mutex::default(),
+                });
+                let service = DefaultExecutionService::new(
+                    RuntimeSnapshotHandle::new(start_snapshot()),
+                    Arc::new(TrackingExecutionStore::default()),
+                    ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                    admissions.clone(),
+                    Arc::new(UnusedContinuation),
+                    Arc::new(RecordingClientApiKeyUsage::default()),
+                )
+                .with_budget(budget.clone());
+                let input = request(&service, transport);
+                let prepared = service.prepare_execution(input.client).unwrap();
+                let policy = prepared.client().policy().clone();
+                let mut values = prepared.settings().execution_values().unwrap();
+                values.fast_mode = mode;
+                values.client_limits = RateLimits {
+                    max_concurrency: 3,
+                    requests_per_minute: 13,
+                };
+                let changed = prepared
+                    .settings()
+                    .replace_execution(&values, "settings")
+                    .unwrap();
+                let prepared = prepared.with_settings(changed).unwrap();
+                assert_eq!(prepared.client().policy(), &policy);
+                let mut started = service
+                    .start_prepared(
+                        prepared,
+                        PreparedExecutionRequest {
+                            public_model: input.public_model,
+                            operation: input.operation,
+                            metadata: input.metadata,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                consume_charged_prefix(started.session.as_mut()).await;
+                started.session.detach_finalize().await;
+                assert_cleanup_completed(&admissions, &budget, &started.request_id);
+                assert_eq!(*provider.observed.lock().unwrap(), [mode]);
+                assert_eq!(*admissions.limits.lock().unwrap(), [values.client_limits]);
+                assert_eq!(
+                    service.authenticate("sk_start_test").unwrap().policy(),
+                    &policy
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn execution_limit_overrides_do_not_remove_the_shared_user_admission_limit() {
+    use gateway_core::engine::execution::PreparedExecutionRequest;
+    block_on(async {
+        let provider = ProviderKind::new("openai").unwrap();
+        let clients = ["a", "b"].map(|id| {
+            ClientPolicy::new(
+                ClientApiKeyId::new(format!("key_{id}")).unwrap(),
+                PlaintextClientApiKey::new(format!("sk_{id}")).unwrap(),
+                account_scope(&provider, "acct_start"),
+                true,
+                RateLimits {
+                    max_concurrency: 2,
+                    requests_per_minute: 0,
+                },
+            )
+            .with_user_admission(Some((
+                ClientApiKeyId::user_admission("alice"),
+                RateLimits {
+                    max_concurrency: 1,
+                    requests_per_minute: 0,
+                },
+            )))
+        });
+        let admissions = Arc::new(SharedUserAdmissions::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot_with_clients(1, clients.to_vec())),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let mut sessions = Vec::new();
+        for (index, key) in ["sk_a", "sk_b"].into_iter().enumerate() {
+            let prepared = service
+                .prepare_execution(service.authenticate(key).unwrap())
+                .unwrap();
+            let mut values = prepared.settings().execution_values().unwrap();
+            values.client_limits = RateLimits::unlimited();
+            let settings = prepared
+                .settings()
+                .replace_execution(&values, "unlimited")
+                .unwrap();
+            let result = service
+                .start_prepared(
+                    prepared.with_settings(settings).unwrap(),
+                    PreparedExecutionRequest {
+                        public_model: PublicModelId::new("gpt-start").unwrap(),
+                        operation: start_operation(),
+                        metadata: ExecutionRequestMetadata {
+                            protocol: "openai".into(),
+                            endpoint: "/v1/responses".into(),
+                            transport: ClientTransport::HttpJson,
+                            stream: false,
+                            client_ip: None,
+                            user_agent: None,
+                            previous_response_id: None,
+                        },
+                    },
+                )
+                .await;
+            if index == 0 {
+                sessions.push(result.unwrap());
+            } else {
+                assert!(matches!(result,Err(e) if e.kind()==GatewayErrorKind::RateLimited));
+            }
+        }
+        for started in sessions {
+            started.session.detach_finalize().await;
+        }
+        assert!(
+            admissions
+                .active
+                .lock()
+                .unwrap()
+                .values()
+                .all(BTreeSet::is_empty)
+        );
+    });
 }
