@@ -3,6 +3,7 @@ use gateway_plugin_sdk::{
     client::{CallFuture, CallReply, PluginCall, PluginHandler, PluginSession, SessionConfig},
 };
 use serde_json::json;
+
 struct Worker {
     contributes: serde_json::Value,
     fail: bool,
@@ -11,6 +12,7 @@ impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "middleware.handle" => worker_middleware::handle(call).await,
             "plugin.register" if !self.fail=>Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![])),
             "frontend_auth.identifier"=>Ok(CallReply::unary(json!({"identifier":"fixture-auth"}),vec![])),
             "frontend_auth.authenticate"=>{
@@ -97,4 +99,146 @@ async fn main() {
             .unwrap_or(false),
     };
     let _ = session.run(handler).await;
+}
+
+mod worker_middleware {
+    //! A real SDK author handler, plus intentionally malformed wire variants.
+    use gateway_plugin_sdk::{
+        ErrorCode, PluginFault,
+        call::middleware::*,
+        client::{CallReply, MiddlewareOutput, PluginCall, RequestCall, ResponseStream},
+    };
+    use serde_json::json;
+
+    pub async fn handle(call: PluginCall) -> Result<CallReply, PluginFault> {
+        let input: serde_json::Value = serde_json::from_slice(&call.payload).unwrap();
+        let mode = input["mode"].as_str().unwrap().to_owned();
+        if mode == "reject" {
+            return Err(PluginFault::new(ErrorCode::Rejected, "rejected by fixture"));
+        }
+        if mode == "short" {
+            return Ok(CallReply::stream(
+                json!({"response":null,"protocol":"openai","status":403,"header_mutations":[],"body":{"kind":"stream","framing":"raw_bytes"}}),
+                vec![],
+                ResponseStream::from_chunks(vec![
+                    MiddlewareBodyFrame::new(b"denied".to_vec(), true).encode(),
+                ]),
+            ));
+        }
+        let host = call.host.clone();
+        if mode.starts_with("raw-") {
+            let params = json!({"body":"preserve"});
+            let reply = host
+                .call(NEXT_METHOD, params.clone(), vec![])
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            let next: MiddlewareNextResponse = serde_json::from_value(reply.result).unwrap();
+            let body = next.body.unwrap();
+            let mut output =
+                json!({"response":next.response,"body":{"kind":"pass_through","body":body}});
+            match mode.as_str() {
+                "raw-double" => {
+                    let result = host.call(NEXT_METHOD, params, vec![]).await;
+                    assert!(result.is_err());
+                }
+                "raw-forged" => output["body"]["body"]["handle"] = json!("another-parent-handle"),
+                "raw-empty" => output["body"] = json!({"kind":"empty"}),
+                "raw-read-pass" | "raw-replay" | "raw-standalone" => {
+                    let reply = host
+                        .call(
+                            BODY_READ_METHOD,
+                            json!({"handle":body.handle,"maximum_bytes":65536}),
+                            vec![],
+                        )
+                        .await
+                        .map_err(|e| e.into_plugin_fault())?;
+                    if mode != "raw-read-pass" {
+                        let frame = if mode == "raw-standalone" {
+                            MiddlewareBodyFrame::new(reply.payload, true)
+                        } else {
+                            // Source 1 is current; pretending source 2 must not release its envelope.
+                            let frame = MiddlewareBodyFrame::new(reply.payload, true);
+                            let mut encoded = frame.encode();
+                            encoded[5..13].copy_from_slice(&2u64.to_be_bytes());
+                            encoded[4] = MiddlewareBodyDisposition::Only as u8;
+                            encoded[13] = 0;
+                            return Ok(CallReply::stream(
+                                json!({"response":next.response,"body":{"kind":"stream","framing":body.framing}}),
+                                vec![],
+                                ResponseStream::from_chunks(vec![encoded]),
+                            ));
+                        };
+                        return Ok(CallReply::stream(
+                            json!({"response":next.response,"body":{"kind":"stream","framing":body.framing}}),
+                            vec![],
+                            ResponseStream::from_chunks(vec![frame.encode()]),
+                        ));
+                    }
+                }
+                _ => unreachable!(),
+            }
+            return Ok(CallReply::stream(
+                output,
+                vec![],
+                ResponseStream::from_chunks(vec![]),
+            ));
+        }
+        let RequestCall {
+            mut request, next, ..
+        } = RequestCall::try_from(call)?;
+        assert_eq!(request.head.client_key_id, "key_original");
+        if mode == "rewrite" {
+            request.replace_body(br#"{"model":"changed"}"#.to_vec());
+            request.append_header("x-plugin", b"changed".to_vec());
+            // These display facts never become host authority through next.
+            request.head.client_key_id = "key_forged".into();
+            request.head.request_id = "req_forged".into();
+        }
+        if mode == "settings" {
+            request.head.settings = json!({"fast":true});
+        }
+        let mut response = next.run(request).await?;
+        if mode == "wait" {
+            std::future::pending::<()>().await;
+        }
+        if matches!(
+            mode.as_str(),
+            "inspect" | "inspect-transformed" | "map" | "expand" | "drop-first"
+        ) {
+            let mut first = true;
+            response.body = response.body.with_facts()?.map_frames(move |mut frame| {
+                if let Some(facts) = &mut frame.facts {
+                    if mode == "inspect-transformed" {
+                        assert!(facts.host.as_ref().unwrap().middleware_transformed);
+                        assert!(
+                            facts
+                                .host
+                                .as_ref()
+                                .unwrap()
+                                .middleware_origin_wire
+                                .is_some()
+                        );
+                    }
+                    // Plugin-side facts can be changed without changing the host receipt.
+                    facts.facts.clear();
+                    facts.host = None;
+                }
+                if mode == "map" {
+                    frame.payload = br#"{"mapped":true}"#.to_vec();
+                }
+                if mode == "drop-first" && first {
+                    first = false;
+                    return Ok(vec![]);
+                }
+                if mode == "expand" {
+                    return Ok(vec![
+                        MiddlewareBodyFrame::new(b"data: {\"prefix\":true}\n\n".to_vec(), false),
+                        frame,
+                    ]);
+                }
+                Ok(vec![frame])
+            })?;
+        }
+        response.encode()
+    }
 }

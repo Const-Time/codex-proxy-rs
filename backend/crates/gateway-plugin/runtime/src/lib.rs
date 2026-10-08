@@ -3,6 +3,7 @@ mod callbacks;
 mod data;
 mod engine;
 mod management_validation;
+pub mod middleware;
 mod package;
 mod resources;
 mod rpc;
