@@ -275,6 +275,10 @@ impl ExecutionStore for FakeStore {
 }
 
 enum Script {
+    DelayedStream {
+        account_id: &'static str,
+        items: Vec<Result<GatewayEvent, ProviderError>>,
+    },
     Stream {
         account_id: &'static str,
         items: Vec<Result<GatewayEvent, ProviderError>>,
@@ -350,10 +354,13 @@ impl Provider for ScriptedProvider {
             .expect("scripts lock")
             .pop_front()
             .expect("one script per provider call");
+        if matches!(&script, Script::DelayedStream { .. }) {
+            futures_timer::Delay::new(Duration::from_millis(10)).await;
+        }
         match script {
             Script::Error(error) => Err(error),
             Script::Pending => futures::future::pending().await,
-            Script::Stream { account_id, items } => {
+            Script::Stream { account_id, items } | Script::DelayedStream { account_id, items } => {
                 let candidate = request.candidate();
                 let metadata = ProviderCallMetadata::new(
                     candidate.provider().clone(),
@@ -4641,4 +4648,759 @@ fn connection_retry_requires_not_sent_and_keeps_the_same_account() {
             assert_eq!(store.state.lock().unwrap().intermediate_failures, 0);
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum AttemptMiddlewareMode {
+    Pass,
+    RewriteFacts,
+    FailAfterRead,
+    ShortCircuit,
+    ShortCircuitAfterRetry,
+    EarlyEnd,
+    RequireImage,
+    FailWhileStalled,
+    ForgeCheckpoint,
+    ResumeRead,
+    HoldError,
+    WaitBeforeNext,
+    ObservationInterrupted,
+}
+struct TestAttemptMiddleware {
+    mode: AttemptMiddlewareMode,
+    store: Arc<FakeStore>,
+    contexts: Arc<Mutex<Vec<AttemptContext>>>,
+}
+impl gateway_core::engine::attempt_middleware::AttemptMiddleware for TestAttemptMiddleware {
+    fn invoke(
+        &self,
+        request: ProviderRequest,
+        context: AttemptContext,
+        next: gateway_core::engine::attempt_middleware::AttemptNext,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<
+            gateway_core::engine::attempt_middleware::AttemptEvents,
+            gateway_core::engine::middleware::MiddlewareError,
+        >,
+    > {
+        use gateway_core::engine::middleware::MiddlewareError;
+        let mode = self.mode;
+        let store = self.store.clone();
+        self.contexts.lock().unwrap().push(context.clone());
+        Box::pin(async move {
+            if matches!(mode, AttemptMiddlewareMode::ShortCircuit)
+                || (matches!(mode, AttemptMiddlewareMode::ShortCircuitAfterRetry)
+                    && context.attempt_index().get() > 1)
+            {
+                return Ok(Box::pin(futures::stream::iter(
+                    complete_stream(None)
+                        .into_iter()
+                        .map(|value| Ok(ProviderEvent::canonical(value.unwrap()))),
+                ))
+                    as gateway_core::engine::attempt_middleware::AttemptEvents);
+            }
+            if matches!(mode, AttemptMiddlewareMode::WaitBeforeNext) {
+                futures_timer::Delay::new(Duration::from_millis(10)).await;
+            }
+            let operation = if matches!(mode, AttemptMiddlewareMode::RequireImage) {
+                image_generate_operation()
+            } else {
+                request.operation().clone()
+            };
+            let mut source = next.run(operation).await?;
+            assert_eq!(source.metadata().provider(), request.candidate().provider());
+            if !matches!(mode, AttemptMiddlewareMode::ObservationInterrupted) {
+                assert_eq!(
+                    store.state.lock().unwrap().attempts.len(),
+                    context.attempt_index().get() as usize,
+                    "cold attempt must be registered before plugin reads"
+                );
+            }
+            if matches!(mode, AttemptMiddlewareMode::FailWhileStalled) {
+                source.next_event().await?;
+                source.next_event().await?;
+                let read = Box::pin(source.next_event());
+                let timeout = Box::pin(futures_timer::Delay::new(Duration::from_millis(10)));
+                assert!(matches!(
+                    futures::future::select(read, timeout).await,
+                    futures::future::Either::Right(_)
+                ));
+                return Err(MiddlewareError::Fault);
+            }
+            if matches!(mode, AttemptMiddlewareMode::ResumeRead) {
+                let mut read = Box::pin(source.next_event());
+                assert!(futures::poll!(read.as_mut()).is_pending());
+                drop(read);
+                return Ok(source.into_events());
+            }
+            if matches!(mode, AttemptMiddlewareMode::HoldError) {
+                while source.next_event().await.is_ok() {}
+                return futures::future::pending().await;
+            }
+            if matches!(
+                mode,
+                AttemptMiddlewareMode::Pass
+                    | AttemptMiddlewareMode::ShortCircuitAfterRetry
+                    | AttemptMiddlewareMode::WaitBeforeNext
+                    | AttemptMiddlewareMode::ObservationInterrupted
+            ) {
+                return Ok(source.into_events());
+            }
+            if matches!(mode, AttemptMiddlewareMode::EarlyEnd) {
+                return Ok(Box::pin(futures::stream::empty())
+                    as gateway_core::engine::attempt_middleware::AttemptEvents);
+            }
+            while source.next_event().await?.is_some() {}
+            if matches!(mode, AttemptMiddlewareMode::FailAfterRead) {
+                return Err(MiddlewareError::Fault);
+            }
+            let mut projected = vec![
+                Ok(ProviderEvent::canonical(GatewayEvent::Started(
+                    ResponseMeta::new("forged-response", "forged-model"),
+                ))),
+                Ok(ProviderEvent::canonical(GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(999).unwrap(),
+                ))),
+                Ok(ProviderEvent::canonical(GatewayEvent::Completed(
+                    ResponseMeta::new("forged-response", "forged-model"),
+                ))),
+            ];
+            if matches!(mode, AttemptMiddlewareMode::ForgeCheckpoint) {
+                projected[0].as_mut().unwrap().attach_session_update(
+                    ProviderSessionState::new(
+                        "openai",
+                        json!({"forged":true}).as_object().unwrap().clone(),
+                    )
+                    .unwrap(),
+                );
+            }
+            Ok(Box::pin(futures::stream::iter(projected))
+                as gateway_core::engine::attempt_middleware::AttemptEvents)
+        })
+    }
+}
+fn costed_attempt() -> Script {
+    Script::Stream {
+        account_id: "acct_one",
+        items: vec![
+            Ok(GatewayEvent::Started(ResponseMeta::new(
+                "original", "gpt-5",
+            ))),
+            Ok(GatewayEvent::ProviderCost(
+                ProviderReportedCost::from_usd_ticks(123).unwrap(),
+            )),
+            Ok(GatewayEvent::Completed(ResponseMeta::new(
+                "original", "gpt-5",
+            ))),
+        ],
+    }
+}
+fn attempt_hook(mode: AttemptMiddlewareMode, store: &Arc<FakeStore>) -> Arc<TestAttemptMiddleware> {
+    Arc::new(TestAttemptMiddleware {
+        mode,
+        store: store.clone(),
+        contexts: Arc::new(Mutex::new(vec![])),
+    })
+}
+#[test]
+fn attempt_middleware_observes_original_cost_before_rewriting_display_facts() {
+    let operation = generate_operation();
+    let (coordinator, store, provider) = coordinator(vec![costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::RewriteFacts, &store);
+    let deadline = SystemTime::now() + Duration::from_secs(30);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook.clone()));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, deadline),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let output = block_on(session.collect_uncommitted()).unwrap();
+    assert!(output.iter().any(|event| event.canonical_facts().iter().any(|fact| matches!(fact, GatewayEvent::ProviderCost(cost) if cost.total().amount().scaled() == 999))));
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    let state = store.state.lock().unwrap();
+    assert_eq!(state.commits, 1);
+    assert_eq!(state.finalizations.len(), 1);
+    assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+    assert_eq!(
+        state.finalizations[0].upstream_response_id.as_deref(),
+        Some("original")
+    );
+    assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+    assert_eq!(hook.contexts.lock().unwrap()[0].deadline(), deadline);
+    assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+}
+#[test]
+fn attempt_middleware_failure_after_read_keeps_cost_and_does_not_retry() {
+    let operation = generate_operation();
+    let (coordinator, store, provider) = coordinator(vec![costed_attempt(), costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::FailAfterRead, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::Middleware)
+    ));
+    assert!(session.is_finalized());
+    assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+    assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+    assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
+    let state = store.state.lock().unwrap();
+    assert_eq!(state.commits, 0);
+    assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+    assert_eq!(state.finalizations[0].send_state, UpstreamSendState::Sent);
+}
+#[test]
+fn attempt_middleware_cannot_expand_routed_capabilities() {
+    let operation = generate_operation();
+    let (coordinator, store, provider) = coordinator(vec![costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::RequireImage, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::Middleware)
+    ));
+    assert!(provider.contexts.lock().unwrap().is_empty());
+    assert_eq!(
+        store.state.lock().unwrap().finalizations[0].send_state,
+        UpstreamSendState::NotSent
+    );
+}
+#[test]
+fn attempt_middleware_short_circuit_never_selects_or_sends_a_provider() {
+    let operation = generate_operation();
+    let (coordinator, store, provider) = coordinator(vec![]);
+    let hook = attempt_hook(AttemptMiddlewareMode::ShortCircuit, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert_eq!(block_on(session.collect_uncommitted()).unwrap().len(), 2);
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    assert!(provider.contexts.lock().unwrap().is_empty());
+    let state = store.state.lock().unwrap();
+    assert!(state.attempts.is_empty());
+    assert_eq!(state.finalizations[0].attempt_count, 0);
+    assert_eq!(
+        state.finalizations[0].send_state,
+        UpstreamSendState::NotSent
+    );
+    assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
+}
+#[test]
+fn attempt_middleware_must_finish_original_source_before_claiming_success() {
+    let operation = generate_operation();
+    let (coordinator, store, provider) = coordinator(vec![costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::EarlyEnd, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::Middleware)
+    ));
+    assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
+    assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+    assert_eq!(
+        store.state.lock().unwrap().finalizations[0].send_state,
+        UpstreamSendState::NotSent
+    );
+}
+#[test]
+fn attempt_middleware_pass_through_uses_original_delivery_barrier() {
+    let operation = generate_operation();
+    let (coordinator, store, _) = coordinator(vec![costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::Pass, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let first = block_on(session.next_event()).unwrap().unwrap();
+    assert_eq!(
+        first.commit_requirement(),
+        CommitRequirement::CommitBeforeDelivery
+    );
+    assert!(matches!(
+        block_on(session.next_event()),
+        Err(EngineError::DownstreamCommitRequired)
+    ));
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    while block_on(session.next_event()).unwrap().is_some() {}
+    assert_eq!(
+        store.state.lock().unwrap().finalizations[0].cost_ticks,
+        Some(123)
+    );
+}
+
+#[test]
+fn attempt_middleware_is_recreated_for_each_core_retry_and_keeps_accumulated_costs() {
+    let operation = generate_operation();
+    let first = Script::Stream {
+        account_id: "acct_first",
+        items: vec![
+            Ok(GatewayEvent::Started(ResponseMeta::new("first", "gpt-5"))),
+            Ok(GatewayEvent::ProviderCost(
+                ProviderReportedCost::from_usd_ticks(999).unwrap(),
+            )),
+            Err(
+                ProviderError::new(ProviderErrorKind::Unavailable, UpstreamSendState::Sent)
+                    .with_replay_safe(),
+            ),
+        ],
+    };
+    let (coordinator, store, provider) = coordinator(vec![first, costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::Pass, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook.clone()));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let output = block_on(session.collect_uncommitted()).unwrap();
+    assert_eq!(output.len(), 3);
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    assert_eq!(session.budget_charge().amount_usd.scaled(), 1122);
+    assert_eq!(provider.contexts.lock().unwrap().len(), 2);
+    let contexts = hook.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(contexts[0].attempt_index().get(), 1);
+    assert_eq!(contexts[1].attempt_index().get(), 2);
+    assert_eq!(contexts[0].request_id(), contexts[1].request_id());
+    assert_eq!(contexts[0].deadline(), contexts[1].deadline());
+    let state = store.state.lock().unwrap();
+    assert_eq!(state.commits, 1);
+    assert_eq!(state.finalizations[0].attempt_count, 2);
+    assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+}
+#[test]
+fn attempt_middleware_cannot_read_a_provider_outside_the_frozen_scope() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let Script::Stream { items, .. } = costed_attempt() else {
+        unreachable!()
+    };
+    let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+        account_id: "acct_outside_scope",
+        items,
+    }]);
+    let hook = attempt_hook(AttemptMiddlewareMode::Pass, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::AccountOutsideClientScope)
+    ));
+    assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
+    let state = store.state.lock().unwrap();
+    assert!(state.attempts.is_empty());
+    assert_eq!(
+        state.finalizations[0].send_state,
+        UpstreamSendState::NotSent
+    );
+    assert_eq!(state.finalizations[0].cost_ticks, None);
+}
+
+#[test]
+fn attempt_middleware_can_fail_while_the_original_upstream_read_is_stalled() {
+    let operation = generate_operation();
+    let (coordinator, store, _) = coordinator(vec![Script::HangingStream {
+        account_id: "acct_one",
+        items: vec![
+            Ok(GatewayEvent::Started(ResponseMeta::new(
+                "original", "gpt-5",
+            ))),
+            Ok(GatewayEvent::ProviderCost(
+                ProviderReportedCost::from_usd_ticks(123).unwrap(),
+            )),
+        ],
+    }]);
+    let hook = attempt_hook(AttemptMiddlewareMode::FailWhileStalled, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(2)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert!(
+        matches!(
+            block_on(session.collect_uncommitted()),
+            Err(EngineError::Middleware)
+        ),
+        "plugin failure must win over root deadline"
+    );
+    assert!(session.is_finalized());
+    assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+    assert!(
+        session.provider_attempt_outcomes().is_empty(),
+        "plugin failure cannot penalize provider health"
+    );
+}
+#[test]
+fn attempt_middleware_projection_cannot_forge_a_continuation_checkpoint() {
+    let operation = generate_operation();
+    let (coordinator, store, _) = coordinator(vec![costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::ForgeCheckpoint, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let events = block_on(session.collect_uncommitted()).unwrap();
+    assert!(events.iter().all(|event| event.session_update().is_none()));
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+}
+
+#[test]
+fn attempt_middleware_preserves_original_checkpoint_when_display_forges_one() {
+    let original = ProviderSessionState::new(
+        "openai",
+        json!({"original":true}).as_object().unwrap().clone(),
+    )
+    .unwrap();
+    let mut completed = ProviderEvent::canonical(GatewayEvent::Completed(ResponseMeta::new(
+        "original", "gpt-5",
+    )));
+    completed.attach_session_update(original.clone());
+    let operation = generate_operation();
+    let (coordinator, store, _) = coordinator(vec![Script::ObservedStream {
+        account_id: "acct_one",
+        items: vec![
+            Ok(ProviderEvent::canonical(GatewayEvent::Started(
+                ResponseMeta::new("original", "gpt-5"),
+            ))),
+            Ok(completed),
+        ],
+    }]);
+    let hook = attempt_hook(AttemptMiddlewareMode::ForgeCheckpoint, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let events = block_on(session.collect_uncommitted()).unwrap();
+    let checkpoints: Vec<_> = events
+        .iter()
+        .filter_map(ProviderEvent::session_update)
+        .collect();
+    assert_eq!(checkpoints, vec![&original]);
+    assert!(session.native_continuation_pin(checkpoints[0]).is_some());
+    block_on(session.commit_downstream(Some(200))).unwrap();
+}
+#[test]
+fn attempt_middleware_resumes_a_dropped_read_without_losing_or_duplicating_facts() {
+    let operation = generate_operation();
+    let (coordinator, store, provider) = coordinator(vec![costed_attempt()]);
+    let hook = attempt_hook(AttemptMiddlewareMode::ResumeRead, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert_eq!(block_on(session.collect_uncommitted()).unwrap().len(), 3);
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+    assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+    assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+}
+#[test]
+fn attempt_middleware_live_cancel_keeps_cost_while_source_is_stalled() {
+    block_on(async {
+        let operation = generate_operation();
+        let (coordinator, store, provider) = coordinator(vec![Script::HangingStream {
+            account_id: "acct_one",
+            items: vec![
+                Ok(GatewayEvent::Started(ResponseMeta::new(
+                    "original", "gpt-5",
+                ))),
+                Ok(GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(123).unwrap(),
+                )),
+            ],
+        }]);
+        let hook = attempt_hook(AttemptMiddlewareMode::Pass, &store);
+        let coordinator = coordinator.with_attempt_middleware(Some(hook));
+        let cancellation = CancellationToken::new();
+        let mut session = coordinator
+            .start(
+                model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                operation.clone(),
+                plan(&operation),
+                None,
+                None,
+                cancellation.clone(),
+            )
+            .await
+            .unwrap();
+        let collect = Box::pin(session.collect_uncommitted());
+        let timer = Box::pin(futures_timer::Delay::new(Duration::from_millis(10)));
+        let futures::future::Either::Right((_, collect)) =
+            futures::future::select(collect, timer).await
+        else {
+            panic!("source should be stalled")
+        };
+        cancellation.cancel();
+        assert!(matches!(collect.await, Err(EngineError::Cancelled)));
+        session.cancel_and_finalize().await.unwrap();
+        assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+        assert!(session.provider_attempt_outcomes().is_empty());
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.finalizations.len(), 1);
+        assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+    });
+}
+#[test]
+fn attempt_middleware_cancel_cannot_erase_atomic_error_receipts() {
+    block_on(async {
+        for explicit_cleanup in [false, true] {
+            let operation = generate_operation();
+            let error = ProviderError::new(ProviderErrorKind::Unavailable, UpstreamSendState::Sent)
+                .with_atomic_client_events(vec![
+                    ProviderEvent::canonical(GatewayEvent::Started(ResponseMeta::new(
+                        "original-error",
+                        "gpt-5",
+                    ))),
+                    ProviderEvent::canonical(GatewayEvent::ProviderCost(
+                        ProviderReportedCost::from_usd_ticks(123).unwrap(),
+                    )),
+                ]);
+            let (coordinator, store, provider) = coordinator(vec![Script::ObservedStream {
+                account_id: "acct_one",
+                items: vec![Err(error)],
+            }]);
+            let hook = attempt_hook(AttemptMiddlewareMode::HoldError, &store);
+            let coordinator = coordinator.with_attempt_middleware(Some(hook));
+            let cancellation = CancellationToken::new();
+            let mut session = coordinator
+                .start(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation.clone(),
+                    plan(&operation),
+                    None,
+                    None,
+                    cancellation.clone(),
+                )
+                .await
+                .unwrap();
+            let collect = Box::pin(session.collect_uncommitted());
+            let timer = Box::pin(futures_timer::Delay::new(Duration::from_millis(10)));
+            let futures::future::Either::Right((_, collect)) =
+                futures::future::select(collect, timer).await
+            else {
+                panic!("middleware should retain original error")
+            };
+            if explicit_cleanup {
+                drop(collect);
+                session.cancel_and_finalize().await.unwrap();
+            } else {
+                cancellation.cancel();
+                assert!(matches!(collect.await, Err(EngineError::Cancelled)));
+            }
+            session.cancel_and_finalize().await.unwrap();
+            assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+            assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+            assert_eq!(session.provider_attempt_outcomes().len(), 1);
+            let state = store.state.lock().unwrap();
+            assert_eq!(state.finalizations.len(), 1);
+            assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+            assert_eq!(state.finalizations[0].send_state, UpstreamSendState::Sent);
+            assert_eq!(
+                state.finalizations[0].upstream_response_id.as_deref(),
+                Some("original-error")
+            );
+        }
+    });
+}
+
+#[test]
+fn attempt_middleware_resumes_preparation_without_reinvoking_the_plugin_or_provider() {
+    block_on(async {
+        for before_next in [true, false] {
+            let operation = generate_operation();
+            let script = if before_next {
+                costed_attempt()
+            } else {
+                Script::DelayedStream {
+                    account_id: "acct_one",
+                    items: complete_stream(None),
+                }
+            };
+            let (coordinator, store, provider) = coordinator(vec![script]);
+            let hook = attempt_hook(
+                if before_next {
+                    AttemptMiddlewareMode::WaitBeforeNext
+                } else {
+                    AttemptMiddlewareMode::Pass
+                },
+                &store,
+            );
+            let coordinator = coordinator.with_attempt_middleware(Some(hook.clone()));
+            let mut session = coordinator
+                .start(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation.clone(),
+                    plan(&operation),
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let mut first = Box::pin(session.next_event());
+            assert!(futures::poll!(first.as_mut()).is_pending());
+            drop(first);
+            let events = session.collect_uncommitted().await.unwrap();
+            assert_eq!(events.len(), if before_next { 3 } else { 2 });
+            session.commit_downstream(Some(200)).await.unwrap();
+            assert_eq!(hook.contexts.lock().unwrap().len(), 1);
+            assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+            assert_eq!(store.state.lock().unwrap().created, 1);
+            assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+        }
+    });
+}
+#[test]
+fn attempt_middleware_resumes_validated_cold_source_after_interrupted_observation() {
+    block_on(async {
+        let operation = generate_operation();
+        let (release, gate) = oneshot::channel();
+        let (coordinator, store, provider) = coordinator_with_store(
+            vec![costed_attempt()],
+            Arc::new(FakeStore {
+                create_gate: Mutex::new(Some(gate)),
+                ..FakeStore::default()
+            }),
+        );
+        let hook = attempt_hook(AttemptMiddlewareMode::ObservationInterrupted, &store);
+        let coordinator = coordinator.with_attempt_middleware(Some(hook.clone()));
+        let mut session = coordinator
+            .start(
+                model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                operation.clone(),
+                plan(&operation),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut first = Box::pin(session.next_event());
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        drop(first);
+        // Preserve the existing best-effort registration contract.
+        assert!(release.send(()).is_err());
+        assert_eq!(session.collect_uncommitted().await.unwrap().len(), 3);
+        session.commit_downstream(Some(200)).await.unwrap();
+        assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+        assert_eq!(hook.contexts.lock().unwrap().len(), 1);
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+        assert_eq!(store.state.lock().unwrap().created, 1);
+        assert!(store.state.lock().unwrap().finalizations.is_empty());
+    });
+}
+
+#[test]
+fn attempt_middleware_short_circuit_after_unsent_retry_keeps_not_sent() {
+    let operation = generate_operation();
+    let error = ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::NotSent)
+        .with_status(429);
+    let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+        account_id: "acct_one",
+        items: vec![Err(error)],
+    }]);
+    let hook = attempt_hook(AttemptMiddlewareMode::ShortCircuitAfterRetry, &store);
+    let coordinator = coordinator.with_attempt_middleware(Some(hook.clone()));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation.clone(),
+        plan(&operation),
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert_eq!(block_on(session.collect_uncommitted()).unwrap().len(), 2);
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    assert_eq!(hook.contexts.lock().unwrap().len(), 2);
+    assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+    let state = store.state.lock().unwrap();
+    assert_eq!(state.finalizations.len(), 1);
+    assert_eq!(state.finalizations[0].attempt_count, 1);
+    assert_eq!(
+        state.finalizations[0].send_state,
+        UpstreamSendState::NotSent
+    );
+    assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
 }

@@ -120,6 +120,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    attempt_middleware: Option<Arc<dyn super::attempt_middleware::AttemptMiddleware>>,
     client: AuthenticatedClient,
     request_id: ModelRequestId,
     started_at: SystemTime,
@@ -128,6 +129,14 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn with_attempt_middleware(
+        mut self,
+        middleware: Arc<dyn super::attempt_middleware::AttemptMiddleware>,
+    ) -> Self {
+        self.attempt_middleware = Some(middleware);
+        self
+    }
+
     pub fn client(&self) -> &AuthenticatedClient {
         &self.client
     }
@@ -599,6 +608,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         let PreparedRootExecution {
+            attempt_middleware,
             client,
             request_id,
             started_at,
@@ -724,6 +734,7 @@ impl DefaultExecutionService {
         };
         let core = match self
             .coordinator
+            .with_attempt_middleware(attempt_middleware)
             .start(
                 new_request,
                 operation,
@@ -1207,6 +1218,7 @@ impl ExecutionService for DefaultExecutionService {
         })?;
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            attempt_middleware: None,
             client,
             request_id: new_request_id()?,
             started_at,
