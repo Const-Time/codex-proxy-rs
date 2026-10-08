@@ -53,10 +53,41 @@ pub(super) async fn forward_execution(
     connection: &mut ResponsesWebSocketConnection,
     started: StartedExecution,
     replay: &mut ConnectionReplaySnapshot,
+    revocation: Option<gateway_core::lifecycle::CancellationToken>,
 ) -> ForwardOutcome {
     let request_id = Arc::<str>::from(started.request_id.to_string());
     let streaming = started.stream;
-    let mut execution = PendingExecution::new(started.session);
+    // Construct cleanup ownership before a ready revocation can win the select.
+    let execution = PendingExecution::new(started.session);
+    let Some(revocation) = revocation else {
+        return forward_execution_inner(connection, request_id, streaming, execution, replay).await;
+    };
+    // Revocation also covers a completed Core response waiting on a WS write.
+    // Dropping the inner forwarder retains PendingExecution's original cleanup.
+    let outcome = tokio::select! { biased;
+        () = revocation.cancelled() => None,
+        outcome = forward_execution_inner(connection, request_id.clone(), streaming, execution, replay) => Some(outcome),
+    };
+    match outcome {
+        Some(outcome) => outcome,
+        None => {
+            send_gateway_error(
+                connection,
+                &GatewayError::new(GatewayErrorKind::Internal, "plugin middleware was revoked"),
+                &request_id,
+            )
+            .await
+        }
+    }
+}
+
+async fn forward_execution_inner(
+    connection: &mut ResponsesWebSocketConnection,
+    request_id: Arc<str>,
+    streaming: bool,
+    mut execution: PendingExecution,
+    replay: &mut ConnectionReplaySnapshot,
+) -> ForwardOutcome {
     if !streaming {
         let error = GatewayError::new(
             GatewayErrorKind::Internal,
@@ -108,7 +139,14 @@ pub(super) async fn forward_execution(
         return ForwardOutcome::Disconnect;
     };
     let response_headers = response_session.response_headers().to_vec();
-    if let Err(error) = response_session.commit_downstream(None).await {
+    let projected_error_status = response_session
+        .middleware_response_head()
+        .map(|head| head.status_code)
+        .filter(|status| !(200..300).contains(status));
+    if let Err(error) = response_session
+        .commit_downstream(projected_error_status)
+        .await
+    {
         let error = gateway_error_from_engine(&error);
         return send_gateway_error(connection, &error, &request_id).await;
     }

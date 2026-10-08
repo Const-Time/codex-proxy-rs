@@ -138,4 +138,11 @@ attempt 挂载已连接 Responses HTTP 和真实 SDK 子进程：每次重试独
 
 request/attempt 两层已接入 `/v1/images/generations`、`/v1/images/edits` 和 `/v1/alpha/search`，并通过真实 SDK 子进程的透传、事实读取、正文改写和错误短路测试。它们固定使用 OpenAI Provider 原生端点；图片生成/编辑类型由入口保持，正文中的模型不参与文本模型映射。插件输入与输出继续过滤受管身份头；attempt 仅重建原端点已有的 session、thread、turn metadata 和 image turn 请求头。
 
-未改写的响应保留原始 JSON 字节、空白和字段次序，不包装成 Responses 对象。插件可修改客户端状态及正文，但不能修改原上游状态、费用和结算身份。请求取消、插件撤销、非法输出和超限均沿用同一 Core 清理路径。生产 middleware 门禁仍关闭，WebSocket 和其余声明范围尚待接入；经过中间件的 JSON 文档仍受 8 MiB 上限约束，大图响应可能超限，无匹配中间件时保留原有大响应合同。
+未改写的响应保留原始 JSON 字节、空白和字段次序，不包装成 Responses 对象。插件可修改客户端状态及正文，但不能修改原上游状态、费用和结算身份。请求取消、插件撤销、非法输出和超限均沿用同一 Core 清理路径。生产 middleware 门禁仍关闭，WebSocket request 和其余声明范围尚待接入；经过中间件的 JSON 文档仍受 8 MiB 上限约束，大图响应可能超限，无匹配中间件时保留原有大响应合同。
+
+
+### WebSocket attempt 接入进度
+
+Responses WebSocket 的 attempt 挂载已接入原 Core 执行与控制帧转发链。每个插件正文帧是一条完整 JSON 消息，不使用 SSE 字节；插件可改写消息内容或展开消息，宿主按整批校验后交付。原响应 ID、冻结模型、续接、stream 语义、连接 ID、上游传输标记与 Provider 私有状态保持原归属，避免把响应中断或下一轮续接指向其他执行。错误短路的 JSON 对象投影为带非 2xx status 的 WebSocket error 消息。
+
+真实连接验证覆盖响应中断、错误 ID 拒绝、排队 create 串行执行、断连/撤销、原生续接状态和改写批次失败；SDK 子进程验证 JSON 消息透传、改写、展开及错误短路。等待 WebSocket 写入时仍检查插件撤销；Core 启动后、首次轮询转发前发生撤销也会释放并发并完成唯一结算。当前只接通 WS 的 attempt 层；匹配到尚未接线的 request 层时明确拒绝，不跳过必需插件。生产 middleware 能力仍未开放，后续继续接入 WebSocket request 与其余声明范围。

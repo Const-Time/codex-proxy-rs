@@ -21,7 +21,7 @@ const DOWNSTREAM_WEBSOCKET_CONNECTION_ID_CONTEXT_KEY: &str = "downstream_websock
 
 /// Responses 请求进入共享解码内核时的下游传输来源。
 #[derive(Clone, Copy)]
-pub(super) enum RequestDecodeSource {
+pub(in crate::openai) enum RequestDecodeSource {
     /// 单次 HTTP 请求，请求头与正文属于同一请求。
     Http,
     /// 复用连接上的 WebSocket `response.create` 帧。
@@ -80,7 +80,7 @@ impl OpenAiRequestHeaders {
 
     /// 绑定代理为当前下游 WebSocket 分配的连接身份。
     #[must_use]
-    pub(super) fn with_downstream_websocket_connection_id(
+    pub(in crate::openai) fn with_downstream_websocket_connection_id(
         mut self,
         connection_id: impl Into<String>,
     ) -> Self {
@@ -419,7 +419,7 @@ pub(super) fn decode_request_inner(
 }
 
 /// 解码已解析的顶层 object；按下游传输来源恢复连接级协议上下文。
-pub(super) fn decode_request_object(
+pub(in crate::openai) fn decode_request_object(
     mut object: Map<String, Value>,
     request_headers: &OpenAiRequestHeaders,
     source: RequestDecodeSource,

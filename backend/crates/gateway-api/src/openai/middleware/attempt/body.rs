@@ -16,6 +16,7 @@ pub(super) struct SourceBody {
     pending: VecDeque<MiddlewareFrame>,
     exhausted: bool,
     streaming: bool,
+    format: super::super::WireFormat,
 }
 impl SourceBody {
     pub(super) async fn response(
@@ -30,6 +31,7 @@ impl SourceBody {
             pending: VecDeque::new(),
             exhausted: false,
             streaming,
+            format,
         };
         let mut headers = vec![];
         let mut status = 200;
@@ -118,22 +120,33 @@ impl SourceBody {
         )
     }
     fn encode(&mut self, event: ProviderEvent) -> Result<(), MiddlewareError> {
-        let mut frames = self.encoder.push_sse(&event);
+        let mut frames = if self.format.websocket() {
+            self.encoder
+                .push_websocket(&event)
+                .into_iter()
+                .map(Bytes::from)
+                .collect()
+        } else {
+            self.encoder.push_sse(&event)
+        };
+        let wire_framing = if self.format.websocket() {
+            MiddlewareFraming::JsonDocument
+        } else {
+            MiddlewareFraming::SseEvent
+        };
         if frames.iter().map(Bytes::len).sum::<usize>() > MAX_DOCUMENT_BYTES {
             return Err(MiddlewareError::InvalidState);
         }
         let terminal = self.encoder.is_completed() || self.encoder.has_wire_failure();
         let last = frames.pop().unwrap_or_default();
         for frame in frames {
-            self.pending.push_back(
-                MiddlewareFrame::new(frame, MiddlewareFraming::SseEvent, false)
-                    .with_transformed(true),
-            );
+            self.pending
+                .push_back(MiddlewareFrame::new(frame, wire_framing, false).with_transformed(true));
         }
         let framing = if last.is_empty() {
             MiddlewareFraming::RawBytes
         } else {
-            MiddlewareFraming::SseEvent
+            wire_framing
         };
         self.pending.push_back(MiddlewareFrame::from_provider_event(
             last, framing, terminal, event,

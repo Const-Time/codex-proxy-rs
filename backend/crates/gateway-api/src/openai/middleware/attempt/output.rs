@@ -17,6 +17,9 @@ struct Output {
     streaming: bool,
     raw_error: bool,
     raw_json: bool,
+    websocket: bool,
+    status: u16,
+    original_response_id: Option<String>,
     wire_terminal: bool,
     finished: bool,
 }
@@ -30,6 +33,9 @@ pub(super) fn decode(
         pending: VecDeque::new(),
         streaming: format.streaming() && (200..300).contains(&status),
         raw_json: format.raw_json(),
+        websocket: format.websocket(),
+        status,
+        original_response_id: None,
         raw_error: !(200..300).contains(&status),
         wire_terminal: false,
         finished: false,
@@ -103,6 +109,13 @@ impl Output {
             }
             let boundary = envelope.is_some() || !transformed;
             if let Some(envelope) = envelope {
+                if self.websocket {
+                    for fact in envelope.events().flat_map(|event| event.canonical_facts()) {
+                        if let GatewayEvent::Started(meta) | GatewayEvent::Completed(meta) = fact {
+                            self.original_response_id = Some(meta.response_id().to_owned());
+                        }
+                    }
+                }
                 facts.extend(
                     envelope
                         .events()
@@ -110,10 +123,17 @@ impl Output {
                 );
             }
             if !payload.is_empty() {
-                if framing != MiddlewareFraming::SseEvent {
-                    return Err(MiddlewareError::InvalidState);
-                }
-                let (wire, is_terminal) = sse(payload)?;
+                let (wire, is_terminal) = if self.websocket {
+                    if framing != MiddlewareFraming::JsonDocument {
+                        return Err(MiddlewareError::InvalidState);
+                    }
+                    websocket_message(payload)?
+                } else {
+                    if framing != MiddlewareFraming::SseEvent {
+                        return Err(MiddlewareError::InvalidState);
+                    }
+                    sse(payload)?
+                };
                 if self.wire_terminal {
                     return Err(MiddlewareError::InvalidState);
                 }
@@ -146,6 +166,20 @@ impl Output {
                 self.close().await;
             }
             if (boundary || terminal) && !batch.is_empty() {
+                if self.websocket
+                    && let Some(expected) = self.original_response_id.as_deref()
+                {
+                    for event in &batch {
+                        let Some(data) = event.wire_event().map(|wire| wire.data()) else {
+                            continue;
+                        };
+                        for id in [data.pointer("/response/id"), data.get("response_id")] {
+                            if id.is_some_and(|id| id.as_str() != Some(expected)) {
+                                return Err(MiddlewareError::InvalidState);
+                            }
+                        }
+                    }
+                }
                 self.pending = batch;
                 return Ok(self.pending.pop_front());
             }
@@ -166,7 +200,15 @@ impl Output {
                 {
                     return Err(MiddlewareError::InvalidState);
                 }
-                let wire = if self.raw_error || self.raw_json {
+                let wire = if self.websocket {
+                    let mut value: serde_json::Map<String, serde_json::Value> =
+                        serde_json::from_slice(&bytes)
+                            .map_err(|_| MiddlewareError::InvalidState)?;
+                    value.insert("type".into(), "error".into());
+                    value.insert("status".into(), self.status.into());
+                    ProtocolWireEvent::json("openai", Some("error".into()), value.into())
+                        .map_err(|_| MiddlewareError::InvalidState)?
+                } else if self.raw_error || self.raw_json {
                     ProtocolWireEvent::raw_json("openai", Bytes::from(bytes))
                         .map_err(|_| MiddlewareError::InvalidState)?
                 } else {
@@ -203,6 +245,23 @@ impl Output {
         Err(MiddlewareError::InvalidState)
     }
 }
+fn websocket_message(payload: Bytes) -> Result<(ProtocolWireEvent, bool), MiddlewareError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(&payload).map_err(|_| MiddlewareError::InvalidState)?;
+    let kind = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .ok_or(MiddlewareError::InvalidState)?;
+    let terminal = matches!(
+        kind,
+        "response.completed" | "response.incomplete" | "response.failed" | "error"
+    );
+    let wire = ProtocolWireEvent::json("openai", Some(kind.to_owned()), value)
+        .map_err(|_| MiddlewareError::InvalidState)?;
+    Ok((wire, terminal))
+}
+
 fn sse(payload: Bytes) -> Result<(ProtocolWireEvent, bool), MiddlewareError> {
     if !(payload.ends_with(b"\n\n") || payload.ends_with(b"\r\n\r\n")) {
         return Err(MiddlewareError::InvalidState);

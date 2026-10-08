@@ -2,8 +2,9 @@
 mod body;
 mod output;
 mod raw;
+mod request;
 
-use crate::openai::responses::{decode_request_with_headers, request::forwarded_request_headers};
+use crate::openai::responses::request::forwarded_request_headers;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_admin::plugins::middleware::PluginMiddlewareRegistry;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 pub(super) struct ResponsesAttempt {
     pub registry: Arc<PluginMiddlewareRegistry>,
     pub context: MiddlewareContext,
-    pub streaming: bool,
+    pub format: super::WireFormat,
 }
 impl AttemptMiddleware for ResponsesAttempt {
     fn invoke(
@@ -27,7 +28,7 @@ impl AttemptMiddleware for ResponsesAttempt {
     ) -> BoxFuture<'static, Result<AttemptOutput, MiddlewareError>> {
         let registry = self.registry.clone();
         let mut context = self.context.clone();
-        let streaming = self.streaming;
+        let format = self.format;
         Box::pin(async move {
             context.attempt_index = Some(attempt.attempt_index().get());
             context.provider = Some(original.candidate().provider().clone());
@@ -52,7 +53,7 @@ impl AttemptMiddleware for ResponsesAttempt {
                 serde_json::to_vec(payload.body()).map_err(|_| MiddlewareError::InvalidState)?,
             );
             let headers = super::headers::from_context(payload.context())?;
-            let expected = decode_request_with_headers(&body, &headers)
+            let expected = request::decode(original.operation(), &body, &headers, format)
                 .map_err(|_| MiddlewareError::InvalidState)?;
             let request = MiddlewareRequest::new(
                 "openai",
@@ -73,8 +74,9 @@ impl AttemptMiddleware for ResponsesAttempt {
                             return Err(MiddlewareError::InvalidState);
                         }
                         let headers = super::headers::filtered_headers(request.headers())?;
-                        let decoded = decode_request_with_headers(request.body(), &headers)
-                            .map_err(|_| MiddlewareError::InvalidState)?;
+                        let decoded =
+                            request::decode(original.operation(), request.body(), &headers, format)
+                                .map_err(|_| MiddlewareError::InvalidState)?;
                         // Routing and continuation have already been resolved by Core.
                         if decoded.metadata().requested_model()
                             != expected.metadata().requested_model()
@@ -106,15 +108,11 @@ impl AttemptMiddleware for ResponsesAttempt {
                         {
                             operation.set_provider_session_state(state.clone());
                         }
-                        body::SourceBody::response(
-                            next.run(operation).await?,
-                            super::WireFormat::Responses { streaming },
-                        )
-                        .await
+                        body::SourceBody::response(next.run(operation).await?, format).await
                     })
                 });
             let response = plan.run(request, terminal).await?;
-            output::decode(response, super::WireFormat::Responses { streaming })
+            output::decode(response, format)
         })
     }
 }
