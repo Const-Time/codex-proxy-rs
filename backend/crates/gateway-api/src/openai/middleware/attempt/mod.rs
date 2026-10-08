@@ -70,7 +70,7 @@ impl AttemptMiddleware for ResponsesAttempt {
             let terminal =
                 gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
                     Box::pin(async move {
-                        if request.protocol() != "openai" {
+                        if request.protocol() != "openai" || request.has_capability_declaration() {
                             return Err(MiddlewareError::InvalidState);
                         }
                         let headers = super::headers::filtered_headers(request.headers())?;
@@ -88,12 +88,13 @@ impl AttemptMiddleware for ResponsesAttempt {
                             return Err(MiddlewareError::InvalidState);
                         }
                         let (mut operation, _) = decoded.into_parts();
-                        let Operation::Generate(rewritten) = &operation else {
+                        let Operation::Generate(rewritten) = &mut operation else {
                             return Err(MiddlewareError::InvalidState);
                         };
                         let Operation::Generate(original_generate) = original.operation() else {
                             return Err(MiddlewareError::InvalidState);
                         };
+                        rewritten.inherit_capability_requirements(original_generate);
                         if rewritten.protocol_payload().context().get("use_websocket")
                             != original_generate
                                 .protocol_payload()

@@ -134,7 +134,8 @@ pub(in crate::openai) async fn respond(
                             "middleware request is invalid",
                         ))
                     })?
-                    .with_client_context(ip, agent);
+                    .with_client_context(ip, agent)
+                    .with_middleware_capabilities(&request)?;
                 if decoded.metadata().stream() != streaming {
                     return Err(MiddlewareError::Gateway(GatewayError::new(
                         GatewayErrorKind::InvalidRequest,

@@ -135,7 +135,7 @@ pub(in crate::openai) async fn respond(
                     input.decoded.metadata().user_agent().map(str::to_owned),
                 );
                 // Select private replay state using the rewritten continuation, never plugin bytes.
-                let decoded = snapshot.prepare(decoded);
+                let decoded = snapshot.prepare(decoded.with_middleware_capabilities(&request)?);
                 let started = service
                     .start_prepared_response(
                         root.prepared,

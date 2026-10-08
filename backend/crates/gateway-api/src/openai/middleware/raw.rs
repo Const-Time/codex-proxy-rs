@@ -134,7 +134,7 @@ pub(super) fn rewrite(
     original: &Operation,
     request: &MiddlewareRequest,
 ) -> Result<Operation, MiddlewareError> {
-    if request.protocol() != "openai" {
+    if request.protocol() != "openai" || request.has_capability_declaration() {
         return Err(MiddlewareError::InvalidState);
     }
     let headers = super::headers::filtered_headers(request.headers())?;

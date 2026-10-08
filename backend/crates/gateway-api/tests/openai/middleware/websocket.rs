@@ -484,3 +484,59 @@ async fn ws_request_preserves_capacity_and_continuation_error_projections() {
         );
     }
 }
+
+#[tokio::test]
+async fn ws_request_capabilities_preserve_routing_constraints_across_both_layers() {
+    use gateway_core::operation::Feature;
+    for (mode, extra, supported, success) in [
+        (Mode::HandleTools, json!({"tools":[{}]}), false, true),
+        (
+            Mode::HandleTools,
+            json!({"tools":[{}],"reasoning":{}}),
+            false,
+            false,
+        ),
+        (Mode::FalseHandleTools, json!({"tools":[{}]}), false, false),
+        (Mode::RequireReasoning, json!({}), false, false),
+        (Mode::RequireReasoning, json!({}), true, true),
+    ] {
+        let features = if supported {
+            vec![Feature::Reasoning]
+        } else {
+            vec![]
+        };
+        let f = Fixture::with_features(
+            mode,
+            vec![
+                PluginMiddlewareMount::Request,
+                PluginMiddlewareMount::Attempt,
+            ],
+            &features,
+        )
+        .await;
+        let (_server, mut socket) = connect(&f).await;
+        let mut body = create();
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        send(&mut socket, body).await;
+        let value = event(&mut socket).await;
+        if success {
+            assert_eq!(value["type"], "response.created", "{value}");
+            assert_eq!(event(&mut socket).await["type"], "response.completed");
+            f.settled().await;
+            assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+            let operations = f.effects.operations.lock().unwrap();
+            assert_eq!(
+                operations[0]
+                    .capability_requirements()
+                    .features()
+                    .contains(&Feature::Reasoning),
+                supported
+            );
+        } else {
+            assert_eq!(value["type"], "error", "{value}");
+            assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+}

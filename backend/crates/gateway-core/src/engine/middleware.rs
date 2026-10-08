@@ -8,13 +8,15 @@ use crate::{
     error::{GatewayError, ProviderError},
     event::ProviderEvent,
     lifecycle::CancellationToken,
-    operation::OperationKind,
+    operation::{
+        CapabilityRequirements, Feature, GenerateRequest, Operation, OperationKind, ProtocolPayload,
+    },
     policy::ClientApiKeyId,
     routing::{AccountGroupId, ProviderKind},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use std::{fmt, time::SystemTime};
+use std::{collections::BTreeSet, fmt, time::SystemTime};
 /// 中间件在一次逻辑请求中的挂载位置
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MiddlewareMount {
@@ -89,11 +91,26 @@ pub struct MiddlewareRequest {
     protocol: String,
     headers: Vec<MiddlewareHeader>,
     body: Bytes,
+    original_body: Bytes,
+    original_protocol: String,
+    capabilities: Option<MiddlewareCapabilityDeclaration>,
 }
+
+/// Features converted by request middleware and additional upstream requirements.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MiddlewareCapabilityDeclaration {
+    pub handled: BTreeSet<Feature>,
+    pub required: BTreeSet<Feature>,
+}
+
 impl MiddlewareRequest {
     pub fn new(protocol: impl Into<String>, headers: Vec<MiddlewareHeader>, body: Bytes) -> Self {
+        let protocol = protocol.into();
         Self {
-            protocol: protocol.into(),
+            original_protocol: protocol.clone(),
+            original_body: body.clone(),
+            capabilities: None,
+            protocol,
             headers,
             body,
         }
@@ -110,7 +127,77 @@ impl MiddlewareRequest {
     pub fn into_parts(self) -> (String, Vec<MiddlewareHeader>, Bytes) {
         (self.protocol, self.headers, self.body)
     }
+    /// Keep the chain's original requirements; a declaration must describe this layer's real conversion.
+    pub fn replace_parts(
+        mut self,
+        protocol: String,
+        headers: Vec<MiddlewareHeader>,
+        body: Bytes,
+        declaration: Option<MiddlewareCapabilityDeclaration>,
+    ) -> Result<Self, MiddlewareError> {
+        if let Some(declaration) = declaration {
+            if self.protocol != "openai"
+                || protocol != "openai"
+                || self.original_protocol != "openai"
+                || declaration.handled.contains(&Feature::NativeContinuation)
+                || !declaration.handled.is_disjoint(&declaration.required)
+                || (declaration.handled.is_empty() && declaration.required.is_empty())
+            {
+                return Err(MiddlewareError::InvalidState);
+            }
+            let before = generate_requirements(&self.body)?;
+            let after = generate_requirements(&body)?;
+            if !declaration.handled.is_subset(before.features())
+                || !declaration.handled.is_disjoint(after.features())
+            {
+                return Err(MiddlewareError::InvalidState);
+            }
+            let accumulated = self.capabilities.get_or_insert_default();
+            accumulated.handled.extend(declaration.handled);
+            accumulated.required.extend(declaration.required);
+        }
+        self.protocol = protocol;
+        self.headers = headers;
+        self.body = body;
+        Ok(self)
+    }
+    /// Apply after protocol decoding; actual body requirements always remain in force.
+    pub fn apply_capabilities(&self, operation: Operation) -> Result<Operation, MiddlewareError> {
+        let Some(declaration) = &self.capabilities else {
+            return Ok(operation);
+        };
+        if !matches!(&operation, Operation::Generate(generate) if generate.protocol_payload().protocol() == "openai")
+            || self.protocol != "openai"
+        {
+            return Err(MiddlewareError::InvalidState);
+        }
+        let original = generate_requirements(&self.original_body)?;
+        let mut effective = CapabilityRequirements::new(OperationKind::Generate);
+        for feature in original
+            .features()
+            .difference(&declaration.handled)
+            .chain(declaration.required.iter())
+        {
+            effective = effective.require(*feature);
+        }
+        operation
+            .with_inherited_capability_requirements(effective)
+            .map_err(|_| MiddlewareError::InvalidState)
+    }
+    pub fn has_capability_declaration(&self) -> bool {
+        self.capabilities.is_some()
+    }
 }
+fn generate_requirements(body: &[u8]) -> Result<CapabilityRequirements, MiddlewareError> {
+    let body = serde_json::from_slice(body).map_err(|_| MiddlewareError::InvalidState)?;
+    let payload =
+        ProtocolPayload::json_object("openai", body).map_err(|_| MiddlewareError::InvalidState)?;
+    Ok(
+        Operation::Generate(GenerateRequest::from_protocol_payload(payload))
+            .capability_requirements(),
+    )
+}
+
 /// 中间件逐次拉取的完整正文边界
 pub struct MiddlewareFrame {
     bytes: Bytes,

@@ -138,3 +138,85 @@ async fn revoking_plugin_interrupts_live_sse_and_releases_core_admission() {
         assert_eq!(charges[0].amount_usd, Decimal::ZERO);
     }
 }
+
+#[tokio::test]
+async fn request_capabilities_are_checked_by_core_and_survive_attempt_redecode() {
+    use axum::{body::Body, http::Request};
+    use gateway_core::operation::Feature;
+    use tower::ServiceExt;
+    for both in [false, true] {
+        for streaming in [false, true] {
+            for (mode, extra, supported, success) in [
+                (Mode::HandleTools, json!({"tools":[{}]}), false, true),
+                (
+                    Mode::HandleTools,
+                    json!({"tools":[{}],"reasoning":{}}),
+                    false,
+                    false,
+                ),
+                (Mode::FalseHandleTools, json!({"tools":[{}]}), false, false),
+                (Mode::RequireReasoning, json!({}), false, false),
+                (Mode::RequireReasoning, json!({}), true, true),
+            ] {
+                let mounts = if both {
+                    vec![
+                        PluginMiddlewareMount::Request,
+                        PluginMiddlewareMount::Attempt,
+                    ]
+                } else {
+                    vec![PluginMiddlewareMount::Request]
+                };
+                let features = if supported {
+                    vec![Feature::Reasoning]
+                } else {
+                    vec![]
+                };
+                let f = Fixture::with_features(mode, mounts, &features).await;
+                let mut body = extra;
+                body["model"] = json!("model-a");
+                body["input"] = json!("original input");
+                body["stream"] = json!(streaming);
+                let response = f
+                    .app
+                    .clone()
+                    .oneshot(
+                        Request::post("/v1/responses")
+                            .header("authorization", "Bearer sk_middleware")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status().is_success(),
+                    success,
+                    "status={} both={both} streaming={streaming}",
+                    response.status()
+                );
+                let output = bytes(response).await;
+                if success {
+                    assert!(
+                        String::from_utf8_lossy(&output).contains("resp_original"),
+                        "{}",
+                        String::from_utf8_lossy(&output)
+                    );
+                    f.settled().await;
+                    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(f.effects.commits.load(Ordering::SeqCst), 1);
+                    let operations = f.effects.operations.lock().unwrap();
+                    assert_eq!(
+                        operations[0]
+                            .capability_requirements()
+                            .features()
+                            .contains(&Feature::Reasoning),
+                        supported
+                    );
+                } else {
+                    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(f.effects.active.load(Ordering::SeqCst), 0);
+                }
+            }
+        }
+    }
+}

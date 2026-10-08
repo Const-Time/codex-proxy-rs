@@ -559,3 +559,8 @@ WebSocket attempt 复用同一 PreparedRootExecution 和冻结中间件发布快
 WebSocket request/attempt 使用相同冻结计划与根身份。API 的 ExecutionBody 按 ClientTransport 输出 JSON 文档、SSE 或 WS JSON 消息，Delivery 复用原批次上限与 commit/finalization 校验；WS 不添加 SSE 结束帧。响应 ID、Provider 续接状态只从宿主来源信封读取，并在完整批次通过校验且原执行终结后更新连接快照。request 改写后的续接 ID 再匹配原快照，不能把旧状态附给另一响应。
 
 WS 控制帧等待函数同时用于原会话读取、插件调用及外层正文读取，整个等待期间固定同一个 future；只共享当前 Core 的 ResponseControl 句柄，不新增执行或账本。根撤销覆盖等待插件和下游写入，原 PendingExecution 与 RPC 正文 owner 负责取消后的清理。request 错误短路发生在 Core 准入前，不创建费用记录；真实执行的费用与原始终态仍由唯一 Core 会话处理。
+
+
+中间件能力声明由 Core 的 MiddlewareRequest 保存链入口正文和累计 handled/required，Runtime 只把 SDK 声明转换为此合同，并限制为 Generate 的 request 挂载和显式正文替换。每层的 handled 必须来自本层改写前的需求，并在改写后消失；NativeContinuation 不允许被处理声明豁免。最终解码后，API 将原入口未处理的需求和额外 required 交给 GenerateRequest 的继承约束；实际正文需求始终取并集，Router 仍是能力准入 owner。声明不影响身份、账号范围、预算或计费 owner。
+
+attempt 解码只从原 GenerateRequest 附回继承约束，不复制原正文的推导需求；因此正文功能改变仍会触发已冻结能力比较。多个 SDK next 保留同一个链入口及累计声明，普通正文/头透传不会抹掉前层约束。此机制不把执行设置 JSON 当作协议正文参数；请求级设置模型仍需独立接入。

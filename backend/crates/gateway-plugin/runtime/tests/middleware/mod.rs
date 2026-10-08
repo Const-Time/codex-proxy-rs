@@ -1,3 +1,4 @@
+mod capabilities;
 mod plan;
 use bytes::Bytes;
 use futures::future::BoxFuture;

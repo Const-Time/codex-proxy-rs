@@ -151,3 +151,12 @@ Responses WebSocket 的 attempt 挂载已接入原 Core 执行与控制帧转发
 request 插件获得不含 `response.create` 类型字段的请求 JSON，可以在正常 Core 权限与路由检查前改写模型和正文；客户端流式语义、连接身份、上游传输标记仍由入口保持。宿主按改写后的续接 ID 选择连接内私有状态，不从插件正文恢复状态。响应以完整 JSON 消息批次校验，不发送 SSE 的 `[DONE]`，只有通过校验才确认原交付；原始响应 ID 和费用不能被改写。
 
 等待 request 插件、Core 启动及下一批响应时，复用原控制帧 pump，保持同一个读取 future，排队 create 仍串行执行。关闭连接、禁用插件或换代会中断等待并交还原清理 owner。request 层直接返回错误时不会启动 Core 或产生费用；attempt 层错误短路仍由已启动的 Core 请求收尾。容量不足的 503 与客户端续接重放错误复用原 WebSocket 投影，不被 request 插件链改成普通错误。真实连接覆盖三种挂载组合、next 前后挂起及改写续接后的私有状态隔离；真实 SDK 子进程与 Core 验证两层正文改写/展开、唯一交付确认和原始费用。
+
+
+### Request 能力转换声明
+
+Responses JSON/SSE/WS 的 request 层已接通 SDK `declare_capabilities`。声明必须与显式正文替换一起提交；`handled` 只能包含本层输入确实需要、替换后正文已不再需要的 tools、vision、reasoning、json_schema。重复项、空声明、handled/required 重叠、没有实际消除的功能都会被拒绝。转换后的响应还原由插件负责。
+
+Core 路由仍校验改写后正文中的全部需求，并继承链入口中未声明处理的需求及各层额外 `required`。后层重新引入的功能会恢复检查，不能取消前层的额外上游要求；原生续接不能声明为已处理。attempt 重解码保留继承的声明，但继续独立比较实际正文的能力，不能在已选路由后借声明修改能力范围。声明仅用于 Responses request；attempt、Images 和 Search 会明确拒绝。
+
+这项接线经过 SDK 子进程、嵌套 next 与本地 Core 路由验证，覆盖 HTTP JSON/SSE 和 WebSocket 两层组合。它不解除 middleware 生产启用门禁：请求级执行设置、宿主模型调用及其余声明范围仍在实施。

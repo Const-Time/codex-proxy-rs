@@ -212,6 +212,39 @@ mod worker_middleware {
         if mode == "settings" {
             request.head.settings = json!({"fast":true});
         }
+        if mode.starts_with("caps-") {
+            use gateway_plugin_sdk::call::middleware::{CapabilityDeclaration, RequestFeature};
+            let mut body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let declaration = match mode.as_str() {
+                "caps-required" | "caps-preserve" => CapabilityDeclaration {
+                    handled: vec![],
+                    required: vec![RequestFeature::Reasoning],
+                },
+                "caps-missing" => CapabilityDeclaration {
+                    handled: vec![RequestFeature::Vision],
+                    required: vec![],
+                },
+                "caps-duplicate" => CapabilityDeclaration {
+                    handled: vec![RequestFeature::Tools, RequestFeature::Tools],
+                    required: vec![],
+                },
+                "caps-overlap" => CapabilityDeclaration {
+                    handled: vec![RequestFeature::Tools],
+                    required: vec![RequestFeature::Tools],
+                },
+                _ => CapabilityDeclaration {
+                    handled: vec![RequestFeature::Tools],
+                    required: vec![],
+                },
+            };
+            if mode != "caps-retain" {
+                body.as_object_mut().unwrap().remove("tools");
+            }
+            if mode != "caps-preserve" {
+                request.replace_body(serde_json::to_vec(&body).unwrap());
+            }
+            request.declare_capabilities(declaration);
+        }
         let mut response = next.run(request).await?;
         if mode == "chain" {
             response.append_header("x-chain", format!("{instance}:{generation}").into_bytes());
