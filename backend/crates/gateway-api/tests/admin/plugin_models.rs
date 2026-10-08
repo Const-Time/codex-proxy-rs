@@ -24,6 +24,30 @@ use tower::ServiceExt;
 pub(super) struct Plugins(pub(super) PluginAccess);
 #[async_trait]
 impl PluginService for Plugins {
+    async fn authenticate(
+        &self,
+        authorization: String,
+    ) -> Result<PluginAuthenticationDecision, AdminError> {
+        if self.0.is_revoked() || authorization == "Bearer plugin-error" {
+            return Err(AdminError::unavailable("private plugin error"));
+        }
+        Ok(match authorization.as_str() {
+            "Bearer external" => PluginAuthenticationDecision::Authenticated {
+                key: gateway_core::policy::ClientApiKeyId::new("key_api_test").unwrap(),
+                access: self.0.clone(),
+            },
+            "Bearer missing-binding" => PluginAuthenticationDecision::Authenticated {
+                key: gateway_core::policy::ClientApiKeyId::new("missing").unwrap(),
+                access: self.0.clone(),
+            },
+            value if value == format!("Bearer {}", secret()) => {
+                PluginAuthenticationDecision::Builtin {
+                    access: self.0.clone(),
+                }
+            }
+            _ => PluginAuthenticationDecision::Rejected,
+        })
+    }
     fn access(&self, id: &str, revision: u64) -> Result<PluginAccess, AdminError> {
         if id == "plugin" && revision == 1 && !self.0.is_revoked() {
             Ok(self.0.clone())
@@ -71,11 +95,11 @@ impl PluginService for Plugins {
     }
 }
 #[derive(Default)]
-struct Trace {
-    starts: Mutex<Vec<(String, String)>>,
-    events: AtomicUsize,
-    cancelled: AtomicUsize,
-    finalized: AtomicUsize,
+pub(crate) struct Trace {
+    pub(crate) starts: Mutex<Vec<(String, String)>>,
+    pub(crate) events: AtomicUsize,
+    pub(crate) cancelled: AtomicUsize,
+    pub(crate) finalized: AtomicUsize,
 }
 struct Execution {
     client: AuthenticatedClient,
@@ -84,6 +108,13 @@ struct Execution {
     pending_json: bool,
 }
 impl ExecutionService for Execution {
+    fn authenticate_bound_key(
+        &self,
+        key: &gateway_core::policy::ClientApiKeyId,
+        revocation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        crate::openai::bound_client(self.snapshots.clone(), key, revocation)
+    }
     fn client_access(&self, client: &AuthenticatedClient) -> Option<ClientAccessGuard> {
         self.snapshots.client_access(client.policy()).ok()
     }
@@ -127,9 +158,18 @@ impl ExecutionService for Execution {
     }
     fn start_provider_endpoint(
         &self,
-        _: StartProviderExecution,
+        request: StartProviderExecution,
     ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
-        unreachable!()
+        Box::pin(async move {
+            self.trace.starts.lock().unwrap().push((
+                request.client.policy().key_id().as_str().into(),
+                request.metadata.endpoint,
+            ));
+            Err(GatewayError::new(
+                gateway_core::error::GatewayErrorKind::Internal,
+                "fixture reached provider execution",
+            ))
+        })
     }
 }
 struct Session {
@@ -193,15 +233,15 @@ impl ExecutionSession for Session {
 fn secret() -> String {
     format!("sk_{}", "a".repeat(43))
 }
-struct Fixture {
+pub(crate) struct Fixture {
     admin: AdminTestFixture,
-    app: axum::Router,
-    plugin: PluginAccess,
-    snapshots: RuntimeSnapshotHandle,
-    trace: Arc<Trace>,
+    pub(crate) app: axum::Router,
+    pub(crate) plugin: PluginAccess,
+    pub(crate) snapshots: RuntimeSnapshotHandle,
+    pub(crate) trace: Arc<Trace>,
 }
 impl Fixture {
-    async fn new(pending_json: bool) -> Self {
+    pub(crate) async fn new(pending_json: bool) -> Self {
         let admin = AdminTestFixture::new().await;
         admin.auth.insert_session("admin");
         admin.auth.insert_user_session("ordinary", "ordinary");
@@ -249,7 +289,7 @@ impl Fixture {
         Request::builder().method("POST").uri("/api/admin/plugins/models/responses").header("cookie",format!("cpr_admin_session={cookie}")).header("content-type","application/json").body(Body::from(json!({"id":"plugin","revision":revision,"clientKeyId":key,"body":{"model":"model-a","input":"hello","stream":stream}}).to_string())).unwrap()
     }
 }
-async fn until(mut predicate: impl FnMut() -> bool) {
+pub(crate) async fn until(mut predicate: impl FnMut() -> bool) {
     tokio::time::timeout(StdDuration::from_secs(2), async {
         while !predicate() {
             tokio::task::yield_now().await;

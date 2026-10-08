@@ -106,12 +106,41 @@ pub fn bearer_client_api_key(headers: &HeaderMap) -> Result<&str, ClientApiKeyAu
     Ok(token)
 }
 
-pub(crate) fn authenticate_client(
+pub(crate) async fn authenticate_client(
     service: &OpenAiService,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedClient, ClientAccessError> {
-    let key = bearer_client_api_key(headers)?;
-    let client = service.authenticate(key)?;
+    let mut values = headers.get_all(AUTHORIZATION).iter();
+    let raw = values
+        .next()
+        .ok_or(ClientApiKeyAuthError::MissingAuthorization)?
+        .to_str()
+        .map_err(|_| ClientApiKeyAuthError::MalformedAuthorization)?;
+    if values.next().is_some()
+        || raw.is_empty()
+        || raw.len() > 8192
+        || raw.chars().any(char::is_control)
+    {
+        return Err(ClientApiKeyAuthError::MalformedAuthorization.into());
+    }
+    let client = service
+        .authenticate_ingress(raw, bearer_client_api_key(headers).ok())
+        .await?;
+    enforce_version(client, headers)
+}
+pub(crate) fn authenticate_builtin_client(
+    service: &OpenAiService,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedClient, ClientAccessError> {
+    enforce_version(
+        service.authenticate(bearer_client_api_key(headers)?)?,
+        headers,
+    )
+}
+fn enforce_version(
+    client: AuthenticatedClient,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedClient, ClientAccessError> {
     if let Some(identified) = identify_codex_client(headers) {
         client
             .snapshot()

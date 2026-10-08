@@ -78,6 +78,7 @@ fn source_tree_should_match_frozen_machine_manifest() {
         "src/openai/responses/websocket/mod.rs",
         "src/openai/responses/websocket/protocol.rs",
         "src/openai/router.rs",
+        "src/openai/revocation.rs",
         "src/openai/search/http.rs",
         "src/openai/search/mod.rs",
         "src/openai/service.rs",

@@ -12,7 +12,20 @@ use tokio::sync::Mutex;
 
 type ActivePlugins = BTreeMap<String, (u64, Arc<dyn PluginProcess>)>;
 
+#[derive(Clone)]
+struct AuthenticationEntry {
+    id: String,
+    binding: PluginAuthenticationBinding,
+    process: Option<Arc<dyn PluginProcess>>,
+}
+#[derive(Default)]
+struct AuthenticationPublication {
+    entry: Option<AuthenticationEntry>,
+    blocked_id: Option<String>,
+    epoch: PluginAccess,
+}
 pub struct PluginManager {
+    authentication: RwLock<AuthenticationPublication>,
     store: Arc<dyn PluginStore>,
     runtime: Arc<dyn PluginRuntime>,
     changes: Mutex<()>,
@@ -21,6 +34,7 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new(store: Arc<dyn PluginStore>, runtime: Arc<dyn PluginRuntime>) -> Self {
         Self {
+            authentication: RwLock::default(),
             store,
             runtime,
             changes: Mutex::new(()),
@@ -40,6 +54,9 @@ impl PluginManager {
                 self.runtime.prepare(&record, artifact).await
             }
             .await;
+            if record.frontend_authentication.is_some() {
+                self.publish_authentication(&record, restored.as_ref().ok().cloned());
+            }
             if let Ok(process) = restored {
                 process.activate();
                 self.active
@@ -54,6 +71,11 @@ impl PluginManager {
     }
     pub async fn shutdown(&self) {
         let _guard = self.changes.lock().await;
+        self.authentication
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .epoch
+            .revoke();
         let active = std::mem::take(
             &mut *self
                 .active
@@ -65,6 +87,33 @@ impl PluginManager {
             p.stop().await;
         }))
         .await;
+    }
+    fn publish_authentication(
+        &self,
+        record: &PluginRecord,
+        process: Option<Arc<dyn PluginProcess>>,
+    ) {
+        let mut state = self
+            .authentication
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.entry.as_ref().is_some_and(|e| e.id == record.id)
+            || state.blocked_id.as_deref() == Some(&record.id)
+            || (record.enabled && record.frontend_authentication.is_some())
+        {
+            state.epoch.revoke();
+            state.epoch = PluginAccess::default();
+            state.blocked_id = None;
+            state.entry = record
+                .frontend_authentication
+                .clone()
+                .filter(|_| record.enabled)
+                .map(|binding| AuthenticationEntry {
+                    id: record.id.clone(),
+                    binding,
+                    process,
+                });
+        }
     }
     fn process(&self, id: &str, revision: u64) -> Result<Arc<dyn PluginProcess>, AdminError> {
         self.active
@@ -97,6 +146,7 @@ impl PluginManager {
                 )
         };
         Ok(PluginView {
+            frontend_authentication: record.frontend_authentication,
             id: record.id,
             revision: record.revision,
             name: record.name,
@@ -112,6 +162,54 @@ impl PluginManager {
 }
 #[async_trait]
 impl PluginService for PluginManager {
+    async fn authenticate(
+        &self,
+        authorization: String,
+    ) -> Result<PluginAuthenticationDecision, AdminError> {
+        let (entry, epoch) = {
+            let state = self
+                .authentication
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.blocked_id.is_some() || state.epoch.is_revoked() {
+                return Err(AdminError::unavailable("入口认证暂不可用"));
+            }
+            (state.entry.clone(), state.epoch.clone())
+        };
+        let Some(entry) = entry else {
+            return Ok(PluginAuthenticationDecision::Builtin { access: epoch });
+        };
+        let process = entry
+            .process
+            .ok_or_else(|| AdminError::unavailable("认证器暂不可用"))?;
+        let access = PluginAccess::linked([epoch, process.access()]);
+        if access.is_revoked() {
+            return Err(AdminError::unavailable("认证器已失效"));
+        }
+        let result = process.authenticate(authorization).await?;
+        if access.is_revoked() {
+            return Err(AdminError::unavailable("认证器已失效"));
+        }
+        Ok(match result {
+            PluginAuthenticationResult::Authenticated(principal) => {
+                match entry.binding.identities.get(&principal) {
+                    Some(key) => PluginAuthenticationDecision::Authenticated {
+                        key: gateway_core::policy::ClientApiKeyId::new(key)
+                            .map_err(|_| AdminError::unavailable("身份映射无效"))?,
+                        access,
+                    },
+                    None => PluginAuthenticationDecision::Rejected,
+                }
+            }
+            PluginAuthenticationResult::NotMatched
+                if entry.binding.failure_policy == PluginAuthenticationPolicy::Delegate =>
+            {
+                PluginAuthenticationDecision::Builtin { access }
+            }
+            _ => PluginAuthenticationDecision::Rejected,
+        })
+    }
+
     fn access(&self, id: &str, revision: u64) -> Result<PluginAccess, AdminError> {
         let process = self.process(id, revision)?;
         let access = process.access();
@@ -194,7 +292,19 @@ impl PluginService for PluginManager {
                 secrets.remove(&key);
             }
         }
+        if let Some(binding) = &update.frontend_authentication {
+            binding.validate()?;
+        }
+        if update.enabled
+            && update.frontend_authentication.is_some()
+            && records.iter().any(|r| {
+                Some(r.id.as_str()) != id && r.enabled && r.frontend_authentication.is_some()
+            })
+        {
+            return Err(AdminError::conflict("只能启用一个入口认证器"));
+        }
         let record = PluginRecord {
+            frontend_authentication: update.frontend_authentication,
             id: id
                 .map(str::to_owned)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
@@ -226,6 +336,16 @@ impl PluginService for PluginManager {
                     .as_ref()
                     .is_ok_and(|rows| rows.iter().find(|r| r.id == record.id) == previous);
                 if !unchanged {
+                    if record.frontend_authentication.is_some()
+                        || previous.is_some_and(|r| r.frontend_authentication.is_some())
+                    {
+                        let mut state = self
+                            .authentication
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        state.epoch.revoke();
+                        state.blocked_id = Some(record.id.clone());
+                    }
                     // Lost commit acknowledgement or an external change: no stale generation may remain active.
                     let old = self
                         .active
@@ -252,6 +372,7 @@ impl PluginService for PluginManager {
             }
         }
         // No await between persistent CAS and publication; cancelled HTTP requests cannot leave a prepared-only revision.
+        let auth_candidate = candidate.clone();
         let old = {
             let mut active = self
                 .active
@@ -265,6 +386,7 @@ impl PluginService for PluginManager {
                 candidate.activate();
                 active.insert(record.id.clone(), (record.revision, candidate));
             }
+            self.publish_authentication(&record, auth_candidate);
             old
         };
         if let Some((_, old)) = old {

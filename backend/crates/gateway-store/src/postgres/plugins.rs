@@ -167,10 +167,16 @@ impl PluginStore for PgPluginStore {
         tx.commit().await.map_err(|_| unavailable())
     }
     async fn list(&self) -> Result<Vec<PluginRecord>, AdminError> {
-        let rows = sqlx::query("select id,revision,name,artifact_sha256,enabled,configuration,secrets from plugin_instances order by name,id").fetch_all(&self.pool).await.map_err(|_| unavailable())?;
+        let rows = sqlx::query("select id,revision,name,artifact_sha256,enabled,configuration,secrets,frontend_authentication from plugin_instances order by name,id").fetch_all(&self.pool).await.map_err(|_| unavailable())?;
         rows.into_iter()
             .map(|row| {
                 Ok(PluginRecord {
+                    frontend_authentication: row
+                        .try_get::<Option<serde_json::Value>, _>("frontend_authentication")
+                        .map_err(|_| unavailable())?
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| unavailable())?,
                     id: row.try_get("id").map_err(|_| unavailable())?,
                     revision: row
                         .try_get::<i64, _>("revision")
@@ -194,10 +200,13 @@ impl PluginStore for PgPluginStore {
         actor: &MutationContext,
     ) -> Result<(), AdminError> {
         let mut tx = self.pool.begin().await.map_err(|_| unavailable())?;
+        if let Some(binding) = &record.frontend_authentication {
+            binding.validate()?;
+        }
         let query = if expected == 0 {
-            "insert into plugin_instances(id,revision,name,artifact_sha256,enabled,configuration,secrets) select $1,$2,$3,$4,$5,$6,$7 where $8=0 on conflict do nothing"
+            "insert into plugin_instances(id,revision,name,artifact_sha256,enabled,configuration,secrets,frontend_authentication) select $1,$2,$3,$4,$5,$6,$7,$9 where $8=0 on conflict do nothing"
         } else {
-            "update plugin_instances set revision=$2,name=$3,artifact_sha256=$4,enabled=$5,configuration=$6,secrets=$7,updated_at=now() where id=$1 and revision=$8"
+            "update plugin_instances set revision=$2,name=$3,artifact_sha256=$4,enabled=$5,configuration=$6,secrets=$7,frontend_authentication=$9,updated_at=now() where id=$1 and revision=$8"
         };
         let result = sqlx::query(query)
             .bind(&record.id)
@@ -208,9 +217,25 @@ impl PluginStore for PgPluginStore {
             .bind(&record.configuration)
             .bind(serde_json::to_value(&record.secrets).map_err(|_| unavailable())?)
             .bind(signed(expected)?)
+            .bind(
+                record
+                    .frontend_authentication
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|_| unavailable())?,
+            )
             .execute(&mut *tx)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|e| {
+                if e.as_database_error()
+                    .is_some_and(|e| e.is_unique_violation())
+                {
+                    conflict()
+                } else {
+                    unavailable()
+                }
+            })?;
         if result.rows_affected() != 1 {
             return Err(conflict());
         }

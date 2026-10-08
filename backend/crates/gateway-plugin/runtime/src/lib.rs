@@ -13,3 +13,5 @@ pub use rpc::{CallbackHandler, RpcError, RpcLimits, RpcReply, RpcSession};
 pub use stream::RpcStream;
 
 mod quota;
+
+mod authentication;

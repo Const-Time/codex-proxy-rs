@@ -120,11 +120,22 @@ impl CallbackHandler for Callbacks {
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
                 || context.generation != revision
-                || context.stage != Stage::Management
+                || (context.stage != Stage::Management && context.stage != Stage::Authentication)
             {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
                     "plugin generation is not active",
+                ));
+            }
+            if context.stage == Stage::Authentication
+                && !matches!(
+                    method.as_str(),
+                    "host.state.get" | "host.state.put" | "host.state.delete"
+                )
+            {
+                return Err(PluginFault::new(
+                    ErrorCode::PermissionDenied,
+                    "authentication callbacks cannot access management capabilities",
                 ));
             }
             if matches!(

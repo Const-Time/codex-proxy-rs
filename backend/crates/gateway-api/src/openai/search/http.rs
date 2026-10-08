@@ -29,7 +29,7 @@ pub(crate) async fn standalone_search(
     body: Bytes,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let client = match authenticate_client(service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
@@ -41,6 +41,7 @@ pub(crate) async fn standalone_search(
         Ok(operation) => operation,
         Err(error) => return gateway_error_response(&error),
     };
+    let access = client.bound_access();
     let started = match service
         .start_provider_endpoint(client, operation, client_ip, user_agent, "/v1/alpha/search")
         .await
@@ -48,7 +49,11 @@ pub(crate) async fn standalone_search(
         Ok(started) => started,
         Err(error) => return gateway_error_response(&error),
     };
-    collect_raw_json_response(started).await
+    let response = collect_raw_json_response(started).await;
+    match access {
+        Some(access) => crate::openai::revocation::protect(response, access),
+        None => response,
+    }
 }
 
 fn search_operation(body: Bytes, headers: &HeaderMap) -> Result<Operation, GatewayError> {

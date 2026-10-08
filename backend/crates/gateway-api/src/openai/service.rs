@@ -19,6 +19,7 @@ use super::responses::{ContinuationIntent, DecodedResponsesRequest};
 /// OpenAI HTTP/WS adapter 共享的 Core 与连接生命周期能力。
 #[derive(Clone)]
 pub(crate) struct OpenAiService {
+    administration: Option<gateway_admin::AdminServices>,
     execution: Arc<dyn ExecutionService>,
     lifecycle: Arc<dyn ConnectionLifecycle>,
 }
@@ -30,11 +31,47 @@ impl OpenAiService {
         lifecycle: Arc<dyn ConnectionLifecycle>,
     ) -> Self {
         Self {
+            administration: None,
             execution,
             lifecycle,
         }
     }
 
+    pub(crate) fn with_administration(
+        mut self,
+        administration: gateway_admin::AdminServices,
+    ) -> Self {
+        self.administration = Some(administration);
+        self
+    }
+    pub(crate) async fn authenticate_ingress(
+        &self,
+        authorization: &str,
+        builtin: Option<&str>,
+    ) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
+        use gateway_admin::model::plugins::PluginAuthenticationDecision;
+        if let Some(plugins) = self.administration.as_ref().and_then(|a| a.plugins().ok()) {
+            let decision = plugins
+                .authenticate(authorization.to_owned())
+                .await
+                .map_err(|_| ClientApiKeyAuthError::RuntimeUnavailable)?;
+            return match decision {
+                PluginAuthenticationDecision::Authenticated { key, access } => self
+                    .execution
+                    .authenticate_bound_key(&key, access.cancellation())
+                    .map_err(map_authentication_error),
+                PluginAuthenticationDecision::Builtin { access } => self
+                    .execution
+                    .authenticate_revocable(
+                        builtin.ok_or(ClientApiKeyAuthError::InvalidKeyFormat)?,
+                        access.cancellation(),
+                    )
+                    .map_err(map_authentication_error),
+                PluginAuthenticationDecision::Rejected => Err(ClientApiKeyAuthError::InvalidKey),
+            };
+        }
+        self.authenticate(builtin.ok_or(ClientApiKeyAuthError::InvalidKeyFormat)?)
+    }
     pub(crate) fn authenticate(
         &self,
         plaintext: &str,

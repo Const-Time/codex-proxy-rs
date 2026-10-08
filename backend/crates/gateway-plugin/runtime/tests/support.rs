@@ -179,10 +179,20 @@ impl PluginStore for MemoryStore {
     }
 }
 pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
+    build_archive(version, extra_capability, false)
+}
+pub fn authentication_archive(version: &str) -> Arc<[u8]> {
+    build_archive(version, false, true)
+}
+fn build_archive(version: &str, extra_capability: bool, authentication: bool) -> Arc<[u8]> {
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
     let page = b"<!doctype html><html><body>Plugin fixture</body></html>";
     let mut contributes =
         json!({"management":{"id":"local.fixture.management","version":1,"stages":["management"]}});
+    if authentication {
+        contributes["frontend_authentication"] =
+            json!({"id":"local.fixture.auth","version":1,"stages":["authentication"]});
+    }
     if extra_capability {
         contributes["middleware"] =
             json!({"id":"local.fixture.middleware","version":4,"stages":["request"]});
@@ -210,6 +220,7 @@ pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
 }
 pub fn update(sha: &str, revision: u64, enabled: bool) -> PluginUpdate {
     PluginUpdate {
+        frontend_authentication: None,
         revision,
         name: "Fixture".into(),
         artifact_sha256: sha.into(),

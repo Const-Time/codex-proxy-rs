@@ -84,6 +84,9 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
+    pub fn bound_access(&self) -> Option<crate::runtime::ClientAccessGuard> {
+        self.bound_authorization.clone()
+    }
     #[must_use]
     pub const fn snapshot(&self) -> &Arc<RuntimeSnapshot> {
         &self.snapshot
@@ -198,6 +201,24 @@ pub trait ExecutionService: Send + Sync {
         &self,
         plaintext: &str,
     ) -> Result<AuthenticatedClient, ClientAuthenticationError>;
+    /// Keep the exact plaintext-authenticated policy while adding host revocation.
+    /// Registering access rechecks that policy; never resolve a newer policy by Key ID here.
+    fn authenticate_revocable(
+        &self,
+        plaintext: &str,
+        revocation: CancellationToken,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        let mut client = self.authenticate(plaintext)?;
+        let bound = self
+            .client_access(&client)
+            .ok_or(ClientAuthenticationError::SnapshotUnavailable)?
+            .with_revocation(revocation);
+        if bound.cancellation().is_cancelled() {
+            return Err(ClientAuthenticationError::InvalidKey);
+        }
+        client.bound_authorization = Some(bound);
+        Ok(client)
+    }
     /// Trusted host entry after an external principal has been mapped to a local Key.
     /// This is not an API for accepting an untrusted client-supplied Key ID.
     fn authenticate_bound_key(
