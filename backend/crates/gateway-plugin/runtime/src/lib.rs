@@ -4,6 +4,7 @@ mod data;
 mod engine;
 mod management_validation;
 mod package;
+mod resources;
 mod rpc;
 mod stream;
 pub use engine::PluginEngine;

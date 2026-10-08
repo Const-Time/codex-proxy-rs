@@ -221,6 +221,7 @@ pub fn update(sha: &str, revision: u64, enabled: bool) -> PluginUpdate {
 }
 pub fn request(operation: &str) -> PluginHttpRequest {
     PluginHttpRequest {
+        actor: actor(),
         method: "POST".into(),
         path: "echo".into(),
         query: String::new(),

@@ -21,6 +21,7 @@ use std::{
 };
 
 pub struct PluginEngine {
+    resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
     cache: PathBuf,
     version: semver::Version,
     store: Arc<dyn PluginStore>,
@@ -31,6 +32,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            resources: None,
             cache,
             version,
             store,
@@ -38,6 +40,13 @@ impl PluginEngine {
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
             data: None,
         }
+    }
+    pub fn with_resources(
+        mut self,
+        resources: Arc<dyn gateway_admin::ports::plugins::PluginResourceService>,
+    ) -> Self {
+        self.resources = Some(resources);
+        self
     }
     pub fn with_data(
         mut self,
@@ -221,13 +230,17 @@ impl PluginRuntime for PluginEngine {
         let access = PluginAccess::default();
         let failed_access = access.clone();
         let ended_access = access.clone();
-        let callbacks = Arc::new(crate::callbacks::Callbacks::new(
-            self.store.clone(),
-            record,
-            &manifest,
-            active.clone(),
-            self.data.clone(),
-        )?);
+        let callbacks = Arc::new(
+            crate::callbacks::Callbacks::new(
+                self.store.clone(),
+                record,
+                &manifest,
+                active.clone(),
+                self.data.clone(),
+            )?
+            .with_resources(self.resources.clone()),
+        );
+        let calls = callbacks.calls.clone();
         let session = Arc::new(
             RpcSession::start_supervised(
                 prepared.clone(),
@@ -329,6 +342,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            calls,
             session,
             access,
             package: prepared,
@@ -338,6 +352,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    calls: Arc<crate::resources::ManagementCalls>,
     access: PluginAccess,
     session: Arc<RpcSession>,
     package: Arc<PreparedPackage>,
@@ -454,19 +469,18 @@ impl PluginProcess for LivePlugin {
             headers: vec![],
         })
         .map_err(|_| AdminError::invalid("插件请求无效"))?;
+        let context = self.session.context(
+            Stage::Management,
+            self.session
+                .maximum_call_timeout()
+                .min(Duration::from_secs(30)),
+        );
+        let _caller = self
+            .calls
+            .enter(context.resource_scope_id.clone(), request.actor);
         let reply = self
             .session
-            .call(
-                "management.handle",
-                self.session.context(
-                    Stage::Management,
-                    self.session
-                        .maximum_call_timeout()
-                        .min(Duration::from_secs(30)),
-                ),
-                params,
-                request.body,
-            )
+            .call("management.handle", context, params, request.body)
             .await
             .map_err(|_| AdminError::bad_gateway("插件调用失败，结果可能已生效，请查询后再重试"))?;
         let response: ManagementResponse = self

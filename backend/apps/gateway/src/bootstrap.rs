@@ -110,7 +110,8 @@ pub async fn run() -> Result<(), BootstrapError> {
                 plugin_version,
                 store.plugin_store(),
             )
-            .with_data(admin.services().plugin_data()),
+            .with_data(admin.services().plugin_data())
+            .with_resources(admin.services().plugin_resources()),
         ),
     ));
     plugins.restore().await?;

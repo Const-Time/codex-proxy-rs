@@ -28,6 +28,11 @@ impl PluginHandler for Worker {
                     match call.host.call("host.keys.reset_budget",json!({"client_key_id":"must-not-reset","period":"all"}),vec![]).await {
                         Ok(_) => json!({"unexpected":true}), Err(error)=>json!({"code":error.into_plugin_fault().code})
                     }
+                } else if input["operation"]=="resources" {
+                    use gateway_plugin_sdk::call::resources::*;
+                    let group=call.host.ensure_group(GroupEnsureRequest{resource_key:"main".into(),name:"Group".into(),color:"#2563EBFF".into(),description:None}).await?;
+                    let members=call.host.change_group_members(GroupMembersChange{resource_key:"main".into(),add:vec!["acct_001".into()],remove:vec![]}).await?;
+                    json!({"group":group,"members":members})
                 } else if input["operation"]=="facts" {
                     use gateway_plugin_sdk::call::data::*;
                     let key=call.host.key_facts(ClientKeyFactsQuery{client_key_id:"key_test".into()}).await?;

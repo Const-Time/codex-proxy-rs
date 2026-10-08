@@ -118,3 +118,49 @@ async fn static_plugin_routes_decode_valid_admin_requests_before_service_dispatc
         );
     }
 }
+
+#[tokio::test]
+async fn plugin_management_mutation_identity_comes_from_auth_not_plugin_payload() {
+    use base64::Engine as _;
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("admin-session");
+    let service = Arc::new(super::plugin_models::Plugins(
+        gateway_admin::model::plugins::PluginAccess::default(),
+    ));
+    let state = AdminTestState(fixture.services.clone().with_plugins(service));
+    let app = gateway_api::admin::plugins::router::<AdminTestState>().with_state(state);
+    let request = |body: serde_json::Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/admin/plugins/invoke")
+            .header("cookie", "cpr_admin_session=admin-session")
+            .header("x-request-id", "plugin-actor-test")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+    let body = serde_json::json!({"id":"plugin","revision":1,"method":"POST","path":"echo","contentType":"application/json","body":base64::engine::general_purpose::STANDARD.encode(br#"{"actor":"forged"}"#)});
+    let response = app.clone().oneshot(request(body.clone())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(envelope["data"]["body"].as_str().unwrap())
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(
+        result["actor"],
+        "AdminSession { admin_user_id: \"admin_1\" }"
+    );
+    assert_eq!(result["requestId"], "plugin-actor-test");
+    let mut forged = body;
+    forged["actor"] = serde_json::json!({"admin_user_id":"forged"});
+    assert_eq!(
+        app.oneshot(request(forged)).await.unwrap().status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}

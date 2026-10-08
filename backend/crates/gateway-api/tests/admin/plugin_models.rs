@@ -21,7 +21,7 @@ use std::{
 };
 use tower::ServiceExt;
 
-struct Plugins(PluginAccess);
+pub(super) struct Plugins(pub(super) PluginAccess);
 #[async_trait]
 impl PluginService for Plugins {
     fn access(&self, id: &str, revision: u64) -> Result<PluginAccess, AdminError> {
@@ -65,9 +65,9 @@ impl PluginService for Plugins {
         &self,
         _: &str,
         _: u64,
-        _: PluginHttpRequest,
+        request: PluginHttpRequest,
     ) -> Result<PluginHttpResponse, AdminError> {
-        unreachable!()
+        Ok(PluginHttpResponse{status:200,content_type:"application/json".into(),body:serde_json::to_vec(&json!({"actor":format!("{:?}",request.actor.actor),"requestId":request.actor.request_id})).unwrap()})
     }
 }
 #[derive(Default)]

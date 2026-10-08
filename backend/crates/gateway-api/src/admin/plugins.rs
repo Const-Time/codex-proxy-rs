@@ -222,7 +222,7 @@ struct Invocation {
     body: String,
 }
 async fn invoke<S: AdminSessionState + Send + Sync>(
-    _: AdminAuth,
+    auth: AdminAuth,
     State(state): State<S>,
     AdminJson(input): AdminJson<Invocation>,
 ) -> Result<impl IntoResponse, AdminError> {
@@ -237,6 +237,7 @@ async fn invoke<S: AdminSessionState + Send + Sync>(
             &input.id,
             input.revision,
             PluginHttpRequest {
+                actor: auth.context().mutation_context(),
                 method: input.method,
                 path: input.path,
                 query: input.query,

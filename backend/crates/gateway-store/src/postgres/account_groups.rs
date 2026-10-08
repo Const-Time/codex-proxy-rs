@@ -25,6 +25,8 @@ use crate::{
     postgres_unavailable,
 };
 
+use gateway_admin::model::plugins::*;
+
 use super::{
     PgRuntimeSettingsRepository, RuntimeSettingsRepository, account_summary_from_row,
     append_admin_audit_event_in_transaction, bump_config_revision_in_transaction,
@@ -106,6 +108,150 @@ impl PgAccountGroupRepository {
 
 #[async_trait]
 impl AccountGroupStore for PgAccountGroupRepository {
+    async fn ensure_plugin_group(
+        &self,
+        scope: PluginMutationScope,
+        resource_key: String,
+        command: NewAccountGroup,
+    ) -> AdminStoreResult<PluginResourceMutation<PluginManagedResource>> {
+        validate_group_fields(&command.name, command.description.as_deref())?;
+        let mut tx = self.pool.begin().await.map_err(|_| plugin_unavailable())?;
+        lock_plugin_resource(&mut tx, &scope).await?;
+        let existing=sqlx::query("select p.group_id,g.name,g.enabled from plugin_managed_groups p left join account_groups g on g.id=p.group_id where p.instance_id=$1 and p.resource_key=$2")
+            .bind(&scope.instance_id).bind(&resource_key).fetch_optional(&mut *tx).await.map_err(|_|plugin_unavailable())?;
+        if let Some(row) = existing {
+            let id: Option<String> = row.try_get("group_id").map_err(|_| plugin_unavailable())?;
+            let id = id.ok_or_else(|| not_found("deleted plugin group"))?;
+            let revision = plugin_current_revision(&mut tx).await?;
+            let value = PluginManagedResource {
+                id,
+                name: row.try_get("name").map_err(|_| plugin_unavailable())?,
+                enabled: row.try_get("enabled").map_err(|_| plugin_unavailable())?,
+            };
+            tx.commit().await.map_err(|_| plugin_unavailable())?;
+            return Ok(PluginResourceMutation { revision, value });
+        }
+        let count: i64 =
+            sqlx::query_scalar("select count(*) from plugin_managed_groups where instance_id=$1")
+                .bind(&scope.instance_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| plugin_unavailable())?;
+        if count >= 256 {
+            return Err(invalid_admin("plugin group capacity reached"));
+        }
+        let revision = bump_config_revision_in_transaction(&mut tx)
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        insert_group(&mut tx, &command)
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        sqlx::query(
+            "insert into plugin_managed_groups(instance_id,resource_key,group_id) values($1,$2,$3)",
+        )
+        .bind(&scope.instance_id)
+        .bind(resource_key)
+        .bind(command.id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| plugin_unavailable())?;
+        append_admin_audit_event_in_transaction(
+            &mut tx,
+            mutation_audit(
+                &scope.actor,
+                "plugin.group.ensure",
+                "account_group",
+                command.id.as_str(),
+                vec!["plugin_resource".into()],
+            ),
+            revision,
+        )
+        .await
+        .map_err(|e| admin_store_error(ENTITY, e))?;
+        tx.commit().await.map_err(|_| plugin_unavailable())?;
+        Ok(PluginResourceMutation {
+            revision: admin_revision(revision)?,
+            value: PluginManagedResource {
+                id: command.id.as_str().into(),
+                name: command.name,
+                enabled: true,
+            },
+        })
+    }
+    async fn change_plugin_group_members(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginGroupMembers,
+    ) -> AdminStoreResult<PluginResourceMutation<PluginMembersChanged>> {
+        let mut tx = self.pool.begin().await.map_err(|_| plugin_unavailable())?;
+        lock_plugin_resource(&mut tx, &scope).await?;
+        let id: Option<Option<String>> = sqlx::query_scalar(
+            "select group_id from plugin_managed_groups where instance_id=$1 and resource_key=$2",
+        )
+        .bind(&scope.instance_id)
+        .bind(&command.resource_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| plugin_unavailable())?;
+        let id = id.flatten().ok_or_else(|| not_found("plugin group"))?;
+        // Lock configuration before membership updates, matching normal admin mutation order.
+        let revision = bump_config_revision_in_transaction(&mut tx)
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        let exists: Option<String> =
+            sqlx::query_scalar("select id from account_groups where id=$1 for update")
+                .bind(&id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| plugin_unavailable())?;
+        if exists.is_none() {
+            return Err(not_found("plugin group"));
+        }
+        let present: Vec<String> = sqlx::query_scalar(
+            "select id from provider_accounts where id=any($1::text[]) order by id for key share",
+        )
+        .bind(&command.add)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| plugin_unavailable())?;
+        if command.add.iter().any(|id| !present.contains(id)) {
+            return Err(not_found("plugin member account"));
+        }
+        let removed=sqlx::query("delete from account_group_accounts where account_group_id=$1 and provider_account_id=any($2::text[])").bind(&id).bind(&command.remove).execute(&mut *tx).await.map_err(|_|plugin_unavailable())?.rows_affected();
+        let added=sqlx::query("insert into account_group_accounts(account_group_id,provider_account_id,created_at) select $1,id,now() from unnest($2::text[]) as id on conflict do nothing").bind(&id).bind(&command.add).execute(&mut *tx).await.map_err(|_|plugin_unavailable())?.rows_affected();
+        if added + removed > 0 {
+            sqlx::query("update account_groups set updated_at=now() where id=$1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| plugin_unavailable())?;
+            append_admin_audit_event_in_transaction(
+                &mut tx,
+                mutation_audit(
+                    &scope.actor,
+                    "plugin.group.members",
+                    "account_group",
+                    &id,
+                    vec!["accounts".into()],
+                ),
+                revision,
+            )
+            .await
+            .map_err(|e| admin_store_error(ENTITY, e))?;
+        } else {
+            tx.rollback().await.map_err(|_| plugin_unavailable())?;
+            return Ok(PluginResourceMutation {
+                revision: self.current_revision().await?,
+                value: PluginMembersChanged { added, removed },
+            });
+        }
+        tx.commit().await.map_err(|_| plugin_unavailable())?;
+        Ok(PluginResourceMutation {
+            revision: admin_revision(revision)?,
+            value: PluginMembersChanged { added, removed },
+        })
+    }
+
     async fn list_account_groups(
         &self,
         query: AccountGroupListQuery,
@@ -252,21 +398,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
         let revision = self
             .mutate(audit, |transaction| {
                 Box::pin(async move {
-                    sqlx::query(
-                        "insert into account_groups
-                         (id, name, description, color, enabled, created_at, updated_at, daily_limit_usd, weekly_limit_usd, model_multipliers)
-                         values ($1, $2, $3, $4, true, now(), now(), $5::text::numeric, $6::text::numeric, $7)",
-                    )
-                    .bind(command.id.as_str())
-                    .bind(command.name)
-                    .bind(command.description)
-                    .bind(command.color.as_str())
-                    .bind(command.budget.daily_usd.canonical())
-                    .bind(command.budget.weekly_usd.canonical())
-                    .bind(sqlx::types::Json(&command.model_multipliers))
-                    .execute(&mut **transaction)
-                    .await
-                    .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
+                    insert_group(transaction, &command).await?;
                     Ok(())
                 })
             })
@@ -720,4 +852,56 @@ fn invalid(message: &str) -> StoreError {
 
 fn unavailable(message: &'static str) -> StoreError {
     postgres_unavailable(message)
+}
+
+async fn insert_group(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &NewAccountGroup,
+) -> StoreResult<()> {
+    sqlx::query(
+        "insert into account_groups
+         (id, name, description, color, enabled, created_at, updated_at, daily_limit_usd, weekly_limit_usd, model_multipliers)
+         values ($1, $2, $3, $4, true, now(), now(), $5::text::numeric, $6::text::numeric, $7)",
+    )
+    .bind(command.id.as_str())
+    .bind(&command.name)
+    .bind(&command.description)
+    .bind(command.color.as_str())
+    .bind(command.budget.daily_usd.canonical())
+    .bind(command.budget.weekly_usd.canonical())
+    .bind(sqlx::types::Json(&command.model_multipliers))
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
+    Ok(())
+}
+
+fn plugin_unavailable() -> AdminStoreError {
+    admin_store_error(ENTITY, unavailable("plugin group operation"))
+}
+async fn plugin_current_revision(
+    tx: &mut Transaction<'_, Postgres>,
+) -> AdminStoreResult<gateway_admin::model::Revision> {
+    let revision: i64 =
+        sqlx::query_scalar("select config_revision from runtime_settings where id=1")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|_| plugin_unavailable())?;
+    admin_revision(crate::Revision::new(revision as u64).map_err(|e| admin_store_error(ENTITY, e))?)
+}
+async fn lock_plugin_resource(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &PluginMutationScope,
+) -> AdminStoreResult<()> {
+    let revision: Option<i64> = sqlx::query_scalar(
+        "select revision from plugin_instances where id=$1 and enabled for update",
+    )
+    .bind(&scope.instance_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| plugin_unavailable())?;
+    if revision.and_then(|v| u64::try_from(v).ok()) != Some(scope.revision) {
+        return Err(admin_store_error(ENTITY, conflict("plugin generation")));
+    }
+    Ok(())
 }

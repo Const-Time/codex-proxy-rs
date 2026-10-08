@@ -420,6 +420,33 @@ pub trait ClientKeyStore: Send + Sync {
 /// Provider-neutral account group management transactions.
 #[async_trait]
 pub trait AccountGroupStore: Send + Sync {
+    async fn ensure_plugin_group(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _resource_key: String,
+        _command: NewAccountGroup,
+    ) -> AdminStoreResult<
+        crate::model::plugins::PluginResourceMutation<crate::model::plugins::PluginManagedResource>,
+    > {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin resources",
+            "not configured",
+        ))
+    }
+    async fn change_plugin_group_members(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _command: crate::model::plugins::PluginGroupMembers,
+    ) -> AdminStoreResult<
+        crate::model::plugins::PluginResourceMutation<crate::model::plugins::PluginMembersChanged>,
+    > {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin resources",
+            "not configured",
+        ))
+    }
     async fn list_account_groups(
         &self,
         query: AccountGroupListQuery,

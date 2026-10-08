@@ -29,6 +29,7 @@ use gateway_core::{
 };
 
 use super::AdminHarness;
+use gateway_admin::model::plugins::*;
 
 const GROUP_ID: &str = "grp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -129,12 +130,52 @@ async fn group_query_service_enriches_only_current_page_members_with_runtime_fac
 
 #[derive(Default)]
 struct FakeGroupStore {
+    plugin_calls: Mutex<Vec<PluginMutationScope>>,
+    plugin_members: Mutex<Vec<PluginGroupMembers>>,
+    gated: bool,
+    started: tokio::sync::Notify,
+    released: tokio::sync::Notify,
     requested_groups: Mutex<Vec<String>>,
     delete_error: Option<AdminStoreErrorKind>,
 }
 
 #[async_trait]
 impl AccountGroupStore for FakeGroupStore {
+    async fn ensure_plugin_group(
+        &self,
+        scope: PluginMutationScope,
+        _key: String,
+        command: NewAccountGroup,
+    ) -> AdminStoreResult<PluginResourceMutation<PluginManagedResource>> {
+        self.plugin_calls.lock().unwrap().push(scope);
+        if self.gated {
+            self.started.notify_one();
+            self.released.notified().await;
+        }
+        Ok(PluginResourceMutation {
+            revision: Revision::new(44).unwrap(),
+            value: PluginManagedResource {
+                id: command.id.as_str().into(),
+                name: command.name,
+                enabled: true,
+            },
+        })
+    }
+    async fn change_plugin_group_members(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginGroupMembers,
+    ) -> AdminStoreResult<PluginResourceMutation<PluginMembersChanged>> {
+        self.plugin_calls.lock().unwrap().push(scope);
+        let added = command.add.len() as u64;
+        let removed = command.remove.len() as u64;
+        self.plugin_members.lock().unwrap().push(command);
+        Ok(PluginResourceMutation {
+            revision: Revision::new(45).unwrap(),
+            value: PluginMembersChanged { added, removed },
+        })
+    }
+
     async fn list_account_groups(
         &self,
         query: AccountGroupListQuery,
@@ -282,4 +323,116 @@ fn unused() -> AdminStoreError {
         "account group",
         "unused test operation",
     )
+}
+
+#[derive(Default)]
+struct ResourceSnapshot(tokio::sync::Notify, std::sync::atomic::AtomicU64);
+impl gateway_core::runtime::SnapshotControl for ResourceSnapshot {
+    fn publish_committed(
+        &self,
+        revision: gateway_core::routing::ConfigRevision,
+    ) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.1
+                .store(revision.get(), std::sync::atomic::Ordering::SeqCst);
+            self.0.notify_one();
+        })
+    }
+}
+fn plugin_scope() -> PluginMutationScope {
+    PluginMutationScope {
+        instance_id: "plugin".into(),
+        revision: 1,
+        actor: MutationContext {
+            actor: gateway_admin::model::MutationActor::System,
+            request_id: "plugin-test".into(),
+        },
+    }
+}
+fn plugin_group() -> PluginGroupEnsure {
+    PluginGroupEnsure {
+        resource_key: "main".into(),
+        name: "Group".into(),
+        color: "#2563EBFF".into(),
+        description: None,
+    }
+}
+#[tokio::test]
+async fn plugin_resource_commit_and_publication_survive_cancelled_caller() {
+    let groups = Arc::new(FakeGroupStore {
+        gated: true,
+        ..Default::default()
+    });
+    let snapshot = Arc::new(ResourceSnapshot::default());
+    let mut harness = AdminHarness::new().account_groups(groups.clone());
+    harness.snapshot = snapshot.clone();
+    let service = harness.build().await.plugin_resources();
+    let task =
+        tokio::spawn(async move { service.ensure_group(plugin_scope(), plugin_group()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), groups.started.notified())
+        .await
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    groups.released.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), snapshot.0.notified())
+        .await
+        .unwrap();
+    assert_eq!(snapshot.1.load(std::sync::atomic::Ordering::SeqCst), 44);
+    assert_eq!(groups.plugin_calls.lock().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn plugin_resources_validate_scope_inputs_and_normalize_incremental_members() {
+    let groups = Arc::new(FakeGroupStore::default());
+    let service = AdminHarness::new()
+        .account_groups(groups.clone())
+        .build()
+        .await
+        .plugin_resources();
+    for key in ["", " main", "main\n"] {
+        let mut command = plugin_group();
+        command.resource_key = key.into();
+        assert!(service.ensure_group(plugin_scope(), command).await.is_err());
+    }
+    let mut command = plugin_group();
+    command.color = "bad".into();
+    assert!(service.ensure_group(plugin_scope(), command).await.is_err());
+    for command in [
+        PluginGroupMembers {
+            resource_key: "main".into(),
+            add: vec!["acct_test".into()],
+            remove: vec!["acct_test".into()],
+        },
+        PluginGroupMembers {
+            resource_key: "main".into(),
+            add: vec!["".into()],
+            remove: vec![],
+        },
+        PluginGroupMembers {
+            resource_key: "main".into(),
+            add: vec!["acct_test".into(); 1001],
+            remove: vec![],
+        },
+    ] {
+        assert!(
+            service
+                .change_members(plugin_scope(), command)
+                .await
+                .is_err()
+        );
+    }
+    assert!(groups.plugin_calls.lock().unwrap().is_empty());
+    let result = service
+        .change_members(
+            plugin_scope(),
+            PluginGroupMembers {
+                resource_key: "main".into(),
+                add: vec!["acct_test".into(), "acct_test".into()],
+                remove: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.added, 1);
+    assert_eq!(groups.plugin_members.lock().unwrap()[0].add, ["acct_test"]);
 }

@@ -647,3 +647,243 @@ async fn audit_count(pool: &sqlx::PgPool) -> u64 {
         .expect("count audit rows");
     u64::try_from(value).expect("non-negative audit count")
 }
+
+#[tokio::test]
+async fn plugin_groups_are_atomic_owned_idempotent_and_tombstoned_after_admin_deletion() {
+    use gateway_admin::model::plugins::*;
+    let Some(db) = TestDatabase::create("plugin_resources").await else {
+        return;
+    };
+    let groups = PgAccountGroupRepository::new(db.pool.clone());
+    sqlx::query(
+        "insert into plugin_artifacts(sha256,info,archive) values($1,'{}',decode('00','hex'))",
+    )
+    .bind("a".repeat(64))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    for id in ["plugin-a", "plugin-b"] {
+        sqlx::query("insert into plugin_instances(id,revision,name,artifact_sha256,enabled,configuration,secrets) values($1,1,$1,$2,true,'{}','{}')").bind(id).bind("a".repeat(64)).execute(&db.pool).await.unwrap();
+    }
+    let scope = |id: &str, revision| PluginMutationScope {
+        instance_id: id.into(),
+        revision,
+        actor: context("plugin-resource-test"),
+    };
+    let command = |id: &str, name: &str| NewAccountGroup {
+        id: group_id(id),
+        name: name.into(),
+        description: None,
+        color: group_color("#2563EBFF"),
+        budget: Default::default(),
+        model_multipliers: Default::default(),
+    };
+    let (a, b) = tokio::join!(
+        groups.ensure_plugin_group(
+            scope("plugin-a", 1),
+            "main".into(),
+            command(MIXED_GROUP, "First")
+        ),
+        groups.ensure_plugin_group(
+            scope("plugin-a", 1),
+            "main".into(),
+            command(EMPTY_GROUP, "Second")
+        )
+    );
+    let a = a.unwrap();
+    let b = b.unwrap();
+    assert_eq!(a, b);
+    let id = a.value.id.clone();
+    let count: i64 = sqlx::query_scalar("select count(*) from account_groups")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let audits: i64 = sqlx::query_scalar(
+        "select count(*) from admin_audit_events where action='plugin.group.ensure'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audits, 1);
+    sqlx::query("update account_groups set name='Admin changed',enabled=false where id=$1")
+        .bind(&id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let existing = groups
+        .ensure_plugin_group(
+            scope("plugin-a", 1),
+            "main".into(),
+            command(MIXED_GROUP, "Should not overwrite"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(existing.value.name, "Admin changed");
+    assert!(!existing.value.enabled);
+    let members = |key: &str, add: Vec<&str>, remove: Vec<&str>| PluginGroupMembers {
+        resource_key: key.into(),
+        add: add.into_iter().map(str::to_owned).collect(),
+        remove: remove.into_iter().map(str::to_owned).collect(),
+    };
+    assert!(
+        groups
+            .change_plugin_group_members(scope("plugin-b", 1), members("main", vec![], vec![]))
+            .await
+            .is_err()
+    );
+    for account in ["acct_001", "acct_002"] {
+        seed_account(&db.pool, account, "openai", account).await;
+    }
+    let added = groups
+        .change_plugin_group_members(
+            scope("plugin-a", 1),
+            members("main", vec!["acct_001", "acct_002"], vec![]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        added.value,
+        PluginMembersChanged {
+            added: 2,
+            removed: 0
+        }
+    );
+    let repeated = groups
+        .change_plugin_group_members(
+            scope("plugin-a", 1),
+            members("main", vec!["acct_001", "acct_002"], vec![]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated.value,
+        PluginMembersChanged {
+            added: 0,
+            removed: 0
+        }
+    );
+    assert_eq!(repeated.revision, added.revision);
+    assert!(
+        groups
+            .change_plugin_group_members(
+                scope("plugin-a", 1),
+                members("main", vec!["missing"], vec!["acct_001"])
+            )
+            .await
+            .is_err()
+    );
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from account_group_accounts where account_group_id=$1")
+            .bind(&id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+    let other = groups
+        .ensure_plugin_group(
+            scope("plugin-b", 1),
+            "main".into(),
+            command("grp_00000000000000000000000000000003", "Other"),
+        )
+        .await
+        .unwrap();
+    groups
+        .change_plugin_group_members(
+            scope("plugin-b", 1),
+            members("main", vec!["acct_001"], vec![]),
+        )
+        .await
+        .unwrap();
+    let removed = groups
+        .change_plugin_group_members(
+            scope("plugin-a", 1),
+            members("main", vec![], vec!["acct_001"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        removed.value,
+        PluginMembersChanged {
+            added: 0,
+            removed: 1
+        }
+    );
+    let preserved:bool=sqlx::query_scalar("select exists(select 1 from account_group_accounts where account_group_id=$1 and provider_account_id='acct_001')").bind(&other.value.id).fetch_one(&db.pool).await.unwrap();
+    assert!(preserved);
+    sqlx::query("update plugin_instances set revision=2 where id='plugin-a'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        groups
+            .ensure_plugin_group(
+                scope("plugin-a", 1),
+                "main".into(),
+                command(MIXED_GROUP, "Stale")
+            )
+            .await
+            .is_err()
+    );
+    groups
+        .delete_account_group(
+            DeleteAccountGroup { id: group_id(&id) },
+            &context("delete-owned-group"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        groups
+            .ensure_plugin_group(
+                scope("plugin-a", 2),
+                "main".into(),
+                command(MIXED_GROUP, "Must not recreate")
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        AdminStoreErrorKind::NotFound
+    );
+    sqlx::query("update plugin_instances set enabled=false where id='plugin-b'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        groups
+            .change_plugin_group_members(
+                scope("plugin-b", 1),
+                members("main", vec![], vec!["acct_001"])
+            )
+            .await
+            .is_err()
+    );
+    sqlx::query("delete from plugin_instances where id='plugin-b'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let retained: bool =
+        sqlx::query_scalar("select exists(select 1 from account_groups where id=$1)")
+            .bind(&other.value.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(retained);
+    sqlx::query("insert into plugin_managed_groups(instance_id,resource_key) select 'plugin-a','reserved-' || n from generate_series(1,255) as n").execute(&db.pool).await.unwrap();
+    let exhausted = groups
+        .ensure_plugin_group(
+            scope("plugin-a", 2),
+            "over-capacity".into(),
+            command("grp_00000000000000000000000000000004", "Over capacity"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(exhausted.kind(), AdminStoreErrorKind::Invalid);
+    let budgets: i64 = sqlx::query_scalar("select count(*) from user_group_budget_windows")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(budgets, 0);
+    let actor:Option<String>=sqlx::query_scalar("select actor_admin_user_id from admin_audit_events where action='plugin.group.ensure' limit 1").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(actor.as_deref(), Some("test-owner"));
+    db.close().await;
+}
