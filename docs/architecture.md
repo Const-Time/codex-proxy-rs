@@ -564,3 +564,8 @@ WS 控制帧等待函数同时用于原会话读取、插件调用及外层正�
 中间件能力声明由 Core 的 MiddlewareRequest 保存链入口正文和累计 handled/required，Runtime 只把 SDK 声明转换为此合同，并限制为 Generate 的 request 挂载和显式正文替换。每层的 handled 必须来自本层改写前的需求，并在改写后消失；NativeContinuation 不允许被处理声明豁免。最终解码后，API 将原入口未处理的需求和额外 required 交给 GenerateRequest 的继承约束；实际正文需求始终取并集，Router 仍是能力准入 owner。声明不影响身份、账号范围、预算或计费 owner。
 
 attempt 解码只从原 GenerateRequest 附回继承约束，不复制原正文的推导需求；因此正文功能改变仍会触发已冻结能力比较。多个 SDK next 保留同一个链入口及累计声明，普通正文/头透传不会抹掉前层约束。此机制不把执行设置 JSON 当作协议正文参数；请求级设置模型仍需独立接入。
+
+
+运行设置由 Core `settings::SettingsValues` 统一表达，Store 的一致性读取直接构造该值；RuntimeSnapshot 保存原值并编译账号调度和最低版本约束，价格与映射从同一值读取。请求派生只替换该快照的设置及编译结果，保留原 Provider 目录、账号目录、Key 策略、权限与配置 revision，不发布到 RuntimeSnapshotHandle。
+
+`routing::RequestSettings` 保存基线、有效快照和逐字段改写来源。来源标记由调用层传入，完整替换只记录实际变化的字段；恢复到旧值仍是显式覆盖，后续 rebase 不会误当默认值丢弃。`PreparedRootExecution` 校验基线和活跃授权后持有该分支，规划读取有效快照，认证事实始终保留原始快照；开始时间、期限和取消链不因设置替换而重建。插件 wire 执行设置仍待 Fast、准入和期限合同接通后开放。

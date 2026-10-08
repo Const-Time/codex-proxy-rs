@@ -1,6 +1,8 @@
 //! Provider、模型目录、精确模型映射与请求级候选计划。
 
 mod catalog;
+mod request_settings;
+pub use request_settings::RequestSettings;
 pub mod snapshot;
 pub use catalog::{
     ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,

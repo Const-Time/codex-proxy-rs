@@ -1,3 +1,4 @@
+use gateway_core::settings::SettingsValues;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,7 @@ use gateway_core::policy::{ClientApiKeyId, PlaintextClientApiKey, RateLimits};
 use gateway_core::routing::snapshot::{
     RuntimeSnapshotCompileError, RuntimeSnapshotCompiler, SnapshotAccountGroupFacts,
     SnapshotAccountGroupMemberFacts, SnapshotClientPolicyFacts, SnapshotFacts,
-    SnapshotProviderAccountFacts, SnapshotSettingsFacts, SnapshotStoreError, SnapshotStorePort,
+    SnapshotProviderAccountFacts, SnapshotStoreError, SnapshotStorePort,
 };
 use gateway_core::routing::{
     ConfigRevision, ModelCapabilities, ModelPresentation, ProviderKind, PublicModelId,
@@ -307,7 +308,7 @@ fn facts_with_min_versions(
     SnapshotFacts::new(
         revision(config_revision),
         revision(observed_current_revision),
-        SnapshotSettingsFacts::new(
+        SettingsValues::new(
             3,
             50,
             "smart",
@@ -350,7 +351,7 @@ fn catalog_visibility_requires_a_source_account_in_the_current_scope() {
         let facts = SnapshotFacts::new(
             revision(1),
             revision(1),
-            SnapshotSettingsFacts::new(
+            SettingsValues::new(
                 3,
                 0,
                 "smart",

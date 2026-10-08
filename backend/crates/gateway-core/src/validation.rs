@@ -57,6 +57,9 @@ pub enum OperationError {
 /// 路由快照或 Route Plan 不满足不变量。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RoutingError {
+    /// Runtime values cannot preserve the supplied scheduling policy.
+    #[error("runtime settings are invalid")]
+    InvalidSettings,
     /// 动态 Provider/model 标识无法构造。
     #[error("routing identifier is invalid")]
     InvalidIdentifier,
