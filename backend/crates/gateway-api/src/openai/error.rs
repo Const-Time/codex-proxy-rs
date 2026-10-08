@@ -165,7 +165,8 @@ pub fn gateway_error_from_engine(error: &EngineError) -> GatewayError {
                 "no upstream provider is currently available for this request",
             )
         }
-        EngineError::Store(_)
+        EngineError::Middleware
+        | EngineError::Store(_)
         | EngineError::ProviderMetadataMismatch
         | EngineError::ContinuationPinMismatch
         | EngineError::RequiredAccountMismatch

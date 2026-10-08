@@ -1,6 +1,7 @@
 //! 模型请求生命周期、单行持久化 port 与 commit/send/cancellation 边界。
 
 pub mod admission;
+pub mod attempt_middleware;
 pub mod budget;
 pub mod connection;
 pub mod continuation;
@@ -815,6 +816,8 @@ impl CoordinatedEvent {
 
 #[derive(Debug, Error)]
 pub enum EngineError {
+    #[error("attempt middleware failed")]
+    Middleware,
     #[error("execution store failed")]
     Store(#[from] StoreError),
     #[error("provider `{provider}` is not registered")]

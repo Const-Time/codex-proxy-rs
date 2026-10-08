@@ -9,6 +9,11 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use super::attempt_middleware::{
+    AttemptMiddleware, Command as MiddlewareCommand, Invocation, NextRequest,
+    Step as MiddlewareStep,
+};
+use super::middleware::MiddlewareError;
 use super::observation::ResponseObservation;
 use crate::engine::continuation::{
     ContinuationBinding, NativeContinuationPin, NativeContinuationScope, PreviousResponseId,
@@ -39,6 +44,7 @@ use futures_timer::Delay;
 
 /// Request 级协调器；不会创建或写入 `request_attempts`。
 pub struct AttemptCoordinator<S: ?Sized> {
+    middleware: Option<Arc<dyn AttemptMiddleware>>,
     engine: Arc<GatewayEngine<S>>,
 }
 
@@ -69,6 +75,15 @@ where
     pub fn new(engine: GatewayEngine<S>) -> Self {
         Self {
             engine: Arc::new(engine),
+            middleware: None,
+        }
+    }
+
+    /// Bind a root-scoped adapter before a session or Provider attempt exists.
+    pub fn with_attempt_middleware(&self, middleware: Option<Arc<dyn AttemptMiddleware>>) -> Self {
+        Self {
+            engine: Arc::clone(&self.engine),
+            middleware,
         }
     }
 
@@ -164,6 +179,15 @@ where
         let image_generation_requested = operation.image_generation_requested();
         let mut session = ResponseExecutionSession {
             engine: Arc::clone(&self.engine),
+            attempt_middleware: self.middleware.clone(),
+            middleware_invocation: None,
+            middleware_preparation: None,
+            middleware_provider: None,
+            middleware_reply: None,
+            middleware_read: None,
+            middleware_output: None,
+            middleware_source_started: false,
+            middleware_session_update: None,
             request_id,
             client_api_key_ref,
             connection_budget: super::connection::ConnectionBudget::default(),
@@ -225,6 +249,17 @@ where
     }
 }
 
+#[derive(Clone)]
+struct MiddlewarePreparation {
+    candidate: crate::routing::ProviderCandidate,
+    context: AttemptContext,
+    pinned_account: Option<crate::account::ProviderAccountId>,
+    next_attempt: NonZeroU32,
+    attempt_transport: AttemptTransport,
+    trigger: AttemptTrigger,
+    is_transport_recovery: bool,
+}
+
 struct CurrentAttempt {
     stream: ProviderStream,
     metadata: ProviderCallMetadata,
@@ -261,6 +296,16 @@ struct PendingAttemptRetry {
 /// API 只能提交下游 delivery 边界；账号重试、断流终结与
 /// `model_requests` 写回均留在本类型内。
 pub struct ResponseExecutionSession<S: ?Sized> {
+    attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
+    middleware_invocation: Option<Invocation>,
+    middleware_preparation: Option<MiddlewarePreparation>,
+    middleware_provider: Option<BoxFuture<'static, ProviderBoundary>>,
+    middleware_reply: Option<NextRequest>,
+    middleware_read:
+        Option<futures::channel::oneshot::Sender<Result<Option<ProviderEvent>, MiddlewareError>>>,
+    middleware_output: Option<ProviderEvent>,
+    middleware_source_started: bool,
+    middleware_session_update: Option<ProviderSessionState>,
     engine: Arc<GatewayEngine<S>>,
     request_id: ModelRequestId,
     client_api_key_ref: crate::policy::ClientApiKeyId,
@@ -604,6 +649,13 @@ where
     /// 观测写入失败只记录告警，不改变取消结果。
     pub async fn cancel_and_finalize(&mut self) -> Result<(), EngineError> {
         self.cancellation.cancel();
+        self.finish_pending_middleware_error().await?;
+        self.middleware_invocation = None;
+        self.middleware_preparation = None;
+        self.middleware_provider = None;
+        self.middleware_read = None;
+        self.middleware_reply = None;
+        self.middleware_output = None;
         self.resume_finalization().await;
         if self.is_finalized() {
             return Ok(());
@@ -619,7 +671,9 @@ where
 
     async fn pull(&mut self) -> Result<PullOutcome, EngineError> {
         loop {
-            if self.current.is_none() {
+            if self.middleware_preparation.is_some()
+                || (self.current.is_none() && self.middleware_invocation.is_none())
+            {
                 match self.prepare_attempt().await {
                     Ok(Some(outcome)) => return Ok(outcome),
                     Ok(None) => {}
@@ -630,6 +684,13 @@ where
                         return Err(error);
                     }
                 }
+            }
+
+            if self.middleware_invocation.is_some() {
+                if let Some(outcome) = self.pull_middleware().await? {
+                    return Ok(outcome);
+                }
+                continue;
             }
 
             let boundary = {
@@ -656,26 +717,8 @@ where
                     return Err(EngineError::Deadline);
                 }
                 PollBoundary::Item(Some(Ok(mut event))) => {
-                    if let Some(wire) = event.wire_event() {
-                        self.trace
-                            .attempt(self.attempts)
-                            .wire_event(wire.protocol(), wire.event_type());
-                    }
-                    if let Some(state) = event.session_update() {
-                        self.observe_session_update(state);
-                    }
-                    if let Some(observation) = event.take_observation() {
-                        self.observe_response(observation);
-                    }
-                    for fact in event.canonical_facts() {
-                        self.observation.observe_identity(fact);
-                    }
-                    for fact in event.canonical_facts() {
-                        self.observe_event(fact).await;
-                    }
-                    if event.wire_event().is_some() && !event.has_canonical_facts() {
-                        self.observe_wire_event().await;
-                    }
+                    self.observe_provider_event(&mut event).await;
+                    let _ = event.take_observation();
                     if !event.has_client_event() {
                         continue;
                     }
@@ -700,113 +743,367 @@ where
         }
     }
 
-    async fn prepare_attempt(&mut self) -> Result<Option<PullOutcome>, EngineError> {
-        let pending_retry = self.pending_retry.take();
-        let is_transport_recovery = pending_retry
+    async fn observe_provider_event(&mut self, event: &mut ProviderEvent) {
+        if let Some(wire) = event.wire_event() {
+            self.trace
+                .attempt(self.attempts)
+                .wire_event(wire.protocol(), wire.event_type());
+        }
+        if let Some(state) = event.session_update() {
+            self.observe_session_update(state);
+        }
+        if let Some(observation) = event.response_observation().cloned() {
+            self.observe_response(observation);
+        }
+        for fact in event.canonical_facts() {
+            self.observation.observe_identity(fact);
+        }
+        for fact in event.canonical_facts() {
+            self.observe_event(fact).await;
+        }
+        if event.wire_event().is_some() && !event.has_canonical_facts() {
+            self.observe_wire_event().await;
+        }
+    }
+
+    fn projected_event(&mut self, mut event: ProviderEvent) -> ProviderEvent {
+        let _ = event.take_session_update();
+        let _ = event.take_observation();
+        if let Some(state) = self.middleware_session_update.take() {
+            event.attach_session_update(state);
+        }
+        event
+    }
+
+    async fn finish_pending_middleware_error(&mut self) -> Result<bool, EngineError> {
+        let Some(mut error) = self
+            .middleware_invocation
+            .as_mut()
+            .and_then(|inv| inv.original_error.take())
+        else {
+            return Ok(false);
+        };
+        let mut events = error.take_atomic_client_events();
+        self.observe_atomic_terminal_events(&mut events);
+        if let Some(provider) = self
+            .current
             .as_ref()
-            .is_some_and(|retry| retry.transport_recovery);
-        if !is_transport_recovery && self.routing_attempts >= self.plan.max_attempts().get() {
-            return Err(EngineError::EmptyRoutingPlan);
-        }
-        if let Some(recovery) = pending_retry.as_ref()
-            && !recovery.delay.is_zero()
+            .map(|current| current.metadata.provider().clone())
         {
-            let deadline = self
-                .connection_budget
-                .startup_remaining()
-                .map_or(self.deadline, |remaining| {
-                    self.deadline.min(SystemTime::now() + remaining)
-                });
-            match poll_retry_delay(recovery.delay, self.cancellation.clone(), deadline).await {
-                RetryDelayBoundary::Elapsed => {}
-                RetryDelayBoundary::Cancelled => {
-                    self.finish_interruption(&EngineError::Cancelled).await?;
-                    return Err(EngineError::Cancelled);
-                }
-                RetryDelayBoundary::Deadline => {
-                    self.finish_interruption(&EngineError::Deadline).await?;
-                    return Err(EngineError::Deadline);
-                }
-            }
+            self.record_provider_failure(provider, error.kind());
         }
-        let Some(candidate) = self.plan.candidates().get(self.candidate_index).cloned() else {
-            let error = GatewayError::new(
-                GatewayErrorKind::NoAvailableProvider,
-                "no upstream Provider is available",
-            );
-            self.finish_failure(FailureFinalization {
-                outcome: ExecutionOutcome::Failed,
-                send_state: self.current_send_state(),
-                error,
-                upstream_status_code: None,
-                upstream_request_id: None,
-                provider_error_code: None,
-                raw_upstream_error: None,
-                retry_after_ms: None,
-                observation: ModelRequestFailureObservation::default(),
-            })
+        let state = escalate_send_state(self.current_send_state(), error.send_state());
+        self.finish_provider_error_with_send_state(&error, state)
             .await?;
-            return Err(EngineError::EmptyRoutingPlan);
-        };
-        let next_attempt = self
-            .attempts
-            .checked_add(1)
-            .and_then(NonZeroU32::new)
-            .ok_or(EngineError::EmptyRoutingPlan)?;
-        // 请求局部恢复钉选在此被一次性消费，只绑定本次 replay attempt；
-        // 外部 required_account 每次 attempt 都重新生效。
-        let (pinned_account, attempt_transport) = if let Some(recovery) = pending_retry {
-            (Some(recovery.account), recovery.transport)
+        Ok(true)
+    }
+
+    async fn middleware_failure(&mut self) -> Result<PullOutcome, EngineError> {
+        self.middleware_invocation = None;
+        self.middleware_preparation = None;
+        self.middleware_provider = None;
+        self.middleware_reply = None;
+        self.middleware_read = None;
+        self.middleware_output = None;
+        let send_state = if self.middleware_source_started {
+            escalate_send_state(self.current_send_state(), UpstreamSendState::Ambiguous)
         } else {
-            match &self.account_selection {
-                AccountSelection::Diagnostic(account) => {
-                    (Some(account.clone()), AttemptTransport::Default)
-                }
-                AccountSelection::Scheduled(_) => (
-                    self.recovery_account
-                        .take()
-                        .or_else(|| self.account_selection.required_account().cloned()),
-                    AttemptTransport::Default,
-                ),
-            }
+            self.current_send_state()
         };
-        let account_context = match &self.account_selection {
-            AccountSelection::Diagnostic(account) => AccountAttemptContext::diagnostic(
-                self.excluded_accounts.clone(),
-                account.clone(),
-                self.account_state_owner.clone(),
-            ),
-            AccountSelection::Scheduled(_) => AccountAttemptContext::new(
-                self.excluded_accounts.clone(),
-                pinned_account.clone(),
-                self.account_state_owner.clone(),
-            )
-            .with_account_scope(Arc::clone(self.plan.account_scope())),
+        self.finish_failure(FailureFinalization {
+            outcome: ExecutionOutcome::Failed,
+            send_state,
+            error: GatewayError::new(GatewayErrorKind::Internal, "attempt middleware failed"),
+            upstream_status_code: None,
+            upstream_request_id: None,
+            provider_error_code: None,
+            raw_upstream_error: None,
+            retry_after_ms: None,
+            observation: ModelRequestFailureObservation::default(),
+        })
+        .await?;
+        self.current = None;
+        Err(EngineError::Middleware)
+    }
+
+    async fn pull_middleware(&mut self) -> Result<Option<PullOutcome>, EngineError> {
+        // If an observation write was interrupted, the validated cold stream is
+        // still owned by Core. Resume the same continuation, never select again.
+        if let Some(reply) = self.middleware_reply.take() {
+            reply.accept(
+                self.current
+                    .as_ref()
+                    .ok_or(EngineError::NoActiveAttempt)?
+                    .metadata
+                    .clone(),
+            );
         }
-        .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
-            self.credential_recovery_attempted_accounts
-                .contains(account)
-        }));
-        let context = AttemptContext::new(
-            RequestAttemptContext::new(self.request_id.clone(), self.client_api_key_ref.clone())
+        if let Some(event) = self.middleware_output.take() {
+            return Ok(Some(PullOutcome::Event(self.projected_event(event))));
+        }
+        let boundary = {
+            let invocation = self
+                .middleware_invocation
+                .as_mut()
+                .ok_or(EngineError::InvalidDeliveryState)?;
+            self.middleware_source_started |= self.middleware_read.is_some();
+            let source = if self.middleware_read.is_some() {
+                self.current.as_mut().map(|current| &mut current.stream)
+            } else {
+                None
+            };
+            poll_middleware(invocation, source, self.cancellation.clone(), self.deadline).await
+        };
+        let step = match boundary {
+            MiddlewareBoundary::Cancelled | MiddlewareBoundary::Deadline => {
+                let error = if matches!(boundary, MiddlewareBoundary::Cancelled) {
+                    EngineError::Cancelled
+                } else {
+                    EngineError::Deadline
+                };
+                if !self.finish_pending_middleware_error().await? {
+                    self.finish_interruption(&error).await?;
+                }
+                self.middleware_invocation = None;
+                self.middleware_read = None;
+                return Err(error);
+            }
+            MiddlewareBoundary::Source(item) => {
+                let reply = self
+                    .middleware_read
+                    .take()
+                    .ok_or(EngineError::InvalidDeliveryState)?;
+                match item {
+                    Some(Ok(mut event)) => {
+                        if let Some(state) = event.session_update() {
+                            self.middleware_session_update = Some(state.clone());
+                        }
+                        self.observe_provider_event(&mut event).await;
+                        let _ = reply.send(Ok(Some(event)));
+                    }
+                    Some(Err(error)) => {
+                        let visible = error.clone();
+                        let invocation = self
+                            .middleware_invocation
+                            .as_mut()
+                            .ok_or(EngineError::InvalidDeliveryState)?;
+                        invocation.original_error = Some(error);
+                        invocation.source_complete = true;
+                        let _ = reply.send(Err(MiddlewareError::Provider(visible)));
+                    }
+                    None => {
+                        self.middleware_invocation
+                            .as_mut()
+                            .ok_or(EngineError::InvalidDeliveryState)?
+                            .source_complete = true;
+                        let _ = reply.send(Ok(None));
+                    }
+                }
+                return Ok(None);
+            }
+            MiddlewareBoundary::Step(step) => step,
+        };
+        if let MiddlewareStep::Error(error) = &step {
+            self.trace.attempt(self.attempts).record(
+                "middleware.failed",
+                json!({"rejected": error.is_rejected()}),
+            );
+        }
+        match step {
+            MiddlewareStep::Command(MiddlewareCommand::Read(reply)) => {
+                if self.middleware_read.is_some() || self.current.is_none() {
+                    return self.middleware_failure().await.map(Some);
+                }
+                self.middleware_read = Some(reply);
+                Ok(None)
+            }
+            MiddlewareStep::Output(event) => {
+                // Original events have already crossed observe_provider_event.
+                // Projected facts are presentation only, never a second receipt.
+                if self
+                    .middleware_invocation
+                    .as_ref()
+                    .is_some_and(|inv| inv.original_error.is_some())
+                {
+                    return Ok(None);
+                }
+                Ok(Some(PullOutcome::Event(self.projected_event(event))))
+            }
+            MiddlewareStep::End | MiddlewareStep::Error(_) => {
+                let invocation = self
+                    .middleware_invocation
+                    .take()
+                    .ok_or(EngineError::InvalidDeliveryState)?;
+                self.middleware_read = None;
+                if let Some(error) = invocation.original_error {
+                    return self
+                        .handle_stream_error(error)
+                        .await
+                        .map(|result| Some(result.into_pull_outcome()));
+                }
+                if matches!(step, MiddlewareStep::Error(_))
+                    || (self.current.is_some() && !invocation.source_complete)
+                {
+                    return self.middleware_failure().await.map(Some);
+                }
+                self.record_current_provider_success();
+                self.upstream_complete = true;
+                Ok(Some(PullOutcome::End))
+            }
+            MiddlewareStep::Command(MiddlewareCommand::Next(_)) => {
+                self.middleware_failure().await.map(Some)
+            }
+        }
+    }
+
+    async fn prepare_attempt(&mut self) -> Result<Option<PullOutcome>, EngineError> {
+        let MiddlewarePreparation {
+            candidate,
+            context,
+            pinned_account,
+            next_attempt,
+            attempt_transport,
+            trigger,
+            is_transport_recovery,
+        } = if let Some(preparation) = self.middleware_preparation.clone() {
+            preparation
+        } else {
+            let pending_retry = self.pending_retry.take();
+            let is_transport_recovery = pending_retry
+                .as_ref()
+                .is_some_and(|retry| retry.transport_recovery);
+            if !is_transport_recovery && self.routing_attempts >= self.plan.max_attempts().get() {
+                return Err(EngineError::EmptyRoutingPlan);
+            }
+            if let Some(recovery) = pending_retry.as_ref()
+                && !recovery.delay.is_zero()
+            {
+                let deadline = self
+                    .connection_budget
+                    .startup_remaining()
+                    .map_or(self.deadline, |remaining| {
+                        self.deadline.min(SystemTime::now() + remaining)
+                    });
+                match poll_retry_delay(recovery.delay, self.cancellation.clone(), deadline).await {
+                    RetryDelayBoundary::Elapsed => {}
+                    RetryDelayBoundary::Cancelled => {
+                        self.finish_interruption(&EngineError::Cancelled).await?;
+                        return Err(EngineError::Cancelled);
+                    }
+                    RetryDelayBoundary::Deadline => {
+                        self.finish_interruption(&EngineError::Deadline).await?;
+                        return Err(EngineError::Deadline);
+                    }
+                }
+            }
+            let Some(candidate) = self.plan.candidates().get(self.candidate_index).cloned() else {
+                let error = GatewayError::new(
+                    GatewayErrorKind::NoAvailableProvider,
+                    "no upstream Provider is available",
+                );
+                self.finish_failure(FailureFinalization {
+                    outcome: ExecutionOutcome::Failed,
+                    send_state: self.current_send_state(),
+                    error,
+                    upstream_status_code: None,
+                    upstream_request_id: None,
+                    provider_error_code: None,
+                    raw_upstream_error: None,
+                    retry_after_ms: None,
+                    observation: ModelRequestFailureObservation::default(),
+                })
+                .await?;
+                return Err(EngineError::EmptyRoutingPlan);
+            };
+            let next_attempt = self
+                .attempts
+                .checked_add(1)
+                .and_then(NonZeroU32::new)
+                .ok_or(EngineError::EmptyRoutingPlan)?;
+            // 请求局部恢复钉选在此被一次性消费，只绑定本次 replay attempt；
+            // 外部 required_account 每次 attempt 都重新生效。
+            let (pinned_account, attempt_transport) = if let Some(recovery) = pending_retry {
+                (Some(recovery.account), recovery.transport)
+            } else {
+                match &self.account_selection {
+                    AccountSelection::Diagnostic(account) => {
+                        (Some(account.clone()), AttemptTransport::Default)
+                    }
+                    AccountSelection::Scheduled(_) => (
+                        self.recovery_account
+                            .take()
+                            .or_else(|| self.account_selection.required_account().cloned()),
+                        AttemptTransport::Default,
+                    ),
+                }
+            };
+            let account_context = match &self.account_selection {
+                AccountSelection::Diagnostic(account) => AccountAttemptContext::diagnostic(
+                    self.excluded_accounts.clone(),
+                    account.clone(),
+                    self.account_state_owner.clone(),
+                ),
+                AccountSelection::Scheduled(_) => AccountAttemptContext::new(
+                    self.excluded_accounts.clone(),
+                    pinned_account.clone(),
+                    self.account_state_owner.clone(),
+                )
+                .with_account_scope(Arc::clone(self.plan.account_scope())),
+            }
+            .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
+                self.credential_recovery_attempted_accounts
+                    .contains(account)
+            }));
+            let context = AttemptContext::new(
+                RequestAttemptContext::new(
+                    self.request_id.clone(),
+                    self.client_api_key_ref.clone(),
+                )
                 .with_pricing(self.plan.pricing())
                 .with_connection_budget(self.connection_budget.clone())
                 .with_response_control(Some(self.response_control.clone()))
                 .with_timing_started_at(self.observation.timing_started_at)
                 .with_trace(self.trace.clone()),
-            next_attempt,
-            self.deadline,
-            self.plan.account_selection_policy(),
-            account_context,
-            self.continuation.clone(),
-            self.cancellation.clone(),
-        )
-        .with_continuation_attempt(self.continuation_attempt)
-        .with_transport(attempt_transport);
-        let trigger = if self.attempts == 0 {
-            AttemptTrigger::Initial
-        } else {
-            AttemptTrigger::AccountRetry
+                next_attempt,
+                self.deadline,
+                self.plan.account_selection_policy(),
+                account_context,
+                self.continuation.clone(),
+                self.cancellation.clone(),
+            )
+            .with_continuation_attempt(self.continuation_attempt)
+            .with_transport(attempt_transport);
+            let trigger = if self.attempts == 0 {
+                AttemptTrigger::Initial
+            } else {
+                AttemptTrigger::AccountRetry
+            };
+            let attempt_trace = self.trace.attempt(next_attempt.get());
+            attempt_trace.record(
+                "attempt.started",
+                json!({
+                    "provider": candidate.provider().as_str(),
+                    "model": candidate.upstream_model().map(|model| model.as_str()),
+                    "transportPolicy": format!("{attempt_transport:?}"),
+                    "continuation": format!("{:?}", self.continuation_attempt),
+                    "pinnedAccount": pinned_account.as_ref().map(|id| id.as_str()),
+                    "transportRecovery": is_transport_recovery,
+                }),
+            );
+
+            let preparation = MiddlewarePreparation {
+                candidate,
+                context,
+                pinned_account,
+                next_attempt,
+                attempt_transport,
+                trigger,
+                is_transport_recovery,
+            };
+            if self.attempt_middleware.is_some() {
+                self.middleware_preparation = Some(preparation.clone());
+            }
+            preparation
         };
         let provider = self
             .engine
@@ -817,27 +1114,107 @@ where
                 provider: candidate.provider().as_str().to_owned(),
             })?;
         let attempt_trace = self.trace.attempt(next_attempt.get());
-        attempt_trace.record(
-            "attempt.started",
-            json!({
-                "provider": candidate.provider().as_str(),
-                "model": candidate.upstream_model().map(|model| model.as_str()),
-                "transportPolicy": format!("{attempt_transport:?}"),
-                "continuation": format!("{:?}", self.continuation_attempt),
-                "pinnedAccount": pinned_account.as_ref().map(|id| id.as_str()),
-                "transportRecovery": is_transport_recovery,
-            }),
-        );
-        let provider_request = ProviderRequest::new(self.operation.clone(), candidate.clone());
-        let stream = match poll_provider(
-            provider,
-            provider_request,
-            context,
-            self.cancellation.clone(),
-            self.deadline,
-        )
-        .await
-        {
+        let mut provider_request = ProviderRequest::new(self.operation.clone(), candidate.clone());
+        if let Some(middleware) = self.attempt_middleware.clone() {
+            if self.middleware_invocation.is_none() {
+                self.middleware_source_started = false;
+                self.middleware_session_update = None;
+                self.middleware_invocation = Some(Invocation::new(
+                    middleware,
+                    provider_request.clone(),
+                    context.clone(),
+                ));
+            }
+            if self.middleware_reply.is_none() {
+                let boundary = poll_middleware(
+                    self.middleware_invocation
+                        .as_mut()
+                        .ok_or(EngineError::InvalidDeliveryState)?,
+                    None,
+                    self.cancellation.clone(),
+                    self.deadline,
+                )
+                .await;
+                match boundary {
+                    MiddlewareBoundary::Step(MiddlewareStep::Command(MiddlewareCommand::Next(
+                        request,
+                    ))) => {
+                        // Capability and session authority were frozen before this attempt.
+                        // Protocol adapters additionally re-decode model/continuation facts.
+                        if request.operation.capability_requirements()
+                            != self.operation.capability_requirements()
+                            || request.operation.image_generation_requested()
+                                != self.operation.image_generation_requested()
+                            || request
+                                .operation
+                                .provider_session_state(candidate.provider().as_str())
+                                != self
+                                    .operation
+                                    .provider_session_state(candidate.provider().as_str())
+                        {
+                            return self.middleware_failure().await.map(Some);
+                        }
+                        self.middleware_reply = Some(request);
+                    }
+                    MiddlewareBoundary::Step(MiddlewareStep::Output(event)) => {
+                        self.middleware_output = Some(event);
+                        self.middleware_preparation = None;
+                        return Ok(None);
+                    }
+                    MiddlewareBoundary::Step(MiddlewareStep::End) => {
+                        self.middleware_invocation = None;
+                        self.middleware_preparation = None;
+                        self.upstream_complete = true;
+                        return Ok(Some(PullOutcome::End));
+                    }
+                    MiddlewareBoundary::Cancelled | MiddlewareBoundary::Deadline => {
+                        let error = if matches!(boundary, MiddlewareBoundary::Cancelled) {
+                            EngineError::Cancelled
+                        } else {
+                            EngineError::Deadline
+                        };
+                        self.finish_interruption(&error).await?;
+                        self.middleware_invocation = None;
+                        return Err(error);
+                    }
+                    _ => return self.middleware_failure().await.map(Some),
+                }
+            }
+            let request = self
+                .middleware_reply
+                .as_ref()
+                .ok_or(EngineError::InvalidDeliveryState)?;
+            provider_request = ProviderRequest::new(request.operation.clone(), candidate.clone());
+        }
+        let boundary = if self.attempt_middleware.is_some() {
+            if self.middleware_provider.is_none() {
+                self.middleware_provider = Some(Box::pin(poll_provider(
+                    provider,
+                    provider_request,
+                    context,
+                    self.cancellation.clone(),
+                    self.deadline,
+                )));
+            }
+            let boundary = self
+                .middleware_provider
+                .as_mut()
+                .ok_or(EngineError::InvalidDeliveryState)?
+                .await;
+            self.middleware_provider = None;
+            boundary
+        } else {
+            poll_provider(
+                provider,
+                provider_request,
+                context,
+                self.cancellation.clone(),
+                self.deadline,
+            )
+            .await
+        };
+        self.middleware_preparation = None;
+        let stream = match boundary {
             ProviderBoundary::Cancelled => {
                 self.finish_interruption(&EngineError::Cancelled).await?;
                 return Err(EngineError::Cancelled);
@@ -850,6 +1227,8 @@ where
             ProviderBoundary::Result(result) => match *result {
                 Ok(stream) => stream,
                 Err(error) => {
+                    self.middleware_reply = None;
+                    self.middleware_invocation = None;
                     record_trace_error(&attempt_trace, &error);
                     if self.prepare_unavailable_native_continuation_replay(&error) {
                         return Ok(Some(PullOutcome::AttemptDiscarded));
@@ -1069,6 +1448,15 @@ where
                 self.pending_request = None;
                 self.request_persisted = true;
             }
+        }
+        if let Some(reply) = self.middleware_reply.take() {
+            reply.accept(
+                self.current
+                    .as_ref()
+                    .ok_or(EngineError::NoActiveAttempt)?
+                    .metadata
+                    .clone(),
+            );
         }
         Ok(None)
     }
@@ -1532,7 +1920,11 @@ where
         self.persist_finalization(ModelRequestFinalization {
             request_id: self.request_id.clone(),
             outcome: ExecutionOutcome::Succeeded,
-            send_state: UpstreamSendState::Sent,
+            send_state: if self.current.is_none() {
+                self.current_send_state()
+            } else {
+                UpstreamSendState::Sent
+            },
             attempt_count: self.attempts,
             downstream_committed_at: self.downstream_committed_at,
             client_status_code: self.client_status_code,
@@ -1672,6 +2064,13 @@ where
         if self.is_finalized() {
             return Ok(());
         }
+        self.middleware_invocation = None;
+        self.middleware_preparation = None;
+        self.middleware_provider = None;
+        self.middleware_reply = None;
+        self.middleware_read = None;
+        self.middleware_output = None;
+        self.middleware_session_update = None;
         self.trace.record(
             "request.finished",
             json!({
@@ -1960,6 +2359,40 @@ async fn poll_stream_item(
         _ = cancelled => PollBoundary::Cancelled,
         _ = deadline_timer => PollBoundary::Deadline,
         item = next => PollBoundary::Item(item),
+    }
+}
+
+enum MiddlewareBoundary {
+    Step(MiddlewareStep),
+    Source(Option<Result<ProviderEvent, ProviderError>>),
+    Cancelled,
+    Deadline,
+}
+async fn poll_middleware(
+    invocation: &mut Invocation,
+    source: Option<&mut ProviderStream>,
+    cancellation: CancellationToken,
+    deadline: SystemTime,
+) -> MiddlewareBoundary {
+    let Ok(remaining) = deadline.duration_since(SystemTime::now()) else {
+        return MiddlewareBoundary::Deadline;
+    };
+    let step = invocation.next_step().fuse();
+    let source = async move {
+        match source {
+            Some(stream) => stream.next().await,
+            None => futures::future::pending().await,
+        }
+    }
+    .fuse();
+    let cancelled = cancellation.cancelled().fuse();
+    let timeout = Delay::new(remaining).fuse();
+    pin_mut!(step, source, cancelled, timeout);
+    select_biased! {
+        _ = cancelled => MiddlewareBoundary::Cancelled,
+        _ = timeout => MiddlewareBoundary::Deadline,
+        step = step => MiddlewareBoundary::Step(step),
+        source = source => MiddlewareBoundary::Source(source),
     }
 }
 
