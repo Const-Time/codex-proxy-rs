@@ -34,6 +34,13 @@ impl PluginHandler for Worker {
                     let members=call.host.change_group_members(GroupMembersChange{resource_key:"main".into(),add:vec!["acct_001".into()],remove:vec![]}).await?;
                     let key=call.host.ensure_key(KeyEnsureRequest{resource_key:"key".into(),name:"Key".into(),group_resource_keys:vec!["main".into()],max_concurrency:1,requests_per_minute:2,daily_limit_usd:"0".into(),weekly_limit_usd:"0".into()}).await?;
                     json!({"group":group,"members":members,"key":key})
+                } else if input["operation"]=="quota" {
+                    use gateway_plugin_sdk::call::shared_budgets::*;
+                    let target=Target{user_id:"alice".into(),group_id:"grp_00000000000000000000000000000077".into()};
+                    let budget=call.host.shared_budget(target.clone()).await?;
+                    let updated=call.host.update_shared_group_limits(UpdateGroupLimits{group_id:target.group_id.clone(),expected_revision:budget.revision,daily_limit_usd:Some("3".into()),weekly_limit_usd:None}).await?;
+                    let reset=call.host.reset_shared_budgets(Reset{event_id:"90d3a7ec-5866-4f51-8b1a-4c00ad39da63".into(),targets:vec![target]}).await?;
+                    json!({"budget":budget,"updated":updated,"reset":reset})
                 } else if input["operation"]=="facts" {
                     use gateway_plugin_sdk::call::data::*;
                     let key=call.host.key_facts(ClientKeyFactsQuery{client_key_id:"key_test".into()}).await?;

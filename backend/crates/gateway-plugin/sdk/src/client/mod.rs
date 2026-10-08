@@ -53,3 +53,5 @@ async fn payload_call<T: Serialize, R: DeserializeOwned>(
     }
     serde_json::from_slice(&reply.payload).map_err(|_| invalid())
 }
+
+mod shared_budgets;

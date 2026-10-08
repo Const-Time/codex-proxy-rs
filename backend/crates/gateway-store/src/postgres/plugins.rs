@@ -326,7 +326,7 @@ fn plugin_unavailable() -> gateway_admin::ports::store::AdminStoreError {
         "storage unavailable",
     )
 }
-pub(super) async fn plugin_current_revision(
+pub(crate) async fn plugin_current_revision(
     tx: &mut Transaction<'_, Postgres>,
 ) -> gateway_admin::ports::store::AdminStoreResult<gateway_admin::model::Revision> {
     let revision: i64 =
@@ -339,7 +339,7 @@ pub(super) async fn plugin_current_revision(
             .map_err(|e| crate::admin_store_error("plugin resource", e))?,
     )
 }
-pub(super) async fn lock_plugin_resource(
+pub(crate) async fn lock_plugin_resource(
     tx: &mut Transaction<'_, Postgres>,
     scope: &PluginMutationScope,
 ) -> gateway_admin::ports::store::AdminStoreResult<()> {

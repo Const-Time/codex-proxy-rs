@@ -284,6 +284,20 @@ impl AuthStore for UserAuthStore {
     ) -> AdminStoreResult<Vec<gateway_admin::model::operations::UsageKeyOption>> {
         self.usage_key_options_stored(owner).await
     }
+    async fn plugin_shared_budget(
+        &self,
+        scope: gateway_admin::model::plugins::PluginMutationScope,
+        target: gateway_admin::model::users::SubscriptionTarget,
+    ) -> AdminStoreResult<gateway_admin::model::plugins::PluginSharedBudget> {
+        self.plugin_budget_record(scope, target).await
+    }
+    async fn reset_plugin_shared_budget(
+        &self,
+        scope: gateway_admin::model::plugins::PluginMutationScope,
+        command: gateway_admin::model::plugins::PluginBudgetReset,
+    ) -> AdminStoreResult<gateway_admin::model::plugins::PluginResourceMutation<u64>> {
+        self.reset_plugin_budget(scope, command).await
+    }
     async fn subscriptions(
         &self,
     ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserSubscription>> {

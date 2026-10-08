@@ -109,6 +109,85 @@ impl PgAccountGroupRepository {
 
 #[async_trait]
 impl AccountGroupStore for PgAccountGroupRepository {
+    async fn update_plugin_group_budget(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginGroupBudgetUpdate,
+    ) -> AdminStoreResult<PluginResourceMutation<PluginGroupBudget>> {
+        use gateway_admin::ports::store::AdminStoreErrorKind;
+        let fail = |kind| AdminStoreError::new(kind, "plugin quota", "group budget update failed");
+        if AccountGroupId::new(&command.group_id).is_err()
+            || command.expected_revision == 0
+            || (command.daily_limit_usd.is_none() && command.weekly_limit_usd.is_none())
+        {
+            return Err(fail(AdminStoreErrorKind::Invalid));
+        }
+        let amount = |value: &Option<String>| {
+            value
+                .as_ref()
+                .map(|s| {
+                    s.parse::<gateway_core::metering::Decimal>()
+                        .map(|v| v.canonical())
+                        .map_err(|_| fail(AdminStoreErrorKind::Invalid))
+                })
+                .transpose()
+        };
+        let daily = amount(&command.daily_limit_usd)?;
+        let weekly = amount(&command.weekly_limit_usd)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| fail(AdminStoreErrorKind::Unavailable))?;
+        lock_plugin_resource(&mut tx, &scope).await?;
+        let current: i64 = sqlx::query_scalar(
+            "select config_revision from runtime_settings where id=1 for update",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| fail(AdminStoreErrorKind::Unavailable))?;
+        crate::users_adapter::require_administrator(&mut tx, &scope.actor).await?;
+        if u64::try_from(current).ok() != Some(command.expected_revision) {
+            return Err(fail(AdminStoreErrorKind::Conflict));
+        }
+        let row = sqlx::query("update account_groups set daily_limit_usd=coalesce($2::text::numeric,daily_limit_usd),weekly_limit_usd=coalesce($3::text::numeric,weekly_limit_usd),updated_at=now() where id=$1 returning daily_limit_usd::text,weekly_limit_usd::text")
+            .bind(&command.group_id).bind(daily).bind(weekly).fetch_optional(&mut *tx).await.map_err(|e| fail(if e.as_database_error().is_some_and(|e| e.is_check_violation()) {AdminStoreErrorKind::Invalid} else {AdminStoreErrorKind::Unavailable}))?.ok_or_else(|| fail(AdminStoreErrorKind::NotFound))?;
+        let revision = bump_config_revision_in_transaction(&mut tx)
+            .await
+            .map_err(|e| admin_store_error("plugin quota", e))?;
+        let mut fields = vec![];
+        if command.daily_limit_usd.is_some() {
+            fields.push("daily_limit_usd".into());
+        }
+        if command.weekly_limit_usd.is_some() {
+            fields.push("weekly_limit_usd".into());
+        }
+        append_admin_audit_event_in_transaction(
+            &mut tx,
+            mutation_audit(
+                &scope.actor,
+                "plugin.quota.update_group_limits",
+                "account_group",
+                &command.group_id,
+                fields,
+            ),
+            revision,
+        )
+        .await
+        .map_err(|e| admin_store_error("plugin quota", e))?;
+        tx.commit()
+            .await
+            .map_err(|_| fail(AdminStoreErrorKind::Unavailable))?;
+        Ok(PluginResourceMutation {
+            revision: admin_revision(revision)?,
+            value: PluginGroupBudget {
+                group_id: command.group_id,
+                daily_limit_usd: row.get("daily_limit_usd"),
+                weekly_limit_usd: row.get("weekly_limit_usd"),
+            },
+        })
+    }
+
     async fn ensure_plugin_group(
         &self,
         scope: PluginMutationScope,

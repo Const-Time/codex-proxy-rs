@@ -113,3 +113,22 @@ pub trait PluginResourceService: Send + Sync {
         command: PluginGroupMembers,
     ) -> Result<PluginMembersChanged>;
 }
+
+#[async_trait]
+pub trait PluginQuotaService: Send + Sync {
+    async fn get(
+        &self,
+        scope: PluginMutationScope,
+        target: crate::model::users::SubscriptionTarget,
+    ) -> Result<PluginSharedBudget>;
+    async fn update_group_limits(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginGroupBudgetUpdate,
+    ) -> Result<PluginResourceMutation<PluginGroupBudget>>;
+    async fn reset(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginBudgetReset,
+    ) -> Result<PluginResourceMutation<u64>>;
+}

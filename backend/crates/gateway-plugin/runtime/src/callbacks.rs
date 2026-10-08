@@ -22,6 +22,7 @@ struct Namespace {
     schema: jsonschema::Validator,
 }
 pub(crate) struct Callbacks {
+    quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
     resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
     pub(crate) calls: Arc<crate::resources::ManagementCalls>,
     store: Arc<dyn PluginStore>,
@@ -32,6 +33,13 @@ pub(crate) struct Callbacks {
     data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl Callbacks {
+    pub(crate) fn with_quota(
+        mut self,
+        service: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
+    ) -> Self {
+        self.quota = service;
+        self
+    }
     pub(crate) fn with_resources(
         mut self,
         resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
@@ -60,6 +68,7 @@ impl Callbacks {
             })
             .collect::<Result<_, gateway_admin::model::AdminError>>()?;
         Ok(Self {
+            quota: None,
             resources: None,
             calls: Arc::default(),
             store,
@@ -106,6 +115,7 @@ impl CallbackHandler for Callbacks {
         let data = self.data.clone();
         let resources = self.resources.clone();
         let calls = self.calls.clone();
+        let quota = self.quota.clone();
         Box::pin(async move {
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
@@ -116,6 +126,37 @@ impl CallbackHandler for Callbacks {
                     ErrorCode::PermissionDenied,
                     "plugin generation is not active",
                 ));
+            }
+            if matches!(
+                method.as_str(),
+                gateway_plugin_sdk::call::shared_budgets::GET
+                    | gateway_plugin_sdk::call::shared_budgets::UPDATE_GROUP_LIMITS
+                    | gateway_plugin_sdk::call::shared_budgets::RESET
+            ) {
+                let actor = calls.actor(&context.resource_scope_id).ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "management caller is no longer active",
+                    )
+                })?;
+                let service = quota.ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::Unsupported,
+                        "shared quota service is not configured",
+                    )
+                })?;
+                return crate::quota::call(
+                    service.as_ref(),
+                    PluginMutationScope {
+                        instance_id: id,
+                        revision,
+                        actor,
+                    },
+                    &method,
+                    params,
+                    &payload,
+                )
+                .await;
             }
             if matches!(
                 method.as_str(),

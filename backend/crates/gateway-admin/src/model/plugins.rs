@@ -196,3 +196,39 @@ pub struct PluginKeyCreate {
     /// Expected effective shared limits; never implicitly rewrites a shared budget.
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
 }
+
+/// Explicit shared-ledger operations. A Key is never treated as a budget owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginSharedBudget {
+    pub revision: super::Revision,
+    pub target: super::users::SubscriptionTarget,
+    pub enabled: bool,
+    pub group_daily_limit_usd: String,
+    pub group_weekly_limit_usd: String,
+    pub quota_multiplier: String,
+    pub daily_limit_usd: String,
+    pub weekly_limit_usd: String,
+    pub daily_used_usd: String,
+    pub weekly_used_usd: String,
+    pub daily_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub weekly_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_reset_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+#[derive(Debug, Clone)]
+pub struct PluginGroupBudgetUpdate {
+    pub group_id: String,
+    pub expected_revision: u64,
+    pub daily_limit_usd: Option<String>,
+    pub weekly_limit_usd: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginGroupBudget {
+    pub group_id: String,
+    pub daily_limit_usd: String,
+    pub weekly_limit_usd: String,
+}
+#[derive(Debug, Clone)]
+pub struct PluginBudgetReset {
+    pub event_id: String,
+    pub targets: Vec<super::users::SubscriptionTarget>,
+}
