@@ -305,6 +305,13 @@ struct GeneratePayload {
 }
 
 impl GenerateRequest {
+    /// Provider-owned request defaults may replace wire facts without losing context or inherited authority.
+    #[must_use]
+    pub fn with_protocol_body(mut self, body: Map<String, Value>) -> Self {
+        Arc::make_mut(&mut self.payload).protocol_payload.body = body;
+        self
+    }
+
     /// 创建携带协议不透明正文的生成请求。
     ///
     /// 完整请求只以原始 wire object 保存；Core 仅局部只读已知字段以推导路由能力，

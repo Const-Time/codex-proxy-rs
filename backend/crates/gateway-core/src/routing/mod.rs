@@ -2,7 +2,7 @@
 
 mod catalog;
 mod request_settings;
-pub use request_settings::RequestSettings;
+pub use request_settings::{ExecutionSettings, RequestSettings};
 pub mod snapshot;
 pub use catalog::{
     ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
@@ -506,6 +506,7 @@ pub struct RoutingContext {
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {
+    presentation: Option<Arc<ModelPresentation>>,
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
     emulated_features: BTreeSet<Feature>,
@@ -513,6 +514,9 @@ pub struct ProviderCandidate {
 }
 
 impl ProviderCandidate {
+    pub fn model_presentation(&self) -> Option<&ModelPresentation> {
+        self.presentation.as_deref()
+    }
     #[must_use]
     pub const fn provider(&self) -> &ProviderKind {
         &self.provider
@@ -537,6 +541,7 @@ impl ProviderCandidate {
 /// 一次请求冻结的 Provider 尝试顺序。
 #[derive(Debug, Clone)]
 pub struct RoutingPlan {
+    fast_mode: crate::account::FastMode,
     pricing: Arc<crate::metering::PricingOverrides>,
     config_revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
@@ -547,6 +552,15 @@ pub struct RoutingPlan {
 }
 
 impl RoutingPlan {
+    pub fn fast_mode(&self) -> crate::account::FastMode {
+        self.fast_mode
+    }
+    #[must_use]
+    pub fn with_fast_mode(mut self, mode: crate::account::FastMode) -> Self {
+        self.fast_mode = mode;
+        self
+    }
+
     #[must_use]
     pub fn pricing(&self) -> Arc<crate::metering::PricingOverrides> {
         Arc::clone(&self.pricing)

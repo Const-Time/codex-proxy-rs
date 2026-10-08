@@ -1,4 +1,5 @@
 mod account_isolation;
+mod fast_mode;
 mod precommit;
 mod response_interrupt;
 use std::collections::{BTreeMap, BTreeSet};

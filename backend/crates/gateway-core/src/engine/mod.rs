@@ -318,6 +318,7 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context。
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
+    fast_mode: crate::account::FastMode,
     response_control: Option<response_control::ResponseControl>,
     pricing: Arc<crate::metering::PricingOverrides>,
     request_id: ModelRequestId,
@@ -328,6 +329,12 @@ pub struct RequestAttemptContext {
 }
 
 impl RequestAttemptContext {
+    #[must_use]
+    pub fn with_fast_mode(mut self, mode: crate::account::FastMode) -> Self {
+        self.fast_mode = mode;
+        self
+    }
+
     #[must_use]
     pub fn with_response_control(
         mut self,
@@ -346,6 +353,7 @@ impl RequestAttemptContext {
     #[must_use]
     pub fn new(request_id: ModelRequestId, client_api_key_ref: ClientApiKeyId) -> Self {
         Self {
+            fast_mode: crate::account::FastMode::Default,
             response_control: None,
             request_id,
             client_api_key_ref,
@@ -408,6 +416,9 @@ pub struct AttemptContext {
 }
 
 impl AttemptContext {
+    pub fn fast_mode(&self) -> crate::account::FastMode {
+        self.request.fast_mode
+    }
     #[must_use]
     pub fn response_control(&self) -> Option<&response_control::ResponseControl> {
         self.request.response_control.as_ref()

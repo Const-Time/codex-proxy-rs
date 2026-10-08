@@ -880,6 +880,12 @@ impl RuntimeSnapshot {
                 None => BTreeSet::new(),
             };
             candidates.push(ProviderCandidate {
+                presentation: self
+                    .provider_model_presentations
+                    .get(provider)
+                    .and_then(|models| models.get(&upstream_model))
+                    .cloned()
+                    .map(Arc::new),
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
                 emulated_features,
@@ -907,6 +913,7 @@ impl RuntimeSnapshot {
         }
 
         Ok(RoutingPlan {
+            fast_mode: crate::account::FastMode::Default,
             config_revision: self.revision,
             pricing: Arc::clone(&self.values.pricing),
             account_selection_policy: self.account_selection_policy,
@@ -943,12 +950,14 @@ impl RuntimeSnapshot {
             });
         }
         let candidate = ProviderCandidate {
+            presentation: None,
             provider: provider.clone(),
             upstream_model: None,
             emulated_features: BTreeSet::new(),
             account_scope: Arc::clone(&account_scope),
         };
         Ok(RoutingPlan {
+            fast_mode: crate::account::FastMode::Default,
             config_revision: self.revision,
             pricing: Arc::clone(&self.values.pricing),
             account_selection_policy: self.account_selection_policy,

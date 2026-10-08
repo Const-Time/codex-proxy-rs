@@ -332,6 +332,38 @@ impl Provider for CodexProvider {
             .map_err(|_| gateway_core::routing::ProviderCatalogUnavailable)
     }
 
+    fn prepare_operation(
+        &self,
+        operation: Operation,
+        candidate: &ProviderCandidate,
+        fast_mode: gateway_core::account::FastMode,
+    ) -> Operation {
+        if fast_mode == gateway_core::account::FastMode::Default
+            || candidate.provider().as_str() != PROVIDER_NAME
+        {
+            return operation;
+        }
+        let Operation::Generate(generate) = operation else {
+            return operation;
+        };
+        if generate.protocol_payload().protocol() != PROVIDER_NAME {
+            return Operation::Generate(generate);
+        }
+        let mut request =
+            CodexResponsesRequest::from_body(generate.protocol_payload().body().clone());
+        let supports_priority = candidate.model_presentation().is_some_and(|model| {
+            model
+                .service_tiers()
+                .iter()
+                .any(|tier| tier.id() == "priority")
+        });
+        if request.apply_fast_policy(fast_mode, supports_priority) {
+            Operation::Generate(generate.with_protocol_body(request.body().clone()))
+        } else {
+            Operation::Generate(generate)
+        }
+    }
+
     async fn execute(
         &self,
         request: ProviderRequest,

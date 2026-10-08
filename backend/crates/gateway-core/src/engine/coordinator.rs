@@ -1076,6 +1076,7 @@ where
                     self.client_api_key_ref.clone(),
                 )
                 .with_pricing(self.plan.pricing())
+                .with_fast_mode(self.plan.fast_mode())
                 .with_connection_budget(self.connection_budget.clone())
                 .with_response_control(Some(self.response_control.clone()))
                 .with_timing_started_at(self.observation.timing_started_at)
@@ -1130,7 +1131,12 @@ where
                 provider: candidate.provider().as_str().to_owned(),
             })?;
         let attempt_trace = self.trace.attempt(next_attempt.get());
-        let mut provider_request = ProviderRequest::new(self.operation.clone(), candidate.clone());
+        let operation = if self.middleware_invocation.is_none() {
+            provider.prepare_operation(self.operation.clone(), &candidate, context.fast_mode())
+        } else {
+            self.operation.clone()
+        };
+        let mut provider_request = ProviderRequest::new(operation, candidate.clone());
         if let Some(middleware) = self.attempt_middleware.clone() {
             if self.middleware_invocation.is_none() {
                 self.middleware_response_head = None;
