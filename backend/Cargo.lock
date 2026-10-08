@@ -1791,6 +1791,7 @@ dependencies = [
  "flate2",
  "futures",
  "gateway-admin",
+ "gateway-api",
  "gateway-core",
  "gateway-host",
  "gateway-plugin-sdk",

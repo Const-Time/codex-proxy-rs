@@ -41,24 +41,55 @@ impl ExecutionBody {
             if batch.commit_requirement() != CommitRequirement::CommitBeforeDelivery {
                 return Err(MiddlewareError::InvalidState);
             }
-            body.encode_batch(batch)?;
+            let status = body
+                .session()?
+                .middleware_response_head()
+                .map_or(200, |head| head.status_code);
+            if (200..300).contains(&status) {
+                body.encode_batch(batch)?;
+            } else {
+                // An attempt may project a JSON error even for an SSE request.
+                // Its one complete document remains behind the original barrier.
+                let mut events = batch.into_provider_events();
+                let encoded = encode_document(&events, status)?;
+                let last = events.pop().ok_or(MiddlewareError::InvalidState)?;
+                let (bytes, framing, terminal, envelope) = MiddlewareFrame::from_provider_event(
+                    Bytes::from(encoded),
+                    if (200..300).contains(&status) {
+                        MiddlewareFraming::JsonDocument
+                    } else {
+                        MiddlewareFraming::RawBytes
+                    },
+                    true,
+                    last,
+                )
+                .into_parts();
+                body.pending.push_back(
+                    MiddlewareFrame::new(bytes, framing, terminal).with_envelope(
+                        envelope
+                            .ok_or(MiddlewareError::InvalidState)?
+                            .with_preceding_events(events)
+                            .with_batch_end(CommitRequirement::CommitBeforeDelivery),
+                    ),
+                );
+                body.streaming = false;
+                body.terminal = true;
+            }
         } else {
             let mut events = body.session()?.collect_uncommitted().await?;
-            for event in &events {
-                body.encoder.push_sse(event);
-            }
-            let encoded = serde_json::to_vec(
-                &body
-                    .encoder
-                    .finish()
-                    .map_err(|_| MiddlewareError::InvalidState)?,
-            )
-            .map_err(|_| MiddlewareError::InvalidState)?;
-            body.encoder = OpenAiResponsesEncoder::new();
+            let status = body
+                .session()?
+                .middleware_response_head()
+                .map_or(200, |head| head.status_code);
+            let encoded = encode_document(&events, status)?;
             let last = events.pop().ok_or(MiddlewareError::InvalidState)?;
             let frame = MiddlewareFrame::from_provider_event(
                 Bytes::from(encoded),
-                MiddlewareFraming::JsonDocument,
+                if (200..300).contains(&status) {
+                    MiddlewareFraming::JsonDocument
+                } else {
+                    MiddlewareFraming::RawBytes
+                },
                 true,
                 last,
             );
@@ -77,9 +108,13 @@ impl ExecutionBody {
             .iter()
             .map(|h| MiddlewareHeader::new(h.name(), h.value().clone()))
             .collect();
+        let status = body
+            .session()?
+            .middleware_response_head()
+            .map_or(200, |head| head.status_code);
         Ok(MiddlewareResponse::new(
             "openai".into(),
-            200,
+            status,
             headers,
             Box::new(body),
         ))
@@ -202,12 +237,12 @@ impl MiddlewareBody for ExecutionBody {
         Box::pin(async move {
             self.session()?.commit_downstream(status).await?;
             self.committed = true;
-            if !self.streaming && !self.is_finalized() {
-                return Err(MiddlewareError::InvalidState);
-            }
-            if self.streaming && self.terminal {
+            if self.terminal && !self.exhausted {
                 // Complete the original terminal, including settlement, before exposing it.
                 self.finish_terminal().await?;
+            }
+            if !self.streaming && !self.is_finalized() {
+                return Err(MiddlewareError::InvalidState);
             }
             Ok(())
         })
@@ -228,4 +263,23 @@ impl MiddlewareBody for ExecutionBody {
             self.execution.cancel_and_finalize().await;
         })
     }
+}
+
+fn encode_document(events: &[ProviderEvent], status: u16) -> Result<Vec<u8>, MiddlewareError> {
+    if !(200..300).contains(&status)
+        && events.len() == 1
+        && let Some(raw) = events[0].wire_event().and_then(|wire| wire.raw_json_body())
+    {
+        return Ok(raw.to_vec());
+    }
+    let mut encoder = OpenAiResponsesEncoder::new();
+    for event in events {
+        encoder.push_sse(event);
+    }
+    serde_json::to_vec(
+        &encoder
+            .finish()
+            .map_err(|_| MiddlewareError::InvalidState)?,
+    )
+    .map_err(|_| MiddlewareError::InvalidState)
 }

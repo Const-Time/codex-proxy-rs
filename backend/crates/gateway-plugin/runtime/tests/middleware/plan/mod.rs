@@ -1,5 +1,6 @@
 //! Exercise publication with real plugin processes. The test composition enables
 //! the kernel explicitly; production still rejects middleware until API mounts exist.
+mod attempt;
 use super::*;
 use crate::support::{MemoryStore, actor, update};
 use async_trait::async_trait;

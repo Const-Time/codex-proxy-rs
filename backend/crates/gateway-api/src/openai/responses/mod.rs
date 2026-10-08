@@ -11,7 +11,9 @@ pub use error::{ProtocolError, ProtocolErrorBody, RequestDecodeError, ResponseEn
 pub(super) use http::{PendingExecution, request_client_context};
 pub use http::{collect_execution_response, stream_execution_response};
 pub(crate) use http::{responses, responses_at_endpoint};
-pub use middleware::{deliver_middleware_response, execution_middleware_response};
+pub use middleware::{
+    deliver_middleware_response, execution_middleware_response, responses_attempt_middleware,
+};
 pub use request::{
     ContinuationIntent, DecodedResponsesRequest, OpenAiRequestHeaders, ResponsesRequestMetadata,
     decode_request_with_headers,

@@ -1,5 +1,7 @@
+mod attempt;
 mod body;
 mod delivery;
+mod fixture;
 mod request;
 
 use bytes::Bytes;
@@ -153,7 +155,7 @@ impl MiddlewareBody for Rewriter {
                     last = last.with_envelope(envelope);
                 }
                 self.pending = Some(last);
-                return Ok(Some(MiddlewareFrame::new(Bytes::from_static(b"event: response.output_text.delta\ndata: {\"delta\":\"must-not-leak\"}\n\n"), MiddlewareFraming::SseEvent, false)));
+                return Ok(Some(MiddlewareFrame::new(Bytes::from_static(b"event: response.output_text.delta\ndata: {\"delta\":\"must-not-leak\"}\n\n"), MiddlewareFraming::SseEvent, false).with_transformed(true)));
             }
             let bytes = match self.mode {
                 Rewrite::Json => Bytes::from_static(br#"{"id":"resp_rewritten","output":[]}"#),
