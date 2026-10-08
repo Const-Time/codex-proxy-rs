@@ -41,6 +41,21 @@ pub(crate) async fn standalone_search(
         Ok(operation) => operation,
         Err(error) => return gateway_error_response(&error),
     };
+    if let Some(registry) = service.middleware_registry() {
+        return crate::openai::middleware::raw::respond(
+            service.clone(),
+            registry,
+            crate::openai::middleware::raw::Ingress {
+                client,
+                operation,
+                headers,
+                client_ip,
+                user_agent,
+                endpoint: "/v1/alpha/search",
+            },
+        )
+        .await;
+    }
     let access = client.bound_access();
     let started = match service
         .start_provider_endpoint(client, operation, client_ip, user_agent, "/v1/alpha/search")
@@ -56,7 +71,10 @@ pub(crate) async fn standalone_search(
     }
 }
 
-fn search_operation(body: Bytes, headers: &HeaderMap) -> Result<Operation, GatewayError> {
+pub(in crate::openai) fn search_operation(
+    body: Bytes,
+    headers: &HeaderMap,
+) -> Result<Operation, GatewayError> {
     let context = OpenAiRequestHeaders::from_headers(headers).session_context();
     let payload = RawJsonPayload::new(OPENAI_PROTOCOL, body)
         .map_err(|_| {

@@ -26,7 +26,7 @@ pub(super) async fn collect_raw_json_response(started: StartedExecution) -> Resp
             return execution.record_response_status(response).await;
         }
     };
-    let body = match raw_json_body(events) {
+    let body = match raw_json_body(&events) {
         Some(body) => body,
         None => {
             let response = invalid_upstream_response();
@@ -58,17 +58,19 @@ pub(super) async fn collect_raw_json_response(started: StartedExecution) -> Resp
     response
 }
 
-fn raw_json_body(events: Vec<ProviderEvent>) -> Option<Bytes> {
+pub(super) fn raw_json_body(events: &[ProviderEvent]) -> Option<Bytes> {
     let mut body = None;
     for event in events {
-        let (_, wire) = event.into_parts();
-        let Some(wire) = wire.filter(|wire| wire.protocol() == "openai") else {
+        let Some(wire) = event
+            .wire_event()
+            .filter(|wire| wire.protocol() == "openai")
+        else {
             continue;
         };
-        let Some(raw) = wire.into_raw_json_body() else {
+        let Some(raw) = wire.raw_json_body() else {
             continue;
         };
-        if body.replace(raw).is_some() {
+        if body.replace(raw.clone()).is_some() {
             return None;
         }
     }

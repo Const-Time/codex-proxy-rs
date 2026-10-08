@@ -3,6 +3,7 @@ mod endpoint;
 mod error;
 mod execution;
 mod images;
+mod middleware;
 mod models;
 mod responses;
 mod router;

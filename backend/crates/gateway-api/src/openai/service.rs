@@ -163,6 +163,42 @@ impl OpenAiService {
             .await
     }
 
+    pub(crate) async fn start_prepared_provider_endpoint(
+        &self,
+        prepared: PreparedRootExecution,
+        operation: gateway_core::operation::Operation,
+        client_ip: Option<IpAddr>,
+        user_agent: Option<String>,
+        endpoint: &'static str,
+    ) -> Result<StartedExecution, GatewayError> {
+        let provider = gateway_core::routing::ProviderKind::new("openai").map_err(|_| {
+            GatewayError::new(
+                GatewayErrorKind::Internal,
+                "OpenAI provider identifier is invalid",
+            )
+        })?;
+        let execution = Arc::clone(&self.execution);
+        super::execution::start(async move {
+            execution
+                .start_prepared_provider_endpoint(
+                    prepared,
+                    provider,
+                    operation,
+                    ExecutionRequestMetadata {
+                        protocol: "openai".into(),
+                        endpoint: endpoint.into(),
+                        transport: ClientTransport::HttpJson,
+                        stream: false,
+                        client_ip,
+                        user_agent,
+                        previous_response_id: None,
+                    },
+                )
+                .await
+        })
+        .await
+    }
+
     pub(crate) async fn start_provider_endpoint(
         &self,
         client: AuthenticatedClient,

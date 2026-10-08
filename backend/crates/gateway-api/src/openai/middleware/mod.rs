@@ -2,8 +2,12 @@
 mod attempt;
 mod body;
 mod delivery;
+mod headers;
+pub(super) mod raw;
 pub(super) mod request;
+mod root;
 
+pub use attempt::raw_json_attempt_middleware;
 pub use delivery::deliver_middleware_response;
 use gateway_core::engine::{
     execution::ExecutionSession,
@@ -16,7 +20,7 @@ pub async fn execution_middleware_response(
     session: Box<dyn ExecutionSession>,
     streaming: bool,
 ) -> Result<MiddlewareResponse, MiddlewareError> {
-    body::ExecutionBody::response(session, streaming).await
+    body::ExecutionBody::response(session, WireFormat::Responses { streaming }).await
 }
 
 /// Bind the Responses wire adapter to a frozen, root-scoped publication snapshot.
@@ -32,4 +36,18 @@ pub fn responses_attempt_middleware(
         context,
         streaming,
     })
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum WireFormat {
+    Responses { streaming: bool },
+    RawJson,
+}
+impl WireFormat {
+    fn streaming(self) -> bool {
+        matches!(self, Self::Responses { streaming: true })
+    }
+    fn raw_json(self) -> bool {
+        matches!(self, Self::RawJson)
+    }
 }

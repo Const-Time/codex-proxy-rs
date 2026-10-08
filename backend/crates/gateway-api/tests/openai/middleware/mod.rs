@@ -2,11 +2,12 @@ mod attempt;
 mod body;
 mod delivery;
 mod fixture;
+mod raw;
 mod request;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use gateway_api::openai::responses::{deliver_middleware_response, execution_middleware_response};
+use gateway_api::openai::middleware::{deliver_middleware_response, execution_middleware_response};
 use gateway_core::{
     engine::{
         CommitRequirement, CoordinatedEvent, EngineError, execution::ExecutionSession,

@@ -1,4 +1,4 @@
-use super::super::{
+use crate::openai::responses::{
     DecodedResponsesRequest, decode_request_with_headers, request::forwarded_request_headers,
 };
 use crate::openai::{
@@ -7,7 +7,7 @@ use crate::openai::{
 };
 use axum::{
     body::Bytes,
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use gateway_admin::plugins::middleware::PluginMiddlewareRegistry;
@@ -20,7 +20,7 @@ use gateway_core::{
     lifecycle::ConnectionGuard,
 };
 
-pub(in crate::openai::responses) struct Ingress {
+pub(in crate::openai) struct Ingress {
     pub client: AuthenticatedClient,
     pub decoded: DecodedResponsesRequest,
     pub headers: HeaderMap,
@@ -29,7 +29,7 @@ pub(in crate::openai::responses) struct Ingress {
     pub connection: Option<Box<dyn ConnectionGuard>>,
     pub ingress_id: Option<String>,
 }
-pub(in crate::openai::responses) async fn respond(
+pub(in crate::openai) async fn respond(
     service: OpenAiService,
     registry: PluginMiddlewareRegistry,
     input: Ingress,
@@ -44,65 +44,27 @@ pub(in crate::openai::responses) async fn respond(
     } else {
         ClientTransport::HttpJson
     };
-    let context = MiddlewareContext {
-        request_id: prepared.request_id().clone(),
-        client_key_id: prepared.client().policy().key_id().clone(),
-        account_group_ids: prepared
-            .client()
-            .policy()
-            .account_scope()
-            .routing_snapshot()
-            .groups_snapshot()
-            .iter()
-            .map(|group| group.id().clone())
-            .collect(),
-        mount: MiddlewareMount::Request,
-        attempt_index: None,
-        operation: input.decoded.operation().kind(),
-        endpoint: input.endpoint.into(),
+    let context = super::root::context(
+        &prepared,
+        input.decoded.operation(),
+        input.endpoint,
         transport,
-        provider: None,
-        model: Some(input.decoded.metadata().requested_model().into()),
-        account_id: None,
-        cancellation: prepared.cancellation(),
-        deadline_at: prepared.deadline_at(),
-    };
-    let registry = std::sync::Arc::new(registry);
-    let attempt_context = MiddlewareContext {
-        mount: MiddlewareMount::Attempt,
-        ..context.clone()
-    };
-    let attempts = match registry.freeze(attempt_context.clone()) {
-        Ok(plan) => plan,
+        Some(input.decoded.metadata().requested_model().into()),
+    );
+    let root = match super::root::bind(prepared, registry, context) {
+        Ok(root) => root,
         Err(_) => return runtime_unavailable_response().into_response(),
     };
-    let has_attempts = !attempts.is_empty();
-    let prepared = prepared.with_revocation(attempts.cancellation());
-    let prepared = if has_attempts {
-        prepared.with_attempt_middleware(super::responses_attempt_middleware(
-            registry.clone(),
-            attempt_context,
-        ))
-    } else {
-        prepared
-    };
-    let context = MiddlewareContext {
-        cancellation: prepared.cancellation(),
-        ..context
-    };
-    let plan = match registry.freeze(context) {
-        Ok(plan) => plan,
-        Err(_) => return runtime_unavailable_response().into_response(),
-    };
-    let cancellation = gateway_core::lifecycle::CancellationToken::linked([
-        plan.cancellation(),
-        attempts.cancellation(),
-    ]);
+    let super::root::RootPlan {
+        prepared,
+        plan,
+        has_attempts,
+        revocation,
+    } = root;
     let access = prepared
         .client()
         .bound_access()
-        .map(|guard| guard.with_revocation(cancellation.clone()));
-    let prepared = prepared.with_revocation(cancellation);
+        .map(|guard| guard.with_revocation(revocation));
     let request_id = prepared.request_id().as_str().to_owned();
     // Empty plans keep the existing transparent response path and its size contract.
     let mut response = if plan.is_empty() && !has_attempts {
@@ -124,16 +86,22 @@ pub(in crate::openai::responses) async fn respond(
                     .trace()
                     .capture("client.request.body", &input.body);
                 if streaming {
-                    super::super::stream_execution_response(started.session, input.connection).await
+                    crate::openai::responses::stream_execution_response(
+                        started.session,
+                        input.connection,
+                    )
+                    .await
                 } else {
-                    super::super::collect_execution_response(started.session).await
+                    crate::openai::responses::collect_execution_response(started.session).await
                 }
             }
             Err(error) => gateway_error_response(&error),
         }
     } else {
-        let body = match super::super::request::decompress_request_body(&input.body, &input.headers)
-        {
+        let body = match crate::openai::responses::request::decompress_request_body(
+            &input.body,
+            &input.headers,
+        ) {
             Ok(body) => Bytes::copy_from_slice(&body),
             Err(error) => {
                 return crate::openai::error::protocol_error_response(
@@ -158,7 +126,7 @@ pub(in crate::openai::responses) async fn respond(
                 if request.protocol() != "openai" {
                     return Err(MiddlewareError::InvalidState);
                 }
-                let headers = filtered_headers(request.headers())?;
+                let headers = super::headers::filtered_headers(request.headers())?;
                 let decoded = decode_request_with_headers(request.body(), &headers)
                     .map_err(|_| {
                         MiddlewareError::Gateway(GatewayError::new(
@@ -205,18 +173,4 @@ pub(in crate::openai::responses) async fn respond(
         response = crate::openai::revocation::protect(response, access);
     }
     response
-}
-
-pub(super) fn filtered_headers(input: &[MiddlewareHeader]) -> Result<HeaderMap, MiddlewareError> {
-    let mut headers = HeaderMap::new();
-    for header in input {
-        let name = HeaderName::from_bytes(header.name().as_bytes())
-            .map_err(|_| MiddlewareError::InvalidState)?;
-        let value =
-            HeaderValue::from_bytes(header.value()).map_err(|_| MiddlewareError::InvalidState)?;
-        headers.append(name, value);
-    }
-    Ok(forwarded_request_headers(&headers)
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect())
 }

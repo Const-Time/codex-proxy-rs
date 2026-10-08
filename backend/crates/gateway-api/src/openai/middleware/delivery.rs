@@ -293,9 +293,9 @@ fn http_response(
             ProviderResponseHeader::new(name, value)
         })
         .collect();
-    let options = super::super::response_connection_options(&headers);
+    let options = crate::openai::responses::response_connection_options(&headers);
     for header in headers {
-        if super::super::response_header_is_forwardable(header.name(), &options)
+        if crate::openai::responses::response_header_is_forwardable(header.name(), &options)
             && let (Ok(name), Ok(value)) = (
                 HeaderName::from_bytes(header.name().as_bytes()),
                 HeaderValue::from_bytes(header.value()),

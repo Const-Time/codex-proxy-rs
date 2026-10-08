@@ -132,3 +132,10 @@ request 挂载已接入 Responses JSON/SSE 的认证后链路：插件可改写�
 attempt 挂载已连接 Responses HTTP 和真实 SDK 子进程：每次重试独立调用，先校验并尝试登记原上游，再允许插件读取；费用、账号权限和续接状态由原执行链保留。插件可改写正文、客户端状态码和响应头，也可直接返回错误正文；改写不能改变已经冻结的模型、续接、storage intent、传输或能力需求。request 与 attempt 可同时挂载，仍只由原 Core 请求结算。
 
 验证覆盖 JSON/SSE 透传、正文改写/展开、原始事实保留、错误短路、撤销与展开批次的交付屏障。非 2xx 错误正文可为原始字节，最多 8 MiB；JSON 来源最多保留 16384 个事件。这仍是生产启用前的接线验证，middleware 能力门禁保持关闭，尚不能直接启用任意第三方中间件。
+
+
+### Images 与 standalone Search 接入进度
+
+request/attempt 两层已接入 `/v1/images/generations`、`/v1/images/edits` 和 `/v1/alpha/search`，并通过真实 SDK 子进程的透传、事实读取、正文改写和错误短路测试。它们固定使用 OpenAI Provider 原生端点；图片生成/编辑类型由入口保持，正文中的模型不参与文本模型映射。插件输入与输出继续过滤受管身份头；attempt 仅重建原端点已有的 session、thread、turn metadata 和 image turn 请求头。
+
+未改写的响应保留原始 JSON 字节、空白和字段次序，不包装成 Responses 对象。插件可修改客户端状态及正文，但不能修改原上游状态、费用和结算身份。请求取消、插件撤销、非法输出和超限均沿用同一 Core 清理路径。生产 middleware 门禁仍关闭，WebSocket 和其余声明范围尚待接入；经过中间件的 JSON 文档仍受 8 MiB 上限约束，大图响应可能超限，无匹配中间件时保留原有大响应合同。

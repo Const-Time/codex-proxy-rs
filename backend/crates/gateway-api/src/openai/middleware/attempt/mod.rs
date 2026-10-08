@@ -1,10 +1,9 @@
-//! Responses protocol bridge for Core-owned, per-attempt middleware.
+//! OpenAI protocol bridges for Core-owned, per-attempt middleware.
 mod body;
 mod output;
+mod raw;
 
-use super::super::{decode_request_with_headers, request::forwarded_request_headers};
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use crate::openai::responses::{decode_request_with_headers, request::forwarded_request_headers};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_admin::plugins::middleware::PluginMiddlewareRegistry;
@@ -52,34 +51,7 @@ impl AttemptMiddleware for ResponsesAttempt {
             let body = Bytes::from(
                 serde_json::to_vec(payload.body()).map_err(|_| MiddlewareError::InvalidState)?,
             );
-            let mut headers = HeaderMap::new();
-            if let Some(values) = payload
-                .context()
-                .get("opaque_request_headers")
-                .and_then(|v| v.as_array())
-            {
-                for value in values {
-                    let fields = value
-                        .as_array()
-                        .filter(|a| a.len() == 2)
-                        .ok_or(MiddlewareError::InvalidState)?;
-                    let name = HeaderName::from_bytes(
-                        fields[0]
-                            .as_str()
-                            .ok_or(MiddlewareError::InvalidState)?
-                            .as_bytes(),
-                    )
-                    .map_err(|_| MiddlewareError::InvalidState)?;
-                    let value = STANDARD
-                        .decode(fields[1].as_str().ok_or(MiddlewareError::InvalidState)?)
-                        .map_err(|_| MiddlewareError::InvalidState)?;
-                    headers.append(
-                        name,
-                        HeaderValue::from_bytes(&value)
-                            .map_err(|_| MiddlewareError::InvalidState)?,
-                    );
-                }
-            }
+            let headers = super::headers::from_context(payload.context())?;
             let expected = decode_request_with_headers(&body, &headers)
                 .map_err(|_| MiddlewareError::InvalidState)?;
             let request = MiddlewareRequest::new(
@@ -100,7 +72,7 @@ impl AttemptMiddleware for ResponsesAttempt {
                         if request.protocol() != "openai" {
                             return Err(MiddlewareError::InvalidState);
                         }
-                        let headers = super::request::filtered_headers(request.headers())?;
+                        let headers = super::headers::filtered_headers(request.headers())?;
                         let decoded = decode_request_with_headers(request.body(), &headers)
                             .map_err(|_| MiddlewareError::InvalidState)?;
                         // Routing and continuation have already been resolved by Core.
@@ -134,11 +106,24 @@ impl AttemptMiddleware for ResponsesAttempt {
                         {
                             operation.set_provider_session_state(state.clone());
                         }
-                        body::SourceBody::response(next.run(operation).await?, streaming).await
+                        body::SourceBody::response(
+                            next.run(operation).await?,
+                            super::WireFormat::Responses { streaming },
+                        )
+                        .await
                     })
                 });
             let response = plan.run(request, terminal).await?;
-            output::decode(response, streaming)
+            output::decode(response, super::WireFormat::Responses { streaming })
         })
     }
+}
+
+/// Bind the raw Images/Search wire adapter to one root publication snapshot.
+pub fn raw_json_attempt_middleware(
+    registry: Arc<PluginMiddlewareRegistry>,
+    mut context: MiddlewareContext,
+) -> Arc<dyn AttemptMiddleware> {
+    context.mount = MiddlewareMount::Attempt;
+    Arc::new(raw::RawAttempt { registry, context })
 }

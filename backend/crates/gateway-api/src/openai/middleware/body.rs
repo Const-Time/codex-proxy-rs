@@ -1,5 +1,5 @@
 //! Encode a Core session without acknowledging downstream delivery.
-use super::super::{OpenAiResponsesEncoder, PendingExecution};
+use crate::openai::responses::{OpenAiResponsesEncoder, PendingExecution};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::{
@@ -21,8 +21,9 @@ pub(super) struct ExecutionBody {
 impl ExecutionBody {
     pub(super) async fn response(
         session: Box<dyn ExecutionSession>,
-        streaming: bool,
+        format: super::WireFormat,
     ) -> Result<MiddlewareResponse, MiddlewareError> {
+        let streaming = format.streaming();
         let mut body = Self {
             execution: PendingExecution::new(session),
             encoder: OpenAiResponsesEncoder::new(),
@@ -41,20 +42,17 @@ impl ExecutionBody {
             if batch.commit_requirement() != CommitRequirement::CommitBeforeDelivery {
                 return Err(MiddlewareError::InvalidState);
             }
-            let status = body
-                .session()?
-                .middleware_response_head()
-                .map_or(200, |head| head.status_code);
+            let status = body.response_status()?;
             if (200..300).contains(&status) {
                 body.encode_batch(batch)?;
             } else {
                 // An attempt may project a JSON error even for an SSE request.
                 // Its one complete document remains behind the original barrier.
                 let mut events = batch.into_provider_events();
-                let encoded = encode_document(&events, status)?;
+                let encoded = encode_document(&events, status, format)?;
                 let last = events.pop().ok_or(MiddlewareError::InvalidState)?;
                 let (bytes, framing, terminal, envelope) = MiddlewareFrame::from_provider_event(
-                    Bytes::from(encoded),
+                    encoded,
                     if (200..300).contains(&status) {
                         MiddlewareFraming::JsonDocument
                     } else {
@@ -77,14 +75,11 @@ impl ExecutionBody {
             }
         } else {
             let mut events = body.session()?.collect_uncommitted().await?;
-            let status = body
-                .session()?
-                .middleware_response_head()
-                .map_or(200, |head| head.status_code);
-            let encoded = encode_document(&events, status)?;
+            let status = body.response_status()?;
+            let encoded = encode_document(&events, status, format)?;
             let last = events.pop().ok_or(MiddlewareError::InvalidState)?;
             let frame = MiddlewareFrame::from_provider_event(
-                Bytes::from(encoded),
+                encoded,
                 if (200..300).contains(&status) {
                     MiddlewareFraming::JsonDocument
                 } else {
@@ -108,10 +103,7 @@ impl ExecutionBody {
             .iter()
             .map(|h| MiddlewareHeader::new(h.name(), h.value().clone()))
             .collect();
-        let status = body
-            .session()?
-            .middleware_response_head()
-            .map_or(200, |head| head.status_code);
+        let status = body.response_status()?;
         Ok(MiddlewareResponse::new(
             "openai".into(),
             status,
@@ -123,6 +115,18 @@ impl ExecutionBody {
         self.execution
             .session_mut()
             .ok_or(MiddlewareError::InvalidState)
+    }
+    fn response_status(&mut self) -> Result<u16, MiddlewareError> {
+        let session = self.session()?;
+        Ok(session
+            .middleware_response_head()
+            .map(|head| head.status_code)
+            .or_else(|| {
+                session
+                    .response_status_code()
+                    .filter(|status| (200..300).contains(status))
+            })
+            .unwrap_or(200))
     }
     async fn finish_terminal(&mut self) -> Result<(), MiddlewareError> {
         let result = self.session()?.next_event().await;
@@ -265,12 +269,19 @@ impl MiddlewareBody for ExecutionBody {
     }
 }
 
-fn encode_document(events: &[ProviderEvent], status: u16) -> Result<Vec<u8>, MiddlewareError> {
+fn encode_document(
+    events: &[ProviderEvent],
+    status: u16,
+    format: super::WireFormat,
+) -> Result<Bytes, MiddlewareError> {
+    if format.raw_json() {
+        return crate::openai::endpoint::raw_json_body(events).ok_or(MiddlewareError::InvalidState);
+    }
     if !(200..300).contains(&status)
         && events.len() == 1
         && let Some(raw) = events[0].wire_event().and_then(|wire| wire.raw_json_body())
     {
-        return Ok(raw.to_vec());
+        return Ok(raw.clone());
     }
     let mut encoder = OpenAiResponsesEncoder::new();
     for event in events {
@@ -281,5 +292,6 @@ fn encode_document(events: &[ProviderEvent], status: u16) -> Result<Vec<u8>, Mid
             .finish()
             .map_err(|_| MiddlewareError::InvalidState)?,
     )
+    .map(Bytes::from)
     .map_err(|_| MiddlewareError::InvalidState)
 }
