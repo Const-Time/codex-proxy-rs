@@ -144,6 +144,12 @@ impl PreparedRootExecution {
         self.cancellation.clone()
     }
 
+    /// Add host-owned revocation without replacing the prepared identity or deadline.
+    pub fn with_revocation(mut self, revocation: CancellationToken) -> Self {
+        self.cancellation = CancellationToken::linked([self.cancellation, revocation]);
+        self
+    }
+
     fn validate(&self) -> Result<(), GatewayError> {
         if self
             .client

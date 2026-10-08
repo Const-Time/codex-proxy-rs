@@ -6,7 +6,8 @@ use std::sync::Arc;
 use gateway_core::engine::continuation::PreviousResponseId;
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ClientTransport, ExecutionRequestMetadata,
-    ExecutionService, StartExecution, StartProviderExecution, StartedExecution,
+    ExecutionService, PreparedExecutionRequest, PreparedRootExecution, StartExecution,
+    StartProviderExecution, StartedExecution,
 };
 use gateway_core::error::{GatewayError, GatewayErrorKind};
 use gateway_core::lifecycle::{ConnectionDraining, ConnectionGuard, ConnectionLifecycle};
@@ -120,40 +121,46 @@ impl OpenAiService {
         transport: ClientTransport,
         endpoint: &'static str,
     ) -> Result<StartedExecution, GatewayError> {
-        let (operation, metadata) = request.into_parts();
-        let public_model = PublicModelId::from_client_wire(metadata.requested_model().to_owned())
-            .map_err(|_| {
-            GatewayError::new(
-                GatewayErrorKind::ModelNotFound,
-                "requested model was not found",
-            )
-        })?;
-        let previous_response_id = match metadata.continuation() {
-            ContinuationIntent::None => None,
-            ContinuationIntent::PreviousResponseId(value) => {
-                Some(PreviousResponseId::new(value.clone()))
-            }
-        };
+        let request = response_execution_request(request, transport, endpoint)?;
         let execution = Arc::clone(&self.execution);
         super::execution::start(async move {
             execution
                 .start(StartExecution {
                     client,
-                    public_model,
-                    operation,
-                    metadata: ExecutionRequestMetadata {
-                        protocol: "openai".to_owned(),
-                        endpoint: endpoint.to_owned(),
-                        transport,
-                        stream: metadata.stream(),
-                        client_ip: metadata.client_ip(),
-                        user_agent: metadata.user_agent().map(str::to_owned),
-                        previous_response_id,
-                    },
+                    public_model: request.public_model,
+                    operation: request.operation,
+                    metadata: request.metadata,
                 })
                 .await
         })
         .await
+    }
+    pub(crate) fn middleware_registry(
+        &self,
+    ) -> Option<gateway_admin::plugins::middleware::PluginMiddlewareRegistry> {
+        self.administration
+            .as_ref()?
+            .plugins()
+            .ok()?
+            .middleware_registry()
+    }
+    pub(crate) fn prepare_execution(
+        &self,
+        client: AuthenticatedClient,
+    ) -> Result<PreparedRootExecution, GatewayError> {
+        self.execution.prepare_execution(client)
+    }
+    pub(crate) async fn start_prepared_response(
+        &self,
+        prepared: PreparedRootExecution,
+        request: DecodedResponsesRequest,
+        transport: ClientTransport,
+        endpoint: &'static str,
+    ) -> Result<StartedExecution, GatewayError> {
+        let request = response_execution_request(request, transport, endpoint)?;
+        let execution = Arc::clone(&self.execution);
+        super::execution::start(async move { execution.start_prepared(prepared, request).await })
+            .await
     }
 
     pub(crate) async fn start_provider_endpoint(
@@ -214,4 +221,38 @@ const fn map_authentication_error(error: ClientAuthenticationError) -> ClientApi
         ClientAuthenticationError::InvalidKey => ClientApiKeyAuthError::InvalidKey,
         ClientAuthenticationError::SnapshotUnavailable => ClientApiKeyAuthError::RuntimeUnavailable,
     }
+}
+
+fn response_execution_request(
+    request: DecodedResponsesRequest,
+    transport: ClientTransport,
+    endpoint: &'static str,
+) -> Result<PreparedExecutionRequest, GatewayError> {
+    let (operation, metadata) = request.into_parts();
+    let public_model = PublicModelId::from_client_wire(metadata.requested_model().to_owned())
+        .map_err(|_| {
+            GatewayError::new(
+                GatewayErrorKind::ModelNotFound,
+                "requested model was not found",
+            )
+        })?;
+    let previous_response_id = match metadata.continuation() {
+        ContinuationIntent::None => None,
+        ContinuationIntent::PreviousResponseId(value) => {
+            Some(PreviousResponseId::new(value.clone()))
+        }
+    };
+    Ok(PreparedExecutionRequest {
+        public_model,
+        operation,
+        metadata: ExecutionRequestMetadata {
+            protocol: "openai".into(),
+            endpoint: endpoint.into(),
+            transport,
+            stream: metadata.stream(),
+            client_ip: metadata.client_ip(),
+            user_agent: metadata.user_agent().map(str::to_owned),
+            previous_response_id,
+        },
+    })
 }

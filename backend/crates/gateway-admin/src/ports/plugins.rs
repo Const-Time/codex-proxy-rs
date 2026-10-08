@@ -77,6 +77,10 @@ pub trait PluginRuntime: Send + Sync {
 }
 #[async_trait]
 pub trait PluginService: Send + Sync {
+    /// Hosts without execution middleware do not install this data-plane port.
+    fn middleware_registry(&self) -> Option<crate::plugins::middleware::PluginMiddlewareRegistry> {
+        None
+    }
     fn freeze_middleware(
         &self,
         _context: gateway_core::engine::middleware::MiddlewareContext,

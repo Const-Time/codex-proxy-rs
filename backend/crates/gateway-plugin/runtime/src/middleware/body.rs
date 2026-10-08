@@ -251,7 +251,7 @@ impl BodyResource {
             .envelope
             .as_ref()
             .map(|envelope| {
-                let mut snapshot = super::facts::snapshot(envelope.event())?;
+                let mut snapshot = super::facts::envelope(envelope)?;
                 if let Some(host) = snapshot.host.as_mut() {
                     host.middleware_transformed = source.transformed;
                     if source.transformed {
