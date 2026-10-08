@@ -3,6 +3,7 @@
 pub mod auth;
 mod endpoint;
 pub mod error;
+mod execution;
 pub mod images;
 pub mod models;
 pub mod responses;
