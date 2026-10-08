@@ -14,8 +14,9 @@
 | 管理请求 | method/path/query/contentType 与二进制正文；不转发浏览器 Cookie 或请求头；响应必须没有自定义头 |
 | 页面桥 | 上游 v2 桥的管理请求、Responses JSON/SSE 模型调用与高度调整；本地父页面代为鉴权，iframe 使用独立的 opaque origin |
 | 私有状态 | `host.state.get/put/delete`，实例和命名空间隔离，版本比较交换、schema 和配额校验 |
+| 只读事实 | management 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`；不含密钥或凭据 |
 | 页面推理 | 本人管理员会话显式选择自己的 Key，复用正常 Responses 的权限、路由、预算、倍率和结算 |
-| 未开放的能力 | 原生进程 `host.models.*`、middleware、upstream_adapter、路由/选号、外部认证、公开资源、登录回调、资源创建、Key 预算写入、状态迁移 |
+| 未开放的能力 | 原生进程 `host.models.*`、middleware、upstream_adapter、路由/选号、外部认证、公开资源、登录回调、资源创建、主动额度刷新、Key 预算写入、状态迁移 |
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
@@ -43,6 +44,14 @@
 
 可运行示例：[推理便笺](../backend/crates/gateway-plugin/sdk/examples/prompt-pad/README.md)。它只声明 management v1，支持发送、流式显示和停止；内容仅保留在页面。已验证 Linux x86_64 的 SDK 构建、CLI 打包、真实进程握手与注册，以及浏览器页面桥对本地 SSE 测试响应的读取和取消；未使用生产账号产生真实模型费用。
 
+## 插件读取宿主事实
+
+可信插件的管理请求可通过 SDK `key_facts`、`account_facts`、`quota_facts` 查询现有数据。这些接口属于管理员安装的全局管理能力，不受页面所选 Key 限定；普通用户没有管理入口，也不会获得这些回调权限。页面选 Key 仍只用于本人模型推理，不能授权账户管理。
+
+Key 查询只返回 ID、启用状态和显式分组绑定；账户查询只返回 ID、Provider、名称、邮箱、分组、启用状态及更新时间。账户列表按 ID 升序分页，`limit` 为 1～100，可按 `openai` / `xai` 筛选，继续查询时传入上一页 `next_cursor`；末页为 `null`。空分组表示没有显式绑定，不代表全账户权限。
+
+额度查询只读取 Provider 已有观测，返回观测时间、窗口标识、窗口秒数、使用百分比和重置时间。未知值保持 `null`，不会推断为零；读取不调用上游刷新、不计算宿主预测，也不更新订阅额度或账本。`host.quota_observations.refresh` 仍返回 unsupported。查询 JSON 必须放在 RPC payload 中，params 为 `{}`；查询最多 8 KiB，响应最多 1 MiB。回调绑定当前实例与 revision，停用或换代后不能继续读取。
+
 ## 限制与数据
 
 单包最多 32 MiB；制品总量最多 128 个 / 512 MiB；最多 64 个实例。管理资源单个最多 1 MiB、注册资源合计最多 8 MiB；管理请求和响应正文最多 1 MiB。资源必须在清单和管理注册中声明，页面不得加载外部资源或嵌套 iframe，脚本须打包为普通脚本而非 ES module。
@@ -53,6 +62,6 @@
 
 ## 后续改造边界
 
-后续接入只读事实、中间件和具体业务插件；原生进程模型回调与深度扩展仍未开放。现有差异功能尚未从主程序移出。用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
+只读事实已接入；后续继续接入中间件和具体业务插件；原生进程模型回调与深度扩展仍未开放。现有差异功能尚未从主程序移出。用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
 
 本轮实际运行验证平台为 Linux x86_64。CLI 可生成 Linux x86_64 / aarch64、macOS aarch64 制品，但本轮未完成其他平台的真实进程验证，不提供 Windows 插件制品兼容保证。

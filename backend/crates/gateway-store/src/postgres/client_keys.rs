@@ -694,6 +694,22 @@ impl PgAdminClientKeyStore {
 
 #[async_trait]
 impl ClientKeyStore for PgAdminClientKeyStore {
+    async fn plugin_key_facts(
+        &self,
+        id: &ClientApiKeyId,
+    ) -> AdminStoreResult<Option<gateway_admin::model::plugins::PluginKeyFacts>> {
+        let failure = || admin_store_error(ENTITY, postgres_unavailable("read plugin key facts"));
+        let row=sqlx::query("select k.id,k.enabled,array(select g.account_group_id from client_api_key_groups g where g.client_api_key_id=k.id order by g.account_group_id) as group_ids from client_api_keys k where k.id=$1")
+            .bind(id.as_str()).fetch_optional(&self.keys.pool).await.map_err(|_|failure())?;
+        row.map(|r| {
+            Ok(gateway_admin::model::plugins::PluginKeyFacts {
+                id: r.try_get("id").map_err(|_| failure())?,
+                enabled: r.try_get("enabled").map_err(|_| failure())?,
+                group_ids: r.try_get("group_ids").map_err(|_| failure())?,
+            })
+        })
+        .transpose()
+    }
     async fn list_client_keys(
         &self,
         owner: &str,

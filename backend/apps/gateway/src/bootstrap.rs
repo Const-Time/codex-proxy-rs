@@ -104,11 +104,14 @@ pub async fn run() -> Result<(), BootstrapError> {
     host.report_startup_ready("Admin");
     let plugins = Arc::new(gateway_admin::plugins::PluginManager::new(
         store.plugin_store(),
-        Arc::new(gateway_plugin_runtime::PluginEngine::new(
-            plugin_cache,
-            plugin_version,
-            store.plugin_store(),
-        )),
+        Arc::new(
+            gateway_plugin_runtime::PluginEngine::new(
+                plugin_cache,
+                plugin_version,
+                store.plugin_store(),
+            )
+            .with_data(admin.services().plugin_data()),
+        ),
     ));
     plugins.restore().await?;
     host.report_startup_ready("Plugins");

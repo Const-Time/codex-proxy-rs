@@ -86,3 +86,11 @@ pub trait PluginService: Send + Sync {
         request: PluginHttpRequest,
     ) -> Result<PluginHttpResponse>;
 }
+
+/// Only management callbacks can currently obtain this capability. It never refreshes upstream quota.
+#[async_trait]
+pub trait PluginDataService: Send + Sync {
+    async fn key(&self, id: &str) -> Result<PluginKeyFacts>;
+    async fn accounts(&self, query: PluginAccountQuery) -> Result<PluginAccountPage>;
+    async fn quota(&self, id: &str) -> Result<crate::model::provider_credentials::ProviderQuota>;
+}

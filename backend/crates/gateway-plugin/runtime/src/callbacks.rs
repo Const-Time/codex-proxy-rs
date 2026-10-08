@@ -27,6 +27,7 @@ pub(crate) struct Callbacks {
     revision: u64,
     active: Arc<AtomicBool>,
     namespaces: Arc<BTreeMap<String, Namespace>>,
+    data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl Callbacks {
     pub(crate) fn new(
@@ -34,6 +35,7 @@ impl Callbacks {
         record: &PluginRecord,
         manifest: &Manifest,
         active: Arc<AtomicBool>,
+        data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
     ) -> Result<Self, gateway_admin::model::AdminError> {
         let namespaces = manifest
             .state
@@ -54,6 +56,7 @@ impl Callbacks {
             revision: record.revision,
             active,
             namespaces: Arc::new(namespaces),
+            data,
         })
     }
 }
@@ -89,6 +92,7 @@ impl CallbackHandler for Callbacks {
         let revision = self.revision;
         let active = self.active.clone();
         let namespaces = self.namespaces.clone();
+        let data = self.data.clone();
         Box::pin(async move {
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
@@ -99,6 +103,24 @@ impl CallbackHandler for Callbacks {
                     ErrorCode::PermissionDenied,
                     "plugin generation is not active",
                 ));
+            }
+            if matches!(
+                method.as_str(),
+                gateway_plugin_sdk::call::data::ACCOUNTS_LIST
+                    | gateway_plugin_sdk::call::data::KEYS_GET
+                    | gateway_plugin_sdk::call::data::QUOTA_GET
+            ) {
+                let data = data.ok_or_else(|| {
+                    PluginFault::new(ErrorCode::Unsupported, "plugin facts are not configured")
+                })?;
+                let reply = crate::data::call(data.as_ref(), &method, params, &payload).await?;
+                if !active.load(Ordering::Acquire) {
+                    return Err(PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "plugin generation is not active",
+                    ));
+                }
+                return Ok(reply);
             }
             if !matches!(
                 method.as_str(),

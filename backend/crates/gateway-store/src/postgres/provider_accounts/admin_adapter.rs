@@ -371,6 +371,48 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn plugin_account_facts(
+        &self,
+        query: gateway_admin::model::plugins::PluginAccountQuery,
+    ) -> AdminStoreResult<gateway_admin::model::plugins::PluginAccountPage> {
+        use gateway_admin::model::plugins::{PluginAccountFacts, PluginAccountPage};
+        if !(1..=100).contains(&query.limit) {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Invalid,
+                "plugin account facts",
+                "invalid limit",
+            ));
+        }
+        let failure = || {
+            admin_store_error(
+                "plugin account facts",
+                postgres_unavailable("read plugin account facts"),
+            )
+        };
+        let rows=sqlx::query("select a.id,a.provider_kind,a.name,a.email,a.enabled,a.updated_at,array(select g.account_group_id from account_group_accounts g where g.provider_account_id=a.id order by g.account_group_id) as group_ids from provider_accounts a where ($1::text is null or a.provider_kind=$1) and ($2::text is null or a.id>$2) order by a.id limit $3")
+            .bind(query.provider).bind(query.cursor).bind(i64::from(query.limit)+1).fetch_all(&self.pool).await.map_err(|_|failure())?;
+        let more = rows.len() > usize::from(query.limit);
+        let accounts = rows
+            .into_iter()
+            .take(usize::from(query.limit))
+            .map(|r| {
+                Ok(PluginAccountFacts {
+                    id: r.try_get("id").map_err(|_| failure())?,
+                    provider: r.try_get("provider_kind").map_err(|_| failure())?,
+                    name: r.try_get("name").map_err(|_| failure())?,
+                    email: r.try_get("email").map_err(|_| failure())?,
+                    enabled: r.try_get("enabled").map_err(|_| failure())?,
+                    group_ids: r.try_get("group_ids").map_err(|_| failure())?,
+                    updated_at: r.try_get("updated_at").map_err(|_| failure())?,
+                })
+            })
+            .collect::<AdminStoreResult<Vec<_>>>()?;
+        let next_cursor = more.then(|| accounts.last().unwrap().id.clone());
+        Ok(PluginAccountPage {
+            accounts,
+            next_cursor,
+        })
+    }
     async fn load_quota_forecast_history(
         &self,
         window: &AccountUsageWindowQuery,

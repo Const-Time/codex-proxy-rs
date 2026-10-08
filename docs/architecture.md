@@ -509,6 +509,8 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 
 组合根在 Store 初始化后装配 PluginManager 和 PluginEngine，在 API 启动前恢复启用实例，并在关机时回收插件进程。Admin 是实例配置与版本切换的业务 owner；Store 保存制品、敏感配置和私有状态；Host 负责进程容量与终止回收；Runtime 负责协议和能力适配。数据库 CAS 提交先于新实例发布，旧 revision 的入口和私有状态写入随切换失效。
 
-插件私有状态与用户共享账本相互独立。当前开放管理员管理能力、私有状态和经 Core 执行的页面推理；预算写入仍未开放。支持矩阵、可信进程边界和恢复操作见 [插件文档](plugins.md)。
+插件私有状态与用户共享账本相互独立。当前开放管理员管理能力、私有状态、只读事实和经 Core 执行的页面推理；预算写入仍未开放。支持矩阵、可信进程边界和恢复操作见 [插件文档](plugins.md)。
 
 插件页面推理经 API 的静态 `/api/admin/plugins/models/responses` 入口，以本人会话解析本人 Key，再进入现有 Responses delivery 与 Core 执行。Core 的 `RuntimeSnapshotHandle` 在同一次快照发布中撤销失效策略的 `ClientAccessGuard`；插件实例代次由 Admin/Runtime 的 `PluginAccess` 撤销。API 持有两种授权，使用有界正文转发并在撤销/断连时丢弃原执行正文，沿用既有取消、费用结算与准入释放。授权有效期和冻结的请求计费快照各有职责，不新增账本。
+
+插件事实读取由 Admin 的 `PluginDataService` 校验查询，Store 仅投影账户摘要与 Key 分组；Provider 仍负责缓存额度的解释。Runtime 只转换 SDK wire，不导出凭据或 Provider 内部字段。只读额度入口不经过管理页的预测与订阅观测写入逻辑，也不触发刷新。

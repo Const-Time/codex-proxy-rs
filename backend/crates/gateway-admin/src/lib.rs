@@ -151,6 +151,7 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    plugin_data: Arc<dyn ports::plugins::PluginDataService>,
     plugins: Option<Arc<dyn ports::plugins::PluginService>>,
     turn_state: Option<Arc<dyn ports::turn_state::TurnStateService>>,
     proxies: Arc<dyn ProxiesService>,
@@ -168,6 +169,9 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    pub fn plugin_data(&self) -> Arc<dyn ports::plugins::PluginDataService> {
+        self.plugin_data.clone()
+    }
     pub fn with_plugins(mut self, service: Arc<dyn ports::plugins::PluginService>) -> Self {
         self.plugins = Some(service);
         self
@@ -340,6 +344,11 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        plugin_data: Arc::new(use_case::plugin_data::DefaultPluginDataService::new(
+            store.accounts(),
+            store.client_keys(),
+            registry.clone(),
+        )),
         plugins: None,
         turn_state: None,
         proxies: Arc::new(use_case::proxies::DefaultProxiesService::new(
