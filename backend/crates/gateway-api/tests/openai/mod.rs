@@ -1,6 +1,7 @@
 mod auth;
 mod endpoint;
 mod error;
+mod execution;
 mod images;
 mod models;
 mod responses;

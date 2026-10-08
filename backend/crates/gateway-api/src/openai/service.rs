@@ -134,22 +134,26 @@ impl OpenAiService {
                 Some(PreviousResponseId::new(value.clone()))
             }
         };
-        self.execution
-            .start(StartExecution {
-                client,
-                public_model,
-                operation,
-                metadata: ExecutionRequestMetadata {
-                    protocol: "openai".to_owned(),
-                    endpoint: endpoint.to_owned(),
-                    transport,
-                    stream: metadata.stream(),
-                    client_ip: metadata.client_ip(),
-                    user_agent: metadata.user_agent().map(str::to_owned),
-                    previous_response_id,
-                },
-            })
-            .await
+        let execution = Arc::clone(&self.execution);
+        super::execution::start(async move {
+            execution
+                .start(StartExecution {
+                    client,
+                    public_model,
+                    operation,
+                    metadata: ExecutionRequestMetadata {
+                        protocol: "openai".to_owned(),
+                        endpoint: endpoint.to_owned(),
+                        transport,
+                        stream: metadata.stream(),
+                        client_ip: metadata.client_ip(),
+                        user_agent: metadata.user_agent().map(str::to_owned),
+                        previous_response_id,
+                    },
+                })
+                .await
+        })
+        .await
     }
 
     pub(crate) async fn start_provider_endpoint(
@@ -166,22 +170,26 @@ impl OpenAiService {
                 "OpenAI provider identifier is invalid",
             )
         })?;
-        self.execution
-            .start_provider_endpoint(StartProviderExecution {
-                client,
-                provider,
-                operation,
-                metadata: ExecutionRequestMetadata {
-                    protocol: "openai".to_owned(),
-                    endpoint: endpoint.to_owned(),
-                    transport: ClientTransport::HttpJson,
-                    stream: false,
-                    client_ip,
-                    user_agent,
-                    previous_response_id: None,
-                },
-            })
-            .await
+        let execution = Arc::clone(&self.execution);
+        super::execution::start(async move {
+            execution
+                .start_provider_endpoint(StartProviderExecution {
+                    client,
+                    provider,
+                    operation,
+                    metadata: ExecutionRequestMetadata {
+                        protocol: "openai".to_owned(),
+                        endpoint: endpoint.to_owned(),
+                        transport: ClientTransport::HttpJson,
+                        stream: false,
+                        client_ip,
+                        user_agent,
+                        previous_response_id: None,
+                    },
+                })
+                .await
+        })
+        .await
     }
 
     pub(crate) fn try_register_connection(
