@@ -442,6 +442,7 @@ async fn select_grok_session(
         required_account.clone(),
         context.account_selection_policy(),
         context.deadline(),
+        context.cancellation().clone(),
         Arc::clone(candidate.account_scope()),
         context.client_api_key_ref().clone(),
     )
@@ -451,8 +452,12 @@ async fn select_grok_session(
         AccountEligibilityPolicy::Enforce
     })
     .with_affinity(affinity);
-    let selection_deadline = remaining(context.deadline())
-        .ok_or_else(|| provider_error(ProviderErrorKind::Timeout, UpstreamSendState::NotSent))?;
+    if context.deadline().is_elapsed() {
+        return Err(provider_error(
+            ProviderErrorKind::Timeout,
+            UpstreamSendState::NotSent,
+        ));
+    }
     let cancellation = context.cancellation().clone();
     let selected = tokio::select! {
         biased;
@@ -460,7 +465,7 @@ async fn select_grok_session(
             ProviderErrorKind::Cancelled,
             UpstreamSendState::NotSent,
         )),
-        _ = tokio::time::sleep(selection_deadline) => Err(provider_error(
+        _ = context.deadline().wait() => Err(provider_error(
             ProviderErrorKind::Timeout,
             UpstreamSendState::NotSent,
         )),

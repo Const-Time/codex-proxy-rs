@@ -427,3 +427,121 @@ async fn repository() -> Option<(RedisCredentialLeaseRepository, ConnectionManag
         .expect("valid test namespace");
     Some((repository, connection, namespace))
 }
+
+#[tokio::test]
+async fn maintained_provider_slot_outlives_initial_ttl_without_reacquiring_or_changing_fence() {
+    use gateway_core::lifecycle::{CancellationToken, Deadline};
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let mut request = scheduling_request("acct_maintained", "owner", 1, Duration::ZERO);
+    request.ttl = Duration::from_millis(900);
+    let guard = acquired(
+        repository
+            .try_acquire_bounded_lease(&request)
+            .await
+            .unwrap(),
+    );
+    let fence = guard.grant().unwrap().fencing_token;
+    let cancellation = CancellationToken::new();
+    let guard = guard
+        .maintain(Deadline::default(), cancellation.clone())
+        .maintain(Deadline::default(), cancellation.clone());
+    let before = repository
+        .credential_runtime_signals(&[request.resource_id.clone()])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert!(!cancellation.is_cancelled());
+    let after = repository
+        .credential_runtime_signals(&[request.resource_id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(after[0].in_flight, 1);
+    assert_eq!(before[0].last_started_at, after[0].last_started_at);
+    assert_eq!(guard.grant().unwrap().fencing_token, fence);
+    assert!(matches!(
+        repository
+            .try_acquire_bounded_lease(&request)
+            .await
+            .unwrap(),
+        CredentialBoundedLeaseAcquisition::Busy { .. }
+    ));
+    guard.release().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        repository
+            .credential_runtime_signals(&[request.resource_id.clone()])
+            .await
+            .unwrap()[0]
+            .in_flight,
+        0
+    );
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("{namespace}:*"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    redis::cmd("DEL")
+        .arg(keys)
+        .query_async::<i64>(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn provider_renewal_loss_cancels_only_its_execution_and_explicit_deadline_stops_renewal() {
+    use gateway_core::lifecycle::{CancellationToken, Deadline};
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let mut request = scheduling_request("acct_renew_loss", "owner", 1, Duration::ZERO);
+    request.ttl = Duration::from_millis(600);
+    for lost in [true, false] {
+        let parent = CancellationToken::new();
+        let cancellation = CancellationToken::linked([parent.clone()]);
+        let deadline = if lost {
+            Deadline::default()
+        } else {
+            (std::time::SystemTime::now() + Duration::from_millis(300)).into()
+        };
+        let guard = acquired(
+            repository
+                .try_acquire_bounded_lease(&request)
+                .await
+                .unwrap(),
+        )
+        .maintain(deadline, cancellation.clone());
+        if lost {
+            let keys: Vec<String> = redis::cmd("KEYS")
+                .arg(format!("{namespace}:*"))
+                .query_async(&mut connection)
+                .await
+                .unwrap();
+            redis::cmd("DEL")
+                .arg(keys)
+                .query_async::<i64>(&mut connection)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), cancellation.cancelled())
+                .await
+                .unwrap();
+            assert!(!parent.is_cancelled());
+        } else {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            assert!(
+                !cancellation.is_cancelled(),
+                "Core owns explicit timeout classification"
+            );
+            assert_eq!(
+                repository
+                    .credential_runtime_signals(&[request.resource_id.clone()])
+                    .await
+                    .unwrap()[0]
+                    .in_flight,
+                0
+            );
+        }
+        drop(guard);
+    }
+}

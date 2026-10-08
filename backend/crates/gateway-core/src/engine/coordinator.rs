@@ -180,7 +180,7 @@ where
         let mut session = ResponseExecutionSession {
             recovery_lease: Some(self.engine.store().maintain_request(
                 &request_id,
-                Some(deadline),
+                deadline.at(),
                 crate::lifecycle::REQUEST_LEASE_TTL,
             )),
             engine: Arc::clone(&self.engine),
@@ -205,12 +205,7 @@ where
             budget_attempt_already_counted: false,
             trace,
             deadline,
-            deadline_timer: Delay::new(
-                deadline
-                    .duration_since(SystemTime::now())
-                    .unwrap_or(Duration::ZERO),
-            )
-            .fuse(),
+            deadline_timer: deadline.wait().fuse(),
             pending_request: Some(request),
             request_persisted: false,
             operation,
@@ -247,7 +242,7 @@ where
             session.finish_interruption(&EngineError::Cancelled).await?;
             return Err(EngineError::Cancelled);
         }
-        if SystemTime::now() >= deadline {
+        if deadline.is_elapsed() {
             session.finish_interruption(&EngineError::Deadline).await?;
             return Err(EngineError::Deadline);
         }
@@ -325,9 +320,9 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     budget_prior_attempts_usd: Decimal,
     budget_attempt_already_counted: bool,
     trace: TraceContext,
-    deadline: SystemTime,
+    deadline: crate::lifecycle::Deadline,
     /// 会话级 deadline 计时器；deadline 固定，帧循环内复用而非逐事件新建。
-    deadline_timer: Fuse<Delay>,
+    deadline_timer: Fuse<BoxFuture<'static, ()>>,
     pending_request: Option<NewModelRequest>,
     request_persisted: bool,
     operation: Operation,
@@ -1004,7 +999,7 @@ where
                     .connection_budget
                     .startup_remaining()
                     .map_or(self.deadline, |remaining| {
-                        self.deadline.min(SystemTime::now() + remaining)
+                        self.deadline.cap(SystemTime::now() + remaining)
                     });
                 match poll_retry_delay(recovery.delay, self.cancellation.clone(), deadline).await {
                     RetryDelayBoundary::Elapsed => {}
@@ -2383,10 +2378,10 @@ enum PollBoundary {
 async fn poll_stream_item(
     stream: &mut ProviderStream,
     cancellation: CancellationToken,
-    deadline: SystemTime,
-    mut deadline_timer: &mut Fuse<Delay>,
+    deadline: crate::lifecycle::Deadline,
+    mut deadline_timer: &mut Fuse<BoxFuture<'static, ()>>,
 ) -> PollBoundary {
-    if SystemTime::now() >= deadline {
+    if deadline.is_elapsed() {
         return PollBoundary::Deadline;
     }
     let next = stream.next().fuse();
@@ -2409,11 +2404,11 @@ async fn poll_middleware(
     invocation: &mut Invocation,
     source: Option<&mut ProviderStream>,
     cancellation: CancellationToken,
-    deadline: SystemTime,
+    deadline: crate::lifecycle::Deadline,
 ) -> MiddlewareBoundary {
-    let Ok(remaining) = deadline.duration_since(SystemTime::now()) else {
+    if deadline.is_elapsed() {
         return MiddlewareBoundary::Deadline;
-    };
+    }
     let step = invocation.next_step().fuse();
     let source = async move {
         match source {
@@ -2423,7 +2418,7 @@ async fn poll_middleware(
     }
     .fuse();
     let cancelled = cancellation.cancelled().fuse();
-    let timeout = Delay::new(remaining).fuse();
+    let timeout = deadline.wait().fuse();
     pin_mut!(step, source, cancelled, timeout);
     select_biased! {
         _ = cancelled => MiddlewareBoundary::Cancelled,
@@ -2448,14 +2443,14 @@ enum RetryDelayBoundary {
 async fn poll_retry_delay(
     delay: Duration,
     cancellation: CancellationToken,
-    deadline: SystemTime,
+    deadline: crate::lifecycle::Deadline,
 ) -> RetryDelayBoundary {
-    let Ok(remaining) = deadline.duration_since(SystemTime::now()) else {
+    if deadline.is_elapsed() {
         return RetryDelayBoundary::Deadline;
-    };
+    }
     let retry_delay = Delay::new(delay).fuse();
     let cancelled = cancellation.cancelled().fuse();
-    let timeout = Delay::new(remaining).fuse();
+    let timeout = deadline.wait().fuse();
     pin_mut!(retry_delay, cancelled, timeout);
     select_biased! {
         _ = cancelled => RetryDelayBoundary::Cancelled,
@@ -2469,14 +2464,14 @@ async fn poll_provider(
     request: ProviderRequest,
     context: AttemptContext,
     cancellation: CancellationToken,
-    deadline: SystemTime,
+    deadline: crate::lifecycle::Deadline,
 ) -> ProviderBoundary {
-    let Ok(remaining) = deadline.duration_since(SystemTime::now()) else {
+    if deadline.is_elapsed() {
         return ProviderBoundary::Deadline;
-    };
+    }
     let execution = provider.execute(request, context).fuse();
     let cancelled = cancellation.cancelled().fuse();
-    let timeout = Delay::new(remaining).fuse();
+    let timeout = deadline.wait().fuse();
     pin_mut!(execution, cancelled, timeout);
     select_biased! {
         _ = cancelled => ProviderBoundary::Cancelled,

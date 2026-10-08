@@ -14,7 +14,7 @@ pub struct SettingOverride<T = Value> {
     pub value: T,
 }
 
-/// Full execution values; timeout replacement remains gated until lease/deadline support is connected.
+/// Full immutable execution values; null timeout means no total execution deadline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionSettings {
@@ -30,6 +30,7 @@ struct ExecutionOverrides {
     input: ExecutionSettings,
     fast_mode: Option<SettingOverride<FastMode>>,
     client_limits: Option<SettingOverride<RateLimits>>,
+    timeout_ms: Option<SettingOverride<Option<u64>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +150,7 @@ impl RequestSettings {
             },
             fast_mode: previous.and_then(|scope| scope.fast_mode.clone()),
             client_limits: previous.and_then(|scope| scope.client_limits.clone()),
+            timeout_ms: previous.and_then(|scope| scope.timeout_ms.clone()),
         }));
         self
     }
@@ -169,7 +171,10 @@ impl RequestSettings {
                 .client_limits
                 .as_ref()
                 .map_or(scope.input.client_limits, |change| change.value),
-            timeout_ms: scope.input.timeout_ms,
+            timeout_ms: scope
+                .timeout_ms
+                .as_ref()
+                .map_or(scope.input.timeout_ms, |change| change.value),
         })
     }
     pub fn replace_execution(
@@ -178,12 +183,13 @@ impl RequestSettings {
         instance_id: &str,
     ) -> Result<Self, InvalidSettings> {
         let previous = self.execution_values().ok_or(InvalidSettings)?;
-        // Never acknowledge a timeout change while Core leases still use a fixed request lifetime.
-        if values.timeout_ms != previous.timeout_ms {
+        if values.timeout_ms == Some(0) {
             return Err(InvalidSettings);
         }
         let mut updated = self.replace(values.runtime.clone(), instance_id)?;
-        if values.fast_mode == previous.fast_mode && values.client_limits == previous.client_limits
+        if values.fast_mode == previous.fast_mode
+            && values.client_limits == previous.client_limits
+            && values.timeout_ms == previous.timeout_ms
         {
             return Ok(updated);
         }
@@ -208,6 +214,13 @@ impl RequestSettings {
                 instance_id: instance_id.into(),
                 order,
                 value: values.client_limits,
+            });
+        }
+        if values.timeout_ms != previous.timeout_ms {
+            scope.timeout_ms = Some(SettingOverride {
+                instance_id: instance_id.into(),
+                order,
+                value: values.timeout_ms,
             });
         }
         updated.execution = Some(Arc::new(scope));

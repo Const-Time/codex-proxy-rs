@@ -241,6 +241,7 @@ impl GrokAccountSessionSelector {
                         ),
                         request.account_selection_policy().request_interval(),
                         request.deadline(),
+                        request.cancellation(),
                     ),
                 ))
                 .await

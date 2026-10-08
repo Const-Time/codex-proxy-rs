@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -229,18 +229,72 @@ impl fmt::Debug for CredentialBoundedLeaseAcquisition {
 
 /// Drop 时在当前 Tokio runtime 上尽力释放；进程崩溃由 Redis TTL 回收。
 pub struct CredentialLeaseGuard {
+    renewal: Option<tokio::task::JoinHandle<()>>,
     repository: RedisCredentialLeaseRepository,
     request: CredentialLeaseRequest,
     grant: Option<CredentialLeaseGrant>,
 }
 
 impl CredentialLeaseGuard {
+    /// Extend only this fenced slot; guard release stops renewal before removing membership.
+    pub fn maintain(
+        mut self,
+        deadline: gateway_core::lifecycle::Deadline,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Self {
+        self.stop_renewal();
+        let repository = self.repository.clone();
+        let mut request = self.request.clone();
+        let Some(mut grant) = self.grant.clone() else {
+            return self;
+        };
+        let ttl = request.ttl;
+        self.renewal = Some(tokio::spawn(async move {
+            loop {
+                let delay = deadline.bounded(ttl / 3);
+                if delay.is_zero() {
+                    return;
+                }
+                tokio::time::sleep(delay).await;
+                if deadline.is_elapsed() {
+                    return;
+                }
+                request.ttl = deadline.bounded(ttl);
+                if request.ttl.as_millis() == 0 {
+                    return;
+                }
+                let renewed = tokio::time::timeout(
+                    ttl / 3,
+                    repository.renew_credential_lease(&request, &grant),
+                )
+                .await;
+                match renewed {
+                    Ok(Ok(Some(next))) => grant = next,
+                    _ => {
+                        if !deadline.is_elapsed() {
+                            cancellation.cancel();
+                            tracing::warn!("Provider scheduling lease lost; execution cancelled");
+                        }
+                        return;
+                    }
+                }
+            }
+        }));
+        self
+    }
+    fn stop_renewal(&mut self) {
+        if let Some(task) = self.renewal.take() {
+            task.abort();
+        }
+    }
+
     #[must_use]
     pub fn grant(&self) -> Option<&CredentialLeaseGrant> {
         self.grant.as_ref()
     }
 
     pub async fn release(mut self) -> StoreResult<bool> {
+        self.stop_renewal();
         let Some(grant) = self.grant.take() else {
             return Ok(false);
         };
@@ -264,6 +318,7 @@ impl fmt::Debug for CredentialLeaseGuard {
 
 impl Drop for CredentialLeaseGuard {
     fn drop(&mut self) {
+        self.stop_renewal();
         let Some(grant) = self.grant.take() else {
             return;
         };
@@ -324,6 +379,7 @@ impl RedisCredentialLeaseRepository {
     ) -> StoreResult<Option<CredentialLeaseGuard>> {
         let grant = self.acquire_credential_lease(&request).await?;
         Ok(grant.map(|grant| CredentialLeaseGuard {
+            renewal: None,
             repository: self.clone(),
             request,
             grant: Some(grant),
@@ -537,18 +593,13 @@ impl RedisProviderLeaseCoordinator {
         &self,
         request: &ProviderSchedulingLeaseRequest,
     ) -> Result<ProviderLeaseAcquisition, ProviderStoreError> {
-        let ttl = request
-            .deadline()
-            .duration_since(SystemTime::now())
-            .ok()
-            .filter(|remaining| !remaining.is_zero())
-            .map(|remaining| remaining.min(PROVIDER_ACCOUNT_LEASE_TTL))
-            .ok_or_else(|| {
-                ProviderStoreError::new(
-                    ProviderStoreErrorKind::Unavailable,
-                    "acquire expired scheduling lease",
-                )
-            })?;
+        let ttl = request.deadline().bounded(PROVIDER_ACCOUNT_LEASE_TTL);
+        if ttl.is_zero() {
+            return Err(ProviderStoreError::new(
+                ProviderStoreErrorKind::Unavailable,
+                "acquire expired scheduling lease",
+            ));
+        }
         let acquisition = self
             .repository
             .try_acquire_bounded_lease(&CredentialBoundedLeaseRequest {
@@ -563,7 +614,9 @@ impl RedisProviderLeaseCoordinator {
             .map_err(|_| provider_unavailable("acquire scheduling lease"))?;
         Ok(match acquisition {
             CredentialBoundedLeaseAcquisition::Acquired(guard) => {
-                ProviderLeaseAcquisition::Acquired(Box::new(guard))
+                ProviderLeaseAcquisition::Acquired(Box::new(
+                    guard.maintain(request.deadline(), request.cancellation()),
+                ))
             }
             CredentialBoundedLeaseAcquisition::Busy { retry_after } => {
                 ProviderLeaseAcquisition::Busy { retry_after }
@@ -739,6 +792,7 @@ impl CredentialLeaseRepository for RedisCredentialLeaseRepository {
         match attempt.grant {
             Some(grant) => Ok(CredentialBoundedLeaseAcquisition::Acquired(
                 CredentialLeaseGuard {
+                    renewal: None,
                     repository: self.clone(),
                     request: lease_request,
                     grant: Some(grant),

@@ -281,3 +281,26 @@ fn discarded_linked_cancellation_waits_release_all_registrations() {
     assert_eq!(allocations.bytes_current, 0, "{allocations:?}");
     assert!(!child.is_cancelled());
 }
+
+#[test]
+fn optional_deadline_has_no_sentinel_and_bounds_only_explicit_limits() {
+    use gateway_core::lifecycle::{Deadline, REQUEST_LEASE_TTL};
+    use std::time::{Duration, SystemTime};
+    let unlimited = Deadline::default();
+    assert_eq!(unlimited.at(), None);
+    assert_eq!(unlimited.remaining(), None);
+    assert!(!unlimited.is_elapsed());
+    assert!(unlimited.wait().now_or_never().is_none());
+    assert_eq!(
+        unlimited.bounded(Duration::from_secs(3)),
+        Duration::from_secs(3)
+    );
+    let at = SystemTime::now() + Duration::from_secs(2);
+    assert_eq!(unlimited.cap(at).at(), Some(at));
+    assert!(unlimited.lease_deadline() <= SystemTime::now() + REQUEST_LEASE_TTL);
+    let expired = Deadline::from(SystemTime::now() - Duration::from_secs(1));
+    assert!(expired.is_elapsed());
+    assert!(expired.wait().now_or_never().is_some());
+    assert_eq!(expired.bounded(Duration::from_secs(3)), Duration::ZERO);
+    assert!(Deadline::from_timeout(SystemTime::now(), Some(Duration::MAX)).is_none());
+}

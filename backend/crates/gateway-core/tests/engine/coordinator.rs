@@ -708,7 +708,7 @@ fn model_request(operation: &Operation, deadline: SystemTime) -> NewModelRequest
         continuation: Default::default(),
         image_generation_requested: operation.image_generation_requested(),
         started_at: SystemTime::now(),
-        deadline_at: deadline,
+        deadline_at: deadline.into(),
     }
 }
 
@@ -4884,7 +4884,7 @@ fn attempt_middleware_observes_original_cost_before_rewriting_display_facts() {
         Some("original")
     );
     assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
-    assert_eq!(hook.contexts.lock().unwrap()[0].deadline(), deadline);
+    assert_eq!(hook.contexts.lock().unwrap()[0].deadline(), deadline.into());
     assert_eq!(provider.contexts.lock().unwrap().len(), 1);
 }
 #[test]
@@ -5546,5 +5546,46 @@ fn dropping_unpolled_session_stops_recovery_maintenance() {
         drop(session);
         assert_eq!(store.recovery_leases.load(Ordering::SeqCst), 0);
         assert_eq!(store.state.lock().unwrap().created, 0);
+    });
+}
+
+#[test]
+fn unlimited_execution_still_cancels_pending_preparation_and_streams_once() {
+    block_on(async {
+        for script in [
+            Script::Pending,
+            Script::HangingStream {
+                account_id: "acct_first",
+                items: vec![],
+            },
+        ] {
+            let operation = generate_operation();
+            let (coordinator, store, provider) = coordinator(vec![script]);
+            let cancellation = CancellationToken::new();
+            let mut request = model_request(&operation, SystemTime::now());
+            request.started_at = SystemTime::now() - Duration::from_secs(601);
+            request.deadline_at = gateway_core::lifecycle::Deadline::default();
+            let mut session = coordinator
+                .start(
+                    request,
+                    operation.clone(),
+                    plan(&operation),
+                    None,
+                    None,
+                    cancellation.clone(),
+                )
+                .await
+                .unwrap();
+            let mut next = Box::pin(session.next_event());
+            assert!(futures::poll!(next.as_mut()).is_pending());
+            futures_timer::Delay::new(Duration::from_millis(20)).await;
+            assert!(futures::poll!(next.as_mut()).is_pending());
+            assert_eq!(provider.contexts.lock().unwrap()[0].deadline().at(), None);
+            cancellation.cancel();
+            assert!(matches!(next.await, Err(EngineError::Cancelled)));
+            session.cancel_and_finalize().await.unwrap();
+            assert!(session.is_finalized());
+            assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+        }
     });
 }

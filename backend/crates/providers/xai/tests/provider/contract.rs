@@ -1014,7 +1014,7 @@ fn context_with_recovery_state(
             gateway_core::policy::ClientApiKeyId::new("key_xai_contract").expect("client key id"),
         ),
         NonZeroU32::new(1).expect("attempt"),
-        SystemTime::now() + Duration::from_secs(30),
+        gateway_core::lifecycle::Deadline::default(),
         selection_policy(),
         AccountAttemptContext::new(BTreeSet::new(), required_account, account_state_owner)
             .with_credential_recovery_attempted(recovery_attempted),

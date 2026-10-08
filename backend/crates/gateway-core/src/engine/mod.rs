@@ -406,7 +406,7 @@ impl RequestAttemptContext {
 pub struct AttemptContext {
     request: RequestAttemptContext,
     attempt_index: NonZeroU32,
-    deadline: SystemTime,
+    deadline: crate::lifecycle::Deadline,
     account_selection_policy: AccountSelectionPolicy,
     account: AccountAttemptContext,
     continuation: Option<ContinuationBinding>,
@@ -436,10 +436,10 @@ impl AttemptContext {
     }
 
     #[must_use]
-    pub const fn new(
+    pub fn new(
         request: RequestAttemptContext,
         attempt_index: NonZeroU32,
-        deadline: SystemTime,
+        deadline: impl Into<crate::lifecycle::Deadline>,
         account_selection_policy: AccountSelectionPolicy,
         account: AccountAttemptContext,
         continuation: Option<ContinuationBinding>,
@@ -453,7 +453,7 @@ impl AttemptContext {
         Self {
             request,
             attempt_index,
-            deadline,
+            deadline: deadline.into(),
             account_selection_policy,
             account,
             continuation,
@@ -503,7 +503,7 @@ impl AttemptContext {
     }
 
     #[must_use]
-    pub const fn deadline(&self) -> SystemTime {
+    pub const fn deadline(&self) -> crate::lifecycle::Deadline {
         self.deadline
     }
 
@@ -599,7 +599,7 @@ pub struct NewModelRequest {
     /// Client Key 准入判定的完整耗时；内部探测不经过该阶段。
     pub admission_decision_ms: Option<u64>,
     pub started_at: SystemTime,
-    pub deadline_at: SystemTime,
+    pub deadline_at: crate::lifecycle::Deadline,
 }
 
 /// 每次真实上游发送前对同一 `model_requests` 行的更新。

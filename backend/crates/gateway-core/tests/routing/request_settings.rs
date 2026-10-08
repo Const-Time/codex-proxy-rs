@@ -241,6 +241,7 @@ fn execution_settings_keep_scope_and_field_provenance_without_cross_key_leaks() 
     assert_eq!(original.fast_mode, FastMode::Default);
     let mut values = original.clone();
     values.fast_mode = FastMode::Enabled;
+    values.timeout_ms = None;
     values.client_limits = RateLimits {
         max_concurrency: 2,
         requests_per_minute: 7,
@@ -258,6 +259,8 @@ fn execution_settings_keep_scope_and_field_provenance_without_cross_key_leaks() 
     );
     assert_eq!(sources["overrides"]["model_mappings"]["order"], 1);
     assert_eq!(sources["execution"]["client_limits"]["order"], 1);
+    assert_eq!(sources["execution"]["timeout_ms"]["order"], 1);
+    assert!(sources["execution"]["timeout_ms"]["value"].is_null());
     let same = changed.replace_execution(&values, "unchanged").unwrap();
     assert_eq!(same.inspect(), sources);
     let mut next = values.clone();
@@ -280,6 +283,7 @@ fn execution_settings_keep_scope_and_field_provenance_without_cross_key_leaks() 
         .execution_values()
         .unwrap();
     assert_eq!(child.fast_mode, FastMode::Default);
+    assert_eq!(child.timeout_ms, Some(600_000));
     assert_eq!(child.client_limits, other.limits());
     assert_eq!(child.runtime, values.runtime);
     let encoded = serde_json::to_value(&values).unwrap();
@@ -290,16 +294,14 @@ fn execution_settings_keep_scope_and_field_provenance_without_cross_key_leaks() 
 }
 
 #[test]
-fn execution_settings_reject_missing_scope_invalid_types_and_unwired_timeout_changes() {
+fn execution_settings_reject_missing_scope_invalid_types_and_zero_timeout() {
     let policy = client_policy("a", "sk_a", true);
     let root = RequestSettings::new(Arc::new(snapshot()));
     let scoped = root.clone().with_execution(&policy, Some(600_000));
     let mut values = scoped.execution_values().unwrap();
     assert!(root.replace_execution(&values, "a").is_err());
-    for timeout in [None, Some(0), Some(600_001)] {
-        values.timeout_ms = timeout;
-        assert!(scoped.replace_execution(&values, "a").is_err());
-    }
+    values.timeout_ms = Some(0);
+    assert!(scoped.replace_execution(&values, "a").is_err());
     let mut json = serde_json::to_value(scoped.execution_values().unwrap()).unwrap();
     json["fast_mode"] = json!(true);
     assert!(serde_json::from_value::<gateway_core::routing::ExecutionSettings>(json).is_err());

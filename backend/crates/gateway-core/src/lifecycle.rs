@@ -10,6 +10,60 @@ use event_listener::Event;
 /// This is independent of the explicit execution timeout.
 pub const REQUEST_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// Optional total execution budget. Absence means no total deadline, not a distant timestamp.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Deadline(Option<std::time::SystemTime>);
+impl Deadline {
+    pub fn from_timeout(
+        started_at: std::time::SystemTime,
+        timeout: Option<std::time::Duration>,
+    ) -> Option<Self> {
+        match timeout {
+            Some(timeout) => started_at.checked_add(timeout).map(|at| Self(Some(at))),
+            None => Some(Self(None)),
+        }
+    }
+    pub const fn at(self) -> Option<std::time::SystemTime> {
+        self.0
+    }
+    pub fn remaining(self) -> Option<std::time::Duration> {
+        self.0.map(|at| {
+            at.duration_since(std::time::SystemTime::now())
+                .unwrap_or_default()
+        })
+    }
+    pub fn is_elapsed(self) -> bool {
+        self.remaining().is_some_and(|left| left.is_zero())
+    }
+    pub fn bounded(self, maximum: std::time::Duration) -> std::time::Duration {
+        self.remaining().map_or(maximum, |left| left.min(maximum))
+    }
+    pub fn cap(self, at: std::time::SystemTime) -> Self {
+        Self(Some(self.0.map_or(at, |current| current.min(at))))
+    }
+    pub fn lease_deadline(self) -> std::time::SystemTime {
+        self.cap(std::time::SystemTime::now() + REQUEST_LEASE_TTL)
+            .at()
+            .expect("bounded recovery lease")
+    }
+    pub fn wait(self) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            loop {
+                match self.remaining() {
+                    None => futures::future::pending::<()>().await,
+                    Some(left) if left.is_zero() => return,
+                    Some(left) => futures_timer::Delay::new(left.min(REQUEST_LEASE_TTL)).await,
+                }
+            }
+        })
+    }
+}
+impl From<std::time::SystemTime> for Deadline {
+    fn from(at: std::time::SystemTime) -> Self {
+        Self(Some(at))
+    }
+}
+
 struct CancellationState {
     cancelled: AtomicBool,
     event: Event,
