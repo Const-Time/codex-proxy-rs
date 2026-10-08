@@ -21,7 +21,13 @@ export interface PluginManagementView {
   resources: PluginManagementResource[]
 }
 export interface PluginAuthenticationBinding { failurePolicy: 'reject' | 'delegate', identities: Record<string, string> }
+export interface PluginMiddlewareBinding {
+  order: number
+  mounts: ('request' | 'attempt')[]
+  scope: { kind: 'all' } | { kind: 'keys' | 'groups', ids: string[] }
+}
 export interface PluginInstance {
+  middleware: PluginMiddlewareBinding | null
   frontendAuthentication: PluginAuthenticationBinding | null
   id: string
   revision: number
@@ -35,6 +41,7 @@ export interface PluginInstance {
   resources: PluginManagementResource[]
 }
 export interface PluginUpdate {
+  middleware: PluginMiddlewareBinding | null
   frontendAuthentication: PluginAuthenticationBinding | null
   revision: number
   name: string

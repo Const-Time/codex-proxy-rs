@@ -220,6 +220,7 @@ fn build_archive(version: &str, extra_capability: bool, authentication: bool) ->
 }
 pub fn update(sha: &str, revision: u64, enabled: bool) -> PluginUpdate {
     PluginUpdate {
+        middleware: None,
         frontend_authentication: None,
         revision,
         name: "Fixture".into(),

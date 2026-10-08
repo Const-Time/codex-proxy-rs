@@ -196,6 +196,23 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if let Some(binding) = &record.middleware {
+            binding.validate()?;
+            let declaration = manifest
+                .contributes
+                .get(&Capability::Middleware)
+                .ok_or_else(|| AdminError::invalid("此制品未提供中间件能力"))?;
+            if declaration.version != 4
+                || binding.mounts.iter().any(|mount| {
+                    !declaration.stages.contains(&match mount {
+                        PluginMiddlewareMount::Request => Stage::Request,
+                        PluginMiddlewareMount::Attempt => Stage::Attempt,
+                    })
+                })
+            {
+                return Err(AdminError::invalid("中间件版本或挂载位置与制品声明不符"));
+            }
+        }
         if let Some(binding) = &record.frontend_authentication {
             binding.validate()?;
             if manifest
@@ -266,6 +283,7 @@ impl PluginRuntime for PluginEngine {
             .with_quota(self.quota.clone()),
         );
         let calls = callbacks.calls.clone();
+        let middleware = crate::middleware::MiddlewareCallbacks::new(callbacks);
         let session = Arc::new(
             RpcSession::start_supervised(
                 prepared.clone(),
@@ -283,7 +301,7 @@ impl PluginRuntime for PluginEngine {
                 },
                 RpcLimits::default(),
                 &self.processes,
-                callbacks,
+                middleware.clone(),
                 crate::rpc::RpcSessionLifecycle::new(
                     move |_| failed_access.revoke(),
                     move || ended_access.revoke(),
@@ -373,6 +391,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            middleware,
             authentication,
             calls,
             session,
@@ -384,6 +403,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    middleware: Arc<crate::middleware::MiddlewareCallbacks>,
     authentication: bool,
     calls: Arc<crate::resources::ManagementCalls>,
     access: PluginAccess,
@@ -394,6 +414,27 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn middleware(
+        &self,
+        mut context: gateway_core::engine::middleware::MiddlewareContext,
+        request: gateway_core::engine::middleware::MiddlewareRequest,
+        next: gateway_core::engine::middleware::MiddlewareNext,
+    ) -> Result<
+        gateway_core::engine::middleware::MiddlewareResponse,
+        gateway_core::engine::middleware::MiddlewareError,
+    > {
+        if self.status() != "ready" || self.access.is_revoked() {
+            return Err(gateway_core::engine::middleware::MiddlewareError::Fault);
+        }
+        context.cancellation = gateway_core::lifecycle::CancellationToken::linked([
+            context.cancellation,
+            self.access.cancellation(),
+        ]);
+        self.middleware
+            .invoke(self.session.clone(), context, request, next)
+            .await
+    }
+
     async fn authenticate(
         &self,
         authorization: String,

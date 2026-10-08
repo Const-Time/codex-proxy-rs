@@ -183,10 +183,15 @@ mod worker_middleware {
                 ResponseStream::from_chunks(vec![]),
             ));
         }
+        let instance = call.context.instance_id.clone();
+        let generation = call.context.generation;
         let RequestCall {
             mut request, next, ..
         } = RequestCall::try_from(call)?;
         assert_eq!(request.head.client_key_id, "key_original");
+        if mode == "chain" {
+            request.append_header("x-chain", format!("{instance}:{generation}").into_bytes());
+        }
         if mode == "rewrite" {
             request.replace_body(br#"{"model":"changed"}"#.to_vec());
             request.append_header("x-plugin", b"changed".to_vec());
@@ -198,6 +203,9 @@ mod worker_middleware {
             request.head.settings = json!({"fast":true});
         }
         let mut response = next.run(request).await?;
+        if mode == "chain" {
+            response.append_header("x-chain", format!("{instance}:{generation}").into_bytes());
+        }
         if mode == "wait" {
             std::future::pending::<()>().await;
         }

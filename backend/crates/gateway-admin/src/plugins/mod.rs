@@ -1,4 +1,5 @@
 //! 插件实例是唯一配置权威；候选进程完成准备后才提交并替换旧代。
+pub mod middleware;
 use crate::{
     model::{AdminError, MutationContext, plugins::*},
     ports::plugins::*,
@@ -25,6 +26,7 @@ struct AuthenticationPublication {
     epoch: PluginAccess,
 }
 pub struct PluginManager {
+    middleware: RwLock<middleware::Publication>,
     authentication: RwLock<AuthenticationPublication>,
     store: Arc<dyn PluginStore>,
     runtime: Arc<dyn PluginRuntime>,
@@ -34,6 +36,7 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new(store: Arc<dyn PluginStore>, runtime: Arc<dyn PluginRuntime>) -> Self {
         Self {
+            middleware: RwLock::default(),
             authentication: RwLock::default(),
             store,
             runtime,
@@ -54,6 +57,10 @@ impl PluginManager {
                 self.runtime.prepare(&record, artifact).await
             }
             .await;
+            self.middleware
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .publish(&record, restored.as_ref().ok().cloned());
             if record.frontend_authentication.is_some() {
                 self.publish_authentication(&record, restored.as_ref().ok().cloned());
             }
@@ -76,6 +83,10 @@ impl PluginManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .epoch
             .revoke();
+        self.middleware
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown();
         let active = std::mem::take(
             &mut *self
                 .active
@@ -146,6 +157,7 @@ impl PluginManager {
                 )
         };
         Ok(PluginView {
+            middleware: record.middleware,
             frontend_authentication: record.frontend_authentication,
             id: record.id,
             revision: record.revision,
@@ -162,6 +174,15 @@ impl PluginManager {
 }
 #[async_trait]
 impl PluginService for PluginManager {
+    fn freeze_middleware(
+        &self,
+        context: gateway_core::engine::middleware::MiddlewareContext,
+    ) -> Result<middleware::PluginMiddlewarePlan, AdminError> {
+        self.middleware
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .freeze(context)
+    }
     async fn authenticate(
         &self,
         authorization: String,
@@ -292,6 +313,9 @@ impl PluginService for PluginManager {
                 secrets.remove(&key);
             }
         }
+        if let Some(binding) = &update.middleware {
+            binding.validate()?;
+        }
         if let Some(binding) = &update.frontend_authentication {
             binding.validate()?;
         }
@@ -304,6 +328,7 @@ impl PluginService for PluginManager {
             return Err(AdminError::conflict("只能启用一个入口认证器"));
         }
         let record = PluginRecord {
+            middleware: update.middleware,
             frontend_authentication: update.frontend_authentication,
             id: id
                 .map(str::to_owned)
@@ -336,6 +361,14 @@ impl PluginService for PluginManager {
                     .as_ref()
                     .is_ok_and(|rows| rows.iter().find(|r| r.id == record.id) == previous);
                 if !unchanged {
+                    if record.middleware.is_some()
+                        || previous.is_some_and(|r| r.middleware.is_some())
+                    {
+                        self.middleware
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .block(&record.id);
+                    }
                     if record.frontend_authentication.is_some()
                         || previous.is_some_and(|r| r.frontend_authentication.is_some())
                     {
@@ -386,6 +419,10 @@ impl PluginService for PluginManager {
                 candidate.activate();
                 active.insert(record.id.clone(), (record.revision, candidate));
             }
+            self.middleware
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .publish(&record, auth_candidate.clone());
             self.publish_authentication(&record, auth_candidate);
             old
         };
@@ -410,6 +447,10 @@ impl PluginService for PluginManager {
                 return Err(error);
             }
         }
+        self.middleware
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
         let old = self
             .active
             .write()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginArtifact, PluginInstance, PluginManagementPage } from '@/api/modules/plugins'
+import type { PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
 import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
@@ -31,6 +31,30 @@ async function searchKeys() {
 }
 const digest = ref('')
 const configuration = ref('{}')
+const middlewareEnabled = ref(false)
+const middlewareOrder = ref('0')
+const middlewareRequest = ref(true)
+const middlewareAttempt = ref(false)
+const middlewareScope = ref<'all' | 'keys' | 'groups'>('all')
+const middlewareIds = ref('')
+function middlewareBinding(): PluginMiddlewareBinding | null {
+  if (!middlewareEnabled.value)
+    return null
+  const order = Number(middlewareOrder.value)
+  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
+    throw new Error('中间件顺序必须是 -10000 到 10000 的整数')
+  const mounts: PluginMiddlewareBinding['mounts'] = []
+  if (middlewareRequest.value)
+    mounts.push('request')
+  if (middlewareAttempt.value)
+    mounts.push('attempt')
+  if (!mounts.length)
+    throw new Error('请选择中间件挂载位置')
+  const ids = middlewareIds.value.split(/\s+/u).filter(Boolean)
+  if (middlewareScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
+    throw new Error('作用范围需填写 1～256 个不重复的 ID')
+  return { order, mounts, scope: middlewareScope.value === 'all' ? { kind: 'all' } : { kind: middlewareScope.value, ids } }
+}
 const authenticationEnabled = ref(false)
 const authenticationPolicy = ref<'reject' | 'delegate'>('reject')
 const authenticationIdentities = ref('{}')
@@ -88,6 +112,12 @@ function edit(item?: PluginInstance) {
   name.value = item?.name ?? ''
   digest.value = item?.artifact.sha256 ?? artifacts.value[0]?.sha256 ?? ''
   configuration.value = JSON.stringify(item?.configuration ?? {}, null, 2)
+  middlewareEnabled.value = !!item?.middleware
+  middlewareOrder.value = String(item?.middleware?.order ?? 0)
+  middlewareRequest.value = item?.middleware?.mounts.includes('request') ?? true
+  middlewareAttempt.value = item?.middleware?.mounts.includes('attempt') ?? false
+  middlewareScope.value = item?.middleware?.scope.kind ?? 'all'
+  middlewareIds.value = item?.middleware && item.middleware.scope.kind !== 'all' ? item.middleware.scope.ids.join('\n') : ''
   authenticationEnabled.value = !!item?.frontendAuthentication
   authenticationPolicy.value = item?.frontendAuthentication?.failurePolicy ?? 'reject'
   authenticationIdentities.value = JSON.stringify(item?.frontendAuthentication?.identities ?? {}, null, 2)
@@ -120,7 +150,7 @@ async function save(enabled: boolean) {
       else if (secrets.value[key])
         values[key] = secrets.value[key]!
     }
-    await savePlugin(editing.value?.id, { frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+    await savePlugin(editing.value?.id, { middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
     editOpen.value = false
     secrets.value = {}
   })
@@ -128,7 +158,7 @@ async function save(enabled: boolean) {
 async function disable(item: PluginInstance) {
   selected.value = undefined
   await perform(async () => {
-    await savePlugin(item.id, { frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
+    await savePlugin(item.id, { middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
   })
 }
 onMounted(() => perform(async () => { }))
@@ -174,6 +204,27 @@ onMounted(() => perform(async () => { }))
         <label :for="`plugin-secret-${field}`" class="block">{{ field }}<BaseInput :id="`plugin-secret-${field}`" v-model="secrets[field]" type="password" autocomplete="new-password" :placeholder="editing?.configuredSecrets.includes(field) ? '已配置，留空保留' : '填写敏感配置'" :disabled="busy || !artifact?.manifest.secretFields.includes(field)" /></label>
         <BaseCheckbox v-if="editing?.configuredSecrets.includes(field)" v-model="removeSecrets[field]" show-label :label="`清除 ${field}`" :disabled="busy" />
       </div>
+      <details class="space-y-3">
+        <summary>中间件绑定</summary>
+        <p class="text-sm text-cp-text-secondary">
+          仅用于声明中间件能力的插件。当前可保存绑定，待请求入口接入后才能启用；是否支持以制品上方的提示为准。
+        </p>
+        <BaseCheckbox v-model="middlewareEnabled" show-label label="配置中间件的顺序与作用范围" :disabled="busy" />
+        <template v-if="middlewareEnabled">
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label for="plugin-middleware-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-middleware-order" v-model="middlewareOrder" type="number" :disabled="busy" /></label>
+          <div class="flex flex-wrap gap-4">
+            <BaseCheckbox v-model="middlewareRequest" show-label label="每个逻辑请求" :disabled="busy" />
+            <BaseCheckbox v-model="middlewareAttempt" show-label label="每次上游尝试" :disabled="busy" />
+          </div>
+          <BaseSelect v-model="middlewareScope" aria-label="中间件作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label v-if="middlewareScope !== 'all'" for="plugin-middleware-ids" class="block">{{ middlewareScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-middleware-ids" v-model="middlewareIds" :rows="3" :disabled="busy" /></label>
+          <p class="text-sm text-cp-text-secondary">
+            范围只决定哪些请求调用插件，不增加 Key 权限。同序号按实例 ID 排序；修改或停用会撤销旧调用。升级准备失败仍使用旧版本。
+          </p>
+        </template>
+      </details>
       <details class="space-y-3">
         <summary>外部认证</summary>
         <p class="text-sm text-cp-text-secondary">
