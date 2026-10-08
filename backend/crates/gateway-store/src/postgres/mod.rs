@@ -398,3 +398,5 @@ async fn load_control_plane_in_transaction(
     let settings = load_runtime_settings_in_transaction(transaction).await?;
     Ok(ControlPlaneSnapshot { settings })
 }
+
+pub(crate) use plugins::{lock_plugin_resource, plugin_current_revision};

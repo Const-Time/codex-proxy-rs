@@ -509,7 +509,7 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 
 组合根在 Store 初始化后装配 PluginManager 和 PluginEngine，在 API 启动前恢复启用实例，并在关机时回收插件进程。Admin 是实例配置与版本切换的业务 owner；Store 保存制品、敏感配置和私有状态；Host 负责进程容量与终止回收；Runtime 负责协议和能力适配。数据库 CAS 提交先于新实例发布，旧 revision 的入口和私有状态写入随切换失效。
 
-插件私有状态与用户共享账本相互独立。当前开放管理员管理能力、私有状态、只读事实和经 Core 执行的页面推理；预算写入仍未开放。支持矩阵、可信进程边界和恢复操作见 [插件文档](plugins.md)。
+插件私有状态与用户共享账本相互独立。当前开放管理员管理能力、私有状态、只读事实、显式共享额度管理和经 Core 执行的页面推理。支持矩阵、可信进程边界和恢复操作见 [插件文档](plugins.md)。
 
 插件页面推理经 API 的静态 `/api/admin/plugins/models/responses` 入口，以本人会话解析本人 Key，再进入现有 Responses delivery 与 Core 执行。Core 的 `RuntimeSnapshotHandle` 在同一次快照发布中撤销失效策略的 `ClientAccessGuard`；插件实例代次由 Admin/Runtime 的 `PluginAccess` 撤销。API 持有两种授权，使用有界正文转发并在撤销/断连时丢弃原执行正文，沿用既有取消、费用结算与准入释放。授权有效期和冻结的请求计费快照各有职责，不新增账本。
 
@@ -518,3 +518,5 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 插件分组资源的实例归属和幂等键由 `plugin_managed_groups` 保存，真实分组与成员仍由 AccountGroupStore 管理。分组写入与实例代次校验、配置 revision 和真实操作者审计同事务提交；Admin 负责提交后的快照发布，即使管理调用断开也完成收尾。删除分组保留资源 tombstone，卸载实例保留真实分组，不建立插件专用账本。
 
 插件 Key 资源由 ClientKeyStore 在同一事务内校验实例代次、本人身份与单分组权限，调用正常 Key 插入逻辑并写入 `plugin_managed_keys` 幂等登记。SDK 的预算参数校验本人分组的有效共享额度，不改变限额或用量。密钥由 Admin 的共用生成函数创建，仅留在宿主，不进入插件结果。
+
+插件额度由 `PluginQuotaService` 以显式用户＋分组范围编排：AccountGroupStore 比较全局配置 revision 后更新基础限额，AuthStore 读取保留窗口或使用既有 `reset_user_subscriptions` 重置明确订阅。事务内按实例、配置、用户及账本锁顺序校验代次和管理员权限，沿用原有倍率与结算流水。重置事件以实例＋UUIDv4 标识永久幂等，回放不重复审计或改写后续用量。SDK 本地扩展与上游 Key 独立预算 wire 分开命名，不添加第二套额度权威。

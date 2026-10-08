@@ -1007,3 +1007,5 @@ fn unavailable_system() -> SystemOperationError {
         "unavailable in this test",
     )
 }
+
+mod plugin_quota;

@@ -21,6 +21,7 @@ use std::{
 };
 
 pub struct PluginEngine {
+    quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
     resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
     cache: PathBuf,
     version: semver::Version,
@@ -32,6 +33,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            quota: None,
             resources: None,
             cache,
             version,
@@ -40,6 +42,13 @@ impl PluginEngine {
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
             data: None,
         }
+    }
+    pub fn with_quota(
+        mut self,
+        service: Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>,
+    ) -> Self {
+        self.quota = Some(service);
+        self
     }
     pub fn with_resources(
         mut self,
@@ -238,7 +247,8 @@ impl PluginRuntime for PluginEngine {
                 active.clone(),
                 self.data.clone(),
             )?
-            .with_resources(self.resources.clone()),
+            .with_resources(self.resources.clone())
+            .with_quota(self.quota.clone()),
         );
         let calls = callbacks.calls.clone();
         let session = Arc::new(

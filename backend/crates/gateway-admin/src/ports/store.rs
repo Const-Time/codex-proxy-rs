@@ -229,6 +229,29 @@ pub trait AccountRuntimeStore: Send + Sync {
 /// 管理员密码、会话和安全审计。
 #[async_trait]
 pub trait AuthStore: Send + Sync {
+    async fn plugin_shared_budget(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _target: crate::model::users::SubscriptionTarget,
+    ) -> AdminStoreResult<crate::model::plugins::PluginSharedBudget> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin quota",
+            "not configured",
+        ))
+    }
+    async fn reset_plugin_shared_budget(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _command: crate::model::plugins::PluginBudgetReset,
+    ) -> AdminStoreResult<crate::model::plugins::PluginResourceMutation<u64>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin quota",
+            "not configured",
+        ))
+    }
+
     async fn record_operation(
         &self,
         _event: crate::model::operations::OperationLog,
@@ -433,6 +456,20 @@ pub trait ClientKeyStore: Send + Sync {
 /// Provider-neutral account group management transactions.
 #[async_trait]
 pub trait AccountGroupStore: Send + Sync {
+    async fn update_plugin_group_budget(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _command: crate::model::plugins::PluginGroupBudgetUpdate,
+    ) -> AdminStoreResult<
+        crate::model::plugins::PluginResourceMutation<crate::model::plugins::PluginGroupBudget>,
+    > {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin quota",
+            "not configured",
+        ))
+    }
+
     async fn ensure_plugin_group(
         &self,
         _scope: crate::model::plugins::PluginMutationScope,

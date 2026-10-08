@@ -49,3 +49,5 @@ pub use config::*;
 pub use value::*;
 pub use workers::PostgresHealthProbe;
 pub(crate) use workers::*;
+
+mod plugin_quota;

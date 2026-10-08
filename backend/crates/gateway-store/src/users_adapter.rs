@@ -78,7 +78,7 @@ fn db_error(error: sqlx::Error) -> AdminStoreError {
     AdminStoreError::new(kind, "user", "user operation failed")
 }
 
-async fn require_administrator(
+pub(crate) async fn require_administrator(
     tx: &mut Transaction<'_, Postgres>,
     context: &MutationContext,
 ) -> AdminStoreResult<()> {

@@ -141,6 +141,24 @@ struct FakeGroupStore {
 
 #[async_trait]
 impl AccountGroupStore for FakeGroupStore {
+    async fn update_plugin_group_budget(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginGroupBudgetUpdate,
+    ) -> AdminStoreResult<PluginResourceMutation<PluginGroupBudget>> {
+        self.plugin_calls.lock().unwrap().push(scope);
+        self.started.notify_one();
+        self.released.notified().await;
+        Ok(PluginResourceMutation {
+            revision: Revision::new(46).unwrap(),
+            value: PluginGroupBudget {
+                group_id: command.group_id,
+                daily_limit_usd: command.daily_limit_usd.unwrap(),
+                weekly_limit_usd: "10".into(),
+            },
+        })
+    }
+
     async fn ensure_plugin_group(
         &self,
         scope: PluginMutationScope,
@@ -435,4 +453,38 @@ async fn plugin_resources_validate_scope_inputs_and_normalize_incremental_member
         .unwrap();
     assert_eq!(result.added, 1);
     assert_eq!(groups.plugin_members.lock().unwrap()[0].add, ["acct_test"]);
+}
+
+#[tokio::test]
+async fn plugin_quota_commit_and_snapshot_publication_survive_caller_cancellation() {
+    let groups = Arc::new(FakeGroupStore::default());
+    let snapshot = Arc::new(ResourceSnapshot::default());
+    let mut harness = AdminHarness::new().account_groups(groups.clone());
+    harness.snapshot = snapshot.clone();
+    let service = harness.build().await.plugin_quota();
+    let mut scope = plugin_scope();
+    scope.actor.actor = gateway_admin::model::MutationActor::AdminApiKey;
+    let task = tokio::spawn(async move {
+        service
+            .update_group_limits(
+                scope,
+                PluginGroupBudgetUpdate {
+                    group_id: GROUP_ID.into(),
+                    expected_revision: 1,
+                    daily_limit_usd: Some("3".into()),
+                    weekly_limit_usd: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), groups.started.notified())
+        .await
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    groups.released.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), snapshot.0.notified())
+        .await
+        .unwrap();
+    assert_eq!(snapshot.1.load(std::sync::atomic::Ordering::SeqCst), 46);
 }

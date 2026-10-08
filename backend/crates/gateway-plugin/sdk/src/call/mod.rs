@@ -15,3 +15,5 @@ pub mod resources;
 pub mod upstream_adapter;
 
 pub mod services;
+
+pub mod shared_budgets;
