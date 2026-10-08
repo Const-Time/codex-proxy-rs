@@ -116,6 +116,69 @@ pub enum ClientAuthenticationError {
     SnapshotUnavailable,
 }
 
+/// A single root invocation prepared before middleware runs. This value cannot be
+/// cloned or constructed by protocol adapters; consuming it starts the existing
+/// execution path without replacing its identity or resetting its deadline.
+pub struct PreparedRootExecution {
+    client: AuthenticatedClient,
+    request_id: ModelRequestId,
+    started_at: SystemTime,
+    deadline_at: SystemTime,
+    cancellation: CancellationToken,
+}
+
+impl PreparedRootExecution {
+    pub fn client(&self) -> &AuthenticatedClient {
+        &self.client
+    }
+    pub fn request_id(&self) -> &ModelRequestId {
+        &self.request_id
+    }
+    pub fn started_at(&self) -> SystemTime {
+        self.started_at
+    }
+    pub fn deadline_at(&self) -> SystemTime {
+        self.deadline_at
+    }
+    pub fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    fn validate(&self) -> Result<(), GatewayError> {
+        if self
+            .client
+            .bound_authorization
+            .as_ref()
+            .is_none_or(|access| access.cancellation().is_cancelled())
+        {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Unauthorized,
+                "client authorization was revoked",
+            ));
+        }
+        if self.cancellation.is_cancelled() {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Cancelled,
+                "request was cancelled",
+            ));
+        }
+        if SystemTime::now() >= self.deadline_at {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Timeout,
+                "request deadline elapsed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Middleware may replace request facts, never the prepared authority.
+pub struct PreparedExecutionRequest {
+    pub public_model: PublicModelId,
+    pub operation: Operation,
+    pub metadata: ExecutionRequestMetadata,
+}
+
 pub struct StartExecution {
     pub client: AuthenticatedClient,
     pub public_model: PublicModelId,
@@ -146,7 +209,7 @@ impl ExecutionTarget {
 }
 
 struct PendingStartExecution {
-    client: AuthenticatedClient,
+    prepared: PreparedRootExecution,
     target: ExecutionTarget,
     operation: Operation,
     metadata: ExecutionRequestMetadata,
@@ -238,6 +301,43 @@ pub trait ExecutionService: Send + Sync {
         Box::pin(async { Err(ProviderCatalogUnavailable) })
     }
     fn contains_public_model(&self, client: &AuthenticatedClient, model: &PublicModelId) -> bool;
+    /// Freeze current authorization, a single request ID, deadline and cancellation
+    /// before invoking extensions. Preparation does not acquire quota or admission.
+    fn prepare_execution(
+        &self,
+        _client: AuthenticatedClient,
+    ) -> Result<PreparedRootExecution, GatewayError> {
+        Err(GatewayError::new(
+            GatewayErrorKind::Unsupported,
+            "prepared execution is unavailable",
+        ))
+    }
+    fn start_prepared(
+        &self,
+        _prepared: PreparedRootExecution,
+        _request: PreparedExecutionRequest,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async {
+            Err(GatewayError::new(
+                GatewayErrorKind::Unsupported,
+                "prepared execution is unavailable",
+            ))
+        })
+    }
+    fn start_prepared_provider_endpoint(
+        &self,
+        _prepared: PreparedRootExecution,
+        _provider: ProviderKind,
+        _operation: Operation,
+        _metadata: ExecutionRequestMetadata,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async {
+            Err(GatewayError::new(
+                GatewayErrorKind::Unsupported,
+                "prepared execution is unavailable",
+            ))
+        })
+    }
     fn start(
         &self,
         request: StartExecution,
@@ -308,8 +408,8 @@ impl DefaultExecutionService {
             operation,
             metadata,
         } = request;
-        self.start_inner_with_target(PendingStartExecution {
-            client,
+        self.start_prepared_with_target(PendingStartExecution {
+            prepared: self.prepare_execution(client)?,
             target: ExecutionTarget::Model(public_model),
             operation,
             metadata,
@@ -327,8 +427,8 @@ impl DefaultExecutionService {
             operation,
             metadata,
         } = request;
-        self.start_inner_with_target(PendingStartExecution {
-            client,
+        self.start_prepared_with_target(PendingStartExecution {
+            prepared: self.prepare_execution(client)?,
             target: ExecutionTarget::ProviderEndpoint(provider),
             operation,
             metadata,
@@ -336,47 +436,15 @@ impl DefaultExecutionService {
         .await
     }
 
-    async fn start_inner_with_target(
+    async fn start_prepared_with_target(
         &self,
-        mut request: PendingStartExecution,
+        request: PendingStartExecution,
     ) -> Result<StartedExecution, GatewayError> {
-        // A socket cannot outlive the host binding that admitted it. Preserve this
-        // lease when refreshing the local Key policy for each new execution.
-        let bound_authorization = request.client.bound_authorization.clone();
-        if bound_authorization
-            .as_ref()
-            .is_some_and(|access| access.cancellation().is_cancelled())
-        {
-            return Err(GatewayError::new(
-                GatewayErrorKind::Unauthorized,
-                "client authorization was revoked",
-            ));
-        }
-        // 长连接每次执行都重新鉴权并冻结当前策略，确保限额和授权变更对新请求生效。
-        request.client = self
-            .authenticate(request.client.policy.plaintext_key().expose_for_auth())
-            .map_err(|error| match error {
-                ClientAuthenticationError::InvalidKey => {
-                    GatewayError::new(GatewayErrorKind::Unauthorized, "client API key is invalid")
-                }
-                ClientAuthenticationError::SnapshotUnavailable => GatewayError::new(
-                    GatewayErrorKind::Internal,
-                    "runtime snapshot is unavailable",
-                ),
-            })?;
-        request.client.bound_authorization = bound_authorization;
-        let started_at = SystemTime::now();
-        let deadline_at = started_at
-            .checked_add(MODEL_REQUEST_DEADLINE)
-            .ok_or_else(|| {
-                GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
-            })?;
-        let request_id = new_request_id()?;
-        let client_key_id = request.client.policy.key_id().clone();
+        request.prepared.validate()?;
+        let request_id = request.prepared.request_id.clone();
+        let client_key_id = request.prepared.client.policy.key_id().clone();
         let started = Instant::now();
-        let result = self
-            .start_authorized_target(request, request_id.clone(), started_at, deadline_at)
-            .await;
+        let result = self.start_authorized_target(request).await;
         if let Err(error) = &result {
             let observation = self
                 .observations
@@ -400,22 +468,20 @@ impl DefaultExecutionService {
     async fn start_authorized_target(
         &self,
         mut request: PendingStartExecution,
-        request_id: ModelRequestId,
-        started_at: SystemTime,
-        deadline_at: SystemTime,
     ) -> Result<StartedExecution, GatewayError> {
+        let request_id = request.prepared.request_id.clone();
         let routing_context = RoutingContext::default();
-        let account_scope = Arc::clone(request.client.policy.account_scope());
+        let account_scope = Arc::clone(request.prepared.client.policy.account_scope());
         let plan = match &request.target {
             ExecutionTarget::ProviderEndpoint(provider) => {
-                request.client.snapshot.plan_provider_endpoint(
+                request.prepared.client.snapshot.plan_provider_endpoint(
                     provider,
                     &request.operation,
                     account_scope,
                     &routing_context,
                 )
             }
-            ExecutionTarget::Model(public_model) => request.client.snapshot.plan(
+            ExecutionTarget::Model(public_model) => request.prepared.client.snapshot.plan(
                 public_model,
                 &request.operation,
                 account_scope,
@@ -427,7 +493,7 @@ impl DefaultExecutionService {
             Some(previous) => {
                 let resolve = self
                     .continuation
-                    .resolve(request.client.policy.key_id(), previous)
+                    .resolve(request.prepared.client.policy.key_id(), previous)
                     .fuse();
                 let timeout = Delay::new(COORDINATION_TIMEOUT).fuse();
                 pin_mut!(resolve, timeout);
@@ -468,13 +534,20 @@ impl DefaultExecutionService {
                     _ = timeout => None,
                 };
                 match pin {
-                    Some(pin) if !pin.matches_client(request.client.policy.key_id()) => {
+                    Some(pin) if !pin.matches_client(request.prepared.client.policy.key_id()) => {
                         return Err(GatewayError::new(
                             GatewayErrorKind::PolicyDenied,
                             "continuation does not belong to this client API key",
                         ));
                     }
-                    Some(pin) if !request.client.policy.account_scope().allows(pin.account()) => {
+                    Some(pin)
+                        if !request
+                            .prepared
+                            .client
+                            .policy
+                            .account_scope()
+                            .allows(pin.account()) =>
+                    {
                         return Err(GatewayError::new(
                             GatewayErrorKind::PolicyDenied,
                             "continuation account is outside the client account scope",
@@ -499,44 +572,33 @@ impl DefaultExecutionService {
                 }
             }
             None => {
-                return self
-                    .start_without_continuation(
-                        request,
-                        request_id,
-                        started_at,
-                        deadline_at,
-                        plan,
-                        None,
-                    )
-                    .await;
+                return self.start_without_continuation(request, plan, None).await;
             }
         };
-        self.start_without_continuation(
-            request,
-            request_id,
-            started_at,
-            deadline_at,
-            plan,
-            Some(continuation),
-        )
-        .await
+        self.start_without_continuation(request, plan, Some(continuation))
+            .await
     }
 
     async fn start_without_continuation(
         &self,
         request: PendingStartExecution,
-        request_id: ModelRequestId,
-        started_at: SystemTime,
-        deadline_at: SystemTime,
         plan: crate::routing::RoutingPlan,
         continuation: Option<ContinuationBinding>,
     ) -> Result<StartedExecution, GatewayError> {
+        request.prepared.validate()?;
         let PendingStartExecution {
-            client,
+            prepared,
             target,
             operation,
             metadata,
         } = request;
+        let PreparedRootExecution {
+            client,
+            request_id,
+            started_at,
+            deadline_at,
+            cancellation,
+        } = prepared;
         let admission_request = ClientAdmissionRequest {
             model_request_id: request_id.clone(),
             client_api_key_id: client.policy.key_id().clone(),
@@ -662,12 +724,7 @@ impl DefaultExecutionService {
                 plan,
                 None,
                 continuation,
-                client
-                    .bound_authorization
-                    .as_ref()
-                    .map_or_else(CancellationToken::new, |access| {
-                        CancellationToken::linked([access.cancellation()])
-                    }),
+                cancellation,
             )
             .await
         {
@@ -1103,6 +1160,85 @@ impl ExecutionService for DefaultExecutionService {
         client
             .snapshot
             .contains_public_model_for_scope(model, client.policy.account_scope())
+    }
+
+    fn prepare_execution(
+        &self,
+        client: AuthenticatedClient,
+    ) -> Result<PreparedRootExecution, GatewayError> {
+        let previous = client
+            .bound_authorization
+            .as_ref()
+            .map_or_else(CancellationToken::new, |access| access.cancellation());
+        if previous.is_cancelled() {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Unauthorized,
+                "client authorization was revoked",
+            ));
+        }
+        let client = self
+            .authenticate_revocable(client.policy.plaintext_key().expose_for_auth(), previous)
+            .map_err(|error| match error {
+                ClientAuthenticationError::InvalidKey => {
+                    GatewayError::new(GatewayErrorKind::Unauthorized, "client API key is invalid")
+                }
+                ClientAuthenticationError::SnapshotUnavailable => GatewayError::new(
+                    GatewayErrorKind::Internal,
+                    "runtime snapshot is unavailable",
+                ),
+            })?;
+        let started_at = SystemTime::now();
+        let deadline_at = started_at
+            .checked_add(MODEL_REQUEST_DEADLINE)
+            .ok_or_else(|| {
+                GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
+            })?;
+        let authorization = client.bound_authorization.as_ref().ok_or_else(|| {
+            GatewayError::new(
+                GatewayErrorKind::Internal,
+                "prepared authorization is unavailable",
+            )
+        })?;
+        let cancellation = CancellationToken::linked([authorization.cancellation()]);
+        Ok(PreparedRootExecution {
+            client,
+            request_id: new_request_id()?,
+            started_at,
+            deadline_at,
+            cancellation,
+        })
+    }
+    fn start_prepared(
+        &self,
+        prepared: PreparedRootExecution,
+        request: PreparedExecutionRequest,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async move {
+            self.start_prepared_with_target(PendingStartExecution {
+                prepared,
+                target: ExecutionTarget::Model(request.public_model),
+                operation: request.operation,
+                metadata: request.metadata,
+            })
+            .await
+        })
+    }
+    fn start_prepared_provider_endpoint(
+        &self,
+        prepared: PreparedRootExecution,
+        provider: ProviderKind,
+        operation: Operation,
+        metadata: ExecutionRequestMetadata,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async move {
+            self.start_prepared_with_target(PendingStartExecution {
+                prepared,
+                target: ExecutionTarget::ProviderEndpoint(provider),
+                operation,
+                metadata,
+            })
+            .await
+        })
     }
 
     fn start(

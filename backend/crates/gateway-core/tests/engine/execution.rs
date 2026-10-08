@@ -137,6 +137,165 @@ fn request(service: &DefaultExecutionService, transport: ClientTransport) -> Sta
 }
 
 #[test]
+fn preparing_middleware_execution_is_lazy_and_preserves_one_identity_and_deadline() {
+    use gateway_core::engine::execution::PreparedExecutionRequest;
+    block_on(async {
+        let admissions = Arc::new(Admissions::default());
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot()),
+            store.clone(),
+            ProviderRegistry::new([Arc::new(ChargedProvider { fail: false }) as Arc<dyn Provider>])
+                .unwrap(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let request = request(&service, ClientTransport::HttpSse);
+        let prepared = service.prepare_execution(request.client).unwrap();
+        let id = prepared.request_id().clone();
+        let start = prepared.started_at();
+        let deadline = prepared.deadline_at();
+        assert_eq!(
+            deadline.duration_since(start).unwrap(),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            prepared.client().policy().key_id().as_str(),
+            "key_start_test"
+        );
+        assert!(admissions.limits.lock().unwrap().is_empty());
+        assert!(!store.touched.load(Ordering::SeqCst));
+        let mut started = service
+            .start_prepared(
+                prepared,
+                PreparedExecutionRequest {
+                    public_model: request.public_model,
+                    operation: request.operation,
+                    metadata: request.metadata,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.request_id, id);
+        assert_eq!(started.created_at, start);
+        consume_charged_prefix(started.session.as_mut()).await;
+        {
+            let rows = store.requests.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, id);
+            assert_eq!(rows[0].started_at, start);
+            assert_eq!(rows[0].deadline_at, deadline);
+        }
+        started.session.detach_finalize().await;
+        assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn prepared_authority_revocation_blocks_start_without_admission_or_ledger_writes() {
+    use gateway_core::engine::execution::PreparedExecutionRequest;
+    for cause in ["key", "parent", "request"] {
+        let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+        let admissions = Arc::new(Admissions::default());
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            snapshots.clone(),
+            store.clone(),
+            ProviderRegistry::default(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let parent = gateway_core::lifecycle::CancellationToken::new();
+        let client = service
+            .authenticate_bound_key(
+                &ClientApiKeyId::new("key_start_test").unwrap(),
+                parent.clone(),
+            )
+            .unwrap();
+        let request = request(&service, ClientTransport::WebSocket);
+        let prepared = service.prepare_execution(client).unwrap();
+        match cause {
+            "key" => {
+                snapshots.publish(start_snapshot_with_policy(
+                    2,
+                    false,
+                    RateLimits::unlimited(),
+                ));
+            }
+            "parent" => parent.cancel(),
+            _ => prepared.cancellation().cancel(),
+        }
+        let result = block_on(service.start_prepared(
+            prepared,
+            PreparedExecutionRequest {
+                public_model: request.public_model,
+                operation: request.operation,
+                metadata: request.metadata,
+            },
+        ));
+        assert!(
+            matches!(result,Err(e) if e.kind()==if cause=="request" {GatewayErrorKind::Cancelled}else{GatewayErrorKind::Unauthorized})
+        );
+        assert!(admissions.limits.lock().unwrap().is_empty());
+        assert!(!store.touched.load(Ordering::SeqCst));
+        if cause != "parent" {
+            assert!(!parent.is_cancelled());
+        }
+    }
+}
+
+#[test]
+fn prepared_cancellation_reaches_active_execution_and_settles_only_the_original_charge() {
+    use gateway_core::engine::execution::PreparedExecutionRequest;
+    block_on(async {
+        for transport in [
+            ClientTransport::HttpJson,
+            ClientTransport::HttpSse,
+            ClientTransport::WebSocket,
+        ] {
+            let admissions = Arc::new(Admissions::default());
+            let budget = Arc::new(Budget {
+                active: admissions.active.clone(),
+                ..Default::default()
+            });
+            let service = charged_service(admissions.clone(), Some(budget.clone()), false);
+            let parent = gateway_core::lifecycle::CancellationToken::new();
+            let client = service
+                .authenticate_bound_key(
+                    &ClientApiKeyId::new("key_start_test").unwrap(),
+                    parent.clone(),
+                )
+                .unwrap();
+            let request = request(&service, transport);
+            let prepared = service.prepare_execution(client).unwrap();
+            let cancellation = prepared.cancellation();
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: request.public_model,
+                        operation: request.operation,
+                        metadata: request.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            consume_charged_prefix(started.session.as_mut()).await;
+            cancellation.cancel();
+            assert!(matches!(
+                started.session.next_event().await,
+                Err(gateway_core::engine::EngineError::Cancelled)
+            ));
+            started.session.detach_finalize().await;
+            assert_cleanup_completed(&admissions, &budget, &started.request_id);
+            assert!(!parent.is_cancelled());
+        }
+    });
+}
+
+#[test]
 fn budget_rejection_releases_client_concurrency_without_creating_a_charge() {
     let admissions = Arc::new(Admissions::default());
     let budget = Arc::new(Budget {
@@ -1251,11 +1410,13 @@ fn successful_authentication_should_record_client_key_usage() {
 
 #[test]
 fn provider_endpoint_should_persist_its_real_v1_endpoint() {
-    assert_provider_endpoint_observation(None);
-    assert_provider_endpoint_observation(Some("gpt-image-2"));
+    for prepared in [false, true] {
+        assert_provider_endpoint_observation(None, prepared);
+        assert_provider_endpoint_observation(Some("gpt-image-2"), prepared);
+    }
 }
 
-fn assert_provider_endpoint_observation(model: Option<&str>) {
+fn assert_provider_endpoint_observation(model: Option<&str>, prepare: bool) {
     let store = Arc::new(TrackingExecutionStore::default());
     let service = DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(client_snapshot()),
@@ -1280,7 +1441,7 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
         .expect("image payload"),
     ));
 
-    let mut started = block_on(service.start_provider_endpoint(StartProviderExecution {
+    let request = StartProviderExecution {
         client,
         provider: ProviderKind::new("openai").expect("provider"),
         operation,
@@ -1293,8 +1454,22 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
             user_agent: None,
             previous_response_id: None,
         },
-    }))
-    .expect("provider endpoint request should start without a text catalog entry");
+    };
+    let prepared = prepare.then(|| service.prepare_execution(request.client.clone()).unwrap());
+    let expected_id = prepared.as_ref().map(|p| p.request_id().clone());
+    let mut started = match prepared {
+        Some(prepared) => block_on(service.start_prepared_provider_endpoint(
+            prepared,
+            request.provider,
+            request.operation,
+            request.metadata,
+        )),
+        None => block_on(service.start_provider_endpoint(request)),
+    }
+    .expect("provider endpoint starts without a text catalog entry");
+    if let Some(id) = expected_id {
+        assert_eq!(started.request_id, id);
+    }
 
     let error = block_on(started.session.collect_uncommitted())
         .expect_err("the cold provider stops execution after persistence");
