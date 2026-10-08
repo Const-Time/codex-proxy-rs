@@ -24,7 +24,7 @@
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
-中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：request/attempt 挂载、执行顺序、全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置、嵌套宿主调用及其余声明范围尚未完成，上表仍将 middleware 列为未开放；不能把内核测试通过理解为第三方中间件现在可以直接启用。
+中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：request/attempt 挂载、执行顺序、全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，嵌套宿主调用及其余声明范围尚未完成，上表仍将 middleware 列为未开放；不能把内核测试通过理解为第三方中间件现在可以直接启用。
 
 绑定与实例共用 revision 和配置 CAS。候选升级准备失败仍使用旧代；无法确认配置是否提交时阻止继续使用旧绑定，重新保存确认后恢复。恢复失败的必需中间件保留作用范围内的门禁，进程退出也不自动跳过。启停、绑定和版本变更撤销旧调用计划，包含 RPC 已结束但正文尚未交付的响应。
 
@@ -159,14 +159,14 @@ Responses JSON/SSE/WS 的 request 层已接通 SDK `declare_capabilities`。声�
 
 Core 路由仍校验改写后正文中的全部需求，并继承链入口中未声明处理的需求及各层额外 `required`。后层重新引入的功能会恢复检查，不能取消前层的额外上游要求；原生续接不能声明为已处理。attempt 重解码保留继承的声明，但继续独立比较实际正文的能力，不能在已选路由后借声明修改能力范围。声明仅用于 Responses request；attempt、Images 和 Search 会明确拒绝。
 
-这项接线经过 SDK 子进程、嵌套 next 与本地 Core 路由验证，覆盖 HTTP JSON/SSE 和 WebSocket 两层组合。它不解除 middleware 生产启用门禁：请求级执行设置、宿主模型调用及其余声明范围仍在实施。
+这项接线经过 SDK 子进程、嵌套 next 与本地 Core 路由验证，覆盖 HTTP JSON/SSE 和 WebSocket 两层组合。它不解除 middleware 生产启用门禁：宿主模型调用及其余声明范围仍在实施。
 
 
 ### 请求级运行设置基础
 
 Core 已建立与持久化快照共用的 `SettingsValues`，覆盖本地已有的价格、模型映射、账号调度和最低客户端版本事实。`RequestSettings` 为每条调用分支保存宿主基线、有效快照及逐字段的插件来源/顺序；嵌套替换不修改父分支或其他请求，切换宿主基线时只继承显式改写，映射对象整体替换。
 
-`PreparedRootExecution` 已能在原身份、权限、取消和期限下使用派生快照规划模型或固定 Provider 端点；不会重新认证、更新全局 revision 或建立另一个账本。基线不匹配和已撤销请求会被拒绝。此处仍是 Core 接入阶段：SDK `settings` 改写继续明确返回不支持，Fast 三态与 Key 级准入已接入 Core/Provider（见下文），可变期限已接入 Core/Provider，RPC/attempt 设置视图尚待接线，不能据此认为上游设置插件已经可直接使用。
+`PreparedRootExecution` 已能在原身份、权限、取消和期限下使用派生快照规划模型或固定 Provider 端点；不会重新认证、更新全局 revision 或建立另一个账本。基线不匹配和已撤销请求会被拒绝。SDK request 阶段已接通完整 settings 替换，Fast、Key 准入、运行设置及期限沿原执行链生效；attempt 的 settings 保持 null，只提供有效设置来源。可用 runtime 字段以本地宿主返回对象为准，不支持的字段会明确拒绝，不能据此推断上游设置插件无需适配。
 
 
 ### 执行设置的 Fast 与准入
@@ -175,17 +175,26 @@ Core 已建立与持久化快照共用的 `SettingsValues`，覆盖本地已有�
 
 OpenAI Provider 在 attempt 插件之前形成应用 Fast 策略的原生正文：`default` 原样保留，`enabled` 只在冻结模型目录明确提供 priority 且客户端未指定档位或使用 default/null 时改为 priority，`disabled` 把 priority/fast 改为 default；flex、auto 和其他显式值保留。attempt 插件的后续显式改写不再被 Fast 覆盖。原协议上下文、私有续接和继承能力约束保留；其他协议及 Images/Search 不应用 OpenAI 文本档位规则。费用仍取上游实际档位，缺少实际档位时按最终发送档位计算。
 
-HTTP、WebSocket wire 与费用回归已覆盖这些规则，Core 验证重试、唯一结算和共享用户限额。SDK 的执行设置入口及生产 middleware 门禁仍未开放；Core 已支持正毫秒数或 null 的执行超时，SDK 超时改写仍明确拒绝，尚待协议设置视图与来源转换接线。
+HTTP、WebSocket wire 与费用回归已覆盖这些规则，Core 验证重试、唯一结算和共享用户限额。SDK 执行设置入口已接入；生产 middleware 门禁仍保留。超时支持非负毫秒数或 null，0 在终端准入前立即到期，null 表示不设总期限。
 
 
-准入租约已接入持续续期，覆盖 Key 与用户共享并发作用域。取消后的异步结算仍保留槽位；租约丢失会取消原执行，已释放或过期槽位不会通过续期重建。普通请求不再附加固定总期限；SDK 超时改写仍明确拒绝，须完成 RPC 设置合同后才能开放。
+准入租约已接入持续续期，覆盖 Key 与用户共享并发作用域。取消后的异步结算仍保留槽位；租约丢失会取消原执行，已释放或过期槽位不会通过续期重建。普通请求不再附加固定总期限；SDK request 超时改写从原请求开始计时，不重置时钟。
 
 
-PostgreSQL 执行记录已具备持续恢复租约：复用原 running 行，延迟入队的创建记录不会被续期补造，最终状态不会被复活。Core 在终态持久化完成前保留 guard；异常退出停止续期后由既有回收器收敛。恢复租约可有独立的有限执行上界或无上界，Core/Provider 实际执行链已支持该可选期限；插件 SDK 的设置写入尚未开放。
+PostgreSQL 执行记录已具备持续恢复租约：复用原 running 行，延迟入队的创建记录不会被续期补造，最终状态不会被复活。Core 在终态持久化完成前保留 guard；异常退出停止续期后由既有回收器收敛。恢复租约可有独立的有限执行上界或无上界，Core/Provider 实际执行链已支持该可选期限；插件 SDK request 设置写入复用相同生命周期。
 
 
 ### 可选执行期限
 
-普通请求默认没有总时长上限。Core 请求分支可显式设置正毫秒数，始终从原请求开始时间计算；null 移除总期限，改写不更换身份、取消信号或费用归属。OpenAI 文本/Images/Search 与 xAI 推理/压缩均传递可选截止时间，连接预算、握手和接收空闲超时仍各自生效。插件页面桥保留 10 分钟调用限制，RPC 保留单次调用上限。
+普通请求默认没有总时长上限。Core 请求分支可显式设置非负毫秒数，始终从原请求开始时间计算；null 移除总期限，改写不更换身份、取消信号或费用归属。OpenAI 文本/Images/Search 与 xAI 推理/压缩均传递可选截止时间，连接预算、握手和接收空闲超时仍各自生效。插件页面桥保留 10 分钟调用限制，RPC 保留单次调用上限。
 
-Provider 账号调度槽位现已随其 fenced guard 自动续期；不会重新选号、增加并发数、重置调度间隔或获得新的 fencing token。释放前停止续期，租约丢失取消原请求，显式期限到达由 Core 判定 timeout。PostgreSQL 的 deadline_at 用于有限恢复租约，不以虚构远期时间表示无限执行。SDK settings 写入和生产 middleware 门禁继续关闭，后续接入设置值与来源的协议视图。
+Provider 账号调度槽位现已随其 fenced guard 自动续期；不会重新选号、增加并发数、重置调度间隔或获得新的 fencing token。释放前停止续期，租约丢失取消原请求，显式期限到达由 Core 判定 timeout。PostgreSQL 的 deadline_at 用于有限恢复租约，不以虚构远期时间表示无限执行。SDK request 设置值与来源视图已接线；生产 middleware 门禁继续保留，等待其余声明范围完成。
+
+
+### SDK 执行设置传递
+
+request 的 settings 是当前有效的完整对象，包含 runtime、fast_mode、client_limits、timeout_ms。只有实际改变的字段记录插件来源及顺序；同一层运行设置与执行设置使用同一顺序。来源 ID 来自宿主会话，修改 settings_sources 不能伪造其他实例。后层读取前层的结果，原入口与后续请求不受影响。
+
+Responses JSON/SSE/WS、Images 和 Search 的终端都通过原 PreparedRoot 应用设置，再执行路由、准入与结算。attempt 及 Provider 接收最终冻结的 RequestSettings，重试使用相同来源；attempt 不开放设置改写，避免在准入后改变已确定的权限和执行归属。未知字段、缺失设置作用域及非法类型会拒绝，不进行隐式深合并。
+
+runtime 是本地执行设置合同，当前包含计价、账号并发与间隔、轮转策略、模型映射、客户端最低版本。上游特有的画像、位置、Guardian 等字段尚无对应实现；最初入口已经完成的版本检查不会因后续设置改写重做。插件原生模型子调用的设置继承仍待接入。

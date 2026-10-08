@@ -157,12 +157,6 @@ impl PreparedRootExecution {
                 )
             })?
             .timeout_ms;
-        if timeout == Some(0) {
-            return Err(GatewayError::new(
-                GatewayErrorKind::InvalidRequest,
-                "execution timeout must be positive",
-            ));
-        }
         self.deadline_at = crate::lifecycle::Deadline::from_timeout(
             self.started_at,
             timeout.map(Duration::from_millis),
@@ -681,6 +675,7 @@ impl DefaultExecutionService {
             deadline_at,
             cancellation,
         } = prepared;
+        let request_settings = settings.clone();
         let settings = settings.execution_values().ok_or_else(|| {
             GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -821,6 +816,7 @@ impl DefaultExecutionService {
         let core = match self
             .coordinator
             .with_attempt_middleware(attempt_middleware)
+            .with_request_settings(request_settings)
             .start(
                 new_request,
                 operation,

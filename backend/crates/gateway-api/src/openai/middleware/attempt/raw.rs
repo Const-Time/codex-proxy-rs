@@ -26,6 +26,10 @@ impl AttemptMiddleware for RawAttempt {
             let payload = super::super::raw::payload(original.operation())?;
             let headers = super::super::raw::context_headers(payload)?;
             let request = super::super::raw::request(original.operation(), &headers)?;
+            let request = match attempt.settings() {
+                Some(settings) => request.with_settings(settings.clone()),
+                None => request,
+            };
             let terminal =
                 gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
                     Box::pin(async move {

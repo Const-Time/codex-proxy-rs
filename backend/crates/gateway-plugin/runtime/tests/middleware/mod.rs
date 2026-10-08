@@ -1,5 +1,6 @@
 mod capabilities;
 mod plan;
+mod settings;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::{
@@ -375,7 +376,7 @@ async fn cancellation_revokes_rpc_resources_but_keeps_sibling_process_usable() {
     fixture.stop().await;
 }
 #[tokio::test]
-async fn short_circuit_rejection_and_unwired_settings_never_run_terminal() {
+async fn short_circuit_rejection_and_unscoped_settings_never_run_terminal() {
     let fixture = Fixture::new().await;
     for mode in ["short", "reject", "settings"] {
         let trace = Arc::new(Trace::default());

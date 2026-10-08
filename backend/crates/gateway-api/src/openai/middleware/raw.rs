@@ -73,11 +73,17 @@ pub(in crate::openai) async fn respond(
         }
     } else {
         let request = match request(&input.operation, &input.headers) {
-            Ok(request) => request,
+            Ok(request) => request.with_settings(prepared.settings().clone()),
             Err(error) => return super::delivery::error_response(&error),
         };
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
             Box::pin(async move {
+                let prepared = prepared.with_settings(
+                    request
+                        .settings()
+                        .ok_or(MiddlewareError::InvalidState)?
+                        .clone(),
+                )?;
                 let operation = rewrite(&input.operation, &request)?;
                 let started = service
                     .start_prepared_provider_endpoint(

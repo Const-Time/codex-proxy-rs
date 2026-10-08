@@ -94,6 +94,7 @@ pub struct MiddlewareRequest {
     original_body: Bytes,
     original_protocol: String,
     capabilities: Option<MiddlewareCapabilityDeclaration>,
+    settings: Option<crate::routing::RequestSettings>,
 }
 
 /// Features converted by request middleware and additional upstream requirements.
@@ -110,10 +111,19 @@ impl MiddlewareRequest {
             original_protocol: protocol.clone(),
             original_body: body.clone(),
             capabilities: None,
+            settings: None,
             protocol,
             headers,
             body,
         }
+    }
+    /// Frozen values and provenance carried through the same onion chain.
+    pub fn with_settings(mut self, settings: crate::routing::RequestSettings) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+    pub fn settings(&self) -> Option<&crate::routing::RequestSettings> {
+        self.settings.as_ref()
     }
     pub fn protocol(&self) -> &str {
         &self.protocol

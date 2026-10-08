@@ -263,3 +263,26 @@ async fn revoked_raw_plugin_fails_closed_before_start() {
         assert!(f.effects.charges.lock().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn raw_endpoints_propagate_request_settings_to_attempts() {
+    for endpoint in ENDPOINTS {
+        let f = Fixture::with_mounts(
+            Mode::Settings,
+            vec![
+                PluginMiddlewareMount::Request,
+                PluginMiddlewareMount::Attempt,
+            ],
+        )
+        .await;
+        let response = f.raw_request(endpoint).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        bytes(response).await;
+        f.settled().await;
+        assert_eq!(
+            serde_json::to_value(f.effects.settings.lock().unwrap()[0].values()).unwrap()["request_interval_ms"],
+            137
+        );
+        f.manager.shutdown().await;
+    }
+}

@@ -43,11 +43,25 @@ pub(super) async fn invoke(
     if remaining.is_zero() || context.cancellation.is_cancelled() {
         return Err(MiddlewareError::Fault);
     }
-    let invocation = MiddlewareInvocation::new(&context, request, next);
+    let mut call = session.context(stage, remaining);
+    let settings_sources = request
+        .settings()
+        .map_or(serde_json::Value::Null, |s| s.inspect());
+    let settings = if stage == Stage::Request {
+        request
+            .settings()
+            .and_then(|s| s.execution_values())
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| MiddlewareError::InvalidState)?
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Null
+    };
+    let invocation = MiddlewareInvocation::new(&context, call.instance_id.clone(), request, next);
     let (protocol, headers, payload) = invocation
         .request_parts()
         .map_err(|_| MiddlewareError::InvalidState)?;
-    let mut call = session.context(stage, remaining);
     call.request_id = Some(context.request_id.as_str().to_owned());
     call.attempt_id = context
         .attempt_index
@@ -55,8 +69,8 @@ pub(super) async fn invoke(
     call.account_id = context.account_id.as_ref().map(|a| a.as_str().to_owned());
     let binding = callbacks.bind(&call, invocation.clone())?;
     let head = MiddlewareRequestHead {
-        settings_sources: serde_json::Value::Null,
-        settings: serde_json::Value::Null,
+        settings_sources,
+        settings,
         request_id: context.request_id.as_str().into(),
         client_key_id: context.client_key_id.as_str().into(),
         account_group_ids: context

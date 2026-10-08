@@ -183,9 +183,6 @@ impl RequestSettings {
         instance_id: &str,
     ) -> Result<Self, InvalidSettings> {
         let previous = self.execution_values().ok_or(InvalidSettings)?;
-        if values.timeout_ms == Some(0) {
-            return Err(InvalidSettings);
-        }
         let mut updated = self.replace(values.runtime.clone(), instance_id)?;
         if values.fast_mode == previous.fast_mode
             && values.client_limits == previous.client_limits

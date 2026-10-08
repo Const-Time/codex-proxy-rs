@@ -209,6 +209,37 @@ mod worker_middleware {
             request.head.client_key_id = "key_forged".into();
             request.head.request_id = "req_forged".into();
         }
+        if mode == "settings-first" {
+            assert_eq!(request.head.settings["fast_mode"], "default");
+            request.head.settings["fast_mode"] = json!("enabled");
+            request.head.settings["runtime"]["request_interval_ms"] = json!(0);
+            request.head.settings["timeout_ms"] = json!(0);
+            // The host, not the editable head, owns provenance.
+            request.head.settings_sources = json!({"overrides":{"forged":true}});
+        }
+        if mode == "settings-second" {
+            assert_eq!(request.head.settings["fast_mode"], "enabled");
+            assert_eq!(request.head.settings["timeout_ms"], 0);
+            assert_eq!(
+                request.head.settings_sources["execution"]["fast_mode"]["instance_id"],
+                instance
+            );
+            assert_eq!(
+                request.head.settings_sources["execution"]["fast_mode"]["order"],
+                1
+            );
+            request.head.settings["fast_mode"] = json!("disabled");
+        }
+        if mode == "settings-attempt" {
+            assert!(request.head.settings.is_null());
+            assert_eq!(
+                request.head.settings_sources["execution"]["fast_mode"]["value"],
+                "enabled"
+            );
+        }
+        if mode == "settings-unknown" {
+            request.head.settings["unknown"] = json!(true);
+        }
         if mode == "settings" {
             request.head.settings = json!({"fast":true});
         }

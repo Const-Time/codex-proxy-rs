@@ -220,3 +220,62 @@ async fn request_capabilities_are_checked_by_core_and_survive_attempt_redecode()
         }
     }
 }
+
+#[tokio::test]
+async fn request_settings_reach_attempt_and_provider_without_changing_frozen_input() {
+    for streaming in [false, true] {
+        let f = Fixture::with_mounts(
+            Mode::Settings,
+            vec![
+                PluginMiddlewareMount::Request,
+                PluginMiddlewareMount::Attempt,
+            ],
+        )
+        .await;
+        for _ in 0..2 {
+            let response = f.request(streaming).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            bytes(response).await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while f.effects.active.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(f.effects.finalizations.lock().unwrap().len(), 2);
+        assert_eq!(f.effects.charges.lock().unwrap().len(), 2);
+        {
+            let settings = f.effects.settings.lock().unwrap();
+            assert_eq!(settings.len(), 2);
+            for settings in settings.iter() {
+                assert_eq!(
+                    serde_json::to_value(settings.values()).unwrap()["request_interval_ms"],
+                    137
+                );
+                assert_eq!(
+                    settings.execution_values().unwrap().timeout_ms,
+                    Some(60_000)
+                );
+                assert_eq!(
+                    settings.inspect()["execution"]["input"]["fast_mode"],
+                    "default"
+                );
+                assert_eq!(settings.inspect()["execution"]["fast_mode"]["order"], 1);
+            }
+        }
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 2);
+        f.manager.shutdown().await;
+    }
+}
+#[tokio::test]
+async fn zero_timeout_fails_before_admission_and_provider() {
+    let f = Fixture::new(Mode::ZeroTimeout, true).await;
+    let response = f.request(false).await;
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(f.effects.active.load(Ordering::SeqCst), 0);
+    assert!(f.effects.charges.lock().unwrap().is_empty());
+    f.manager.shutdown().await;
+}
