@@ -16,10 +16,7 @@ use gateway_plugin_sdk::{
     },
 };
 use gateway_protocol::openai::sse::parse_sse_events;
-use std::{
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::sync::{Arc, Mutex};
 
 const MAXIMUM_MAPPED_FRAMES_PER_SOURCE: usize = 64;
 const MAXIMUM_MAPPED_BYTES_PER_SOURCE: usize = 8 * 1024 * 1024;
@@ -42,11 +39,7 @@ pub(super) async fn invoke(
     if !session.capability_supports_stage(Capability::Middleware, stage) {
         return Err(MiddlewareError::InvalidState);
     }
-    let remaining = context
-        .deadline_at
-        .duration_since(SystemTime::now())
-        .unwrap_or_default()
-        .min(session.maximum_call_timeout());
+    let remaining = context.deadline_at.bounded(session.maximum_call_timeout());
     if remaining.is_zero() || context.cancellation.is_cancelled() {
         return Err(MiddlewareError::Fault);
     }

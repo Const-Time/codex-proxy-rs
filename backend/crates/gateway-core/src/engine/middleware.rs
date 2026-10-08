@@ -16,7 +16,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use std::{collections::BTreeSet, fmt, time::SystemTime};
+use std::{collections::BTreeSet, fmt};
 /// 中间件在一次逻辑请求中的挂载位置
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MiddlewareMount {
@@ -517,7 +517,7 @@ pub struct MiddlewareContext {
     pub model: Option<String>,
     pub account_id: Option<ProviderAccountId>,
     pub cancellation: CancellationToken,
-    pub deadline_at: SystemTime,
+    pub deadline_at: crate::lifecycle::Deadline,
 }
 /// 中间件链调用错误
 /// 原有域错误保持原类型，不能被插件故障改写为“未发送”

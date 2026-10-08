@@ -1535,7 +1535,7 @@ fn new_model_request_row(request: CoreNewModelRequest) -> NewModelRequest {
         image_generation_requested: request.image_generation_requested,
         admission_decision_ms: request.admission_decision_ms,
         started_at: DateTime::<Utc>::from(request.started_at),
-        deadline_at: DateTime::<Utc>::from(request.deadline_at),
+        deadline_at: DateTime::<Utc>::from(request.deadline_at.lease_deadline()),
     }
 }
 

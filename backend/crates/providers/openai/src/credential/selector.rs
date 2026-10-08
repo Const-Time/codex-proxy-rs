@@ -612,6 +612,7 @@ impl CodexCredentialSelector {
                         account.effective_concurrency(policy.max_concurrent_per_account()),
                         policy.request_interval(),
                         request.attempt.deadline(),
+                        request.attempt.cancellation().clone(),
                     ),
                 ))
                 .await?

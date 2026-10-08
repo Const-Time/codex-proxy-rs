@@ -239,6 +239,7 @@ impl Probe<'_> {
             account.effective_concurrency(scheduling.max_concurrent_per_account()),
             scheduling.request_interval(),
             SystemTime::now() + duration,
+            self.cancellation.clone(),
         );
         let guard = match self
             .manager

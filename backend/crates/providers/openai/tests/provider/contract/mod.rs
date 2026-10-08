@@ -521,7 +521,7 @@ fn context_with_pricing(
         )
         .with_pricing(Arc::new(pricing)),
         NonZeroU32::new(1).expect("attempt"),
-        SystemTime::now() + Duration::from_secs(30),
+        gateway_core::lifecycle::Deadline::default(),
         account_policy(),
         AccountAttemptContext::new(BTreeSet::<ProviderAccountId>::new(), None, None)
             .with_account_scope(contract_account_scope()),

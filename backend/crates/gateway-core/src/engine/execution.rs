@@ -41,7 +41,7 @@ use crate::routing::{
 };
 use crate::runtime::RuntimeSnapshotHandle;
 
-const MODEL_REQUEST_DEADLINE: Duration = Duration::from_secs(10 * 60);
+const MODEL_PROBE_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const COORDINATION_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +125,7 @@ pub struct PreparedRootExecution {
     client: AuthenticatedClient,
     request_id: ModelRequestId,
     started_at: SystemTime,
-    deadline_at: SystemTime,
+    deadline_at: crate::lifecycle::Deadline,
     cancellation: CancellationToken,
 }
 
@@ -142,18 +142,39 @@ impl PreparedRootExecution {
         self.validate()?;
         if !settings.has_baseline(&self.client.snapshot)
             || !settings.is_for(self.client.policy.key_id())
-            || settings.execution_values().map(|value| value.timeout_ms)
-                != self
-                    .settings
-                    .execution_values()
-                    .map(|value| value.timeout_ms)
         {
             return Err(GatewayError::new(
                 GatewayErrorKind::InvalidRequest,
                 "request settings do not match the prepared scope",
             ));
         }
+        let timeout = settings
+            .execution_values()
+            .ok_or_else(|| {
+                GatewayError::new(
+                    GatewayErrorKind::InvalidRequest,
+                    "execution settings are unavailable",
+                )
+            })?
+            .timeout_ms;
+        if timeout == Some(0) {
+            return Err(GatewayError::new(
+                GatewayErrorKind::InvalidRequest,
+                "execution timeout must be positive",
+            ));
+        }
+        self.deadline_at = crate::lifecycle::Deadline::from_timeout(
+            self.started_at,
+            timeout.map(Duration::from_millis),
+        )
+        .ok_or_else(|| {
+            GatewayError::new(
+                GatewayErrorKind::InvalidRequest,
+                "execution timeout is outside the supported range",
+            )
+        })?;
         self.settings = settings;
+        self.validate()?;
         Ok(self)
     }
 
@@ -174,7 +195,7 @@ impl PreparedRootExecution {
     pub fn started_at(&self) -> SystemTime {
         self.started_at
     }
-    pub fn deadline_at(&self) -> SystemTime {
+    pub fn deadline_at(&self) -> crate::lifecycle::Deadline {
         self.deadline_at
     }
     pub fn cancellation(&self) -> CancellationToken {
@@ -205,7 +226,7 @@ impl PreparedRootExecution {
                 "request was cancelled",
             ));
         }
-        if SystemTime::now() >= self.deadline_at {
+        if self.deadline_at.is_elapsed() {
             return Err(GatewayError::new(
                 GatewayErrorKind::Timeout,
                 "request deadline elapsed",
@@ -882,7 +903,8 @@ impl DefaultExecutionService {
             .map_err(map_routing_error)?;
         let started_at = SystemTime::now();
         let deadline_at = started_at
-            .checked_add(MODEL_REQUEST_DEADLINE)
+            .checked_add(MODEL_PROBE_DEADLINE)
+            .map(crate::lifecycle::Deadline::from)
             .ok_or_else(|| {
                 GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
             })?;
@@ -1281,11 +1303,7 @@ impl ExecutionService for DefaultExecutionService {
                 ),
             })?;
         let started_at = SystemTime::now();
-        let deadline_at = started_at
-            .checked_add(MODEL_REQUEST_DEADLINE)
-            .ok_or_else(|| {
-                GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
-            })?;
+        let deadline_at = crate::lifecycle::Deadline::default();
         let authorization = client.bound_authorization.as_ref().ok_or_else(|| {
             GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -1294,10 +1312,8 @@ impl ExecutionService for DefaultExecutionService {
         })?;
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
-            settings: crate::routing::RequestSettings::new(client.snapshot.clone()).with_execution(
-                &client.policy,
-                Some(MODEL_REQUEST_DEADLINE.as_secs() * 1_000),
-            ),
+            settings: crate::routing::RequestSettings::new(client.snapshot.clone())
+                .with_execution(&client.policy, None),
             attempt_middleware: None,
             client,
             request_id: new_request_id()?,

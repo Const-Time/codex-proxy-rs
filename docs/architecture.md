@@ -568,7 +568,7 @@ attempt 解码只从原 GenerateRequest 附回继承约束，不复制原正文�
 
 运行设置由 Core `settings::SettingsValues` 统一表达，Store 的一致性读取直接构造该值；RuntimeSnapshot 保存原值并编译账号调度和最低版本约束，价格与映射从同一值读取。请求派生只替换该快照的设置及编译结果，保留原 Provider 目录、账号目录、Key 策略、权限与配置 revision，不发布到 RuntimeSnapshotHandle。
 
-`routing::RequestSettings` 保存基线、有效快照和逐字段改写来源。来源标记由调用层传入，完整替换只记录实际变化的字段；恢复到旧值仍是显式覆盖，后续 rebase 不会误当默认值丢弃。`PreparedRootExecution` 校验基线和活跃授权后持有该分支，规划读取有效快照，认证事实始终保留原始快照；开始时间、期限和取消链不因设置替换而重建。Fast 与 Key 准入已经接入该 Core 分支，插件 wire 执行设置仍待期限及 RPC 合同接通后开放。
+`routing::RequestSettings` 保存基线、有效快照和逐字段改写来源。来源标记由调用层传入，完整替换只记录实际变化的字段；恢复到旧值仍是显式覆盖，后续 rebase 不会误当默认值丢弃。`PreparedRootExecution` 校验基线和活跃授权后持有该分支，规划读取有效快照，认证事实始终保留原始快照；开始时间、期限和取消链不因设置替换而重建。Fast、Key 准入与可选执行期限已经接入该 Core 分支，插件 wire 执行设置仍待 RPC 合同接通后开放。
 
 
 执行覆盖与运行覆盖共享来源顺序，但执行覆盖绑定当前 Client Key。有效 Key 限额只传给原准入端口，不替换认证策略或共享用户限额；Fast 冻结在 RoutingPlan，传入每次 AttemptContext。模型候选保存该次路由的展示能力快照，使 Provider 的 Fast 启用判断与所选上游模型的目录证据一致。
@@ -576,7 +576,12 @@ attempt 解码只从原 GenerateRequest 附回继承约束，不复制原正文�
 Provider 的同步 `prepare_operation` 只形成原生请求默认值，不执行网络、选号或租约操作。Coordinator 在 attempt 中间件之前调用；OpenAI 解释 Fast/service_tier，Core 不解释该协议字段。正文替换保留原非 wire 上下文、私有会话状态与继承能力。每次重试从原请求重新形成基线；已进入中间件的 attempt 恢复轮询不重做准备，Provider 终端也不再次覆盖中间件输出。原 Provider 解码器仍按上游实际费用事实结算。
 
 
-准入续期由 Store 的 Redis adapter 拥有，Core 为每个已准入的 Key/用户共享作用域持有独立 guard。续期只延长仍存活的并发槽位，不重写 RPM，不缩短已有期限，不复活过期或已释放成员。续期失败、超时或发现成员丢失时取消原执行；释放队列不承接续期。取消和终态费用结算期间继续持有 guard，进入释放前停止续期；丢弃 guard 终止后台任务，遗漏释放由 TTL 收敛。此机制为可变执行期限提供准入基础；执行截止时间和 PostgreSQL 恢复期限仍为既有固定合同，尚未开放无限时请求。
+准入续期由 Store 的 Redis adapter 拥有，Core 为每个已准入的 Key/用户共享作用域持有独立 guard。续期只延长仍存活的并发槽位，不重写 RPM，不缩短已有期限，不复活过期或已释放成员。续期失败、超时或发现成员丢失时取消原执行；释放队列不承接续期。取消和终态费用结算期间继续持有 guard，进入释放前停止续期；丢弃 guard 终止后台任务，遗漏释放由 TTL 收敛。执行期限独立于恢复租约，普通请求可无总时限；取消后的结算仍持有准入槽位。
 
 
-`ExecutionStore::maintain_request` 为同一 `model_requests` 行续期异常回收时间；Core 会话持有 guard，取消等待不丢失 guard，终态写入完成或会话丢弃时停止。PostgreSQL 仅更新未过期的 running 行，缺失的队列观测不补造，已终态/已过期行不复活；显式执行截止时间限制续期上界。BufferedExecutionStore 直接委派续期而不进入可丢失观测队列，观测续期故障按原 best-effort 合同重试，不改变推理结果或费用。`REQUEST_LEASE_TTL` 是恢复租约时长，与执行超时分开命名；恢复端口已经支持无显式截止的 guard，但公开执行仍保留固定期限，需后续统一 Core/Provider/RPC 的可选截止时间。
+`ExecutionStore::maintain_request` 为同一 `model_requests` 行续期异常回收时间；Core 会话持有 guard，取消等待不丢失 guard，终态写入完成或会话丢弃时停止。PostgreSQL 仅更新未过期的 running 行，缺失的队列观测不补造，已终态/已过期行不复活；显式执行截止时间限制续期上界。BufferedExecutionStore 直接委派续期而不进入可丢失观测队列，观测续期故障按原 best-effort 合同重试，不改变推理结果或费用。`REQUEST_LEASE_TTL` 是恢复租约时长，与执行超时分开命名；Core/Provider 与中间件上下文使用统一 Deadline，可不设总期限；恢复 guard 使用其显式上界或独立有限租约。
+
+
+`lifecycle::Deadline` 保存可选绝对截止时间，None 的等待保持 pending；有限期限等待分段使用有界 timer，避免远期时间溢出。PreparedRoot 的超时覆盖从原 started_at 推导，不重置计时或复活已超时请求。普通请求默认 None，诊断探测保留显式期限；连接、握手、空闲与插件 RPC 的局部预算不受影响。数据库执行记录的 deadline_at 是恢复过期时间，由有限 lease 和显式执行上界决定。
+
+ProviderSchedulingLeaseRequest 同时携带 Deadline 与原请求取消信号。Redis ProviderAccount guard 按已有成员和 fencing token 续期，不重新准入或写 last_started；Drop/显式释放先停止续期。失去槽位取消该执行，有限期限到达不抢先转换为 cancelled；Core 保留 timeout 归类权。OAuth 刷新/互斥租约仍走原专属生命周期。

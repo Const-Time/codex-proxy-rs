@@ -300,7 +300,7 @@ pub(super) struct Effects {
     pub(super) completion: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub(super) charges: Mutex<Vec<ClientBudgetCharge>>,
     pub(super) finalizations: Mutex<Vec<ModelRequestFinalization>>,
-    pub(super) requests: Mutex<Vec<(String, String, String, SystemTime)>>,
+    pub(super) requests: Mutex<Vec<(String, String, String, gateway_core::lifecycle::Deadline)>>,
     pub(super) raw_requests: Mutex<Vec<Operation>>,
     pub(super) revoke_after_start: Mutex<Option<PluginAccess>>,
     pub(super) operations: Mutex<Vec<Operation>>,

@@ -3,7 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use gateway_core::account::{
     AccountCapacitySnapshot, AccountEligibilityPolicy, AccountSelectionPolicy, CredentialRevision,
@@ -234,20 +234,29 @@ pub struct GrokSessionSelection {
     account_selection_policy: AccountSelectionPolicy,
     eligibility: AccountEligibilityPolicy,
     affinity: Option<GrokSessionAffinityKey>,
-    deadline: SystemTime,
+    cancellation: gateway_core::lifecycle::CancellationToken,
+    deadline: gateway_core::lifecycle::Deadline,
     account_scope: Arc<FrozenAccountScope>,
     client_api_key_id: ClientApiKeyId,
 }
 
 impl GrokSessionSelection {
+    pub fn cancellation(&self) -> gateway_core::lifecycle::CancellationToken {
+        self.cancellation.clone()
+    }
     /// 创建不可变的选择请求。
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Selection must carry the owning execution cancellation together with its frozen routing facts"
+    )]
     pub fn new(
         upstream_model: UpstreamModelId,
         excluded_accounts: BTreeSet<ProviderAccountId>,
         required_account: Option<ProviderAccountId>,
         account_selection_policy: AccountSelectionPolicy,
-        deadline: SystemTime,
+        deadline: impl Into<gateway_core::lifecycle::Deadline>,
+        cancellation: gateway_core::lifecycle::CancellationToken,
         account_scope: Arc<FrozenAccountScope>,
         client_api_key_id: ClientApiKeyId,
     ) -> Self {
@@ -258,7 +267,8 @@ impl GrokSessionSelection {
             account_selection_policy,
             eligibility: AccountEligibilityPolicy::Enforce,
             affinity: None,
-            deadline,
+            deadline: deadline.into(),
+            cancellation,
             account_scope,
             client_api_key_id,
         }
@@ -318,7 +328,7 @@ impl GrokSessionSelection {
 
     /// 返回限定调度租约的绝对截止时间。
     #[must_use]
-    pub const fn deadline(&self) -> SystemTime {
+    pub const fn deadline(&self) -> gateway_core::lifecycle::Deadline {
         self.deadline
     }
 

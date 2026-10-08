@@ -124,7 +124,7 @@ fn context(streaming: bool) -> MiddlewareContext {
         model: Some("model-original".into()),
         account_id: None,
         cancellation: CancellationToken::new(),
-        deadline_at: SystemTime::now() + Duration::from_secs(20),
+        deadline_at: (SystemTime::now() + Duration::from_secs(20)).into(),
     }
 }
 fn request(mode: &str) -> MiddlewareRequest {

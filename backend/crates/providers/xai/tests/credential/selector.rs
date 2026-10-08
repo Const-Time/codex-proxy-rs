@@ -243,6 +243,7 @@ impl SelectorFixture {
                 Duration::ZERO,
             ),
             SystemTime::now() + Duration::from_secs(30),
+            gateway_core::lifecycle::CancellationToken::new(),
             Arc::new(FrozenAccountScope::new(
                 Arc::new(RuntimeAccountDirectory::new(accounts)),
                 ClientRoutingScope::all_accounts(),
@@ -1178,6 +1179,7 @@ async fn model_access_excludes_a_required_xai_account_before_acquiring_a_lease()
                 Duration::ZERO,
             ),
             SystemTime::now() + Duration::from_secs(30),
+            gateway_core::lifecycle::CancellationToken::new(),
             Arc::clone(&scope),
             ClientApiKeyId::new("key_xai_selector").expect("key"),
         );

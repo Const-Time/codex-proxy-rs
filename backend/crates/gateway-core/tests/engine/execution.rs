@@ -173,10 +173,7 @@ fn preparing_middleware_execution_is_lazy_and_preserves_one_identity_and_deadlin
         let id = prepared.request_id().clone();
         let start = prepared.started_at();
         let deadline = prepared.deadline_at();
-        assert_eq!(
-            deadline.duration_since(start).unwrap(),
-            Duration::from_secs(600)
-        );
+        assert_eq!(deadline.at(), None);
         assert_eq!(
             prepared.client().policy().key_id().as_str(),
             "key_start_test"
@@ -2309,7 +2306,7 @@ fn prepared_runtime_settings_reject_foreign_baselines_and_preserve_revocation() 
             prepared.settings().clone()
         };
         let settings = if cause == "timeout" {
-            settings.with_execution(prepared.client().policy(), None)
+            settings.with_execution(prepared.client().policy(), Some(0))
         } else if cause == "key_scope" {
             let other = ClientPolicy::new(
                 ClientApiKeyId::new("other").unwrap(),
@@ -2530,3 +2527,55 @@ impl Drop for CountingAdmissionLease {
 
 struct TestExecutionRecoveryLease;
 impl gateway_core::engine::ExecutionRecoveryLeaseGuard for TestExecutionRecoveryLease {}
+
+#[test]
+fn timeout_overrides_use_original_start_and_can_remove_the_total_deadline() {
+    let admissions = Arc::new(Admissions::default());
+    let service = service(admissions.clone(), Arc::new(Budget::default()));
+    let prepared = service
+        .prepare_execution(service.authenticate("sk_start_test").unwrap())
+        .unwrap();
+    let start = prepared.started_at();
+    let id = prepared.request_id().clone();
+    assert_eq!(prepared.deadline_at().at(), None);
+    let mut values = prepared.settings().execution_values().unwrap();
+    values.timeout_ms = Some(2000);
+    let settings = prepared
+        .settings()
+        .replace_execution(&values, "finite")
+        .unwrap();
+    let prepared = prepared.with_settings(settings).unwrap();
+    assert_eq!(
+        prepared.deadline_at().at(),
+        Some(start + Duration::from_secs(2))
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    values.timeout_ms = Some(4000);
+    let settings = prepared
+        .settings()
+        .replace_execution(&values, "later")
+        .unwrap();
+    let prepared = prepared.with_settings(settings).unwrap();
+    assert_eq!(
+        prepared.deadline_at().at(),
+        Some(start + Duration::from_secs(4))
+    );
+    values.timeout_ms = None;
+    let settings = prepared
+        .settings()
+        .replace_execution(&values, "unlimited")
+        .unwrap();
+    let prepared = prepared.with_settings(settings).unwrap();
+    assert_eq!(prepared.deadline_at().at(), None);
+    assert_eq!(prepared.started_at(), start);
+    assert_eq!(prepared.request_id(), &id);
+    values.timeout_ms = Some(1);
+    let settings = prepared
+        .settings()
+        .replace_execution(&values, "elapsed")
+        .unwrap();
+    assert!(
+        matches!(prepared.with_settings(settings), Err(e) if e.kind() == GatewayErrorKind::Timeout)
+    );
+    assert!(admissions.limits.lock().unwrap().is_empty());
+}
