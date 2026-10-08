@@ -309,6 +309,16 @@ pub(super) struct Effects {
     pub(super) raw_response: Mutex<Option<Bytes>>,
 }
 impl ClientAdmissionPort for Effects {
+    fn maintain(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &gateway_core::engine::ModelRequestId,
+        _: std::time::Duration,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        Box::new(TestAdmissionLease)
+    }
+
     fn admit(
         &self,
         _: ClientAdmissionRequest,
@@ -808,3 +818,6 @@ impl ExecutionService for PostStartExecution {
         self.inner.start_provider_endpoint(request)
     }
 }
+
+struct TestAdmissionLease;
+impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissionLease {}

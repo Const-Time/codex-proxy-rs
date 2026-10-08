@@ -390,3 +390,200 @@ async fn pttl(connection: &mut ConnectionManager, key: &str) -> i64 {
         .await
         .expect("read admission TTL")
 }
+
+#[test]
+fn lease_ttl_requires_positive_whole_milliseconds() {
+    for ttl in [
+        Duration::from_nanos(1),
+        Duration::from_micros(1500),
+        Duration::MAX,
+    ] {
+        assert!(admission_request("request", "key", ttl).validate().is_err());
+    }
+}
+
+#[tokio::test]
+async fn renewal_preserves_rpm_and_longer_leases_and_never_revives_lost_slots() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let key = "renew-key";
+    let request = "renew-request";
+    assert!(
+        !repository
+            .renew_client_request(key, request, Duration::from_secs(60))
+            .await
+            .unwrap()
+    );
+    repository
+        .admit_client_request(&admission_request(request, key, Duration::from_secs(30)))
+        .await
+        .unwrap();
+    let keys = namespace_keys(&mut connection, &namespace).await;
+    let active = key_with_suffix(&keys, ":active");
+    let recent = key_with_suffix(&keys, ":requests");
+    let rpm: Vec<(String, f64)> = redis::cmd("ZRANGE")
+        .arg(recent)
+        .arg(0)
+        .arg(-1)
+        .arg("WITHSCORES")
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    let previous: f64 = redis::cmd("ZSCORE")
+        .arg(active)
+        .arg(request)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .renew_client_request(key, request, Duration::from_secs(120))
+            .await
+            .unwrap()
+    );
+    let extended: f64 = redis::cmd("ZSCORE")
+        .arg(active)
+        .arg(request)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(extended > previous + 80_000.0);
+    assert!(
+        repository
+            .renew_client_request(key, request, Duration::from_secs(1))
+            .await
+            .unwrap()
+    );
+    let retained: f64 = redis::cmd("ZSCORE")
+        .arg(active)
+        .arg(request)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(retained, extended);
+    let after: Vec<(String, f64)> = redis::cmd("ZRANGE")
+        .arg(recent)
+        .arg(0)
+        .arg(-1)
+        .arg("WITHSCORES")
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(after, rpm);
+    assert!(pttl(&mut connection, active).await >= 170_000);
+    assert!(
+        !repository
+            .renew_client_request("different-key", request, Duration::from_secs(120))
+            .await
+            .unwrap()
+    );
+    redis::cmd("ZADD")
+        .arg(active)
+        .arg(0)
+        .arg(request)
+        .query_async::<i64>(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .renew_client_request(key, request, Duration::from_secs(120))
+            .await
+            .unwrap()
+    );
+    repository
+        .release_client_request(key, request)
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .renew_client_request(key, request, Duration::from_secs(120))
+            .await
+            .unwrap()
+    );
+    assert_eq!(repository.active_count(key).await.unwrap(), 0);
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
+#[tokio::test]
+async fn maintained_slot_survives_original_ttl_and_cancellation_until_guard_drops() {
+    use gateway_core::{
+        engine::{ModelRequestId, admission::ClientAdmissionPort},
+        lifecycle::CancellationToken,
+        policy::ClientApiKeyId,
+    };
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let ttl = Duration::from_millis(1200);
+    repository
+        .admit_client_request(&admission_request("req_renewal", "key", ttl))
+        .await
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    let guard = repository.maintain(
+        &ClientApiKeyId::new("key").unwrap(),
+        &ModelRequestId::new("req_renewal").unwrap(),
+        ttl,
+        cancellation.clone(),
+    );
+    cancellation.cancel(); // cancellation still needs asynchronous settlement, which owns this guard
+    tokio::time::sleep(Duration::from_millis(1800)).await;
+    assert_eq!(repository.active_count("key").await.unwrap(), 1);
+    let keys = namespace_keys(&mut connection, &namespace).await;
+    assert_eq!(
+        zcard(&mut connection, key_with_suffix(&keys, ":requests")).await,
+        1
+    );
+    drop(guard);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(repository.active_count("key").await.unwrap(), 0);
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
+#[tokio::test]
+async fn renewal_cancels_execution_on_missing_slot_or_redis_error() {
+    use gateway_core::{
+        engine::{ModelRequestId, admission::ClientAdmissionPort},
+        lifecycle::CancellationToken,
+        policy::ClientApiKeyId,
+    };
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    for wrong_type in [false, true] {
+        repository
+            .admit_client_request(&admission_request(
+                "req_renewal",
+                "key",
+                Duration::from_secs(30),
+            ))
+            .await
+            .unwrap();
+        let keys = namespace_keys(&mut connection, &namespace).await;
+        repository
+            .release_client_request("key", "req_renewal")
+            .await
+            .unwrap();
+        if wrong_type {
+            redis::cmd("SET")
+                .arg(key_with_suffix(&keys, ":active"))
+                .arg("invalid type")
+                .query_async::<()>(&mut connection)
+                .await
+                .unwrap();
+        }
+        let cancellation = CancellationToken::new();
+        let guard = repository.maintain(
+            &ClientApiKeyId::new("key").unwrap(),
+            &ModelRequestId::new("req_renewal").unwrap(),
+            Duration::from_millis(300),
+            cancellation.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(3), cancellation.cancelled())
+            .await
+            .expect("lost slot must cancel execution");
+        drop(guard);
+        delete_namespace_keys(&mut connection, &namespace).await;
+    }
+}

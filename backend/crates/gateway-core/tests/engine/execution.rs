@@ -12,6 +12,7 @@ use gateway_core::error::GatewayError;
 
 #[derive(Default)]
 struct Admissions {
+    renewals: Arc<AtomicUsize>,
     active: Arc<AtomicBool>,
     limits: Mutex<Vec<RateLimits>>,
     release_gate: Mutex<Option<oneshot::Receiver<()>>>,
@@ -19,6 +20,17 @@ struct Admissions {
 }
 
 impl ClientAdmissionPort for Admissions {
+    fn maintain(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &gateway_core::engine::ModelRequestId,
+        _: std::time::Duration,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        self.renewals.fetch_add(1, Ordering::SeqCst);
+        Box::new(CountingAdmissionLease(self.renewals.clone()))
+    }
+
     fn admit(
         &self,
         request: ClientAdmissionRequest,
@@ -35,6 +47,11 @@ impl ClientAdmissionPort for Admissions {
         _: &'a ModelRequestId,
     ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
         Box::pin(async {
+            assert_eq!(
+                self.renewals.load(Ordering::SeqCst),
+                0,
+                "stop renewal before release"
+            );
             self.releases.fetch_add(1, Ordering::SeqCst);
             let gate = self.release_gate.lock().unwrap().take();
             if let Some(gate) = gate {
@@ -351,11 +368,23 @@ fn reused_client_uses_updated_limits_for_each_execution() {
 
 #[derive(Default)]
 struct SharedUserAdmissions {
+    renewals: Arc<AtomicUsize>,
     active: Mutex<BTreeMap<ClientApiKeyId, BTreeSet<ModelRequestId>>>,
     counts: Mutex<BTreeMap<ClientApiKeyId, u64>>,
 }
 
 impl ClientAdmissionPort for SharedUserAdmissions {
+    fn maintain(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &gateway_core::engine::ModelRequestId,
+        _: std::time::Duration,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        self.renewals.fetch_add(1, Ordering::SeqCst);
+        Box::new(CountingAdmissionLease(self.renewals.clone()))
+    }
+
     fn admit(
         &self,
         request: ClientAdmissionRequest,
@@ -458,6 +487,7 @@ fn user_concurrency_and_rpm_are_shared_across_distinct_keys_and_release_both_sco
             },
         };
         let first = block_on(service.start(next("sk_a"))).unwrap();
+        assert_eq!(admissions.renewals.load(Ordering::SeqCst), 2);
         if limits.requests_per_minute > 0 {
             block_on(first.session.detach_finalize());
         } else {
@@ -465,8 +495,11 @@ fn user_concurrency_and_rpm_are_shared_across_distinct_keys_and_release_both_sco
                 matches!(block_on(service.start(next("sk_b"))), Err(error) if error.kind() == GatewayErrorKind::RateLimited)
             );
             let other = block_on(service.start(next("sk_other"))).unwrap();
+            assert_eq!(admissions.renewals.load(Ordering::SeqCst), 4);
             block_on(other.session.detach_finalize());
+            assert_eq!(admissions.renewals.load(Ordering::SeqCst), 2);
             block_on(first.session.detach_finalize());
+            assert_eq!(admissions.renewals.load(Ordering::SeqCst), 0);
             let after_release = block_on(service.start(next("sk_b"))).unwrap();
             block_on(after_release.session.detach_finalize());
         }
@@ -738,6 +771,7 @@ fn detached_early_failure_resumes_cancelled_store_write_and_settles_once_for_all
                 assert!(store.finalizations.lock().unwrap().is_empty());
                 assert_eq!(budget.settlements.load(Ordering::SeqCst), 0);
                 assert_eq!(admissions.releases.load(Ordering::SeqCst), 0);
+                assert_eq!(admissions.renewals.load(Ordering::SeqCst), 1);
                 assert!(admissions.active.load(Ordering::SeqCst));
 
                 let mut detached = started.session.detach_finalize();
@@ -756,6 +790,7 @@ fn detached_early_failure_resumes_cancelled_store_write_and_settles_once_for_all
                 assert_eq!(budget.settlements.load(Ordering::SeqCst), 1);
                 assert!(budget.charges.lock().unwrap().is_empty());
                 assert_eq!(admissions.releases.load(Ordering::SeqCst), 0);
+                assert_eq!(admissions.renewals.load(Ordering::SeqCst), 1);
                 assert!(admissions.active.load(Ordering::SeqCst));
 
                 complete_settlement.send(()).expect("original settlement");
@@ -946,6 +981,7 @@ fn settlement_survives_cancelled_event_wait_and_resumes_without_restart() {
                 assert_eq!(budget.settlements.load(Ordering::SeqCst), 1);
                 assert!(budget.charges.lock().unwrap().is_empty());
                 assert_eq!(admissions.releases.load(Ordering::SeqCst), 0);
+                assert_eq!(admissions.renewals.load(Ordering::SeqCst), 1);
             }
             release
                 .send(())
@@ -986,6 +1022,7 @@ fn detached_cleanup_settles_cancelled_execution_and_resumes_existing_settlement(
             assert!(futures::poll!(detached.as_mut()).is_pending());
             assert_eq!(budget.settlements.load(Ordering::SeqCst), 1);
             assert_eq!(admissions.releases.load(Ordering::SeqCst), 0);
+            assert_eq!(admissions.renewals.load(Ordering::SeqCst), 1);
             release
                 .send(())
                 .expect("detached cleanup retains settlement");
@@ -1778,6 +1815,16 @@ impl ExecutionStore for TrackingExecutionStore {
 struct UnusedAdmissions;
 
 impl ClientAdmissionPort for UnusedAdmissions {
+    fn maintain(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &gateway_core::engine::ModelRequestId,
+        _: std::time::Duration,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        Box::new(TestAdmissionLease)
+    }
+
     fn admit(
         &self,
         _: ClientAdmissionRequest,
@@ -2459,4 +2506,15 @@ fn execution_limit_overrides_do_not_remove_the_shared_user_admission_limit() {
                 .all(BTreeSet::is_empty)
         );
     });
+}
+
+struct TestAdmissionLease;
+impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissionLease {}
+
+struct CountingAdmissionLease(Arc<AtomicUsize>);
+impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for CountingAdmissionLease {}
+impl Drop for CountingAdmissionLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }

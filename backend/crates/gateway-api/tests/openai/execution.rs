@@ -88,6 +88,16 @@ impl Effects {
 }
 
 impl ClientAdmissionPort for Effects {
+    fn maintain(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &gateway_core::engine::ModelRequestId,
+        _: std::time::Duration,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        Box::new(TestAdmissionLease)
+    }
+
     fn admit(
         &self,
         request: ClientAdmissionRequest,
@@ -319,3 +329,6 @@ async fn dropping_unread_started_result_keeps_its_finalization_owner() {
         effects.assert_cleaned_once().await;
     }
 }
+
+struct TestAdmissionLease;
+impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissionLease {}

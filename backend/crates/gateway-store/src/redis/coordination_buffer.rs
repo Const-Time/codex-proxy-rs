@@ -73,6 +73,16 @@ impl BufferedClientAdmissionPort {
 }
 
 impl ClientAdmissionPort for BufferedClientAdmissionPort {
+    fn maintain(
+        &self,
+        key: &ClientApiKeyId,
+        request: &ModelRequestId,
+        lease_ttl: std::time::Duration,
+        cancellation: CancellationToken,
+    ) -> Box<dyn gateway_core::engine::admission::ClientAdmissionLeaseGuard> {
+        self.inner.maintain(key, request, lease_ttl, cancellation)
+    }
+
     fn admit(
         &self,
         request: ClientAdmissionRequest,
