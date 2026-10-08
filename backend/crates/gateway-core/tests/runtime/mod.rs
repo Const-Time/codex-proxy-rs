@@ -680,6 +680,9 @@ fn committed_scope_change_preempts_slow_catalog_and_reconciles_later() {
         let compiler = Arc::new(catalog_compiler(store.clone(), catalog.clone()));
         let handle = RuntimeSnapshotHandle::new(compiler.compile().await.unwrap());
         let frozen = handle.acquire().unwrap();
+        let delegated = handle
+            .client_access(frozen.client_policies().next().unwrap())
+            .unwrap();
         let publisher = RuntimeSnapshotPublisher::new(
             compiler,
             handle.clone(),
@@ -707,6 +710,10 @@ fn committed_scope_change_preempts_slow_catalog_and_reconciles_later() {
         assert_eq!(handle.revision(), Some(revision(11)));
         assert!(!removed_account_allowed(&handle.acquire().unwrap()));
         assert!(
+            delegated.cancellation().is_cancelled(),
+            "delegated plugin calls lose the removed scope immediately"
+        );
+        assert!(
             removed_account_allowed(&frozen),
             "in-flight requests retain frozen scope"
         );
@@ -719,4 +726,29 @@ fn committed_scope_change_preempts_slow_catalog_and_reconciles_later() {
         );
         assert!(!removed_account_allowed(&handle.acquire().unwrap()));
     });
+}
+
+#[test]
+fn delegated_access_is_revoked_at_publication_without_waiting_for_the_consumer() {
+    let store = Arc::new(TestSnapshotStore::new(Ok(facts(1, 1))));
+    let original = block_on(compiler(store).compile()).unwrap();
+    let policy = original.client_policies().next().unwrap().clone();
+    let snapshots = RuntimeSnapshotHandle::new(original.clone());
+    let access = snapshots.client_access(&policy).unwrap();
+    snapshots.publish(original.clone());
+    assert!(
+        !access.cancellation().is_cancelled(),
+        "unrelated publication preserves authorization"
+    );
+    snapshots.publish(empty_snapshot(2));
+    assert!(access.cancellation().is_cancelled());
+    snapshots.publish(original);
+    assert!(
+        access.cancellation().is_cancelled(),
+        "re-enable cannot revive an old call"
+    );
+    let next = snapshots.client_access(&policy).unwrap();
+    snapshots.suspend();
+    assert!(next.cancellation().is_cancelled());
+    assert!(snapshots.client_access(&policy).is_err());
 }

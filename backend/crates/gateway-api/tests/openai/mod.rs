@@ -184,7 +184,7 @@ fn snapshot(plaintext: &str, provider_name: &str) -> RuntimeSnapshot {
 }
 
 #[derive(Default)]
-struct TestLifecycle {
+pub(crate) struct TestLifecycle {
     cancellation: gateway_core::lifecycle::CancellationToken,
 }
 
@@ -206,7 +206,7 @@ impl ConnectionLifecycle for TestLifecycle {
     }
 }
 
-struct EmptyWorkerHealth;
+pub(crate) struct EmptyWorkerHealth;
 
 impl WorkerHealthSource for EmptyWorkerHealth {
     fn snapshot(&self) -> Vec<WorkerHealthSnapshot> {

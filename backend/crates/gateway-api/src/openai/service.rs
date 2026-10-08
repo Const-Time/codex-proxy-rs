@@ -44,6 +44,12 @@ impl OpenAiService {
             .map_err(map_authentication_error)
     }
 
+    pub(crate) fn client_access(
+        &self,
+        client: &AuthenticatedClient,
+    ) -> Option<gateway_core::runtime::ClientAccessGuard> {
+        self.execution.client_access(client)
+    }
     pub(crate) fn public_models(&self, client: &AuthenticatedClient) -> Vec<String> {
         self.execution
             .public_models(client)

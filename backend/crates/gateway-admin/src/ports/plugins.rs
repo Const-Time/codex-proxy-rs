@@ -34,6 +34,7 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    fn access(&self) -> PluginAccess;
     fn status(&self) -> &'static str;
     fn pages(&self) -> Vec<PluginPage>;
     fn resources(&self) -> Vec<PluginResource>;
@@ -61,6 +62,7 @@ pub trait PluginRuntime: Send + Sync {
 }
 #[async_trait]
 pub trait PluginService: Send + Sync {
+    fn access(&self, id: &str, revision: u64) -> Result<PluginAccess>;
     async fn artifacts(&self) -> Result<Vec<PluginArtifactInfo>>;
     async fn delete_artifact(&self, digest: &str, actor: &MutationContext) -> Result<()>;
     async fn upload(

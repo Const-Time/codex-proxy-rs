@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as SyncMutex, RwLock};
+use std::sync::{Arc, Mutex as SyncMutex, RwLock, Weak};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -67,28 +67,66 @@ pub struct RuntimeSnapshotUnavailable;
 /// RuntimeSnapshot 原子发布和请求级冻结句柄。
 #[derive(Clone, Default)]
 pub struct RuntimeSnapshotHandle {
-    current: Arc<RwLock<Option<Arc<RuntimeSnapshot>>>>,
+    current: Arc<RwLock<PublishedSnapshot>>,
+}
+#[derive(Default)]
+struct PublishedSnapshot {
+    snapshot: Option<Arc<RuntimeSnapshot>>,
+    access: Vec<Weak<ClientAccess>>,
+}
+struct ClientAccess {
+    policy: crate::policy::ClientPolicy,
+    cancellation: CancellationToken,
+}
+/// Live authorization for delegated calls; it never changes the execution's frozen billing facts.
+#[derive(Clone)]
+pub struct ClientAccessGuard(Arc<ClientAccess>);
+impl ClientAccessGuard {
+    pub fn cancellation(&self) -> CancellationToken {
+        self.0.cancellation.clone()
+    }
 }
 
 impl RuntimeSnapshotHandle {
     #[must_use]
     pub fn new(initial: RuntimeSnapshot) -> Self {
         Self {
-            current: Arc::new(RwLock::new(Some(Arc::new(initial)))),
+            current: Arc::new(RwLock::new(PublishedSnapshot {
+                snapshot: Some(Arc::new(initial)),
+                access: Vec::new(),
+            })),
         }
     }
 
     pub fn publish(&self, snapshot: RuntimeSnapshot) {
-        *write_unpoisoned(&self.current) = Some(Arc::new(snapshot));
+        let mut current = write_unpoisoned(&self.current);
+        current.access.retain(|weak| {
+            let Some(access) = weak.upgrade() else {
+                return false;
+            };
+            if !snapshot
+                .client_policies()
+                .any(|policy| policy == &access.policy)
+            {
+                access.cancellation.cancel();
+            }
+            !access.cancellation.is_cancelled()
+        });
+        current.snapshot = Some(Arc::new(snapshot));
     }
 
     pub fn suspend(&self) {
-        *write_unpoisoned(&self.current) = None;
+        let mut current = write_unpoisoned(&self.current);
+        for access in current.access.drain(..).filter_map(|weak| weak.upgrade()) {
+            access.cancellation.cancel();
+        }
+        current.snapshot = None;
     }
 
     #[must_use]
     pub fn revision(&self) -> Option<ConfigRevision> {
         read_unpoisoned(&self.current)
+            .snapshot
             .as_ref()
             .map(|snapshot| snapshot.revision())
     }
@@ -98,13 +136,36 @@ impl RuntimeSnapshotHandle {
         &self,
     ) -> Option<BTreeMap<ProviderKind, ProviderCatalogGeneration>> {
         read_unpoisoned(&self.current)
+            .snapshot
             .as_ref()
             .map(|snapshot| snapshot.provider_catalog_generations().clone())
     }
 
+    /// Registration and revocation share the publication lock; disable/re-enable cannot resurrect a lease.
+    pub fn client_access(
+        &self,
+        policy: &crate::policy::ClientPolicy,
+    ) -> Result<ClientAccessGuard, RuntimeSnapshotUnavailable> {
+        let mut current = write_unpoisoned(&self.current);
+        if !current
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.client_policies().any(|p| p == policy))
+        {
+            return Err(RuntimeSnapshotUnavailable);
+        }
+        current.access.retain(|weak| weak.strong_count() != 0);
+        let access = Arc::new(ClientAccess {
+            policy: policy.clone(),
+            cancellation: CancellationToken::new(),
+        });
+        current.access.push(Arc::downgrade(&access));
+        Ok(ClientAccessGuard(access))
+    }
     /// 冻结当前 Arc；后续发布不改变已经开始的请求。
     pub fn acquire(&self) -> Result<Arc<RuntimeSnapshot>, RuntimeSnapshotUnavailable> {
         read_unpoisoned(&self.current)
+            .snapshot
             .clone()
             .ok_or(RuntimeSnapshotUnavailable)
     }

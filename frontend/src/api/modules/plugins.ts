@@ -1,3 +1,4 @@
+import { API_BASE_URL } from '../constants'
 import request from '../request'
 
 export const PLUGIN_MANAGEMENT_TIMEOUT_MS = 35_000
@@ -60,4 +61,8 @@ export async function callPluginRoute(target: PluginTarget, payload: { method: s
   for (let offset = 0; offset < bytes.length; offset += 8192)
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
   return decodeReply(await request<WireReply>({ url: '/api/admin/plugins/invoke', method: 'POST', data: { id: target.instanceId, revision: target.revision, ...payload, body: btoa(binary) }, signal, timeout: PLUGIN_MANAGEMENT_TIMEOUT_MS }))
+}
+
+export function callPluginModel(target: PluginTarget, input: { clientKeyId: string, body: Record<string, unknown> }, signal: AbortSignal) {
+  return fetch(`${API_BASE_URL}/api/admin/plugins/models/responses`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: target.instanceId, revision: target.revision, ...input }), signal })
 }

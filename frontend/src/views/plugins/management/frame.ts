@@ -63,6 +63,7 @@ export async function assemblePluginManagementPage(
   theme: PluginFrameTheme,
   viewportHeight: number,
   signal: AbortSignal,
+  clientKeyId?: string,
 ): Promise<AssembledPluginPage> {
   validateView(view, page)
   const resources = await loadResources(view, signal)
@@ -116,6 +117,7 @@ export async function assemblePluginManagementPage(
     theme,
     viewportHeight,
     resourceUrls: Object.fromEntries(resourceUrls),
+    clientKeyId,
   }))
   return {
     srcdoc: `<!doctype html>\n${document.documentElement.outerHTML}`,
@@ -429,6 +431,7 @@ function safeThemeValue(value: string) {
 }
 
 function createBridgeScript(input: {
+  clientKeyId?: string
   view: PluginManagementView
   page: PluginManagementPage
   channel: string
@@ -439,6 +442,7 @@ function createBridgeScript(input: {
   resourceUrls: Record<string, string>
 }) {
   const initial = JSON.stringify({
+    clientKeyId: input.clientKeyId,
     target: PLUGIN_MANAGEMENT_BRIDGE,
     version: PLUGIN_MANAGEMENT_BRIDGE_VERSION,
     channel: input.channel,

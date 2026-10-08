@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>推理便笺</title>
+<style>
+body { font: 15px/1.6 system-ui, sans-serif; margin: 20px; color: #172033; background: #f7f9fc; }
+label { display: block; margin-top: 16px; }
+input, textarea, button { font: inherit; border: 1px solid #94a3b8; border-radius: 8px; padding: 10px; }
+input, textarea { display: block; width: 100%; box-sizing: border-box; background: white; }
+button { margin: 14px 8px 0 0; cursor: pointer; background: white; }
+button:disabled { cursor: default; opacity: .5; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 100px; }
+</style></head><body>
+<h2>推理便笺</h2><p>先在宿主页面选择本人 Key，再填写模型 ID 与问题。内容仅保留在当前页面。</p>
+<form id="form"><label for="model">模型 ID</label><input id="model" required placeholder="填写此 Key 可用的模型 ID">
+<label for="prompt">问题</label><textarea id="prompt" required rows="5" placeholder="输入问题"></textarea>
+<button id="send" type="submit">发送</button><button id="stop" type="button" disabled>停止</button></form>
+<p id="status" role="status">尚未发送</p><pre id="output"></pre>
+<script>
+const bridge = window.codexProxyPlugin;
+const form = document.getElementById('form');
+const output = document.getElementById('output');
+const status = document.getElementById('status');
+const send = document.getElementById('send');
+const stop = document.getElementById('stop');
+let controller;
+stop.onclick = () => controller?.abort();
+form.onsubmit = async (event) => {
+  event.preventDefault();
+  if (controller) return;
+  if (!bridge?.models.clientKeyId) { status.textContent = '请先在宿主页面选择本人 Key'; return; }
+  controller = new AbortController();
+  send.disabled = true; stop.disabled = false; output.textContent = ''; status.textContent = '请求中…';
+  try {
+    const response = await bridge.models.responses({
+      clientKeyId: bridge.models.clientKeyId,
+      body: { model: document.getElementById('model').value.trim(), input: document.getElementById('prompt').value, stream: true },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error((await response.text()).slice(0, 2000));
+    if (!response.body) throw new Error('模型未返回正文');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    let terminal = false;
+    const consume = () => {
+      const frames = pending.replace(/\r\n/g, '\n').split('\n\n');
+      pending = frames.pop();
+      for (const frame of frames) {
+        const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+        if (!data || data === '[DONE]') continue;
+        const item = JSON.parse(data);
+        if (item.type === 'response.output_text.delta') output.textContent += item.delta;
+        if (item.type === 'response.failed' || item.type === 'error') throw new Error(item.response?.error?.message || item.error?.message || item.message || '推理失败');
+        if (item.type === 'response.completed') terminal = true;
+      }
+      if (pending.length > 1024 * 1024 || output.textContent.length > 2 * 1024 * 1024) throw new Error('输出超过便笺显示上限');
+    };
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        pending += decoder.decode(chunk.value, { stream: true }); consume();
+      }
+      pending += decoder.decode() + '\n\n'; consume();
+      if (!terminal) throw new Error('响应提前结束，未收到完成事件');
+      status.textContent = '已完成';
+    } finally { await reader.cancel().catch(() => {}); }
+  } catch (error) { status.textContent = controller.signal.aborted ? '已停止' : String(error.message || error); }
+  finally { controller = undefined; send.disabled = false; stop.disabled = true; }
+};
+</script></body></html>

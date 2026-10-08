@@ -960,7 +960,10 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 | POST | `/api/admin/plugins/artifacts/remove` | `sha256`，只能删除没有实例引用的制品 |
 | GET | `/api/admin/plugins/resource` | query `id, revision, path` |
 | POST | `/api/admin/plugins/invoke` | `id, revision, method, path, query, contentType, body` |
+| POST | `/api/admin/plugins/models/responses` | `id, revision, clientKeyId, body`；必须本人管理员会话与本人 Key |
 
 实例配置包括 `revision, name, artifactSha256, enabled, trustedProcess, configuration, secrets`。创建 revision 为 0；修改必须提交读取时的 revision。启用必须显式信任所选制品。secrets 是字段名到字符串或 null 的对象：省略保留，null 清除；响应仅含 configuredSecrets 字段名，不返回敏感值。
 
 资源与调用的 body 为 base64，响应 data 是 `{status, contentType, body}`；HTML 始终通过 JSON envelope 返回，由父页面注入隔离 iframe，不作为同源 HTML 直接响应。请求头和自定义响应头未开放。失效 revision 返回冲突；业务调用失败不自动重试，结果可能已经生效。能力与大小限制见 [插件支持矩阵](plugins.md)。
+
+插件模型入口的 `body` 是 JSON 对象（最大 8 MiB），返回普通 Responses JSON/SSE；不使用管理 envelope 包装成功响应。管理身份、归属或 revision 校验失败仍返回管理错误 envelope，进入 Responses 链路后的错误沿用数据面协议。模型调用不接受插件提供的 Authorization/Cookie，部署级管理 API Key 返回拒绝。插件与 Key 的运行时授权撤销会中断活动响应，已取得费用仍通过正常结算持久化。

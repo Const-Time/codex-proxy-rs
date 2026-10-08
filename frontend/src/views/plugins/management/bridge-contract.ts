@@ -15,6 +15,7 @@ export interface PluginFrameTheme {
 }
 
 export interface PluginBridgeInitial {
+  clientKeyId?: string
   target: string
   version: number
   channel: string

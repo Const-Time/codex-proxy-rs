@@ -460,7 +460,7 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
     get theme() { return currentTheme },
     request,
     callbackTicket,
-    models: Object.freeze({ responses: modelResponses }),
+    models: Object.freeze({ responses: modelResponses, clientKeyId: initial.clientKeyId ?? null }),
     resourceUrl(path: string) {
       const key = String(path)
       if (!Object.hasOwn(initial.resourceUrls, key))

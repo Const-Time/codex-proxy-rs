@@ -186,6 +186,13 @@ pub trait ExecutionSession: Send {
 }
 
 pub trait ExecutionService: Send + Sync {
+    /// Delegated plugin requests require live revocation support. Missing support fails closed at the caller.
+    fn client_access(
+        &self,
+        _client: &AuthenticatedClient,
+    ) -> Option<crate::runtime::ClientAccessGuard> {
+        None
+    }
     fn authenticate(
         &self,
         plaintext: &str,
@@ -886,6 +893,12 @@ impl ExecutionStore for TransientExecutionStore {
 }
 
 impl ExecutionService for DefaultExecutionService {
+    fn client_access(
+        &self,
+        client: &AuthenticatedClient,
+    ) -> Option<crate::runtime::ClientAccessGuard> {
+        self.snapshots.client_access(client.policy()).ok()
+    }
     fn authenticate(
         &self,
         plaintext: &str,

@@ -701,6 +701,11 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
 
 #[tokio::test]
 async fn model_billing_freezes_rates_and_charges_exactly_once() {
+    for endpoint in ["/v1/responses", "/api/admin/plugins/models/responses"] {
+        model_billing_for_endpoint(endpoint).await;
+    }
+}
+async fn model_billing_for_endpoint(endpoint: &str) {
     let Some(db) = TestDatabase::create("model_billing").await else {
         return;
     };
@@ -713,7 +718,7 @@ async fn model_billing_freezes_rates_and_charges_exactly_once() {
     .await
     .unwrap();
     let insert = "insert into model_requests(id, client_api_key_ref, user_id, config_revision, protocol, operation, endpoint, client_transport, requested_model_id, routing_scope, routing_group_refs, routing_group_names_snapshot, started_at, deadline_at, outcome, completed_at, cost_source, cost_amount, cost_currency)
-        values ($1, 'priced', 'budget-user', 1, 'openai', 'responses', '/v1/responses', 'http_sse', $2, 'groups', $3, '[\"priced\"]', now(), now() + interval '1 hour', 'failed', now(), 'calculated', 0.2, 'USD')";
+        values ($1, 'priced', 'budget-user', 1, 'openai', 'responses', $4, 'http_sse', $2, 'groups', $3, '[\"priced\"]', now(), now() + interval '1 hour', 'failed', now(), 'calculated', 0.2, 'USD')";
     for (id, model) in [
         ("req_rate-old", "test-model"),
         ("req_rate-default", "other-model"),
@@ -722,6 +727,7 @@ async fn model_billing_freezes_rates_and_charges_exactly_once() {
             .bind(id)
             .bind(model)
             .bind(vec![group_id("priced").to_string()])
+            .bind(endpoint)
             .execute(&db.pool)
             .await
             .unwrap();
@@ -737,6 +743,7 @@ async fn model_billing_freezes_rates_and_charges_exactly_once() {
         .bind("req_rate-new")
         .bind("test-model")
         .bind(vec![group_id("priced").to_string()])
+        .bind(endpoint)
         .execute(&db.pool)
         .await
         .unwrap();

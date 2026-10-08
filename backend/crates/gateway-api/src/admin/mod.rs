@@ -16,6 +16,7 @@ pub mod client_keys;
 mod extract;
 pub mod observability;
 pub mod operations;
+pub(crate) mod plugin_models;
 pub mod plugins;
 pub mod presenter;
 pub mod proxies;

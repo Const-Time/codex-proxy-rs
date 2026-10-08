@@ -112,6 +112,14 @@ impl PluginManager {
 }
 #[async_trait]
 impl PluginService for PluginManager {
+    fn access(&self, id: &str, revision: u64) -> Result<PluginAccess, AdminError> {
+        let process = self.process(id, revision)?;
+        let access = process.access();
+        if access.is_revoked() {
+            return Err(AdminError::conflict("插件版本已失效"));
+        }
+        Ok(access)
+    }
     async fn artifacts(&self) -> Result<Vec<PluginArtifactInfo>, AdminError> {
         self.store
             .artifacts()

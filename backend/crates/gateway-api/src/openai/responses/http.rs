@@ -47,6 +47,24 @@ pub(crate) async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    responses_at_endpoint(
+        State(state),
+        connect_info,
+        ingress_id,
+        headers,
+        body,
+        "/v1/responses",
+    )
+    .await
+}
+pub(crate) async fn responses_at_endpoint(
+    State(state): State<ApiState>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    ingress_id: Option<Extension<tower_http::request_id::RequestId>>,
+    headers: HeaderMap,
+    body: Bytes,
+    endpoint: &'static str,
+) -> Response {
     let service = state.openai();
     let client = match authenticate_client(service, &headers) {
         Ok(client) => client,
@@ -81,7 +99,7 @@ pub(crate) async fn responses(
             } else {
                 ClientTransport::HttpJson
             },
-            "/v1/responses",
+            endpoint,
         )
         .await
     {

@@ -209,6 +209,9 @@ impl PluginRuntime for PluginEngine {
             .map_err(|_| AdminError::internal("插件准备任务失败"))?
             .map_err(|_| AdminError::invalid("插件平台不兼容或制品不可执行"))?;
         let active = Arc::new(AtomicBool::new(false));
+        let access = PluginAccess::default();
+        let failed_access = access.clone();
+        let ended_access = access.clone();
         let callbacks = Arc::new(crate::callbacks::Callbacks::new(
             self.store.clone(),
             record,
@@ -233,7 +236,10 @@ impl PluginRuntime for PluginEngine {
                 RpcLimits::default(),
                 &self.processes,
                 callbacks,
-                crate::rpc::RpcSessionLifecycle::new(|_| {}, || {}),
+                crate::rpc::RpcSessionLifecycle::new(
+                    move |_| failed_access.revoke(),
+                    move || ended_access.revoke(),
+                ),
             )
             .await
             .map_err(|_| AdminError::unavailable("插件进程启动或协议握手失败"))?,
@@ -314,6 +320,7 @@ impl PluginRuntime for PluginEngine {
         }
         Ok(Arc::new(LivePlugin {
             session,
+            access,
             package: prepared,
             active,
             management,
@@ -321,6 +328,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    access: PluginAccess,
     session: Arc<RpcSession>,
     package: Arc<PreparedPackage>,
     active: Arc<AtomicBool>,
@@ -328,6 +336,9 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    fn access(&self) -> PluginAccess {
+        self.access.clone()
+    }
     fn status(&self) -> &'static str {
         if self.active.load(Ordering::Acquire)
             && self.session.diagnostic() == crate::rpc::RpcSessionDiagnostic::Ready
@@ -368,10 +379,12 @@ impl PluginProcess for LivePlugin {
         self.active.store(true, Ordering::Release);
     }
     fn revoke(&self) {
+        self.access.revoke();
         self.active.store(false, Ordering::Release);
         self.session.quiesce();
     }
     async fn stop(&self) {
+        self.access.revoke();
         self.active.store(false, Ordering::Release);
         self.session.shutdown(Duration::from_secs(5)).await;
     }

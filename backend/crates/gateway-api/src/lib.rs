@@ -139,6 +139,7 @@ pub fn initialize(
         .route("/healthz", get(health::healthz))
         .merge(openai::router::router())
         .merge(admin::router::<ApiState>())
+        .merge(admin::plugin_models::router())
         .fallback_service(ServeDir::new(config.asset_directory).fallback(ServeFile::new(index)));
     if !config.cors_allowed_origins.is_empty() {
         let origins = config

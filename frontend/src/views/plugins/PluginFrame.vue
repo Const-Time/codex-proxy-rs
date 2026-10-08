@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import type { PluginInstance, PluginManagementPage } from '@/api/modules/plugins'
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { callPluginRoute } from '@/api/modules/plugins'
+import { callPluginModel, callPluginRoute } from '@/api/modules/plugins'
 import { PLUGIN_MANAGEMENT_BRIDGE, PLUGIN_MANAGEMENT_BRIDGE_VERSION } from './management/bridge-contract'
 import { assemblePluginManagementPage, readPluginFrameTheme } from './management/frame'
+import { PluginModelBridge } from './management/models'
 
 const props = defineProps<{
+  clientKeyId: string
   plugin: PluginInstance
   page: PluginManagementPage
 }>()
@@ -18,7 +20,10 @@ let channel = ''
 let session = ''
 let inFlight = 0
 let lastId = 0
+let models: PluginModelBridge | undefined
 function dispose() {
+  models?.dispose()
+  models = undefined
   controller.abort()
   source.value = ''
 }
@@ -31,8 +36,14 @@ async function load() {
   lastId = 0
   inFlight = 0
   failure.value = ''
+  const currentChannel = channel
+  const currentSession = session
+  models = new PluginModelBridge(props.clientKeyId, (input, signal) => callPluginModel({ instanceId: props.plugin.id, revision: props.plugin.revision }, input, signal), (packet) => {
+    if (!current.signal.aborted)
+      frame.value?.contentWindow?.postMessage({ target: PLUGIN_MANAGEMENT_BRIDGE, version: PLUGIN_MANAGEMENT_BRIDGE_VERSION, channel: currentChannel, session: currentSession, ...packet }, '*')
+  })
   try {
-    const result = await assemblePluginManagementPage({ ...props.plugin, target: { instanceId: props.plugin.id, revision: props.plugin.revision } }, props.page, channel, session, location.origin, readPluginFrameTheme(), 600, current.signal)
+    const result = await assemblePluginManagementPage({ ...props.plugin, target: { instanceId: props.plugin.id, revision: props.plugin.revision } }, props.page, channel, session, location.origin, readPluginFrameTheme(), 600, current.signal, props.clientKeyId)
     if (!current.signal.aborted)
       source.value = result.srcdoc
   }
@@ -45,10 +56,24 @@ async function receive(event: MessageEvent) {
   const message = event.data
   if (event.source !== frame.value?.contentWindow || event.origin !== 'null' || !message || typeof message !== 'object'
     || message.target !== PLUGIN_MANAGEMENT_BRIDGE || message.version !== PLUGIN_MANAGEMENT_BRIDGE_VERSION
-    || message.channel !== channel || message.session !== session || !Number.isSafeInteger(message.id) || message.id <= lastId) {
+    || message.channel !== channel || message.session !== session || !Number.isSafeInteger(message.id) || message.id < 1) {
     return
   }
+  if (message.type === 'models-pull') {
+    await models?.pull(message.id, message.payload?.pullId)
+    return
+  }
+  if (message.type === 'models-cancel') {
+    models?.cancel(message.id)
+    return
+  }
+  if (message.id <= lastId)
+    return
   lastId = message.id
+  if (message.type === 'models-request') {
+    await models?.request(message.id, message.payload)
+    return
+  }
   const current = controller
   const currentChannel = channel
   const currentSession = session
@@ -86,7 +111,7 @@ async function receive(event: MessageEvent) {
       inFlight--
   }
 }
-watch(() => [props.plugin.id, props.plugin.revision, props.page.id], load, { immediate: true })
+watch(() => [props.plugin.id, props.plugin.revision, props.page.id, props.clientKeyId], load, { immediate: true })
 window.addEventListener('message', receive)
 onBeforeUnmount(() => {
   dispose()

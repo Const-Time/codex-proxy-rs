@@ -96,3 +96,18 @@ pub struct PluginResource {
     pub path: String,
     pub content_type: String,
 }
+
+/// Shared generation revocation; the API keeps this lease for the complete model response lifetime.
+#[derive(Clone, Default)]
+pub struct PluginAccess(gateway_core::lifecycle::CancellationToken);
+impl PluginAccess {
+    pub fn revoke(&self) {
+        self.0.cancel();
+    }
+    pub fn is_revoked(&self) -> bool {
+        self.0.is_cancelled()
+    }
+    pub async fn revoked(&self) {
+        self.0.cancelled().await;
+    }
+}

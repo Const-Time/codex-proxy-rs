@@ -83,6 +83,7 @@ mod client_keys;
 mod errors;
 mod observability;
 mod operations;
+mod plugin_models;
 mod plugins;
 mod proxies;
 mod settings;
@@ -92,6 +93,7 @@ mod wire;
 
 pub(super) struct AdminTestFixture {
     pub services: AdminServices,
+    pub client_keys: Arc<MemoryClientKeyStore>,
     pub auth: Arc<MemoryAuthStore>,
     pub settings: Arc<MemorySettingsStore>,
     pub usage_records: Arc<Mutex<Vec<UsageListRecord>>>,
@@ -113,7 +115,7 @@ impl AdminTestFixture {
         let api_key = Arc::new(Mutex::new(None));
         let auth = Arc::new(MemoryAuthStore::new(api_key.clone()));
         let settings = Arc::new(MemorySettingsStore::new(api_key));
-        let client_keys = Arc::new(MemoryClientKeyStore);
+        let client_keys = Arc::new(MemoryClientKeyStore::default());
         let account_groups = Arc::new(MemoryAccountGroupStore::new());
         let usage_records = Arc::new(Mutex::new(Vec::new()));
         let usage_detail = Arc::new(Mutex::new(None));
@@ -169,6 +171,7 @@ impl AdminTestFixture {
         .expect("initialize test admin services");
         Self {
             services: bundle.services(),
+            client_keys,
             auth,
             settings,
             usage_records,
@@ -567,7 +570,11 @@ impl SettingsStore for MemorySettingsStore {
     }
 }
 
-pub(super) struct MemoryClientKeyStore;
+#[derive(Default)]
+pub(super) struct MemoryClientKeyStore {
+    owners: Mutex<BTreeMap<String, String>>,
+    reveals: Mutex<Vec<(String, String)>>,
+}
 
 pub(super) const PRIMARY_GROUP_ID: &str = "grp_11111111111111111111111111111111";
 pub(super) const SECONDARY_GROUP_ID: &str = "grp_22222222222222222222222222222222";
@@ -833,9 +840,22 @@ impl ClientKeyStore for MemoryClientKeyStore {
 
     async fn reveal_client_key(
         &self,
-        _owner: &str,
+        owner: &str,
         id: &ClientApiKeyId,
     ) -> AdminStoreResult<Option<ClientKeySecret>> {
+        self.reveals
+            .lock()
+            .unwrap()
+            .push((owner.to_owned(), id.as_str().to_owned()));
+        if self
+            .owners
+            .lock()
+            .unwrap()
+            .get(id.as_str())
+            .is_some_and(|actual| actual != owner)
+        {
+            return Ok(None);
+        }
         let now = Utc::now();
         Ok(Some(ClientKeySecret::new(
             ClientKeyRecord {

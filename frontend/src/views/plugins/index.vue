@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { PluginArtifact, PluginInstance, PluginManagementPage } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
+import { getApiKeys } from '@/api/modules/api-keys'
 import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -19,6 +20,15 @@ const failure = ref('')
 const editing = ref<PluginInstance>()
 const editOpen = ref(false)
 const name = ref('')
+const inferenceKey = ref('')
+const keySearch = ref('')
+const keyOptions = ref<{ label: string, value: string }[]>([])
+async function searchKeys() {
+  await perform(async () => {
+    const result = await getApiKeys({ limit: 100, search: keySearch.value })
+    keyOptions.value = result.items.filter(key => key.enabled).map(key => ({ label: `${key.name} · ${key.prefix}`, value: key.id }))
+  })
+}
 const digest = ref('')
 const configuration = ref('{}')
 const secrets = ref<Record<string, string>>({})
@@ -28,6 +38,9 @@ const selected = ref<{
   plugin: PluginInstance
   page: PluginManagementPage
 }>()
+watch(() => [selected.value?.plugin.id, selected.value?.plugin.revision], () => {
+  inferenceKey.value = ''
+}, { flush: 'sync' })
 const removing = ref<PluginInstance>()
 const confirmDelete = ref(false)
 const removingArtifact = ref('')
@@ -201,8 +214,21 @@ onMounted(() => perform(async () => { }))
         </BaseButton>
       </div>
     </BaseCard>
-    <BaseCard v-if="selected" class="p-4">
-      <PluginFrame :key="`${selected.plugin.id}/${selected.plugin.revision}/${selected.page.id}`" :plugin="selected.plugin" :page="selected.page" />
+    <BaseCard v-if="selected" class="space-y-3 p-4">
+      <p class="text-sm text-cp-text-secondary">
+        推理使用本人 Key 的权限与额度，按现有倍率计费。更换 Key 或关闭页面会取消进行中的调用。
+      </p>
+      <div class="flex flex-wrap gap-3">
+        <BaseInput v-model="keySearch" aria-label="搜索本人推理 Key" placeholder="搜索本人 Key" class="max-w-xs" />
+        <BaseButton variant="secondary" :disabled="busy" @click="searchKeys">
+          查询 Key
+        </BaseButton>
+        <BaseSelect v-model="inferenceKey" aria-label="选择推理 Key" :options="keyOptions" placeholder="选择本人 Key 后允许推理" class="max-w-sm" />
+        <BaseButton variant="secondary" @click="selected = undefined; inferenceKey = ''">
+          关闭页面
+        </BaseButton>
+      </div>
+      <PluginFrame :key="`${selected.plugin.id}/${selected.plugin.revision}/${selected.page.id}`" :plugin="selected.plugin" :page="selected.page" :client-key-id="inferenceKey" />
     </BaseCard>
     <details v-if="artifacts.length" class="space-y-3">
       <summary>已上传制品（{{ artifacts.length }}）</summary>

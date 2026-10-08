@@ -26,6 +26,7 @@ async fn installs_runs_callbacks_upgrades_and_revokes_old_revision_without_leaki
         .update(None, update(&package.sha256, 0, true), &actor())
         .await
         .unwrap();
+    let old_access = manager.access(&installed.id, 1).unwrap();
     assert_eq!(installed.status, "ready");
     assert_eq!(installed.pages.len(), 1);
     assert!(
@@ -84,6 +85,7 @@ async fn installs_runs_callbacks_upgrades_and_revokes_old_revision_without_leaki
         .await
         .unwrap();
     assert_eq!(next.revision, 2);
+    assert!(old_access.is_revoked());
     assert!(
         manager
             .handle(&installed.id, 1, request("state"))
@@ -207,6 +209,7 @@ async fn one_crashed_plugin_does_not_break_another_instance() {
         .update(None, update(&artifact.sha256, 0, true), &actor())
         .await
         .unwrap();
+    let crashed_access = manager.access(&first.id, 1).unwrap();
     assert!(
         manager
             .handle(&first.id, 1, request("crash"))
@@ -230,6 +233,7 @@ async fn one_crashed_plugin_does_not_break_another_instance() {
             .status,
         "failed"
     );
+    assert!(crashed_access.is_revoked());
     manager.shutdown().await;
 }
 

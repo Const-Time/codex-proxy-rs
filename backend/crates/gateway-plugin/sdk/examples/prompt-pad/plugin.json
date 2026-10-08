@@ -1,0 +1,14 @@
+{
+  "manifestVersion": 2,
+  "name": "prompt-pad",
+  "displayName": "推理便笺",
+  "publisher": "cpr",
+  "version": "1.0.0",
+  "description": "使用本人选定的 Key 进行可取消的 Responses 推理",
+  "license": "Apache-2.0",
+  "engines": {"codex-proxy-rs": ">=3.11.0, <4.0.0"},
+  "main": "bin/plugin",
+  "runtime": "trustedProcess",
+  "contributes": {"management": {}},
+  "resources": {"web/index.html": "text/html"}
+}
