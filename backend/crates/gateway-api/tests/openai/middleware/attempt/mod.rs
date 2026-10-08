@@ -181,3 +181,34 @@ async fn attempt_raw_error_body_is_preserved_for_json_and_sse_clients() {
         f.manager.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn http_attempt_preserves_host_selected_upstream_transport() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    for use_websocket in [false, true] {
+        let f = Fixture::with_mounts(Mode::Rewrite, vec![PluginMiddlewareMount::Attempt]).await;
+        let response = f.app.clone().oneshot(Request::post("/v1/responses")
+            .header("authorization", "Bearer sk_middleware")
+            .header("content-type", "application/json")
+            .header("x-custom", "preserved")
+            .body(Body::from(json!({"model":"model-a","input":"original input","use_websocket":use_websocket}).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let output = bytes(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+        f.settled().await;
+        let operations = f.effects.operations.lock().unwrap();
+        let gateway_core::operation::Operation::Generate(generate) = &operations[0] else {
+            panic!()
+        };
+        assert_eq!(
+            generate.protocol_payload().context()["use_websocket"],
+            use_websocket
+        );
+    }
+}

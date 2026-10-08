@@ -6,6 +6,7 @@ mod headers;
 pub(super) mod raw;
 pub(super) mod request;
 mod root;
+pub(super) mod websocket;
 
 pub use attempt::raw_json_attempt_middleware;
 pub use delivery::deliver_middleware_response;
@@ -30,11 +31,17 @@ pub fn responses_attempt_middleware(
     mut context: gateway_core::engine::middleware::MiddlewareContext,
 ) -> std::sync::Arc<dyn gateway_core::engine::attempt_middleware::AttemptMiddleware> {
     context.mount = gateway_core::engine::middleware::MiddlewareMount::Attempt;
-    let streaming = context.transport == gateway_core::engine::execution::ClientTransport::HttpSse;
+    let format = match context.transport {
+        gateway_core::engine::execution::ClientTransport::WebSocket => WireFormat::WebSocket,
+        gateway_core::engine::execution::ClientTransport::HttpSse => {
+            WireFormat::Responses { streaming: true }
+        }
+        _ => WireFormat::Responses { streaming: false },
+    };
     std::sync::Arc::new(attempt::ResponsesAttempt {
         registry,
         context,
-        streaming,
+        format,
     })
 }
 
@@ -42,10 +49,14 @@ pub fn responses_attempt_middleware(
 pub(super) enum WireFormat {
     Responses { streaming: bool },
     RawJson,
+    WebSocket,
 }
 impl WireFormat {
     fn streaming(self) -> bool {
-        matches!(self, Self::Responses { streaming: true })
+        matches!(self, Self::Responses { streaming: true } | Self::WebSocket)
+    }
+    fn websocket(self) -> bool {
+        matches!(self, Self::WebSocket)
     }
     fn raw_json(self) -> bool {
         matches!(self, Self::RawJson)

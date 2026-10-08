@@ -116,6 +116,16 @@ mod worker_middleware {
         if mode == "reject" {
             return Err(PluginFault::new(ErrorCode::Rejected, "rejected by fixture"));
         }
+        if mode == "ws-short" {
+            return Ok(CallReply::stream(
+                json!({"response":null,"protocol":"openai","status":403,"header_mutations":[],"body":{"kind":"stream","framing":"json_document"}}),
+                vec![],
+                ResponseStream::from_chunks(vec![
+                    MiddlewareBodyFrame::new(br#"{"error":{"message":"blocked"}}"#.to_vec(), true)
+                        .encode(),
+                ]),
+            ));
+        }
         if mode == "short" {
             return Ok(CallReply::stream(
                 json!({"response":null,"protocol":"openai","status":403,"header_mutations":[],"body":{"kind":"stream","framing":"raw_bytes"}}),
@@ -211,7 +221,13 @@ mod worker_middleware {
         }
         if matches!(
             mode.as_str(),
-            "inspect" | "inspect-transformed" | "map" | "expand" | "drop-first"
+            "inspect"
+                | "inspect-transformed"
+                | "map"
+                | "expand"
+                | "drop-first"
+                | "ws-map"
+                | "ws-expand"
         ) {
             let mut first = true;
             response.body = response.body.with_facts()?.map_frames(move |mut frame| {
@@ -230,6 +246,21 @@ mod worker_middleware {
                     // Plugin-side facts can be changed without changing the host receipt.
                     facts.facts.clear();
                     facts.host = None;
+                }
+                if mode == "ws-map" && !frame.payload.is_empty() {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&frame.payload).unwrap();
+                    value["plugin"] = json!(true);
+                    frame.payload = serde_json::to_vec(&value).unwrap();
+                }
+                if mode == "ws-expand" && !frame.payload.is_empty() {
+                    return Ok(vec![
+                        MiddlewareBodyFrame::new(
+                            br#"{"type":"response.output_text.delta","delta":"prefix"}"#.to_vec(),
+                            false,
+                        ),
+                        frame,
+                    ]);
                 }
                 if mode == "map" {
                     frame.payload = br#"{"mapped":true}"#.to_vec();

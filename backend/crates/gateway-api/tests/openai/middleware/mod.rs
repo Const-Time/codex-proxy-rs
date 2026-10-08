@@ -4,6 +4,7 @@ mod delivery;
 mod fixture;
 mod raw;
 mod request;
+mod websocket;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -131,6 +132,8 @@ enum Rewrite {
     MissingTerminal,
     ExpandInvalidTerminal,
     Pass,
+    MessageJson,
+    MessageIdentity,
 }
 struct Rewriter {
     inner: Box<dyn MiddlewareBody>,
@@ -159,6 +162,15 @@ impl MiddlewareBody for Rewriter {
                 return Ok(Some(MiddlewareFrame::new(Bytes::from_static(b"event: response.output_text.delta\ndata: {\"delta\":\"must-not-leak\"}\n\n"), MiddlewareFraming::SseEvent, false).with_transformed(true)));
             }
             let bytes = match self.mode {
+                Rewrite::MessageJson | Rewrite::MessageIdentity if !bytes.is_empty() => {
+                    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    if matches!(self.mode, Rewrite::MessageIdentity) {
+                        value["response"]["id"] = json!("resp_forged");
+                    } else {
+                        value["plugin"] = json!(true);
+                    }
+                    Bytes::from(value.to_string())
+                }
                 Rewrite::Json => Bytes::from_static(br#"{"id":"resp_rewritten","output":[]}"#),
                 Rewrite::Invalid => Bytes::from_static(b"not a document"),
                 Rewrite::InvalidSecond if self.seen == 2 => Bytes::from_static(b"not an SSE event"),

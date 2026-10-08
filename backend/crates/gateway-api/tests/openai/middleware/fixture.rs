@@ -1,6 +1,8 @@
 // Real HTTP routing, PluginManager publication, Core admission and settlement.
 use super::*;
-use crate::openai::{EmptyWorkerHealth, IgnoredClientApiKeyUsage, TestLifecycle, snapshot};
+use crate::openai::{
+    EmptyWorkerHealth, IgnoredClientApiKeyUsage, TestLifecycle, snapshot_with_capabilities,
+};
 use async_trait::async_trait;
 use axum::{body::Body, http::Request};
 use futures::StreamExt;
@@ -96,6 +98,8 @@ pub(super) enum Mode {
     ShortCircuitRaw,
     ResponseRewrite,
     ExpandInvalid,
+    MessageRewrite,
+    MessageIdentity,
 }
 pub(super) struct Plugin {
     pub(super) access: PluginAccess,
@@ -159,6 +163,7 @@ impl PluginProcess for Plugin {
         request: MiddlewareRequest,
         next: MiddlewareNext,
     ) -> Result<MiddlewareResponse, MiddlewareError> {
+        let websocket = context.transport == ClientTransport::WebSocket;
         let attempt = context.mount == MiddlewareMount::Attempt;
         self.seen.lock().unwrap().push(context);
         *self.headers.lock().unwrap() = request.headers().iter().map(|h| h.name().into()).collect();
@@ -189,7 +194,7 @@ impl PluginProcess for Plugin {
         }
         body["input"] = json!("changed input");
         if matches!(self.mode, Mode::Transport) {
-            body["stream"] = json!(true);
+            body["stream"] = json!(!websocket);
         }
         for (name, value) in [
             ("authorization", "Bearer forged"),
@@ -231,6 +236,10 @@ impl PluginProcess for Plugin {
                 Rewrite::Invalid
             } else if matches!(self.mode, Mode::ResponseRewrite) {
                 Rewrite::Json
+            } else if matches!(self.mode, Mode::MessageRewrite) {
+                Rewrite::MessageJson
+            } else if matches!(self.mode, Mode::MessageIdentity) {
+                Rewrite::MessageIdentity
             } else if matches!(self.mode, Mode::ExpandInvalid) {
                 Rewrite::ExpandInvalidTerminal
             } else {
@@ -249,6 +258,10 @@ pub(super) struct Effects {
     pub(super) finalizations: Mutex<Vec<ModelRequestFinalization>>,
     pub(super) requests: Mutex<Vec<(String, String, String, SystemTime)>>,
     pub(super) raw_requests: Mutex<Vec<Operation>>,
+    pub(super) revoke_after_start: Mutex<Option<PluginAccess>>,
+    pub(super) operations: Mutex<Vec<Operation>>,
+    pub(super) interrupt: AtomicBool,
+    pub(super) state: Mutex<Option<gateway_core::operation::ProviderSessionState>>,
     pub(super) raw_response: Mutex<Option<Bytes>>,
 }
 impl ClientAdmissionPort for Effects {
@@ -374,6 +387,10 @@ impl Provider for Effects {
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.operations
+            .lock()
+            .unwrap()
+            .push(request.operation().clone());
         let Operation::Generate(generate) = request.operation() else {
             return self.raw_execute(request, context).await;
         };
@@ -413,16 +430,33 @@ impl Provider for Effects {
             ))],
             event("response.created").into_parts().1.unwrap(),
         );
-        let completed = ProviderEvent::canonical_with_wire(
+        let mut completed = ProviderEvent::canonical_with_wire(
             vec![
                 GatewayEvent::ProviderCost(ProviderReportedCost::from_usd_ticks(25).unwrap()),
                 GatewayEvent::Completed(ResponseMeta::new("resp_original", "model-b")),
             ],
             event("response.completed").into_parts().1.unwrap(),
         );
+        if let Some(state) = self.state.lock().unwrap().clone() {
+            completed.attach_session_update(state);
+        }
+        let active = if self.interrupt.load(Ordering::SeqCst) {
+            Some(
+                context
+                    .response_control()
+                    .unwrap()
+                    .activate("resp_original".into())
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         let wait = self.completion.lock().unwrap().clone();
         let stream =
             futures::stream::iter([Ok(created)]).chain(futures::stream::once(async move {
+                if let Some(active) = active {
+                    active.requested().await;
+                }
                 if let Some(wait) = wait {
                     wait.notified().await;
                 }
@@ -483,7 +517,18 @@ impl Fixture {
         let effects = Arc::new(Effects::default());
         let execution = Arc::new(
             DefaultExecutionService::new(
-                RuntimeSnapshotHandle::new(snapshot("sk_middleware", "openai")),
+                RuntimeSnapshotHandle::new(snapshot_with_capabilities(
+                    "sk_middleware",
+                    "openai",
+                    gateway_core::routing::ModelCapabilities::new(
+                        [gateway_core::operation::OperationKind::Generate].into(),
+                        Some(16000),
+                    )
+                    .with_feature(
+                        gateway_core::operation::Feature::NativeContinuation,
+                        gateway_core::routing::SupportLevel::Native,
+                    ),
+                )),
                 effects.clone(),
                 ProviderRegistry::new([effects.clone() as Arc<dyn Provider>]).unwrap(),
                 effects.clone(),
@@ -500,7 +545,10 @@ impl Fixture {
                 request_timeout_seconds: None,
                 request_id_header: "x-request-id".into(),
             },
-            execution,
+            Arc::new(PostStartExecution {
+                inner: execution,
+                effects: effects.clone(),
+            }),
             admin.services.with_plugins(manager.clone()),
             vec![],
             Arc::new(EmptyWorkerHealth),
@@ -622,5 +670,79 @@ impl Fixture {
             )
             .await
             .unwrap()
+    }
+}
+
+// Place revocation after Core has returned its live session, before API forwarding.
+struct PostStartExecution {
+    inner: Arc<DefaultExecutionService>,
+    effects: Arc<Effects>,
+}
+impl ExecutionService for PostStartExecution {
+    fn authenticate(
+        &self,
+        plaintext: &str,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        self.inner.authenticate(plaintext)
+    }
+    fn client_access(
+        &self,
+        client: &AuthenticatedClient,
+    ) -> Option<gateway_core::runtime::ClientAccessGuard> {
+        self.inner.client_access(client)
+    }
+    fn public_models(
+        &self,
+        client: &AuthenticatedClient,
+    ) -> Vec<gateway_core::routing::PublicModelId> {
+        self.inner.public_models(client)
+    }
+    fn contains_public_model(
+        &self,
+        client: &AuthenticatedClient,
+        model: &gateway_core::routing::PublicModelId,
+    ) -> bool {
+        self.inner.contains_public_model(client, model)
+    }
+    fn prepare_execution(
+        &self,
+        client: AuthenticatedClient,
+    ) -> Result<PreparedRootExecution, GatewayError> {
+        self.inner.prepare_execution(client)
+    }
+    fn start_prepared(
+        &self,
+        prepared: PreparedRootExecution,
+        request: PreparedExecutionRequest,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async move {
+            let started = self.inner.start_prepared(prepared, request).await?;
+            if let Some(access) = self.effects.revoke_after_start.lock().unwrap().take() {
+                access.revoke();
+            }
+            Ok(started)
+        })
+    }
+    fn start_prepared_provider_endpoint(
+        &self,
+        prepared: PreparedRootExecution,
+        provider: gateway_core::routing::ProviderKind,
+        operation: Operation,
+        metadata: ExecutionRequestMetadata,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        self.inner
+            .start_prepared_provider_endpoint(prepared, provider, operation, metadata)
+    }
+    fn start(
+        &self,
+        request: StartExecution,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        self.inner.start(request)
+    }
+    fn start_provider_endpoint(
+        &self,
+        request: StartProviderExecution,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        self.inner.start_provider_endpoint(request)
     }
 }

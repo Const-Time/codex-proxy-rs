@@ -227,15 +227,29 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
             expire_connection(&mut connection).await;
             break;
         }
-        let started = match service
-            .start_response(
-                client.clone(),
-                decoded,
-                ClientTransport::WebSocket,
-                "/v1/responses",
-            )
-            .await
-        {
+        let start = async {
+            if let Some(registry) = service.middleware_registry() {
+                crate::openai::middleware::websocket::start(
+                    &service,
+                    registry,
+                    client.clone(),
+                    decoded,
+                )
+                .await
+                .map(|(started, revocation)| (started, Some(revocation)))
+            } else {
+                service
+                    .start_response(
+                        client.clone(),
+                        decoded,
+                        ClientTransport::WebSocket,
+                        "/v1/responses",
+                    )
+                    .await
+                    .map(|started| (started, None))
+            }
+        };
+        let (started, middleware_revocation) = match start.await {
             Ok(started) => started,
             Err(error) => {
                 trace_rejected_request(
@@ -262,7 +276,7 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
             .trace()
             .capture("client.request.body", payload.as_bytes());
 
-        if forward_execution(&mut connection, started, &mut replay).await
+        if forward_execution(&mut connection, started, &mut replay, middleware_revocation).await
             == ForwardOutcome::Disconnect
         {
             break;

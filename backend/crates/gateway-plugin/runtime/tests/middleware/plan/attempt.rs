@@ -447,3 +447,91 @@ async fn sdk_raw_endpoint_attempt_bridge_preserves_bytes_and_receipts() {
     }
     install.manager.shutdown().await;
 }
+
+#[tokio::test]
+async fn sdk_websocket_attempt_preserves_json_framing_identity_and_original_receipts() {
+    let install = Installation::new().await;
+    let mut command = install.command(0, 0);
+    command.middleware.as_mut().unwrap().mounts = vec![PluginMiddlewareMount::Attempt];
+    install
+        .manager
+        .update(None, command, &actor())
+        .await
+        .unwrap();
+    for mode in ["pass", "inspect", "ws-map", "ws-expand", "ws-short"] {
+        let mut context = context(true);
+        context.transport = ClientTransport::WebSocket;
+        let decoded = gateway_api::openai::responses::decode_response_create_with_context(
+            &json!({"type":"response.create","model":"gpt-5","input":"original","mode":mode})
+                .to_string(),
+            &Default::default(),
+        )
+        .unwrap();
+        let operation = decoded.into_parts().0;
+        let execution = Arc::new(Execution::default());
+        let adapter = gateway_api::openai::middleware::responses_attempt_middleware(
+            Arc::new(install.manager.middleware_registry().unwrap()),
+            context.clone(),
+        );
+        let coordinator = AttemptCoordinator::new(GatewayEngine::new(
+            execution.clone(),
+            ProviderRegistry::new([execution.clone() as Arc<dyn Provider>]).unwrap(),
+        ))
+        .with_attempt_middleware(Some(adapter));
+        let mut row = request_row(&context, &operation);
+        row.client_transport = "websocket".into();
+        let mut session = coordinator
+            .start(
+                row,
+                operation.clone(),
+                routing(&operation),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(5), session.collect_uncommitted())
+            .await
+            .expect("WS SDK/Core rendezvous must not deadlock")
+            .unwrap();
+        let values: Vec<_> = events
+            .iter()
+            .filter_map(|event| event.wire_event())
+            .map(|wire| {
+                assert!(wire.has_json_data());
+                assert!(wire.raw_sse_frame().is_none());
+                wire.data().clone()
+            })
+            .collect();
+        let short = mode == "ws-short";
+        if short {
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0]["type"], "error");
+            assert_eq!(values[0]["status"], 403);
+            assert_eq!(values[0]["error"]["message"], "blocked");
+        } else {
+            assert_eq!(values.last().unwrap()["type"], "response.completed");
+            assert_eq!(values.last().unwrap()["response"]["id"], "resp_original");
+            if mode == "ws-map" {
+                assert!(values.iter().all(|v| v["plugin"] == true));
+            }
+            if mode == "ws-expand" {
+                assert_eq!(values.iter().filter(|v| v["delta"] == "prefix").count(), 2);
+            }
+        }
+        let status = if short { 403 } else { 200 };
+        assert_eq!(
+            session.middleware_response_head().unwrap().status_code,
+            status
+        );
+        session.commit_downstream(Some(status)).await.unwrap();
+        assert_eq!(
+            session.budget_charge().amount_usd.scaled(),
+            if short { 0 } else { 123 }
+        );
+        assert_eq!(execution.calls.load(Ordering::SeqCst), usize::from(!short));
+        assert_eq!(execution.rows.lock().unwrap().len(), 1);
+    }
+    install.manager.shutdown().await;
+}

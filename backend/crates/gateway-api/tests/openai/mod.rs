@@ -159,15 +159,22 @@ impl ClientApiKeyUsageSink for IgnoredClientApiKeyUsage {
 }
 
 fn snapshot(plaintext: &str, provider_name: &str) -> RuntimeSnapshot {
+    let capabilities = ModelCapabilities::new(
+        BTreeSet::from([gateway_core::operation::OperationKind::Generate]),
+        Some(16_000),
+    );
+    snapshot_with_capabilities(plaintext, provider_name, capabilities)
+}
+fn snapshot_with_capabilities(
+    plaintext: &str,
+    provider_name: &str,
+    capabilities: ModelCapabilities,
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new(provider_name).expect("provider");
     let account_directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
         ProviderAccountId::new("acct_api_test").expect("account ID"),
         RuntimeAccount::new(provider.clone(), BTreeSet::new()),
     )])));
-    let capabilities = ModelCapabilities::new(
-        BTreeSet::from([gateway_core::operation::OperationKind::Generate]),
-        Some(16_000),
-    );
     RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
         AccountSelectionPolicy::new(
