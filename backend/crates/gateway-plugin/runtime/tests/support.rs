@@ -195,7 +195,7 @@ fn build_archive(version: &str, extra_capability: bool, authentication: bool) ->
     }
     if extra_capability {
         contributes["middleware"] =
-            json!({"id":"local.fixture.middleware","version":4,"stages":["request"]});
+            json!({"id":"local.fixture.middleware","version":4,"stages":["request","attempt"]});
     }
     let manifest = json!({"manifestVersion":2,"name":"fixture","displayName":"Fixture","publisher":"local","version":version,"description":"Lifecycle fixture","license":"MIT",
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,

@@ -212,6 +212,17 @@ impl RpcSession {
             .get(&capability)
             .map(|declaration| declaration.version)
     }
+
+    pub(crate) fn capability_supports_stage(
+        &self,
+        capability: gateway_plugin_sdk::Capability,
+        stage: Stage,
+    ) -> bool {
+        self.handshake
+            .contributes
+            .get(&capability)
+            .is_some_and(|d| d.stages.contains(&stage))
+    }
 }
 
 pub(crate) struct Shared {

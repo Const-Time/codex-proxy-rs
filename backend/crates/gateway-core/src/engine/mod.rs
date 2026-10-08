@@ -6,6 +6,7 @@ pub mod connection;
 pub mod continuation;
 pub mod coordinator;
 pub mod execution;
+pub mod middleware;
 mod observation;
 pub mod probe;
 pub mod provider;

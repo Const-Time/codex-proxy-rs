@@ -221,6 +221,8 @@ const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("codex-proxy-plugin-cli", "gateway-plugin-sdk"),
     ("gateway-plugin-runtime", "gateway-plugin-sdk"),
     ("gateway-plugin-runtime", "gateway-admin"),
+    ("gateway-plugin-runtime", "gateway-core"),
+    ("gateway-plugin-runtime", "gateway-protocol"),
     ("gateway-plugin-runtime", "gateway-host"),
     ("codex-proxy-rs", "gateway-api"),
     ("codex-proxy-rs", "gateway-core"),

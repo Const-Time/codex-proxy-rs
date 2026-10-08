@@ -1787,11 +1787,14 @@ name = "gateway-plugin-runtime"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "flate2",
  "futures",
  "gateway-admin",
+ "gateway-core",
  "gateway-host",
  "gateway-plugin-sdk",
+ "gateway-protocol",
  "hex",
  "image",
  "jsonschema",
