@@ -669,16 +669,35 @@ async fn recover_standard_costs(
         {
             continue;
         }
-        let standard = breakdown
-            .standard_amount
-            .amount
-            .checked_mul(&fact.billing_multiplier)
+        let selected = selected_group_cost(&fact, &breakdown)
+            .ok_or_else(|| AdminError::internal("分项费用超出金额范围"))?;
+        let standard_raw = decimal(&breakdown.standard_amount.amount)
+            .ok_or_else(|| AdminError::internal("费用无效"))?
+            .scaled();
+        let standard_selected = if fact.billing_multiplier_scope.is_all() {
+            standard_raw
+        } else if let Some(components) = &breakdown.standard_components {
+            use gateway_core::metering::CostComponent::{CacheRead, CacheWrite, Input, Output};
+            components
+                .iter()
+                .zip([Input, Output, CacheRead, CacheWrite])
+                .try_fold(0u128, |sum, (amount, component)| {
+                    if fact.billing_multiplier_scope.includes(component) {
+                        sum.checked_add(decimal(&amount.amount)?.scaled())
+                    } else {
+                        Some(sum)
+                    }
+                })
+                .ok_or_else(|| AdminError::internal("标准费用无效"))?
+        } else if breakdown.standard_amount == breakdown.total_amount {
+            selected
+        } else {
+            continue;
+        };
+        let standard = adjusted_group_amount(&fact, standard_raw, standard_selected)
             .ok_or_else(|| AdminError::internal("模型倍率计费超出金额范围"))?;
         scenarios.standard.add(fact.bucket_start, standard)?;
-        if let Some(no_cache_cost) = no_cache_cost(&fact, &breakdown) {
-            let billed = no_cache_cost
-                .checked_mul(&fact.billing_multiplier)
-                .ok_or_else(|| AdminError::internal("模型倍率计费超出金额范围"))?;
+        if let Some(billed) = no_cache_cost(&fact, &breakdown) {
             scenarios.no_cache.add(fact.bucket_start, billed)?;
         }
     }
@@ -689,6 +708,19 @@ fn no_cache_cost(
     fact: &UsageCalculatedBillingFact,
     breakdown: &crate::model::observability::CalculatedBillingBreakdown,
 ) -> Option<DecimalAmount> {
+    use gateway_core::metering::CostComponent;
+    let scope = &fact.billing_multiplier_scope;
+    let mut selected = selected_group_cost(fact, breakdown)?;
+    if !scope.is_all() {
+        if scope.includes(CostComponent::CacheRead) {
+            selected =
+                selected.checked_sub(decimal(&breakdown.cache_read_amount.amount)?.scaled())?;
+        }
+        if scope.includes(CostComponent::CacheWrite) {
+            selected =
+                selected.checked_sub(decimal(&breakdown.cache_write_amount.amount)?.scaled())?;
+        }
+    }
     let image = breakdown.image.as_ref();
     let input_tokens = fact
         .input_tokens?
@@ -707,6 +739,9 @@ fn no_cache_cost(
         .scaled()
         .checked_mul(u128::from(cached_tokens.saturating_add(cache_write_tokens)))?
         .checked_div(1_000_000)?;
+    if !scope.is_all() && scope.includes(CostComponent::Input) {
+        selected = selected.checked_add(replaced_input_amount)?;
+    }
     let mut total = decimal(&breakdown.total_amount.amount)?
         .scaled()
         .checked_sub(decimal(&breakdown.cache_read_amount.amount)?.scaled())?
@@ -717,16 +752,70 @@ fn no_cache_cost(
             .scaled()
             .checked_mul(u128::from(image.cached_tokens))?
             .checked_div(1_000_000)?;
+        if !scope.is_all() {
+            if scope.includes(CostComponent::CacheRead) {
+                selected =
+                    selected.checked_sub(decimal(&image.cache_read_amount.amount)?.scaled())?;
+            }
+            if scope.includes(CostComponent::Input) {
+                selected = selected.checked_add(image_no_cache)?;
+            }
+        }
         total = total
             .checked_sub(decimal(&image.cache_read_amount.amount)?.scaled())?
             .checked_add(image_no_cache)?;
     }
-    DecimalAmount::from_str(
-        &gateway_core::metering::Decimal::from_scaled(total)
-            .ok()?
-            .canonical(),
-    )
-    .ok()
+    adjusted_group_amount(fact, total, selected)
+}
+
+fn selected_group_cost(
+    fact: &UsageCalculatedBillingFact,
+    b: &crate::model::observability::CalculatedBillingBreakdown,
+) -> Option<u128> {
+    use gateway_core::metering::CostComponent::{CacheRead, CacheWrite, Input, Output};
+    let scope = &fact.billing_multiplier_scope;
+    let mut selected = 0u128;
+    for (component, amount) in [
+        (Input, &b.input_amount),
+        (Output, &b.output_amount),
+        (CacheRead, &b.cache_read_amount),
+        (CacheWrite, &b.cache_write_amount),
+    ] {
+        if scope.includes(component) {
+            selected = selected.checked_add(decimal(&amount.amount)?.scaled())?;
+        }
+    }
+    if let Some(image) = &b.image {
+        if scope.includes(Input) {
+            selected = selected.checked_add(decimal(&image.input_amount.amount)?.scaled())?;
+        }
+        if scope.includes(CacheRead) {
+            selected = selected.checked_add(decimal(&image.cache_read_amount.amount)?.scaled())?;
+        }
+    }
+    Some(selected)
+}
+
+fn adjusted_group_amount(
+    fact: &UsageCalculatedBillingFact,
+    total: u128,
+    selected: u128,
+) -> Option<DecimalAmount> {
+    let selected = if fact.billing_multiplier_scope.is_all() {
+        total
+    } else {
+        selected
+    };
+    let adjusted = selected
+        .checked_mul(decimal(&fact.billing_multiplier)?.scaled())?
+        .checked_add(5_000_000_000)?
+        .checked_div(10_000_000_000)?;
+    let ticks = total.checked_sub(selected)?.checked_add(adjusted)?;
+    gateway_core::metering::Decimal::from_scaled(ticks)
+        .ok()?
+        .canonical()
+        .parse()
+        .ok()
 }
 
 fn amount_difference(

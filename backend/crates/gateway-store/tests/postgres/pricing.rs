@@ -100,7 +100,10 @@ async fn concurrent_price_edits_preserve_other_models_and_sync_preserves_manual_
     for _ in 0..2 {
         settings
             .update_pricing(
-                update("model-a", PricingChange::Multiplier(20000)),
+                update(
+                    "model-a",
+                    PricingChange::Multiplier(20000, Default::default()),
+                ),
                 &context,
             )
             .await

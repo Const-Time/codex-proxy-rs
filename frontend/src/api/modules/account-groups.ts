@@ -1,3 +1,4 @@
+import type { MultiplierScope } from './pricing'
 import request from '../request'
 
 export interface AccountGroupRef {
@@ -24,7 +25,7 @@ export interface AccountGroupUsage {
 }
 
 export interface AccountGroup extends AccountGroupRef {
-  modelMultipliers: Record<string, string>
+  modelMultipliers: Record<string, string | { multiplier: string, scope: MultiplierScope }>
   dailyLimitUsd: string
   weeklyLimitUsd: string
   description: string | null
@@ -66,7 +67,7 @@ interface AccountGroupListParams {
 }
 
 interface AccountGroupCreateParam {
-  modelMultipliers: Record<string, string>
+  modelMultipliers: Record<string, string | { multiplier: string, scope: MultiplierScope }>
   dailyLimitUsd: string
   weeklyLimitUsd: string
   name: string
@@ -75,7 +76,7 @@ interface AccountGroupCreateParam {
 }
 
 interface AccountGroupUpdateParam {
-  modelMultipliers: Record<string, string>
+  modelMultipliers: Record<string, string | { multiplier: string, scope: MultiplierScope }>
   dailyLimitUsd: string
   weeklyLimitUsd: string
   id: string

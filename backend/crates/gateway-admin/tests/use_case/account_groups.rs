@@ -283,3 +283,27 @@ fn unused() -> AdminStoreError {
         "unused test operation",
     )
 }
+
+#[test]
+fn model_billing_rules_validate_legacy_and_scoped_values() {
+    use gateway_admin::model::account_groups::{GroupModelMultiplier, valid_model_multipliers};
+    for value in [
+        serde_json::json!({"model":"2.5"}),
+        serde_json::json!({"model":{"multiplier":"2.5","scope":{"components":["input","cacheRead"]}}}),
+    ] {
+        let rules: std::collections::BTreeMap<String, GroupModelMultiplier> =
+            serde_json::from_value(value.clone()).unwrap();
+        assert!(valid_model_multipliers(&rules));
+        assert_eq!(serde_json::to_value(rules).unwrap(), value);
+    }
+    for value in [
+        serde_json::json!({"model":{"multiplier":"2","scope":{"components":[]}}}),
+        serde_json::json!({"model":{"multiplier":"1001","scope":"all"}}),
+        serde_json::json!({"model":{"multiplier":"2","scope":{"components":["unknown"]}}}),
+    ] {
+        let rules = serde_json::from_value::<
+            std::collections::BTreeMap<String, GroupModelMultiplier>,
+        >(value);
+        assert!(rules.is_err() || !valid_model_multipliers(&rules.unwrap()));
+    }
+}

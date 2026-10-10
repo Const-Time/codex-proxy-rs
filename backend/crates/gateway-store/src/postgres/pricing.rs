@@ -27,6 +27,7 @@ pub(crate) fn encode_billing_snapshot(
         "cacheRead": b.cache_read_amount().amount().canonical(),
         "cacheWrite": b.cache_write_amount().amount().canonical(),
         "standard": b.standard_amount().amount().canonical(),
+        "standardComponents": b.standard_components().map(|items| items.map(|m| m.amount().canonical())),
         "total": b.total_amount().amount().canonical(),
         "inputPrice": b.input_price_per_million().amount().canonical(),
         "outputPrice": b.output_price_per_million().amount().canonical(),
@@ -36,6 +37,7 @@ pub(crate) fn encode_billing_snapshot(
         "serviceTier": b.service_tier(),
         "multiplierPercent": b.multiplier_percent(),
         "customMultiplierBps": b.custom_multiplier_bps(),
+        "customMultiplierScope": b.custom_multiplier_scope(),
     })
 }
 
@@ -78,6 +80,22 @@ pub(crate) fn decode_billing_snapshot(
         output_amount: amount("output")?,
         cache_read_amount: amount("cacheRead")?,
         cache_write_amount: amount("cacheWrite")?,
+        standard_components: match value.get("standardComponents").filter(|v| !v.is_null()) {
+            Some(v) => {
+                let values = v.as_array()?;
+                let components = values
+                    .iter()
+                    .map(|v| {
+                        Some(CurrencyCost {
+                            currency: currency.to_owned(),
+                            amount: v.as_str()?.parse().ok()?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(components.try_into().ok()?)
+            }
+            None => None,
+        },
         standard_amount: amount("standard")?,
         total_amount: amount("total")?,
         input_price_per_million: amount("inputPrice")?,
@@ -86,6 +104,12 @@ pub(crate) fn decode_billing_snapshot(
         cache_write_price_per_million: amount("cacheWritePrice")?,
         service_tier: value.get("serviceTier")?.as_str().map(str::to_owned),
         multiplier_percent: value.get("multiplierPercent")?.as_u64()?.try_into().ok()?,
+        custom_multiplier_scope: value
+            .get("customMultiplierScope")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .ok()?
+            .unwrap_or_default(),
         custom_multiplier_bps: value
             .get("customMultiplierBps")?
             .as_u64()?
@@ -187,6 +211,7 @@ impl PgControlPlaneRepository {
                     continue;
                 }
                 prices.multiplier_bps = 10_000;
+                prices.multiplier_scope = Default::default();
                 match target.entry(model) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(prices);
@@ -195,6 +220,7 @@ impl PgControlPlaneRepository {
                         if command.automatic.is_none() || policy.update_existing {
                             entry.get_mut().bands.extend(prices.bands);
                             entry.get_mut().multiplier_bps = 10_000;
+                            entry.get_mut().multiplier_scope = Default::default();
                         }
                     }
                 }
@@ -267,14 +293,14 @@ impl PgControlPlaneRepository {
                 PricingChange::Replace(value) => {
                     models.insert(model, value.clone());
                 }
-                PricingChange::Multiplier(bps) => {
-                    models
-                        .entry(model)
-                        .or_insert_with(|| ModelPriceOverride {
-                            multiplier_bps: 10_000,
-                            bands: Default::default(),
-                        })
-                        .multiplier_bps = *bps;
+                PricingChange::Multiplier(bps, scope) => {
+                    let entry = models.entry(model).or_insert_with(|| ModelPriceOverride {
+                        multiplier_bps: 10_000,
+                        multiplier_scope: Default::default(),
+                        bands: Default::default(),
+                    });
+                    entry.multiplier_bps = *bps;
+                    entry.multiplier_scope = scope.clone();
                 }
             }
         }

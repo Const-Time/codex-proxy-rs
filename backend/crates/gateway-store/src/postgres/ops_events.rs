@@ -26,6 +26,7 @@ impl OpsEventLevel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsEvent {
+    pub entry_context: Option<serde_json::Value>,
     pub id: String,
     pub model_request_id: Option<String>,
     pub attempt_index: Option<u32>,
@@ -50,6 +51,13 @@ pub struct OpsEvent {
 
 impl OpsEvent {
     pub fn validate(&self) -> StoreResult<()> {
+        if self
+            .entry_context
+            .as_ref()
+            .is_some_and(|value| self.component != "request_entry" || !value.is_object())
+        {
+            return Err(invalid("entry context requires a request_entry object"));
+        }
         require_nonempty(ENTITY, "id", &self.id)?;
         require_nonempty(ENTITY, "component", &self.component)?;
         require_nonempty(ENTITY, "operation", &self.operation)?;
@@ -120,13 +128,15 @@ impl OpsEventRepository for PgOpsEventRepository {
                provider_account_authentication_kind_snapshot,
                failure_kind, upstream_send_state, status_code, provider_error_code, retry_after_ms,
                upstream_request_id, latency_ms, message, raw_upstream_error,
-               created_at
+               created_at, entry_context
              ) values (
                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                (select name from provider_accounts where id = $8),
                (select email from provider_accounts where id = $8),
                (select authentication_kind from provider_accounts where id = $8),
-               $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+               $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+               case when $21::jsonb is null then null else $21::jsonb || jsonb_build_object(
+                   'userId', (select owner_user_id from client_api_keys where id = $21::jsonb ->> 'clientKeyId')) end
              )",
         )
         .bind(event.id)
@@ -167,6 +177,7 @@ impl OpsEventRepository for PgOpsEventRepository {
         .bind(event.message)
         .bind(event.raw_upstream_error)
         .bind(event.created_at)
+        .bind(event.entry_context)
         .execute(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("append ops event"))?;

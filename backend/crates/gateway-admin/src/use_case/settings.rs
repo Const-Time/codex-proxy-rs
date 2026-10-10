@@ -233,10 +233,14 @@ impl SettingsService for DefaultSettingsService {
                     return Err(AdminError::invalid("未知模型必须提供标准档价格"));
                 }
             }
-            PricingChange::Multiplier(bps) if *bps > 1_000_000 => {
-                return Err(AdminError::invalid("倍率必须在 0 至 100 倍之间"));
+            PricingChange::Multiplier(bps, scope)
+                if *bps > 1_000_000 || scope.validate().is_err() =>
+            {
+                return Err(AdminError::invalid(
+                    "倍率须为 0 至 100 倍，且至少选择一个费用项",
+                ));
             }
-            PricingChange::Multiplier(_)
+            PricingChange::Multiplier(_, _)
                 if command.models.iter().any(|model| {
                     !defaults.is_some_and(|p| p.contains_key(model))
                         && !catalog

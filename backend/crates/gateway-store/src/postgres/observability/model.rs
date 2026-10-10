@@ -353,6 +353,7 @@ pub struct RequestMetricPoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalculatedUsageBillingFact {
     pub billing_multiplier: DecimalAmount,
+    pub billing_multiplier_scope: gateway_core::metering::MultiplierScope,
     pub billing_snapshot_json: Option<serde_json::Value>,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
@@ -527,6 +528,7 @@ pub struct UsageListRecord {
     pub total_tokens: Option<u64>,
     pub raw_cost_amount: Option<DecimalAmount>,
     pub billing_multiplier: DecimalAmount,
+    pub billing_multiplier_scope: gateway_core::metering::MultiplierScope,
     pub cost_source: String,
     pub cost_amount: Option<DecimalAmount>,
     pub cost_currency: Option<String>,
@@ -601,6 +603,7 @@ pub struct UsageRecord {
     pub total_tokens: Option<u64>,
     pub raw_cost_amount: Option<DecimalAmount>,
     pub billing_multiplier: DecimalAmount,
+    pub billing_multiplier_scope: gateway_core::metering::MultiplierScope,
     pub cost_source: String,
     pub cost_amount: Option<DecimalAmount>,
     pub cost_currency: Option<String>,

@@ -221,14 +221,14 @@ async fn migration_moves_only_system_probes_and_keeps_business_facts_unchanged()
           'http_sse',now(),now()+interval '30 seconds','failed',now(),'all')"
     ).execute(&db.pool).await.unwrap();
     let before: serde_json::Value = sqlx::query_scalar(
-        "select to_jsonb(m) - 'billing_snapshot_json' from model_requests m where id='business'",
+        "select to_jsonb(m) - 'billing_snapshot_json' - 'billing_multiplier_scope' from model_requests m where id='business'",
     )
     .fetch_one(&db.pool)
     .await
     .unwrap();
     super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
     let after: serde_json::Value = sqlx::query_scalar(
-        "select to_jsonb(m) - 'billing_snapshot_json' from model_requests m where id='business'",
+        "select to_jsonb(m) - 'billing_snapshot_json' - 'billing_multiplier_scope' from model_requests m where id='business'",
     )
     .fetch_one(&db.pool)
     .await

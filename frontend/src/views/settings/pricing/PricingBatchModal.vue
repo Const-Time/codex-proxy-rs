@@ -1,21 +1,26 @@
 <script setup lang="ts">
 import type { PricingRow } from './model'
-import type { PricingChange } from '@/api'
+import type { MultiplierScope, PricingChange } from '@/api'
 import { computed, ref, watch } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
+import MultiplierScopeSelect from '@/components/MultiplierScopeSelect.vue'
+import { scopeLabel, validScope } from '@/utils/multiplierScope'
 import { multiplierText, parseMultiplier } from './model'
 
 defineProps<{ rows: PricingRow[], reset: boolean, saving: boolean }>()
 defineEmits<{ confirm: [change: PricingChange] }>()
 const open = defineModel<boolean>({ required: true })
 const multiplier = ref('1')
+const scope = ref<MultiplierScope>('all')
 const bps = computed(() => parseMultiplier(multiplier.value))
 watch(open, (value) => {
-  if (value)
+  if (value) {
     multiplier.value = '1'
+    scope.value = 'all'
+  }
 })
 </script>
 
@@ -32,10 +37,11 @@ watch(open, (value) => {
           </template>
         </BaseInput>
       </BaseFormItem>
+      <MultiplierScopeSelect v-if="!reset" v-model="scope" :disabled="saving" />
       <ul class="m-0 max-h-64 list-none overflow-auto rounded-cp bg-cp-fill-quaternary p-3 text-cp-sm">
         <li v-for="row in rows" :key="row.model" class="flex items-start justify-between gap-3 py-2">
           <span class="min-w-0 break-all font-mono">{{ row.model }}</span>
-          <span class="shrink-0 font-mono text-cp-text-secondary">{{ multiplierText(row.effective.multiplierBps) }} → {{ reset ? '1×' : bps === undefined ? '—' : multiplierText(bps) }}</span>
+          <span class="shrink-0 font-mono text-cp-text-secondary">{{ multiplierText(row.effective.multiplierBps) }}（{{ scopeLabel(row.effective.multiplierScope) }}） → {{ reset ? '1×' : bps === undefined ? '—' : multiplierText(bps) }}</span>
         </li>
       </ul>
       <p v-if="!reset && bps === undefined" role="alert" class="m-0 text-cp-sm text-cp-error">
@@ -46,7 +52,7 @@ watch(open, (value) => {
       <BaseButton :disabled="saving" @click="open = false">
         取消
       </BaseButton>
-      <BaseButton variant="primary" :loading="saving" :disabled="!rows.length || (!reset && bps === undefined)" @click="$emit('confirm', reset ? { action: 'reset' } : { action: 'multiplier', multiplierBps: bps! })">
+      <BaseButton variant="primary" :loading="saving" :disabled="!rows.length || (!reset && (bps === undefined || !validScope(scope)))" @click="$emit('confirm', reset ? { action: 'reset' } : { action: 'multiplier', multiplierBps: bps!, multiplierScope: scope })">
         {{ reset ? '确认清除覆盖' : '确认设置倍率' }}
       </BaseButton>
     </template>

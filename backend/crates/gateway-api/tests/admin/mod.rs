@@ -489,14 +489,16 @@ impl SettingsStore for MemorySettingsStore {
                 PricingChange::Replace(p) => {
                     models.insert(model, p.clone());
                 }
-                PricingChange::Multiplier(bps) => {
-                    models
-                        .entry(model)
-                        .or_insert_with(|| gateway_core::metering::ModelPriceOverride {
+                PricingChange::Multiplier(bps, scope) => {
+                    let entry = models.entry(model).or_insert_with(|| {
+                        gateway_core::metering::ModelPriceOverride {
                             multiplier_bps: 10_000,
+                            multiplier_scope: Default::default(),
                             bands: Default::default(),
-                        })
-                        .multiplier_bps = *bps;
+                        }
+                    });
+                    entry.multiplier_bps = *bps;
+                    entry.multiplier_scope = scope.clone();
                 }
             }
         }

@@ -11,7 +11,7 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import { useOpsErrorsTable } from '../composables/useOpsErrorsTable'
 import { opsErrorColumns } from '../constants'
-import { opsErrorSummary } from '../utils/opsErrorPresentation'
+import { entryRejected, opsErrorSummary } from '../utils/opsErrorPresentation'
 import { usageUserAgent } from '../utils/records'
 import { usageUserDisplay } from '../utils/user'
 import OpsErrorDetailModal from './OpsErrorDetailModal.vue'
@@ -54,7 +54,7 @@ function accountText(record: OpsError) {
     || record.accountName
     || record.metadata.accountLabel
     || record.accountId
-    || '未记录'
+    || (entryRejected(record) ? '未调用上游' : '未记录')
 }
 
 function modelText(record: OpsError) {
@@ -119,7 +119,9 @@ function upstreamSendStateText(value: string | null | undefined) {
           </div>
         </template>
         <template #provider="{ row }">
+          <span v-if="entryRejected(row)" class="text-cp-xs text-cp-text-secondary">未调用上游</span>
           <ProviderIconGroup
+            v-else
             :provider="String(row.provider || '')"
             :authentication-kind="row.authenticationKind"
           />

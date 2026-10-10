@@ -3,6 +3,7 @@ import type { PricingRow } from './model'
 import type { BaseTableColumn } from '@/components/base/BaseTable/columns'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseTable from '@/components/base/BaseTable/index.vue'
+import { scopeLabel } from '@/utils/multiplierScope'
 import { effectivePrice, multiplierText, sourceLabels } from './model'
 import PricingUnit from './PricingUnit.vue'
 
@@ -49,23 +50,26 @@ function summaryBand(row: PricingRow) {
           </span>
         </div>
         <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-cp-xs text-cp-text-secondary sm:hidden">
-          <span>输入 <span class="font-mono">{{ effectivePrice(row.effective.bands[summaryBand(row)]?.input, row.effective.multiplierBps) }}</span></span>
-          <span>输出 <span class="font-mono">{{ effectivePrice(row.effective.bands[summaryBand(row)]?.output, row.effective.multiplierBps) }}</span></span>
+          <span>输入 <span class="font-mono">{{ effectivePrice(row.effective.bands[summaryBand(row)]?.input, row.effective.multiplierBps, row.effective.multiplierScope, 'input') }}</span></span>
+          <span>输出 <span class="font-mono">{{ effectivePrice(row.effective.bands[summaryBand(row)]?.output, row.effective.multiplierBps, row.effective.multiplierScope, 'output') }}</span></span>
         </div>
       </div>
     </template>
     <template v-for="field in (['input', 'output', 'cacheRead'] as const)" :key="field" #[field]="{ row }">
       <div class="py-1 font-mono tabular-nums">
-        <div v-if="effectivePrice(row.base.bands[summaryBand(row)]?.[field]) !== effectivePrice(row.effective.bands[summaryBand(row)]?.[field], row.effective.multiplierBps)" class="text-cp-xs text-cp-text-tertiary line-through">
+        <div v-if="effectivePrice(row.base.bands[summaryBand(row)]?.[field]) !== effectivePrice(row.effective.bands[summaryBand(row)]?.[field], row.effective.multiplierBps, row.effective.multiplierScope, field)" class="text-cp-xs text-cp-text-tertiary line-through">
           {{ effectivePrice(row.base.bands[summaryBand(row)]?.[field]) }}
         </div>
         <div :class="row.source === 'custom' ? 'text-cp-primary-text' : 'text-cp-text'">
-          {{ effectivePrice(row.effective.bands[summaryBand(row)]?.[field], row.effective.multiplierBps) }}
+          {{ effectivePrice(row.effective.bands[summaryBand(row)]?.[field], row.effective.multiplierBps, row.effective.multiplierScope, field) }}
         </div>
       </div>
     </template>
     <template #multiplier="{ row }">
       <span class="font-mono tabular-nums">{{ multiplierText(row.effective.multiplierBps) }}</span>
+      <div class="text-cp-xs text-cp-text-secondary">
+        {{ scopeLabel(row.effective.multiplierScope) }}
+      </div>
     </template>
     <template #actions="{ row }">
       <button

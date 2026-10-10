@@ -306,6 +306,8 @@ enum PricingChangeRequest {
     Multiplier {
         #[serde(rename = "multiplierBps")]
         multiplier_bps: u32,
+        #[serde(default, rename = "multiplierScope")]
+        multiplier_scope: gateway_core::metering::MultiplierScope,
     },
     Reset {},
 }
@@ -403,9 +405,10 @@ where
     use gateway_admin::model::pricing::{PricingChange, UpdatePricing};
     let change = match request.change {
         PricingChangeRequest::Replace { pricing } => PricingChange::Replace(pricing),
-        PricingChangeRequest::Multiplier { multiplier_bps } => {
-            PricingChange::Multiplier(multiplier_bps)
-        }
+        PricingChangeRequest::Multiplier {
+            multiplier_bps,
+            multiplier_scope,
+        } => PricingChange::Multiplier(multiplier_bps, multiplier_scope),
         PricingChangeRequest::Reset {} => PricingChange::Reset,
     };
     state

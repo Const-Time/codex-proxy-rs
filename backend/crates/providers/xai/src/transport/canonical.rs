@@ -243,7 +243,18 @@ pub fn grok_billing_breakdown_with_override(
         Some(tier.to_owned()),
         multiplier_percent,
     )
-    .with_custom_multiplier(custom.map_or(10_000, |p| p.multiplier_bps))
+    .with_standard_components([
+        usd_money(u128::from(standard_input_tokens).checked_mul(standard.input_ticks)?)?,
+        usd_money(u128::from(output_tokens).checked_mul(standard.output_ticks)?)?,
+        usd_money(u128::from(cached_tokens).checked_mul(standard.cached_input_ticks)?)?,
+        usd_money(u128::from(cache_write_tokens).checked_mul(standard_write.unwrap_or_default())?)?,
+    ])
+    .with_custom_multiplier(
+        custom.map_or(10_000, |p| p.multiplier_bps),
+        custom
+            .map(|p| p.multiplier_scope.clone())
+            .unwrap_or_default(),
+    )
 }
 
 fn usd_money(ticks: u128) -> Option<Money> {
@@ -1089,6 +1100,7 @@ pub(crate) fn pricing_catalog() -> gateway_admin::model::pricing::ProviderPricin
                     (*model).to_owned(),
                     ModelPriceOverride {
                         multiplier_bps: 10_000,
+                        multiplier_scope: Default::default(),
                         bands,
                     },
                 )

@@ -6,9 +6,11 @@ use std::str::FromStr;
 use crate::validation::MeteringError;
 
 mod pricing;
+mod scope;
 pub use pricing::{
     ModelPriceOverride, PricingOverrides, TokenPrice, TokenPriceOverride, merge_pricing,
 };
+pub use scope::{CostComponent, MultiplierScope};
 
 const DECIMAL_SCALE: u128 = 10_000_000_000;
 const MAX_SCALED_DECIMAL: u128 = 99_999_999_999_999_999_999;
@@ -327,6 +329,8 @@ pub struct CalculatedCostBreakdown {
     service_tier: Option<String>,
     multiplier_percent: u32,
     custom_multiplier_bps: u32,
+    custom_multiplier_scope: MultiplierScope,
+    standard_components: Option<[Money; 4]>,
 }
 
 /// 图像输入是总输入的子集，单独保留其价格，不能伪装成文本平均单价。
@@ -416,6 +420,8 @@ impl CalculatedCostBreakdown {
             service_tier,
             multiplier_percent,
             custom_multiplier_bps: 10_000,
+            custom_multiplier_scope: MultiplierScope::All,
+            standard_components: None,
         }
     }
 
@@ -503,13 +509,31 @@ impl CalculatedCostBreakdown {
         self.custom_multiplier_bps
     }
 
+    #[must_use]
+    pub const fn custom_multiplier_scope(&self) -> &MultiplierScope {
+        &self.custom_multiplier_scope
+    }
+
+    #[must_use]
+    pub fn with_standard_components(mut self, amounts: [Money; 4]) -> Self {
+        self.standard_components = Some(amounts);
+        self
+    }
+    #[must_use]
+    pub const fn standard_components(&self) -> Option<&[Money; 4]> {
+        self.standard_components.as_ref()
+    }
+
     /// 统一调整金额和有效单价，保留服务档位倍率的独立含义。
     #[must_use]
-    pub fn with_custom_multiplier(mut self, bps: u32) -> Option<Self> {
-        if bps > 1_000_000 {
+    pub fn with_custom_multiplier(mut self, bps: u32, scope: MultiplierScope) -> Option<Self> {
+        if bps > 1_000_000 || scope.validate().is_err() {
             return None;
         }
-        let scale = |money: Money| {
+        let scale = |money: Money, selected: bool| {
+            if !selected {
+                return Some(money);
+            }
             let ticks = money
                 .amount()
                 .scaled()
@@ -523,6 +547,31 @@ impl CalculatedCostBreakdown {
         };
         let previous_total = self.total_amount;
         let same_standard = self.standard_amount == previous_total;
+        if self.standard_components.is_none() && same_standard {
+            let sum = |a: Money, b: Option<Money>| -> Option<Money> {
+                Some(Money::new(
+                    Decimal::from_scaled(
+                        a.amount()
+                            .scaled()
+                            .checked_add(b.map_or(0, |v| v.amount().scaled()))?,
+                    )
+                    .ok()?,
+                    a.currency(),
+                ))
+            };
+            self.standard_components = Some([
+                sum(
+                    self.input_amount,
+                    self.image.as_ref().map(|i| i.input_amount),
+                )?,
+                self.output_amount,
+                sum(
+                    self.cache_read_amount,
+                    self.image.as_ref().map(|i| i.cache_read_amount),
+                )?,
+                self.cache_write_amount,
+            ]);
+        }
         let mut token_total = self
             .input_amount
             .amount()
@@ -534,21 +583,70 @@ impl CalculatedCostBreakdown {
             token_total = token_total
                 .checked_add(image.input_amount.amount().scaled())?
                 .checked_add(image.cache_read_amount.amount().scaled())?;
-            image.input_amount = scale(image.input_amount)?;
-            image.cache_read_amount = scale(image.cache_read_amount)?;
-            image.input_price_per_million = scale(image.input_price_per_million)?;
-            image.cache_read_price_per_million = scale(image.cache_read_price_per_million)?;
+            image.input_amount = scale(image.input_amount, scope.includes(CostComponent::Input))?;
+            image.cache_read_amount = scale(
+                image.cache_read_amount,
+                scope.includes(CostComponent::CacheRead),
+            )?;
+            image.input_price_per_million = scale(
+                image.input_price_per_million,
+                scope.includes(CostComponent::Input),
+            )?;
+            image.cache_read_price_per_million = scale(
+                image.cache_read_price_per_million,
+                scope.includes(CostComponent::CacheRead),
+            )?;
         }
         let other = Money::new(
             Decimal::from_scaled(previous_total.amount().scaled().checked_sub(token_total)?)
                 .ok()?,
             previous_total.currency(),
         );
-        self.input_amount = scale(self.input_amount)?;
-        self.output_amount = scale(self.output_amount)?;
-        self.cache_read_amount = scale(self.cache_read_amount)?;
-        self.cache_write_amount = scale(self.cache_write_amount)?;
-        self.standard_amount = scale(self.standard_amount)?;
+        self.input_amount = scale(self.input_amount, scope.includes(CostComponent::Input))?;
+        self.output_amount = scale(self.output_amount, scope.includes(CostComponent::Output))?;
+        self.cache_read_amount = scale(
+            self.cache_read_amount,
+            scope.includes(CostComponent::CacheRead),
+        )?;
+        self.cache_write_amount = scale(
+            self.cache_write_amount,
+            scope.includes(CostComponent::CacheWrite),
+        )?;
+        if let Some(components) = &mut self.standard_components {
+            let original_sum = components.iter().try_fold(0u128, |sum, amount| {
+                sum.checked_add(amount.amount().scaled())
+            })?;
+            let other = Money::new(
+                Decimal::from_scaled(
+                    self.standard_amount
+                        .amount()
+                        .scaled()
+                        .checked_sub(original_sum)?,
+                )
+                .ok()?,
+                self.standard_amount.currency(),
+            );
+            for (amount, component) in components.iter_mut().zip([
+                CostComponent::Input,
+                CostComponent::Output,
+                CostComponent::CacheRead,
+                CostComponent::CacheWrite,
+            ]) {
+                *amount = scale(*amount, scope.includes(component))?;
+            }
+            let total = components.iter().try_fold(
+                scale(other, scope.is_all())?.amount().scaled(),
+                |sum, amount| sum.checked_add(amount.amount().scaled()),
+            )?;
+            self.standard_amount = Money::new(
+                Decimal::from_scaled(total).ok()?,
+                self.standard_amount.currency(),
+            );
+        } else if scope.is_all() {
+            self.standard_amount = scale(self.standard_amount, true)?;
+        } else {
+            return None;
+        }
         // 各费用项独立四舍五入后求和，防止明细合计与账本金额相差一个 tick。
         let mut total = self
             .input_amount
@@ -557,7 +655,7 @@ impl CalculatedCostBreakdown {
             .checked_add(self.output_amount.amount().scaled())?
             .checked_add(self.cache_read_amount.amount().scaled())?
             .checked_add(self.cache_write_amount.amount().scaled())?
-            .checked_add(scale(other)?.amount().scaled())?;
+            .checked_add(scale(other, scope.is_all())?.amount().scaled())?;
         if let Some(image) = &self.image {
             total = total
                 .checked_add(image.input_amount.amount().scaled())?
@@ -568,11 +666,24 @@ impl CalculatedCostBreakdown {
         if same_standard {
             self.standard_amount = self.total_amount;
         }
-        self.input_price_per_million = scale(self.input_price_per_million)?;
-        self.output_price_per_million = scale(self.output_price_per_million)?;
-        self.cache_read_price_per_million = scale(self.cache_read_price_per_million)?;
-        self.cache_write_price_per_million = scale(self.cache_write_price_per_million)?;
+        self.input_price_per_million = scale(
+            self.input_price_per_million,
+            scope.includes(CostComponent::Input),
+        )?;
+        self.output_price_per_million = scale(
+            self.output_price_per_million,
+            scope.includes(CostComponent::Output),
+        )?;
+        self.cache_read_price_per_million = scale(
+            self.cache_read_price_per_million,
+            scope.includes(CostComponent::CacheRead),
+        )?;
+        self.cache_write_price_per_million = scale(
+            self.cache_write_price_per_million,
+            scope.includes(CostComponent::CacheWrite),
+        )?;
         self.custom_multiplier_bps = bps;
+        self.custom_multiplier_scope = scope;
         Some(self)
     }
 }

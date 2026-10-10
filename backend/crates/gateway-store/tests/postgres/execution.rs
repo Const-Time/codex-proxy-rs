@@ -461,7 +461,12 @@ async fn billing_snapshot_survives_later_price_changes_and_usage_detail_reads() 
         Some("default".to_owned()),
         100,
     )
-    .with_custom_multiplier(12500)
+    .with_custom_multiplier(
+        12500,
+        gateway_core::metering::MultiplierScope::Components(
+            [gateway_core::metering::CostComponent::CacheRead].into(),
+        ),
+    )
     .unwrap();
     let mut finalization = successful_core_finalization("req_billing_snapshot");
     finalization.cost = billing.calculated_cost().into_estimate();
@@ -481,7 +486,12 @@ async fn billing_snapshot_survives_later_price_changes_and_usage_detail_reads() 
         panic!("persisted billing breakdown must be restored without provider recalculation");
     };
     assert_eq!(saved.custom_multiplier_bps, 12500);
-    assert_eq!(saved.total_amount.amount, "0.00075".parse().unwrap());
+    assert_eq!(saved.total_amount.amount, "0.000675".parse().unwrap());
+    assert_eq!(
+        saved.custom_multiplier_scope,
+        *billing.custom_multiplier_scope()
+    );
+    assert!(saved.standard_components.is_some());
     sqlx::query("update runtime_settings set pricing_overrides_json = $1 where id = 1")
         .bind(json!({"openai":{"gpt-5.4":{"multiplierBps":90000,"bands":{}}}}))
         .execute(&database.pool)
@@ -1272,9 +1282,21 @@ async fn entry_rejection_is_observed_without_creating_a_model_request() {
     let Some(database) = TestDatabase::create("entry_rejection").await else {
         return;
     };
+    sqlx::query("insert into client_api_keys(id,name,key,owner_user_id,created_at,updated_at) values('key_entry_rejected','entry-test','sk_' || repeat('a',43),'test-owner',now(),now())").execute(&database.pool).await.unwrap();
     let store = PgExecutionStore::new(database.pool.clone());
     store
         .record_entry_rejection(gateway_core::engine::EntryRejection {
+            metadata: gateway_core::engine::execution::ExecutionRequestMetadata {
+                protocol: "openai".into(),
+                endpoint: "/v1/responses".into(),
+                transport: gateway_core::engine::execution::ClientTransport::HttpSse,
+                stream: true,
+                client_ip: Some("127.0.0.1".parse().unwrap()),
+                user_agent: Some("fixture-agent".into()),
+                previous_response_id: None,
+            },
+            requested_model: Some(gateway_core::routing::PublicModelId::new("test-model").unwrap()),
+            routing_group_refs: vec!["test-group".into()],
             request_id: ModelRequestId::new("req_entry_rejected").unwrap(),
             client_key_id: gateway_core::policy::ClientApiKeyId::new("key_entry_rejected").unwrap(),
             error: GatewayError::new(GatewayErrorKind::RateLimited, "request exceeds user limits"),
@@ -1290,13 +1312,98 @@ async fn entry_rejection_is_observed_without_creating_a_model_request() {
     assert!(request_id.is_none());
     assert_eq!(component, "request_entry");
     assert_eq!(kind, GatewayErrorKind::RateLimited.as_str());
-    let message: serde_json::Value = serde_json::from_str(&message).unwrap();
-    assert_eq!(message["requestId"], "req_entry_rejected");
-    assert_eq!(message["clientKeyId"], "key_entry_rejected");
+    assert_eq!(message, "request exceeds user limits");
+    let context: serde_json::Value = sqlx::query_scalar("select entry_context from ops_events")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(context["requestId"], "req_entry_rejected");
+    assert_eq!(context["clientKeyId"], "key_entry_rejected");
+    assert_eq!(context["requestedModel"], "test-model");
+    assert_eq!(context["clientStatusCode"], 429);
     let count: i64 = sqlx::query_scalar("select count(*) from model_requests")
         .fetch_one(&database.pool)
         .await
         .unwrap();
     assert_eq!(count, 0);
+    assert_eq!(context["userId"], "test-owner");
+    // Deleting a key cannot erase attribution or leak this event to another user.
+    sqlx::query("delete from client_api_keys where id='key_entry_rejected'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    for (user, expected) in [("test-owner", 1), ("another-user", 0)] {
+        let page = ObservabilityRepository::list_ops_errors(
+            &observability_repository(&database.pool),
+            gateway_store::postgres::OpsErrorQuery {
+                range: ObservabilityRange::new(
+                    Utc::now() - Duration::minutes(1),
+                    Utc::now() + Duration::minutes(1),
+                )
+                .unwrap(),
+                filter: gateway_store::postgres::OpsErrorFilter {
+                    user_id: Some(user.into()),
+                    client_api_key_ref: Some("key_entry_rejected".into()),
+                    request_id: Some("req_entry_rejected".into()),
+                    group_id: Some("test-group".into()),
+                    model: Some("test-model".into()),
+                    client_transport: Some("http_sse".into()),
+                    status_code: Some(429),
+                    ..Default::default()
+                },
+                current_page: 1,
+                page_size: ObservabilityPageSize::new(10).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.total, expected);
+        assert_eq!(page.items.len() as u64, expected);
+        if let Some(error) = page.items.first() {
+            assert_eq!(error.requested_model_id.as_deref(), Some("test-model"));
+            assert_eq!(error.client_ip.as_deref(), Some("127.0.0.1"));
+            assert_eq!(error.client_status_code, Some(429));
+            assert_eq!(error.upstream_status_code, None);
+        }
+    }
     database.close().await;
+}
+
+#[tokio::test]
+async fn entry_migration_recovers_only_recorded_context_and_preserves_historical_billing() {
+    let Some(db) = TestDatabase::create_at_version("entry_migration", 26).await else {
+        return;
+    };
+    sqlx::query("insert into client_api_keys(id,name,key,owner_user_id,created_at,updated_at) values('legacy-key','legacy','sk_' || repeat('b',43),'test-owner',now(),now())").execute(&db.pool).await.unwrap();
+    for (id,message) in [("valid",json!({"requestId":"req_old","clientKeyId":"legacy-key","message":"request exceeds user limits"}).to_string()),("malformed","{not-json".into())] {
+        sqlx::query("insert into ops_events(id,component,operation,level,failure_kind,message,created_at) values($1,'request_entry','reject','warning','rate_limited',$2,now())").bind(id).bind(message).execute(&db.pool).await.unwrap();
+    }
+    seed_running_request(&db.pool, "req_old_bill")
+        .await
+        .unwrap();
+    sqlx::query("update model_requests set cost_source='calculated',cost_amount=1.25,cost_currency='USD',billing_multiplier=2.5 where id='req_old_bill'").execute(&db.pool).await.unwrap();
+    let before: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(mr) from model_requests mr where id='req_old_bill'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
+    let after: serde_json::Value = sqlx::query_scalar("select to_jsonb(mr) - 'billing_multiplier_scope' from model_requests mr where id='req_old_bill'").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(before, after);
+    let rows: Vec<(String, Option<serde_json::Value>, String, Option<String>)> = sqlx::query_as(
+        "select id,entry_context,message,upstream_send_state from ops_events order by id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows[0].0, "malformed");
+    assert!(rows[0].1.is_none());
+    assert_eq!(rows[0].2, "{not-json");
+    let context = rows[1].1.as_ref().unwrap();
+    assert_eq!(context["requestId"], "req_old");
+    assert_eq!(context["userId"], "test-owner");
+    assert!(context.get("requestedModel").is_none());
+    assert_eq!(rows[1].2, "request exceeds user limits");
+    assert_eq!(rows[1].3.as_deref(), Some("not_sent"));
+    db.close().await;
 }

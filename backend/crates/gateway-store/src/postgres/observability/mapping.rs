@@ -378,6 +378,7 @@ pub(crate) fn admin_calculated_usage_billing_fact(
 ) -> AdminStoreResult<admin_observability::UsageCalculatedBillingFact> {
     Ok(admin_observability::UsageCalculatedBillingFact {
         billing_multiplier: admin_decimal_amount(fact.billing_multiplier)?,
+        billing_multiplier_scope: fact.billing_multiplier_scope,
         breakdown: fact
             .billing_snapshot_json
             .as_ref()
@@ -428,6 +429,7 @@ fn restore_billing_snapshot(
 ) -> Option<admin_observability::UsageBilling> {
     if let Some(admin_observability::UsageBilling::GroupAdjusted {
         multiplier,
+        scope,
         original,
         total,
     }) = billing
@@ -435,6 +437,7 @@ fn restore_billing_snapshot(
         let original = restore_billing_snapshot(Some(*original), snapshot)?;
         return Some(admin_observability::UsageBilling::GroupAdjusted {
             multiplier,
+            scope,
             original: Box::new(original),
             total,
         });
@@ -471,18 +474,21 @@ pub(crate) fn admin_usage_list_record(
                 },
             };
             let multiplier = admin_decimal_amount(record.billing_multiplier.clone())?;
-            Some(if multiplier.as_str() == "1" {
-                original
-            } else {
-                admin_observability::UsageBilling::GroupAdjusted {
-                    multiplier,
-                    original: Box::new(original),
-                    total: admin_observability::CurrencyCost {
-                        currency: currency.clone(),
-                        amount: admin_decimal_amount(amount.clone())?,
-                    },
-                }
-            })
+            Some(
+                if multiplier.as_str() == "1" && record.billing_multiplier_scope.is_all() {
+                    original
+                } else {
+                    admin_observability::UsageBilling::GroupAdjusted {
+                        multiplier,
+                        scope: record.billing_multiplier_scope.clone(),
+                        original: Box::new(original),
+                        total: admin_observability::CurrencyCost {
+                            currency: currency.clone(),
+                            amount: admin_decimal_amount(amount.clone())?,
+                        },
+                    }
+                },
+            )
         }
         (None, None) => None,
         _ => {
@@ -567,18 +573,21 @@ pub(crate) fn admin_usage_record(
                 },
             };
             let multiplier = admin_decimal_amount(record.billing_multiplier.clone())?;
-            Some(if multiplier.as_str() == "1" {
-                original
-            } else {
-                admin_observability::UsageBilling::GroupAdjusted {
-                    multiplier,
-                    original: Box::new(original),
-                    total: admin_observability::CurrencyCost {
-                        currency: currency.clone(),
-                        amount: admin_decimal_amount(amount.clone())?,
-                    },
-                }
-            })
+            Some(
+                if multiplier.as_str() == "1" && record.billing_multiplier_scope.is_all() {
+                    original
+                } else {
+                    admin_observability::UsageBilling::GroupAdjusted {
+                        multiplier,
+                        scope: record.billing_multiplier_scope.clone(),
+                        original: Box::new(original),
+                        total: admin_observability::CurrencyCost {
+                            currency: currency.clone(),
+                            amount: admin_decimal_amount(amount.clone())?,
+                        },
+                    }
+                },
+            )
         }
         (None, None) => None,
         _ => {
@@ -882,6 +891,12 @@ pub(crate) fn usage_list_record_from_row(
         total_tokens: optional_unsigned(row, "total_tokens")?,
         raw_cost_amount: optional_decimal(row, "raw_cost_amount")?,
         billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
+        billing_multiplier_scope: row
+            .try_get::<sqlx::types::Json<gateway_core::metering::MultiplierScope>, _>(
+                "billing_multiplier_scope",
+            )
+            .map_err(|_| postgres_unavailable("decode billing scope"))?
+            .0,
         cost_source: get(row, "cost_source")?,
         cost_amount: optional_decimal(row, "cost_amount")?,
         cost_currency: get(row, "cost_currency")?,
@@ -964,6 +979,12 @@ pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<
         total_tokens: optional_unsigned(row, "total_tokens")?,
         raw_cost_amount: optional_decimal(row, "raw_cost_amount")?,
         billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
+        billing_multiplier_scope: row
+            .try_get::<sqlx::types::Json<gateway_core::metering::MultiplierScope>, _>(
+                "billing_multiplier_scope",
+            )
+            .map_err(|_| postgres_unavailable("decode billing scope"))?
+            .0,
         cost_source: get(row, "cost_source")?,
         cost_amount: optional_decimal(row, "cost_amount")?,
         cost_currency: get(row, "cost_currency")?,
@@ -1068,6 +1089,12 @@ pub(crate) fn calculated_usage_billing_fact_from_row(
 ) -> StoreResult<CalculatedUsageBillingFact> {
     Ok(CalculatedUsageBillingFact {
         billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
+        billing_multiplier_scope: row
+            .try_get::<sqlx::types::Json<gateway_core::metering::MultiplierScope>, _>(
+                "billing_multiplier_scope",
+            )
+            .map_err(|_| postgres_unavailable("decode billing scope"))?
+            .0,
         billing_snapshot_json: get(row, "billing_snapshot_json")?,
         bucket_start: get(row, "bucket_start")?,
         provider_kind: get(row, "provider_kind")?,

@@ -303,7 +303,7 @@ fn user_concurrency_and_rpm_are_shared_across_distinct_keys_and_release_both_sco
             block_on(first.session.detach_finalize());
         } else {
             assert!(
-                matches!(block_on(service.start(next("sk_b"))), Err(error) if error.kind() == GatewayErrorKind::RateLimited)
+                matches!(block_on(service.start(next("sk_b"))), Err(error) if error.kind() == GatewayErrorKind::RateLimited && error.client_error_code() == Some("user_concurrency_limited"))
             );
             let other = block_on(service.start(next("sk_other"))).unwrap();
             block_on(other.session.detach_finalize());
@@ -313,7 +313,7 @@ fn user_concurrency_and_rpm_are_shared_across_distinct_keys_and_release_both_sco
         }
         if limits.requests_per_minute > 0 {
             assert!(
-                matches!(block_on(service.start(next("sk_b"))), Err(error) if error.kind() == GatewayErrorKind::RateLimited)
+                matches!(block_on(service.start(next("sk_b"))), Err(error) if error.kind() == GatewayErrorKind::RateLimited && error.client_error_code() == Some("user_rate_limited"))
             );
             let other = block_on(service.start(next("sk_other"))).unwrap();
             block_on(other.session.detach_finalize());
@@ -1353,6 +1353,11 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
     let rejections = store.entry_rejections.lock().unwrap();
     assert_eq!(rejections.len(), 1);
     assert_eq!(rejections[0].error.kind(), GatewayErrorKind::ModelNotFound);
+    assert_eq!(
+        rejections[0].requested_model.as_ref().map(|m| m.as_str()),
+        Some(model)
+    );
+    assert_eq!(rejections[0].metadata.endpoint, "/v1/responses");
     assert!(store.requests.lock().unwrap().is_empty());
 }
 

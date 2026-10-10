@@ -274,11 +274,21 @@ impl ProviderAdmin for OpenAiAdminProvider {
         Ok(Some(CalculatedBillingBreakdown {
             image: None,
             custom_multiplier_bps: breakdown.custom_multiplier_bps(),
+            custom_multiplier_scope: breakdown.custom_multiplier_scope().clone(),
             input_amount: currency_cost(breakdown.input_amount())?,
             output_amount: currency_cost(breakdown.output_amount())?,
             cache_read_amount: currency_cost(breakdown.cache_read_amount())?,
             cache_write_amount: currency_cost(breakdown.cache_write_amount())?,
             standard_amount: currency_cost(breakdown.standard_amount())?,
+            standard_components: match breakdown.standard_components() {
+                Some([a, b, c, d]) => Some([
+                    currency_cost(*a)?,
+                    currency_cost(*b)?,
+                    currency_cost(*c)?,
+                    currency_cost(*d)?,
+                ]),
+                None => None,
+            },
             total_amount,
             input_price_per_million: currency_cost(breakdown.input_price_per_million())?,
             output_price_per_million: currency_cost(breakdown.output_price_per_million())?,

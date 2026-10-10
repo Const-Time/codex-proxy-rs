@@ -1071,6 +1071,7 @@ impl ExecutionStore for PgExecutionStore {
         super::OpsEventRepository::append_ops_event(
             &super::PgOpsEventRepository::new(self.pool.clone()),
             super::OpsEvent {
+                entry_context: None,
                 id: Uuid::now_v7().to_string(),
                 model_request_id: Some(failure.request_id.as_str().to_owned()),
                 attempt_index: Some(failure.attempt_index.get()),
@@ -1119,6 +1120,18 @@ impl ExecutionStore for PgExecutionStore {
         super::OpsEventRepository::append_ops_event(
             &super::PgOpsEventRepository::new(self.pool.clone()),
             super::OpsEvent {
+                entry_context: Some(serde_json::json!({
+                    "requestId": rejection.request_id.as_str(),
+                    "clientKeyId": rejection.client_key_id.as_str(),
+                    "requestedModel": rejection.requested_model.as_ref().map(|m| m.as_str()),
+                    "protocol": rejection.metadata.protocol,
+                    "endpoint": rejection.metadata.endpoint,
+                    "clientTransport": rejection.metadata.transport.as_str(),
+                    "clientIp": rejection.metadata.client_ip.map(|ip| ip.to_string()),
+                    "userAgent": rejection.metadata.user_agent,
+                    "routingGroupRefs": rejection.routing_group_refs,
+                    "clientStatusCode": (error.kind() == gateway_core::error::GatewayErrorKind::RateLimited).then_some(429),
+                })),
                 id: Uuid::now_v7().to_string(),
                 model_request_id: None,
                 attempt_index: None,
@@ -1129,8 +1142,8 @@ impl ExecutionStore for PgExecutionStore {
                 provider_account_id: None,
                 provider_account_ref: None,
                 upstream_model_id: None,
-                failure_kind: error.kind().as_str().to_owned(),
-                upstream_send_state: None,
+                failure_kind: error.client_error_code().unwrap_or(error.kind().as_str()).to_owned(),
+                upstream_send_state: (error.kind() == gateway_core::error::GatewayErrorKind::RateLimited).then(|| "not_sent".to_owned()),
                 raw_upstream_error: None,
                 status_code: None,
                 provider_error_code: error.client_error_code().map(str::to_owned),
@@ -1139,13 +1152,7 @@ impl ExecutionStore for PgExecutionStore {
                     .and_then(|delay| u64::try_from(delay.as_millis()).ok()),
                 upstream_request_id: None,
                 latency_ms: u64::try_from(rejection.latency.as_millis()).ok(),
-                // 入口尚无 model_requests 行，关联 ID 放在安全消息中，不能伪造外键。
-                message: serde_json::json!({
-                    "requestId": rejection.request_id.as_str(),
-                    "clientKeyId": rejection.client_key_id.as_str(),
-                    "message": error.client_message(),
-                })
-                .to_string(),
+                message: error.client_message().to_owned(),
                 created_at: Utc::now(),
             },
         )
@@ -1166,6 +1173,7 @@ impl ExecutionStore for PgExecutionStore {
         super::OpsEventRepository::append_ops_event(
             &super::PgOpsEventRepository::new(self.pool.clone()),
             super::OpsEvent {
+                entry_context: None,
                 id: Uuid::now_v7().to_string(),
                 model_request_id: None,
                 attempt_index: None,
