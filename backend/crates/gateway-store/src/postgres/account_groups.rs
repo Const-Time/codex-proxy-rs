@@ -729,7 +729,9 @@ fn group_record(row: &sqlx::postgres::PgRow) -> StoreResult<AccountGroupRecord> 
         .map_err(|_| invalid("invalid provider counts"))?;
     Ok(AccountGroupRecord {
         model_multipliers: row
-            .try_get::<sqlx::types::Json<BTreeMap<String, String>>, _>("model_multipliers")
+            .try_get::<sqlx::types::Json<
+                BTreeMap<String, gateway_admin::model::account_groups::GroupModelMultiplier>,
+            >, _>("model_multipliers")
             .map_err(|_| invalid("invalid model billing multipliers"))?
             .0,
         budget: gateway_core::engine::budget::ClientBudgetLimits {

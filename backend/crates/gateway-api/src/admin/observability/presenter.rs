@@ -215,11 +215,25 @@ pub(crate) fn billing_view(billing: Option<&domain::UsageBilling>) -> Option<Bil
     match billing? {
         domain::UsageBilling::GroupAdjusted {
             multiplier,
+            scope,
             original,
             total,
         } => {
             let mut view = billing_view(Some(original.as_ref()))?;
-            view.group_multiplier_display = format!("{}x", multiplier.as_str());
+            view.group_multiplier_display = if scope.is_all() {
+                format!("{}x", multiplier.as_str())
+            } else {
+                format!(
+                    "{}x · {}{}",
+                    multiplier.as_str(),
+                    scope.label(),
+                    if matches!(original.as_ref(), domain::UsageBilling::Total { .. }) {
+                        "（无分项明细，保留原费）"
+                    } else {
+                        ""
+                    }
+                )
+            };
             view.total_amount_display = format_money(total);
             Some(view)
         }
@@ -269,9 +283,10 @@ pub(crate) fn billing_view(billing: Option<&domain::UsageBilling>) -> Option<Bil
                 format!("{:.2}x", f64::from(value.multiplier_percent) / 100.0)
             } else {
                 format!(
-                    "档位 {:.2}x · 自定义 {:.4}x",
+                    "档位 {:.2}x · 自定义 {:.4}x · {}",
                     f64::from(value.multiplier_percent) / 100.0,
-                    f64::from(value.custom_multiplier_bps) / 10_000.0
+                    f64::from(value.custom_multiplier_bps) / 10_000.0,
+                    value.custom_multiplier_scope.label()
                 )
             },
         }),

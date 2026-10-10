@@ -910,6 +910,8 @@ pub(super) fn calculated_billing_provider() -> Arc<dyn ProviderAdmin> {
         calculated_billing: Some(
             gateway_admin::model::observability::CalculatedBillingBreakdown {
                 custom_multiplier_bps: 10_000,
+                custom_multiplier_scope: Default::default(),
+                standard_components: None,
                 image: None,
                 input_amount: amount("0.8"),
                 output_amount: amount("0.2"),

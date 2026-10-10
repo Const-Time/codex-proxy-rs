@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { PricingRow } from './model'
-import type { ModelPricing, PriceBand, TokenPrices } from '@/api'
+import type { ModelPricing, MultiplierScope, PriceBand, TokenPrices } from '@/api'
 import { Info } from '@lucide/vue'
 import { computed, ref, shallowRef, useId, watch } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -10,7 +10,9 @@ import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePopover from '@/components/base/BasePopover.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
+import MultiplierScopeSelect from '@/components/MultiplierScopeSelect.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
+import { validScope } from '@/utils/multiplierScope'
 import { bands, parseMultiplier, validPrice } from './model'
 import PricingRateFields from './PricingRateFields.vue'
 
@@ -19,6 +21,7 @@ const emit = defineEmits<{ save: [model: string, pricing: ModelPricing] }>()
 const open = defineModel<boolean>({ required: true })
 const model = ref('')
 const multiplier = ref('1')
+const scope = ref<MultiplierScope>('all')
 const draft = ref<Partial<Record<PriceBand, TokenPrices>>>({})
 const selectedBand = ref<PriceBand>('standard')
 const validation = ref('')
@@ -46,6 +49,7 @@ watch(open, (value) => {
     return
   model.value = props.row?.model ?? ''
   multiplier.value = String((props.row?.custom?.multiplierBps ?? 10_000) / 10_000)
+  scope.value = JSON.parse(JSON.stringify(props.row?.custom?.multiplierScope ?? 'all'))
   draft.value = JSON.parse(JSON.stringify(props.row?.custom?.bands ?? {}))
   selectedBand.value = props.row?.effective.bands.image ? 'image' : 'standard'
   if (!props.row)
@@ -53,7 +57,7 @@ watch(open, (value) => {
   validation.value = ''
   helpOpen.value = false
 })
-watch([model, multiplier, draft], () => {
+watch([model, multiplier, scope, draft], () => {
   validation.value = ''
 }, { deep: true })
 function toggleBand(enabled: boolean) {
@@ -70,8 +74,8 @@ function submit() {
     validation.value = '模型 ID 必须为 1～128 字节，不含空白或控制字符。'
     return
   }
-  if (bps.value === undefined) {
-    validation.value = '倍率范围为 0～100，最多四位小数。'
+  if (bps.value === undefined || !validScope(scope.value)) {
+    validation.value = '倍率范围为 0～100，最多四位小数，且至少选择一个费用项。'
     return
   }
   for (const [band, rates] of Object.entries(draft.value)) {
@@ -87,7 +91,7 @@ function submit() {
     return
   }
   validation.value = ''
-  emit('save', model.value, { multiplierBps: bps.value, bands: draft.value })
+  emit('save', model.value, { multiplierBps: bps.value, multiplierScope: scope.value, bands: draft.value })
 }
 </script>
 
@@ -112,12 +116,13 @@ function submit() {
           </BaseInput>
         </BaseFormItem>
       </div>
+      <MultiplierScopeSelect v-model="scope" :disabled="saving" />
       <section aria-label="档位价格">
         <div class="mb-5 flex flex-wrap items-center justify-between gap-3">
           <BaseSelect :model-value="selectedBand" :options="bandOptions" aria-label="价格档位" class="min-w-0 flex-1 sm:max-w-56" :disabled="saving" @update:model-value="selectedBand = $event as PriceBand" />
           <BaseSegmented v-model="priceMode" label="单价来源" :options="sourceOptions" :disabled="saving" />
         </div>
-        <PricingRateFields v-if="current || base" class="rounded-cp-lg bg-cp-fill-quaternary p-4" :base="base" :custom="current" :multiplier-bps="bps" :disabled="saving" @change="updatePrice" />
+        <PricingRateFields v-if="current || base" class="rounded-cp-lg bg-cp-fill-quaternary p-4" :base="base" :custom="current" :multiplier-bps="bps" :multiplier-scope="scope" :disabled="saving" @change="updatePrice" />
         <div v-else class="grid justify-items-center gap-3 py-6 text-cp-sm text-cp-text-tertiary">
           <p class="m-0">
             此档位暂无来源价格

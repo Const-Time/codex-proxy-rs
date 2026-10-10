@@ -53,6 +53,8 @@ pub struct CostBreakdown {
     pub service_tier: Option<String>,
     pub multiplier_percent: u32,
     pub custom_multiplier_bps: u32,
+    #[serde(default)]
+    pub custom_multiplier_scope: crate::call::services::settings::MultiplierScope,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

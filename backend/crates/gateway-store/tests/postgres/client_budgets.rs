@@ -771,6 +771,7 @@ async fn model_billing_for_endpoint(endpoint: &str) {
         multiplier,
         original,
         total,
+        ..
     }) = &original.billing
     else {
         panic!("frozen group billing missing");
@@ -1280,5 +1281,81 @@ async fn revoked_grants_and_disabled_groups_are_checked_without_snapshot_refresh
             .is_err()
     );
     assert!(store.admit(key_id("key"), None).await.is_err());
+    db.close().await;
+}
+
+#[tokio::test]
+async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledger() {
+    let Some(db) = TestDatabase::create("scoped_billing").await else {
+        return;
+    };
+    seed(&db, "scoped", "100", "1000").await;
+    sqlx::query("update account_groups set model_multipliers = $2 where id=$1")
+        .bind(group_id("scoped").as_str()).bind(serde_json::json!({"test-model":{"multiplier":"3","scope":{"components":["cacheRead","output"]}}}))
+        .execute(&db.pool).await.unwrap();
+    let snapshot = serde_json::json!({"version":1,"total":"10","input":"4","output":"2","cacheRead":"1","cacheWrite":"1","image":{"input":"1","cacheRead":"0.5"}});
+    sqlx::query("insert into model_requests(id,client_api_key_ref,user_id,config_revision,protocol,operation,endpoint,client_transport,requested_model_id,routing_scope,routing_group_refs,routing_group_names_snapshot,started_at,deadline_at,outcome,completed_at,cost_source,cost_amount,cost_currency,billing_snapshot_json) values('req_scoped','scoped','budget-user',1,'openai','responses','/v1/responses','http_sse','test-model','groups',$1,'[\"scoped\"]',now(),now()+interval '1 hour','failed',now(),'calculated',10,'USD',$2)")
+        .bind(vec![group_id("scoped").to_string()]).bind(snapshot.clone()).execute(&db.pool).await.unwrap();
+    let billed: String = sqlx::query_scalar(
+        "select billed_cost_amount::text from model_requests where id='req_scoped'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(billed, "17.0000000000");
+    sqlx::query("update account_groups set model_multipliers='{}'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    for _ in 0..2 {
+        store
+            .settle(charge("scoped", "scoped", "10"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(status(&db, "scoped").await.daily_used_usd.canonical(), "17");
+    let ledger: (String,String,serde_json::Value) = sqlx::query_as("select amount_usd::text,raw_amount_usd::text,billing_multiplier_scope from user_group_charge_events where request_id='req_scoped'").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(ledger.0, "17.0000000000");
+    assert_eq!(ledger.1, "10.0000000000");
+    assert_eq!(
+        ledger.2,
+        serde_json::json!({"components":["cacheRead","output"]})
+    );
+    for (scope, expected) in [
+        (serde_json::json!("all"), "30.0000000000"),
+        (serde_json::json!({"components":["input"]}), "20.0000000000"),
+        (
+            serde_json::json!({"components":["cacheWrite"]}),
+            "12.0000000000",
+        ),
+        (
+            serde_json::json!({"components":["input","output","cacheRead","cacheWrite"]}),
+            "29.0000000000",
+        ),
+    ] {
+        let amount: String = sqlx::query_scalar("select scoped_billed_cost(10,3,$1,$2)::text")
+            .bind(scope)
+            .bind(snapshot.clone())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(amount, expected);
+    }
+    let unknown: String = sqlx::query_scalar(
+        "select scoped_billed_cost(10,3,'{\"components\":[\"cacheRead\"]}',null)::text",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(unknown, "10");
+    let zero: String = sqlx::query_scalar(
+        "select scoped_billed_cost(10,0,'{\"components\":[\"cacheRead\"]}',$1)::text",
+    )
+    .bind(snapshot)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(zero, "8.5000000000");
     db.close().await;
 }

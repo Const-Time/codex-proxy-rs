@@ -1,4 +1,5 @@
-import type { ModelPricing, PriceBand, PricingCatalog, TokenPrices } from '@/api'
+import type { CostComponent, ModelPricing, MultiplierScope, PriceBand, PricingCatalog, TokenPrices } from '@/api'
+import { scopeIncludes } from '../../../utils/multiplierScope.ts'
 
 export const bands: { value: PriceBand, label: string }[] = [
   { value: 'standard', label: '标准' },
@@ -36,7 +37,7 @@ export function pricingRows(catalog: PricingCatalog, provider: string): PricingR
       base,
       custom: override,
       source: override ? 'custom' : synced[model] ? 'synced' : 'builtin',
-      effective: { multiplierBps: override?.multiplierBps ?? 10_000, bands: { ...base.bands, ...override?.bands } },
+      effective: { multiplierBps: override?.multiplierBps ?? 10_000, multiplierScope: override?.multiplierScope ?? 'all', bands: { ...base.bands, ...override?.bands } },
     }
   })
 }
@@ -54,9 +55,11 @@ export function validPrice(value: string) {
 export function multiplierText(bps: number) {
   return `${bps / 10_000}×`
 }
-export function effectivePrice(value: string | undefined, bps = 10_000): string {
+export function effectivePrice(value: string | undefined, bps = 10_000, scope?: MultiplierScope, component?: CostComponent): string {
   if (value === undefined || !validPrice(value))
     return '未配置'
+  if (component && !scopeIncludes(scope, component))
+    bps = 10_000
   const [whole = '0', fraction = ''] = value.split('.')
   const scaled = (BigInt(whole) * 10_000n + BigInt(fraction.padEnd(4, '0'))) * BigInt(bps)
   const decimal = (scaled % 100_000_000n).toString().padStart(8, '0').replace(/0+$/, '')

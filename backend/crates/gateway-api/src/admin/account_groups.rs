@@ -71,7 +71,7 @@ impl ListAccountGroupsQuery {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateAccountGroupRequest {
     #[serde(default)]
-    model_multipliers: BTreeMap<String, String>,
+    model_multipliers: BTreeMap<String, gateway_admin::model::account_groups::GroupModelMultiplier>,
     daily_limit_usd: Option<String>,
     weekly_limit_usd: Option<String>,
     name: String,
@@ -83,7 +83,7 @@ struct CreateAccountGroupRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateAccountGroupRequest {
     #[serde(default)]
-    model_multipliers: BTreeMap<String, String>,
+    model_multipliers: BTreeMap<String, gateway_admin::model::account_groups::GroupModelMultiplier>,
     daily_limit_usd: String,
     weekly_limit_usd: String,
     id: String,
@@ -101,7 +101,7 @@ struct AccountGroupIdRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountGroupView {
-    model_multipliers: BTreeMap<String, String>,
+    model_multipliers: BTreeMap<String, gateway_admin::model::account_groups::GroupModelMultiplier>,
     daily_limit_usd: String,
     weekly_limit_usd: String,
     id: String,

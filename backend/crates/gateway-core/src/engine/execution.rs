@@ -44,6 +44,28 @@ use crate::runtime::RuntimeSnapshotHandle;
 const MODEL_PROBE_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const COORDINATION_TIMEOUT: Duration = Duration::from_millis(100);
 
+fn admission_error(reason: ClientAdmissionRejection, user: bool) -> GatewayError {
+    let (code, message) = match (user, reason) {
+        (true, ClientAdmissionRejection::ConcurrencyLimited) => (
+            "user_concurrency_limited",
+            "user concurrent request limit exceeded",
+        ),
+        (true, ClientAdmissionRejection::RateLimited) => (
+            "user_rate_limited",
+            "user requests per minute limit exceeded",
+        ),
+        (false, ClientAdmissionRejection::ConcurrencyLimited) => (
+            "client_key_concurrency_limited",
+            "client API key concurrent request limit exceeded",
+        ),
+        (false, ClientAdmissionRejection::RateLimited) => (
+            "client_key_rate_limited",
+            "client API key requests per minute limit exceeded",
+        ),
+    };
+    GatewayError::new(GatewayErrorKind::RateLimited, message).with_client_code(code)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientTransport {
     HttpJson,
@@ -504,6 +526,21 @@ impl DefaultExecutionService {
         request.prepared.validate()?;
         let request_id = request.prepared.request_id.clone();
         let client_key_id = request.prepared.client.policy.key_id().clone();
+        let metadata = request.metadata.clone();
+        let requested_model = match &request.target {
+            ExecutionTarget::Model(model) => Some(model.clone()),
+            ExecutionTarget::ProviderEndpoint(_) => None,
+        };
+        let routing_group_refs = request
+            .prepared
+            .client
+            .policy
+            .account_scope()
+            .routing_snapshot()
+            .groups_snapshot()
+            .iter()
+            .map(|group| group.id().as_str().to_owned())
+            .collect();
         let started = Instant::now();
         let result = self.start_authorized_target(request).await;
         if let Err(error) = &result {
@@ -512,6 +549,9 @@ impl DefaultExecutionService {
                 .record_entry_rejection(super::EntryRejection {
                     request_id,
                     client_key_id,
+                    metadata,
+                    requested_model,
+                    routing_group_refs,
                     error: error.clone(),
                     latency: started.elapsed(),
                 })
@@ -700,14 +740,8 @@ impl DefaultExecutionService {
                 )
             })? {
             ClientAdmissionDecision::Granted => {}
-            ClientAdmissionDecision::Rejected(
-                ClientAdmissionRejection::RateLimited
-                | ClientAdmissionRejection::ConcurrencyLimited,
-            ) => {
-                return Err(GatewayError::new(
-                    GatewayErrorKind::RateLimited,
-                    "request exceeds client API key limits",
-                ));
+            ClientAdmissionDecision::Rejected(reason) => {
+                return Err(admission_error(reason, false));
             }
         }
         let admission_decision_ms = duration_ms(admission_started_at.elapsed());
@@ -742,12 +776,9 @@ impl DefaultExecutionService {
                     ));
                     admission.scopes.push(scope.clone());
                 }
-                Ok(ClientAdmissionDecision::Rejected(_)) => {
+                Ok(ClientAdmissionDecision::Rejected(reason)) => {
                     admission.release().await;
-                    return Err(GatewayError::new(
-                        GatewayErrorKind::RateLimited,
-                        "request exceeds user limits",
-                    ));
+                    return Err(admission_error(reason, true));
                 }
                 Err(_) => {
                     admission.release().await;

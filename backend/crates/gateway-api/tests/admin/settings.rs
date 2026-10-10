@@ -393,7 +393,7 @@ async fn admin_auth_should_accept_a_configured_request_id_header_name() {
 }
 
 fn custom_pricing() -> Value {
-    json!({"multiplierBps":12500,"bands":{"standard":{"input":"3","output":"12","cacheRead":"0","cacheWrite":"0"}}})
+    json!({"multiplierBps":12500, "multiplierScope":"all","bands":{"standard":{"input":"3","output":"12","cacheRead":"0","cacheWrite":"0"}}})
 }
 
 #[tokio::test]
@@ -445,7 +445,7 @@ async fn pricing_routes_keep_manual_overrides_during_sync_and_reset_to_source() 
     assert!(result["data"]["syncedAt"].is_string());
     for _ in 0..2 {
         let response = app.clone().oneshot(request(Method::POST, "/api/admin/settings/pricing/update", Some(json!({
-            "provider":"openai", "models":["gpt-5.4"], "change":{"action":"multiplier", "multiplierBps":20000}
+            "provider":"openai", "models":["gpt-5.4"], "change":{"action":"multiplier", "multiplierBps":20000,"multiplierScope":{"components":["cacheRead","output"]}}
         })))).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -456,6 +456,10 @@ async fn pricing_routes_keep_manual_overrides_during_sync_and_reset_to_source() 
             .unwrap(),
     )
     .await;
+    assert_eq!(
+        result["data"]["overrides"]["openai"]["gpt-5.4"]["multiplierScope"],
+        json!({"components":["output","cacheRead"]})
+    );
     assert_eq!(
         result["data"]["overrides"]["openai"]["gpt-5.4"]["multiplierBps"],
         20000
@@ -488,6 +492,7 @@ async fn pricing_rejects_invalid_edits_and_tampered_sync_without_writes() {
     fixture.auth.insert_session("valid-session");
     let app = app(fixture.state());
     for body in [
+        json!({"provider":"openai","models":["model"],"change":{"action":"multiplier","multiplierBps":20000,"multiplierScope":{"components":[]}}}),
         json!({"provider":"unknown","models":["model"],"change":{"action":"reset"}}),
         json!({"provider":"openai","models":[],"change":{"action":"reset"}}),
         json!({"provider":"openai","models":["bad model"],"change":{"action":"reset"}}),

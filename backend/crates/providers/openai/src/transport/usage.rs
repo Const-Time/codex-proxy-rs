@@ -612,7 +612,18 @@ fn openai_billing_breakdown_with_context(
         Some(normalized_tier.unwrap_or_else(|| "default".to_owned())),
         multiplier_percent,
     )
-    .with_custom_multiplier(custom.map_or(10_000, |pricing| pricing.multiplier_bps))
+    .with_standard_components([
+        usd_money(standard.input_ticks)?,
+        usd_money(standard.output_ticks)?,
+        usd_money(standard.cache_read_ticks)?,
+        usd_money(standard.cache_write_ticks)?,
+    ])
+    .with_custom_multiplier(
+        custom.map_or(10_000, |pricing| pricing.multiplier_bps),
+        custom
+            .map(|p| p.multiplier_scope.clone())
+            .unwrap_or_default(),
+    )
 }
 
 fn effective_rates(
@@ -700,6 +711,7 @@ pub(crate) fn pricing_catalog()
                 rule.model.to_owned(),
                 ModelPriceOverride {
                     multiplier_bps: 10_000,
+                    multiplier_scope: Default::default(),
                     bands,
                 },
             )
@@ -724,6 +736,7 @@ pub(crate) fn pricing_catalog()
             (*model).to_owned(),
             ModelPriceOverride {
                 multiplier_bps: 10_000,
+                multiplier_scope: Default::default(),
                 bands,
             },
         );
@@ -839,7 +852,12 @@ pub(crate) fn image_calculated_cost(
         input_price_per_million: usd_price_per_million(image_rates.input_ticks)?,
         cache_read_price_per_million: usd_price_per_million(image_rates.cache_read_ticks)?,
     })
-    .with_custom_multiplier(custom.map_or(10_000, |p| p.multiplier_bps))?;
+    .with_custom_multiplier(
+        custom.map_or(10_000, |p| p.multiplier_bps),
+        custom
+            .map(|p| p.multiplier_scope.clone())
+            .unwrap_or_default(),
+    )?;
     Some(breakdown.calculated_cost())
 }
 

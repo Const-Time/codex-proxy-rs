@@ -1,6 +1,9 @@
 import type { AxiosRequestConfig as RequestOptions } from 'axios'
 import request from '../request'
 
+export type CostComponent = 'input' | 'output' | 'cacheRead' | 'cacheWrite'
+export type MultiplierScope = 'all' | { components: CostComponent[] }
+
 export type PriceBand = 'standard' | 'fast' | 'flex' | 'long_standard' | 'long_fast' | 'long_flex' | 'image'
 
 export interface TokenPrices {
@@ -12,6 +15,7 @@ export interface TokenPrices {
 
 export interface ModelPricing {
   multiplierBps: number
+  multiplierScope?: MultiplierScope
   bands: Partial<Record<PriceBand, TokenPrices>>
 }
 
@@ -33,7 +37,7 @@ export interface PricingSyncPolicy {
 
 export type PricingChange
   = | { action: 'replace', pricing: ModelPricing }
-    | { action: 'multiplier', multiplierBps: number }
+    | { action: 'multiplier', multiplierBps: number, multiplierScope?: MultiplierScope }
     | { action: 'reset' }
 
 export interface PricingSyncPreview {

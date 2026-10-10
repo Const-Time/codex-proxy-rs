@@ -239,6 +239,7 @@ async fn attempts_should_keep_their_own_account_snapshots() {
         .expect("insert first attempt");
     PgOpsEventRepository::new(database.pool.clone())
         .append_ops_event(OpsEvent {
+            entry_context: None,
             id: "ops_snap_a".to_owned(),
             model_request_id: Some("req_snap_ab".to_owned()),
             attempt_index: Some(1),
@@ -371,6 +372,7 @@ async fn ops_errors_should_keep_request_and_event_snapshots_after_account_deleti
     .expect("mark request failed");
     PgOpsEventRepository::new(database.pool.clone())
         .append_ops_event(OpsEvent {
+            entry_context: None,
             id: "ops_snap_probe".to_owned(),
             model_request_id: None,
             attempt_index: None,

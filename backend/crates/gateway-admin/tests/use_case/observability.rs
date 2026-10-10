@@ -376,6 +376,7 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
     }]);
     store.replace_calculated_billing_facts(vec![UsageCalculatedBillingFact {
         billing_multiplier: "1".parse().unwrap(),
+        billing_multiplier_scope: Default::default(),
         breakdown: None,
         bucket_start: quarter_hour_start(now),
         provider_kind: "openai".to_owned(),
@@ -607,6 +608,7 @@ async fn group_billing_enriches_original_cost_and_preserves_frozen_charge() {
     let store = Arc::new(FixtureObservabilityStore::new(observation_range(now)));
     let mut record = total_record("group-bill", Some("openai"), "calculated", now);
     record.billing = Some(UsageBilling::GroupAdjusted {
+        scope: Default::default(),
         original: Box::new(record.billing.take().unwrap()),
         multiplier: "2".parse().unwrap(),
         total: CurrencyCost {
@@ -625,6 +627,7 @@ async fn group_billing_enriches_original_cost_and_preserves_frozen_charge() {
         original,
         multiplier,
         total,
+        ..
     }) = &page.items[0].billing
     else {
         panic!("missing group bill");
@@ -645,6 +648,7 @@ async fn usage_insights_should_reject_partial_costs_when_billing_stream_fails() 
     let store = Arc::new(FixtureObservabilityStore::new(range));
     store.replace_calculated_billing_facts(vec![UsageCalculatedBillingFact {
         billing_multiplier: "1".parse().unwrap(),
+        billing_multiplier_scope: Default::default(),
         breakdown: None,
         bucket_start: quarter_hour_start(now),
         provider_kind: "openai".to_owned(),

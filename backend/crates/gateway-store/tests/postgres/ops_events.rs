@@ -4,6 +4,7 @@ use gateway_store::postgres::{OpsEvent, OpsEventLevel};
 #[test]
 fn request_scoped_ops_event_requires_attempt_index() {
     let event = OpsEvent {
+        entry_context: None,
         id: "event-1".to_owned(),
         model_request_id: Some("request-1".to_owned()),
         attempt_index: None,
