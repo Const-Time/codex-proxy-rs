@@ -36,21 +36,21 @@ from model_requests mr left join users u on u.id = mr.user_id
 where true";
 
 const OPS_EVENT_SELECT: &str = "select 'ops_event'::text as source,
-       mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
-       oe.id as event_id, oe.model_request_id as request_id, oe.attempt_index,
-       mr.client_api_key_ref, oe.component, oe.operation,
-       mr.protocol, mr.client_transport, mr.requested_model_id, mr.service_tier,
-       mr.endpoint, oe.provider_kind, oe.provider_account_ref,
+       coalesce(mr.user_id, oe.entry_context->>'userId') as user_id, u.username as user_email, nullif(u.display_name, '') as username,
+       oe.id as event_id, coalesce(oe.model_request_id, oe.entry_context->>'requestId') as request_id, oe.attempt_index,
+       coalesce(mr.client_api_key_ref, oe.entry_context->>'clientKeyId') as client_api_key_ref, oe.component, oe.operation,
+       coalesce(mr.protocol, oe.entry_context->>'protocol') as protocol, coalesce(mr.client_transport, oe.entry_context->>'clientTransport') as client_transport, coalesce(mr.requested_model_id, oe.entry_context->>'requestedModel') as requested_model_id, mr.service_tier,
+       coalesce(mr.endpoint, oe.entry_context->>'endpoint') as endpoint, oe.provider_kind, oe.provider_account_ref,
        oe.provider_account_name_snapshot as provider_account_name,
        oe.provider_account_email_snapshot as provider_account_email,
        oe.provider_account_authentication_kind_snapshot
          as provider_account_authentication_kind,
        oe.upstream_model_id, null::text as upstream_transport, oe.failure_kind,
        oe.upstream_send_state,
-       null::integer as client_status_code, oe.status_code as upstream_status_code,
+       (oe.entry_context->>'clientStatusCode')::integer as client_status_code, oe.status_code as upstream_status_code,
        oe.provider_error_code, mr.client_response_id, oe.upstream_request_id,
        oe.latency_ms, oe.message, oe.raw_upstream_error,
-       host(mr.client_ip) as client_ip, mr.user_agent,
+       coalesce(host(mr.client_ip), oe.entry_context->>'clientIp') as client_ip, coalesce(mr.user_agent, oe.entry_context->>'userAgent') as user_agent,
        mr.reasoning_effort, mr.reasoning_preset, mr.request_kind,
        mr.subagent_kind, mr.compact,
        mr.continuation_affinity_hash, mr.continuation_previous_response_id_hash,
@@ -66,7 +66,7 @@ const OPS_EVENT_SELECT: &str = "select 'ops_event'::text as source,
        'ops_event:' || oe.id as stable_sort_id
 from ops_events oe
 left join model_requests mr on mr.id = oe.model_request_id
-left join users u on u.id = mr.user_id
+left join users u on u.id = coalesce(mr.user_id, oe.entry_context->>'userId')
 where true";
 
 pub(crate) async fn list_ops_errors(
@@ -177,10 +177,33 @@ fn push_ops_event_predicates(
     filter: &OpsErrorFilter,
 ) {
     push_range(statement, "oe.created_at", range);
-    push_request_scope(statement, filter);
+    push_text_equality(
+        statement,
+        "coalesce(mr.user_id, oe.entry_context->>'userId')",
+        &filter.user_id,
+    );
+    push_text_equality(
+        statement,
+        "coalesce(mr.client_transport, oe.entry_context->>'clientTransport')",
+        &filter.client_transport,
+    );
+    if let Some(group) = &filter.group_id {
+        statement
+            .push(" and (mr.routing_group_refs @> ")
+            .push_bind(vec![group.clone()])
+            .push(" or (oe.entry_context->'routingGroupRefs') ? ")
+            .push_bind(group.clone())
+            .push(")");
+    }
     for (column, value) in [
-        ("mr.client_api_key_ref", &filter.client_api_key_ref),
-        ("oe.model_request_id", &filter.request_id),
+        (
+            "coalesce(mr.client_api_key_ref, oe.entry_context->>'clientKeyId')",
+            &filter.client_api_key_ref,
+        ),
+        (
+            "coalesce(oe.model_request_id, oe.entry_context->>'requestId')",
+            &filter.request_id,
+        ),
         ("oe.provider_account_ref", &filter.provider_account_ref),
         ("oe.provider_kind", &filter.provider_kind),
         ("oe.operation", &filter.operation),
@@ -194,13 +217,22 @@ fn push_ops_event_predicates(
         statement.push(" and false");
     }
     push_response_id_filter(statement, "mr.client_response_id", filter);
-    push_model_filter(statement, "oe.upstream_model_id", filter);
+    if let Some(model) = &filter.model {
+        statement
+            .push(" and (coalesce(mr.requested_model_id, oe.entry_context->>'requestedModel') = ")
+            .push_bind(model.clone())
+            .push(" or oe.upstream_model_id = ")
+            .push_bind(model.clone())
+            .push(")");
+    }
     if let Some(index) = filter.attempt_index {
         statement.push(" and oe.attempt_index = ");
         statement.push_bind(i32::try_from(index).unwrap_or(i32::MAX));
     }
     if let Some(status) = filter.status_code {
-        statement.push(" and oe.status_code = ");
+        statement.push(
+            " and coalesce((oe.entry_context->>'clientStatusCode')::integer, oe.status_code) = ",
+        );
         statement.push_bind(i32::from(status));
     }
     if let Some(search) = &filter.search {
@@ -208,8 +240,8 @@ fn push_ops_event_predicates(
             statement,
             &[
                 "oe.id",
-                "oe.model_request_id",
-                "mr.client_api_key_ref",
+                "coalesce(oe.model_request_id, oe.entry_context->>'requestId')",
+                "coalesce(mr.client_api_key_ref, oe.entry_context->>'clientKeyId')",
                 "oe.provider_account_ref",
                 "oe.upstream_request_id",
                 "oe.provider_error_code",

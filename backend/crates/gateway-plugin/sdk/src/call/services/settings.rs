@@ -150,7 +150,24 @@ pub struct TokenPriceOverride {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPriceOverride {
     pub multiplier_bps: u32,
+    #[serde(default)]
+    pub multiplier_scope: MultiplierScope,
     pub bands: BTreeMap<String, TokenPriceOverride>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CostComponent {
+    Input,
+    Output,
+    CacheRead,
+    CacheWrite,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum MultiplierScope {
+    #[default]
+    All,
+    Components(BTreeSet<CostComponent>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PricingCatalog {

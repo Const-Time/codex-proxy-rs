@@ -1,7 +1,6 @@
-import type { AccountGroup, ApiKey } from '@/api'
+import type { AccountGroup, ApiKey, MultiplierScope } from '@/api'
 import { watchDebounced } from '@vueuse/core'
 import { computed, onMounted, ref, shallowRef, watch } from 'vue'
-
 import {
   createAccountGroup,
   deleteAccountGroup,
@@ -11,6 +10,7 @@ import {
   getApiKeys,
   updateAccountGroup,
 } from '@/api'
+
 import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useIdSet } from '@/composables/useIdSet'
@@ -18,10 +18,11 @@ import { usePagedQuery } from '@/composables/usePagedQuery'
 import { errorMessage } from '@/utils/async'
 import { normalizeRgbaHexColor } from '@/utils/color'
 import { formatDateTime } from '@/utils/date'
+import { validScope } from '@/utils/multiplierScope'
 import { DEFAULT_ACCOUNT_GROUP_COLOR } from '../constants'
 
 export interface AccountGroupFormValue {
-  modelMultipliers: { model: string, multiplier: string }[]
+  modelMultipliers: { model: string, multiplier: string, scope: MultiplierScope }[]
   dailyLimitUsd: string
   weeklyLimitUsd: string
   name: string
@@ -112,7 +113,7 @@ export function useAccountGroups() {
   function openEdit(group: AccountGroup) {
     editingGroup.value = group
     form.value = {
-      modelMultipliers: Object.entries(group.modelMultipliers).map(([model, multiplier]) => ({ model, multiplier })),
+      modelMultipliers: Object.entries(group.modelMultipliers).map(([model, multiplier]) => ({ model, multiplier: typeof multiplier === 'string' ? multiplier : multiplier.multiplier, scope: typeof multiplier === 'string' ? 'all' : JSON.parse(JSON.stringify(multiplier.scope)) })),
       dailyLimitUsd: group.dailyLimitUsd,
       weeklyLimitUsd: group.weeklyLimitUsd,
       name: group.name,
@@ -137,12 +138,12 @@ export function useAccountGroups() {
       return
     }
     const rates = form.value.modelMultipliers
-    if (rates.length > 200 || rates.some(row => !row.model.trim() || !/^\d{1,4}(?:\.\d{1,10})?$/.test(row.multiplier) || Number(row.multiplier) > 1000)
+    if (rates.length > 200 || rates.some(row => !validScope(row.scope) || !row.model.trim() || !/^\d{1,4}(?:\.\d{1,10})?$/.test(row.multiplier) || Number(row.multiplier) > 1000)
       || new Set(rates.map(row => row.model.trim())).size !== rates.length) {
-      toast.warning('模型名称不能重复或为空；倍率须为 0 至 1000，最多 10 位小数')
+      toast.warning('模型名称不能重复或为空；倍率须为 0 至 1000，最多 10 位小数，且至少选择一个费用项')
       return
     }
-    const modelMultipliers = Object.fromEntries(rates.map(row => [row.model.trim(), row.multiplier]))
+    const modelMultipliers = Object.fromEntries(rates.map(row => [row.model.trim(), row.scope === 'all' ? row.multiplier : { multiplier: row.multiplier, scope: row.scope }]))
     const color = normalizeRgbaHexColor(form.value.color)
     if (!color) {
       toast.warning('请选择有效的分组颜色')

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { TokenPrices } from '@/api'
+import type { MultiplierScope, TokenPrices } from '@/api'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import { effectivePrice, priceFields, validPrice } from './model'
@@ -8,6 +8,7 @@ const props = defineProps<{
   base?: TokenPrices
   custom?: TokenPrices
   multiplierBps?: number
+  multiplierScope?: MultiplierScope
   disabled: boolean
 }>()
 defineEmits<{ change: [field: keyof TokenPrices, value: string] }>()
@@ -16,7 +17,7 @@ function preview(field: keyof TokenPrices) {
   const price = (props.custom ?? props.base)?.[field]
   return props.multiplierBps === undefined || price === undefined || !validPrice(price)
     ? '—'
-    : effectivePrice(price, props.multiplierBps)
+    : effectivePrice(price, props.multiplierBps, props.multiplierScope, field)
 }
 </script>
 

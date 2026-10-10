@@ -5,7 +5,7 @@ import type { OpsError } from '@/api'
 import { computed, inject } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
-import { failureClassText } from '../utils/opsErrorPresentation'
+import { entryRejected, failureClassText } from '../utils/opsErrorPresentation'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
@@ -127,12 +127,12 @@ function visibleFields(items: DetailField[]) {
   <BaseModal
     v-model="open"
     title="错误明细"
-    description="上游错误与请求上下文"
+    :description="record && entryRejected(record) ? '入口拒绝 · 未调用上游' : '上游错误与请求上下文'"
     tone="danger"
     size="xl"
   >
     <template v-if="record">
-      <RequestDiagnosticsPanel v-if="!personal && open && record.requestId" class="mb-3" :request-id="record.requestId" :metadata="record.metadata" />
+      <RequestDiagnosticsPanel v-if="!personal && open && record.requestId && record.metadata.component !== 'request_entry'" class="mb-3" :request-id="record.requestId" :metadata="record.metadata" />
       <section :class="panelClass">
         <h3 :class="panelTitleClass">
           错误

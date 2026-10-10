@@ -2,8 +2,8 @@
 import type { AccountGroupFormValue } from '../composables/useAccountGroups'
 import type { AccountGroup } from '@/api'
 import { computed } from 'vue'
-
 import BaseButton from '@/components/base/BaseButton.vue'
+
 import BaseColorPicker from '@/components/base/BaseColorPicker/index.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseForm from '@/components/base/BaseForm/index.vue'
@@ -11,6 +11,7 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import MultiplierScopeSelect from '@/components/MultiplierScopeSelect.vue'
 import { useGroupModelOptions } from '../composables/useGroupModelOptions'
 import { ACCOUNT_GROUP_COLOR_PRESETS } from '../constants'
 
@@ -72,12 +73,12 @@ const description = computed(() => props.group
           <BaseButton size="sm" :loading="loadingModels" :disabled="saving || !group" @click="reloadModels">
             刷新模型
           </BaseButton>
-          <BaseButton size="sm" :disabled="saving || loadingModels || !modelOptions.length || form.modelMultipliers.length >= 200" @click="form.modelMultipliers.push({ model: '', multiplier: '1' })">
+          <BaseButton size="sm" :disabled="saving || loadingModels || !modelOptions.length || form.modelMultipliers.length >= 200" @click="form.modelMultipliers.push({ model: '', multiplier: '1', scope: 'all' })">
             添加模型
           </BaseButton>
         </div>
         <p class="m-0 text-cp-sm text-cp-text-secondary">
-          按请求模型名称精确匹配，未配置时为 1 倍。原始费用 × 倍率计入消费及日/周限额，历史请求不变。
+          按请求模型名称精确匹配，未配置时为 1 倍。选中费用项按倍率计入消费及日/周限额；仅新请求生效，历史请求不变。
         </p>
         <p v-if="modelMessage" role="status" class="m-0 text-cp-sm text-cp-text-secondary">
           {{ modelMessage }}
@@ -88,6 +89,7 @@ const description = computed(() => props.group
           <BaseButton size="sm" :disabled="saving" @click="form.modelMultipliers.splice(index, 1)">
             移除
           </BaseButton>
+          <MultiplierScopeSelect v-model="row.scope" class="col-span-full rounded-cp bg-cp-fill-quaternary p-3" :disabled="saving" />
         </div>
       </div>
       <BaseFormItem label="描述（可选）">

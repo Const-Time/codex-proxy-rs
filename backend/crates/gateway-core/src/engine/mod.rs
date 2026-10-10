@@ -653,6 +653,9 @@ pub struct IntermediateFailure {
 pub struct EntryRejection {
     pub request_id: ModelRequestId,
     pub client_key_id: ClientApiKeyId,
+    pub metadata: execution::ExecutionRequestMetadata,
+    pub requested_model: Option<PublicModelId>,
+    pub routing_group_refs: Vec<String>,
     pub error: GatewayError,
     pub latency: Duration,
 }

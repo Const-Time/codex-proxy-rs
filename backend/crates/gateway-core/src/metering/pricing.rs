@@ -52,6 +52,8 @@ pub struct TokenPriceOverride {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPriceOverride {
     pub multiplier_bps: u32,
+    #[serde(default)]
+    pub multiplier_scope: super::MultiplierScope,
     pub bands: BTreeMap<String, TokenPriceOverride>,
 }
 
@@ -61,6 +63,7 @@ impl ModelPriceOverride {
     /// # Errors
     /// 倍率超过 100 倍或档位不受支持时返回错误。
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.multiplier_scope.validate()?;
         if self.multiplier_bps > 1_000_000 {
             return Err("倍率必须在 0 至 100 倍之间");
         }
@@ -94,9 +97,11 @@ pub fn merge_pricing(mut base: PricingOverrides, overrides: &PricingOverrides) -
                 .entry(model.clone())
                 .or_insert_with(|| ModelPriceOverride {
                     multiplier_bps: 10_000,
+                    multiplier_scope: Default::default(),
                     bands: BTreeMap::new(),
                 });
             entry.multiplier_bps = pricing.multiplier_bps;
+            entry.multiplier_scope = pricing.multiplier_scope.clone();
             entry.bands.extend(pricing.bands.clone());
         }
     }

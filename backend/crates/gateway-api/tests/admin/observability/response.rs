@@ -959,6 +959,8 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             billing: Some(UsageBilling::Calculated(Box::new(
                 CalculatedBillingBreakdown {
                     custom_multiplier_bps: 10_000,
+                    custom_multiplier_scope: Default::default(),
+                    standard_components: None,
                     image: None,
                     input_amount: usd("0.03"),
                     output_amount: usd("0.07"),
@@ -998,6 +1000,7 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
     {
         let mut records = fixture.usage_records.lock().expect("usage records");
         records[0].billing = Some(UsageBilling::GroupAdjusted {
+            scope: Default::default(),
             original: Box::new(records[0].billing.take().unwrap()),
             multiplier: "2.5".parse().unwrap(),
             total: usd("0.25"),

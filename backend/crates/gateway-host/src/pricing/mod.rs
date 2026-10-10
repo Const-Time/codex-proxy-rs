@@ -200,6 +200,7 @@ fn model_price(provider: &str, model: &Value) -> Option<ModelPriceOverride> {
     }
     Some(ModelPriceOverride {
         multiplier_bps: 10_000,
+        multiplier_scope: Default::default(),
         bands,
     })
 }

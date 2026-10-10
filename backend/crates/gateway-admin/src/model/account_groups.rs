@@ -7,15 +7,43 @@ use gateway_core::{account::AccountStatusFacts, routing::AccountGroupId};
 
 use super::{PageSize, Revision, observability::DecimalAmount};
 
+/// Legacy scalar rules mean all fees. Scoped rules retain the same decimal rate.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum GroupModelMultiplier {
+    All(String),
+    Scoped {
+        multiplier: String,
+        scope: gateway_core::metering::MultiplierScope,
+    },
+}
+
+impl GroupModelMultiplier {
+    pub fn multiplier(&self) -> &str {
+        match self {
+            Self::All(value) => value,
+            Self::Scoped { multiplier, .. } => multiplier,
+        }
+    }
+    pub fn valid_scope(&self) -> bool {
+        match self {
+            Self::All(_) => true,
+            Self::Scoped { scope, .. } => scope.validate().is_ok(),
+        }
+    }
+}
+
 /// Exact public model names mapped to nonnegative decimal billing rates.
-pub fn valid_model_multipliers(rates: &BTreeMap<String, String>) -> bool {
+pub fn valid_model_multipliers(rates: &BTreeMap<String, GroupModelMultiplier>) -> bool {
     rates.len() <= 200
         && rates.iter().all(|(model, value)| {
             !model.is_empty()
                 && model.len() <= 256
                 && model.trim() == model
                 && !model.chars().any(char::is_control)
+                && value.valid_scope()
                 && value
+                    .multiplier()
                     .parse::<gateway_core::metering::Decimal>()
                     .is_ok_and(|rate| rate.scaled() <= 10_000_000_000_000)
         })
@@ -94,7 +122,7 @@ pub struct AccountGroupListQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountGroupRecord {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
-    pub model_multipliers: BTreeMap<String, String>,
+    pub model_multipliers: BTreeMap<String, GroupModelMultiplier>,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,
@@ -125,7 +153,7 @@ pub struct AccountGroupPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateAccountGroup {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
-    pub model_multipliers: BTreeMap<String, String>,
+    pub model_multipliers: BTreeMap<String, GroupModelMultiplier>,
     pub name: String,
     pub description: Option<String>,
     pub color: AccountGroupColor,
@@ -135,7 +163,7 @@ pub struct CreateAccountGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAccountGroup {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
-    pub model_multipliers: BTreeMap<String, String>,
+    pub model_multipliers: BTreeMap<String, GroupModelMultiplier>,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,
@@ -146,7 +174,7 @@ pub struct NewAccountGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAccountGroup {
     pub budget: gateway_core::engine::budget::ClientBudgetLimits,
-    pub model_multipliers: BTreeMap<String, String>,
+    pub model_multipliers: BTreeMap<String, GroupModelMultiplier>,
     pub id: AccountGroupId,
     pub name: String,
     pub description: Option<String>,

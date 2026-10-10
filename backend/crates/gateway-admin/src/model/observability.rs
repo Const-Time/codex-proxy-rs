@@ -313,6 +313,7 @@ pub struct ProviderBillingInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageCalculatedBillingFact {
     pub billing_multiplier: DecimalAmount,
+    pub billing_multiplier_scope: gateway_core::metering::MultiplierScope,
     pub breakdown: Option<CalculatedBillingBreakdown>,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
@@ -330,11 +331,13 @@ pub struct UsageCalculatedBillingFact {
 pub struct CalculatedBillingBreakdown {
     pub image: Option<ImageBillingBreakdown>,
     pub custom_multiplier_bps: u32,
+    pub custom_multiplier_scope: gateway_core::metering::MultiplierScope,
     pub input_amount: CurrencyCost,
     pub output_amount: CurrencyCost,
     pub cache_read_amount: CurrencyCost,
     pub cache_write_amount: CurrencyCost,
     pub standard_amount: CurrencyCost,
+    pub standard_components: Option<[CurrencyCost; 4]>,
     pub total_amount: CurrencyCost,
     pub input_price_per_million: CurrencyCost,
     pub output_price_per_million: CurrencyCost,
@@ -362,6 +365,7 @@ pub enum UsageBilling {
     /// Frozen group multiplier; the original bill remains available for price validation.
     GroupAdjusted {
         multiplier: DecimalAmount,
+        scope: gateway_core::metering::MultiplierScope,
         original: Box<UsageBilling>,
         total: CurrencyCost,
     },

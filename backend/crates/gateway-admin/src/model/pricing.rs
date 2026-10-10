@@ -57,7 +57,7 @@ pub struct SyncPricing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PricingChange {
     Replace(ModelPriceOverride),
-    Multiplier(u32),
+    Multiplier(u32, gateway_core::metering::MultiplierScope),
     Reset,
 }
 
