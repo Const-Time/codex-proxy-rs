@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use gateway_admin::{
     model::{AdminError, AdminErrorKind, plugins::*},
     plugins::PluginManager,
-    ports::plugins::{PluginProcess, PluginRuntime, PluginService},
+    ports::plugins::{PluginProcess, PluginRuntime, PluginService, PluginStore},
 };
 use gateway_plugin_runtime::PluginEngine;
 
@@ -442,16 +442,29 @@ async fn binding_validation_rejects_empty_ambiguous_and_undeclared_scopes_withou
         json!({"order":0,"mounts":["request"],"scope":{"kind":"keys","ids":[]}}),
         json!({"order":0,"mounts":["request"],"scope":{"kind":"keys","ids":["key_a","key_a"]}}),
         json!({"order":0,"mounts":["request"],"scope":{"kind":"groups","ids":[""]}}),
+        json!({"order":0,"mounts":["http"],"scope":{"kind":"keys","ids":["key_a"]}}),
+        json!({"order":0,"mounts":["websocket"],"scope":{"kind":"groups","ids":["group_a"]}}),
+        json!({"order":0,"mounts":["service","request"],"scope":{"kind":"keys","ids":["key_a"]}}),
     ] {
         let mut command = f.command(0, 0);
         command.middleware = Some(serde_json::from_value(binding).unwrap());
         assert!(f.manager.update(None, command, &actor()).await.is_err());
     }
     for binding in [
-        json!({"order":0,"mounts":["http"],"scope":{"kind":"all"}}),
+        json!({"order":0,"mounts":["unknown_mount"],"scope":{"kind":"all"}}),
         json!({"order":0,"mounts":["request"],"scope":{"kind":"all","ids":["key_a"]}}),
     ] {
         assert!(serde_json::from_value::<PluginMiddlewareBinding>(binding).is_err());
+    }
+    for mount in [
+        PluginMiddlewareMount::Http,
+        PluginMiddlewareMount::WebSocket,
+        PluginMiddlewareMount::Service,
+    ] {
+        let mut command = f.command(0, 0);
+        command.middleware.as_mut().unwrap().mounts = vec![mount];
+        // The wire recognizes these mounts; the fixture only declares request/attempt.
+        assert!(f.manager.update(None, command, &actor()).await.is_err());
     }
     let artifact = f
         .manager
@@ -468,14 +481,12 @@ async fn binding_validation_rejects_empty_ambiguous_and_undeclared_scopes_withou
             .is_empty()
     );
     // Production still rejects enabling a manifest before data-plane integration.
-    let manager = PluginManager::new(
+    let production = Arc::new(PluginEngine::new(
+        f._cache.path().into(),
+        "3.11.2".parse().unwrap(),
         f.store.clone(),
-        Arc::new(PluginEngine::new(
-            f._cache.path().into(),
-            "3.11.2".parse().unwrap(),
-            f.store.clone(),
-        )),
-    );
+    ));
+    let manager = PluginManager::new(f.store.clone(), production.clone());
     assert!(
         manager
             .update(None, f.command(0, 0), &actor())
@@ -486,6 +497,28 @@ async fn binding_validation_rejects_empty_ambiguous_and_undeclared_scopes_withou
     draft.enabled = false;
     let saved = manager.update(None, draft, &actor()).await.unwrap();
     assert!(saved.middleware.is_some());
+    let mut record = f
+        .store
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == saved.id)
+        .unwrap();
+    let mut declared = f.store.artifact(&record.artifact_sha256).await.unwrap();
+    declared.info.manifest["contributes"]["middleware"]["stages"] =
+        json!(["http", "websocket", "service", "request", "attempt"]);
+    for mount in [
+        PluginMiddlewareMount::Http,
+        PluginMiddlewareMount::WebSocket,
+        PluginMiddlewareMount::Service,
+    ] {
+        record.middleware.as_mut().unwrap().mounts = vec![mount];
+        production.validate(&record, &declared, None).await.unwrap();
+        record.enabled = true;
+        assert!(production.validate(&record, &declared, None).await.is_err());
+        record.enabled = false;
+    }
     assert!(
         manager
             .freeze_middleware(context(false))

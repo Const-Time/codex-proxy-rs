@@ -17,6 +17,10 @@ struct Entry {
     scheduler: Option<PluginAccountSchedulerBinding>,
     process: Option<Arc<dyn PluginProcess>>,
 }
+struct SelectedMiddleware {
+    processes: Vec<Arc<dyn PluginProcess>>,
+    tokens: Vec<CancellationToken>,
+}
 #[derive(Clone, Default)]
 pub(super) struct Publication {
     entries: BTreeMap<String, Entry>,
@@ -85,38 +89,24 @@ impl Publication {
     pub(super) fn shutdown(&self) {
         self.epoch.revoke();
     }
-    pub(super) fn freeze(
+    fn select(
         &self,
-        mut context: MiddlewareContext,
-    ) -> Result<PluginMiddlewarePlan, AdminError> {
+        excluded: &BTreeSet<String>,
+        matches: impl Fn(&PluginMiddlewareBinding) -> bool,
+    ) -> Result<SelectedMiddleware, AdminError> {
         if !self.blocked.is_empty() || self.epoch.is_revoked() {
             return Err(AdminError::unavailable("中间件配置状态未确认"));
-        }
-        if !matches!(
-            context.mount,
-            MiddlewareMount::Request | MiddlewareMount::Attempt
-        ) {
-            return Err(AdminError::invalid("此中间件挂载位置尚未接入"));
         }
         let mut selected = self
             .entries
             .iter()
             .filter(|(id, entry)| {
-                !context.excluded_plugin_instances.contains(*id)
-                    && entry
-                        .binding
-                        .as_ref()
-                        .is_some_and(|binding| binding.matches(&context))
+                !excluded.contains(*id) && entry.binding.as_ref().is_some_and(&matches)
             })
             .collect::<Vec<_>>();
-        selected.sort_by_key(|(id, entry)| {
-            (
-                entry.binding.as_ref().map_or(0, |binding| binding.order),
-                *id,
-            )
-        });
+        selected.sort_by_key(|(id, entry)| (entry.binding.as_ref().map_or(0, |b| b.order), *id));
         let mut processes = Vec::with_capacity(selected.len());
-        let mut tokens = vec![context.cancellation.clone(), self.epoch.cancellation()];
+        let mut tokens = vec![self.epoch.cancellation()];
         for (_, entry) in selected {
             let process = entry
                 .process
@@ -130,6 +120,41 @@ impl Publication {
             tokens.push(access.cancellation());
             processes.push(process.clone());
         }
+        Ok(SelectedMiddleware { processes, tokens })
+    }
+    fn freeze_http(
+        &self,
+        mut context: gateway_core::engine::middleware::http::Context,
+    ) -> Result<super::http::PluginHttpMiddlewarePlan, AdminError> {
+        let SelectedMiddleware { processes, tokens } =
+            self.select(&context.excluded_plugin_instances, |binding| {
+                binding.mounts.contains(&PluginMiddlewareMount::Http)
+                    && matches!(binding.scope, PluginExecutionScope::All {})
+            })?;
+        context.cancellation =
+            CancellationToken::linked(std::iter::once(context.cancellation.clone()).chain(tokens));
+        Ok(super::http::PluginHttpMiddlewarePlan::new(
+            context, processes,
+        ))
+    }
+    pub(super) fn freeze(
+        &self,
+        mut context: MiddlewareContext,
+    ) -> Result<PluginMiddlewarePlan, AdminError> {
+        if !self.blocked.is_empty() || self.epoch.is_revoked() {
+            return Err(AdminError::unavailable("中间件配置状态未确认"));
+        }
+        if !matches!(
+            context.mount,
+            MiddlewareMount::Request | MiddlewareMount::Attempt
+        ) {
+            return Err(AdminError::invalid("此中间件挂载位置尚未接入"));
+        }
+        let SelectedMiddleware { processes, tokens } = self
+            .select(&context.excluded_plugin_instances, |binding| {
+                binding.matches(&context)
+            })?;
+        let tokens = std::iter::once(context.cancellation.clone()).chain(tokens);
         context.cancellation = CancellationToken::linked(tokens);
         Ok(PluginMiddlewarePlan { context, processes })
     }
@@ -139,6 +164,13 @@ impl Publication {
 /// switch revokes it even if preparation has not yet entered the first layer.
 pub struct PluginMiddlewareRegistry(Publication, CancellationToken);
 impl PluginMiddlewareRegistry {
+    pub fn freeze_http(
+        &self,
+        mut context: gateway_core::engine::middleware::http::Context,
+    ) -> Result<super::http::PluginHttpMiddlewarePlan, AdminError> {
+        context.cancellation = CancellationToken::linked([context.cancellation, self.1.clone()]);
+        self.0.freeze_http(context)
+    }
     pub fn freeze(
         &self,
         mut context: MiddlewareContext,

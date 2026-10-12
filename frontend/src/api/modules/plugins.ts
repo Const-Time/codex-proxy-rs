@@ -23,7 +23,7 @@ export interface PluginManagementView {
 export interface PluginAuthenticationBinding { failurePolicy: 'reject' | 'delegate', identities: Record<string, string> }
 export interface PluginMiddlewareBinding {
   order: number
-  mounts: ('request' | 'attempt')[]
+  mounts: ('http' | 'websocket' | 'service' | 'request' | 'attempt')[]
   scope: { kind: 'all' } | { kind: 'keys' | 'groups', ids: string[] }
 }
 export interface PluginModelRouterBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }

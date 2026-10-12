@@ -249,6 +249,9 @@ impl PluginRuntime for PluginEngine {
             if declaration.version != 4
                 || binding.mounts.iter().any(|mount| {
                     !declaration.stages.contains(&match mount {
+                        PluginMiddlewareMount::Http => Stage::Http,
+                        PluginMiddlewareMount::WebSocket => Stage::WebSocket,
+                        PluginMiddlewareMount::Service => Stage::Service,
                         PluginMiddlewareMount::Request => Stage::Request,
                         PluginMiddlewareMount::Attempt => Stage::Attempt,
                     })

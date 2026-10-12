@@ -1,4 +1,7 @@
 //! Host-owned middleware composition and lazy delivery contracts.
+pub mod http;
+pub mod service;
+pub mod websocket;
 use crate::{
     account::ProviderAccountId,
     engine::{

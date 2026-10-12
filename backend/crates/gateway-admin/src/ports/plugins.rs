@@ -34,6 +34,17 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn http_middleware(
+        &self,
+        _context: gateway_core::engine::middleware::http::Context,
+        _request: gateway_core::engine::middleware::http::Request,
+        _next: gateway_core::engine::middleware::http::Next,
+    ) -> std::result::Result<
+        gateway_core::engine::middleware::http::Response,
+        gateway_core::engine::middleware::MiddlewareError,
+    > {
+        Err(gateway_core::engine::middleware::MiddlewareError::Fault)
+    }
     async fn retry_decision(
         &self,
         _input: gateway_core::engine::retry_policy::RetryInput,
