@@ -11,7 +11,7 @@ use gateway_admin::{
 };
 use gateway_plugin_runtime::PluginEngine;
 
-struct KernelRuntime(PluginEngine);
+pub(crate) struct KernelRuntime(pub(crate) PluginEngine);
 #[async_trait]
 impl PluginRuntime for KernelRuntime {
     fn describe(&self, info: PluginArtifactInfo) -> Result<PluginArtifactInfo, AdminError> {

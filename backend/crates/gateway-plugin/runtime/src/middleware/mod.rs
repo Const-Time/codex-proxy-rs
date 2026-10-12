@@ -2,7 +2,7 @@
 
 mod body;
 mod execution;
-mod facts;
+pub(crate) mod facts;
 mod headers;
 mod registry;
 pub use registry::MiddlewareCallbacks;
@@ -35,6 +35,7 @@ pub(crate) use body::MiddlewareBodyAuthority;
 use headers::{apply_header_mutations, wire_headers};
 
 pub(crate) struct MiddlewareInvocation {
+    cancellation: gateway_core::lifecycle::CancellationToken,
     transport: ClientTransport,
     capabilities_allowed: bool,
     settings_allowed: bool,
@@ -79,6 +80,26 @@ pub(crate) enum MiddlewareCompletionBody {
 }
 
 impl MiddlewareInvocation {
+    pub(crate) fn nested_context(
+        &self,
+    ) -> Result<Option<gateway_core::engine::nested::NestedExecutionContext>, PluginFault> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return Err(PluginFault::new(
+                ErrorCode::PermissionDenied,
+                "middleware invocation has ended",
+            ));
+        }
+        state.original_request.nested_context().map_err(|_| {
+            PluginFault::new(
+                ErrorCode::PermissionDenied,
+                "nested model authority is unavailable",
+            )
+        })
+    }
     pub(crate) fn new(
         context: &MiddlewareContext,
         instance_id: String,
@@ -86,6 +107,7 @@ impl MiddlewareInvocation {
         next: MiddlewareNext,
     ) -> Arc<Self> {
         Arc::new(Self {
+            cancellation: context.cancellation.clone(),
             transport: context.transport,
             instance_id,
             settings_allowed: context.mount

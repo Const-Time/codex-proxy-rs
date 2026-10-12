@@ -318,4 +318,30 @@ impl FrozenAccountScope {
     pub const fn directory(&self) -> &Arc<RuntimeAccountDirectory> {
         &self.directory
     }
+
+    /// Retain only authorized target accounts, preserving group and model policies.
+    #[must_use]
+    pub fn execution_target(
+        &self,
+        provider: Option<&ProviderKind>,
+        account: Option<&ProviderAccountId>,
+        excluded: Option<&ProviderAccountId>,
+    ) -> Self {
+        let selected = self
+            .directory
+            .accounts
+            .iter()
+            .filter(|(id, facts)| {
+                self.allows(id)
+                    && account.is_none_or(|required| required == *id)
+                    && provider.is_none_or(|required| facts.provider_kind() == required)
+                    && excluded != Some(*id)
+            })
+            .map(|(id, facts)| (id.clone(), facts.clone()))
+            .collect();
+        Self::new(
+            Arc::new(RuntimeAccountDirectory::new(selected)),
+            self.client_scope.clone(),
+        )
+    }
 }

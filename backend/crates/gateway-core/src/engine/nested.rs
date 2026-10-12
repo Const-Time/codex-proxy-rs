@@ -17,6 +17,15 @@ const MAX_DEPTH: usize = 8;
 const MAX_CHILDREN: usize = 64;
 const MAX_ACTIVE: usize = 16;
 
+/// Optional host model target narrows Key authorization; it never grants an account.
+#[derive(Debug, Clone, Default)]
+pub struct ModelExecutionTarget {
+    pub provider: Option<crate::identity::ProviderKind>,
+    pub account: Option<crate::account::ProviderAccountId>,
+    /// A parent attempt may already own this account's lease while awaiting its child.
+    pub parent_account: Option<crate::account::ProviderAccountId>,
+}
+
 #[derive(Debug, Default)]
 struct GraphState {
     total: usize,
@@ -86,6 +95,13 @@ impl ExtensionCallScope {
         parent: ModelRequestId,
         instance: String,
     ) -> Result<Self, GatewayError> {
+        self.fork_call(Some(parent), instance)
+    }
+    pub(crate) fn fork_call(
+        &self,
+        parent: Option<ModelRequestId>,
+        instance: String,
+    ) -> Result<Self, GatewayError> {
         if instance.is_empty() || instance.len() > 128 || instance.chars().any(char::is_control) {
             return Err(GatewayError::new(
                 GatewayErrorKind::InvalidRequest,
@@ -120,8 +136,8 @@ impl ExtensionCallScope {
         Ok(Self {
             graph: self.graph.clone(),
             ancestors: Arc::new(ancestors),
-            parent_request_id: Some(parent),
-            initiating_plugin_instance_id: Some(instance),
+            initiating_plugin_instance_id: parent.as_ref().map(|_| instance),
+            parent_request_id: parent,
             permit: Some(Arc::new(ActiveChild {
                 graph: self.graph.clone(),
                 released: AtomicBool::new(false),

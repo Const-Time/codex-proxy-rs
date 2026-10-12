@@ -4,6 +4,7 @@ mod data;
 mod engine;
 mod management_validation;
 pub mod middleware;
+mod models;
 mod package;
 mod resources;
 mod rpc;

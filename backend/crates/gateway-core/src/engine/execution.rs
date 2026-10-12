@@ -142,6 +142,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    model_target: super::nested::ModelExecutionTarget,
     lifetime: Arc<super::nested::ExecutionLifetime>,
     extension_scope: super::nested::ExtensionCallScope,
     parent_deadline: crate::lifecycle::Deadline,
@@ -155,6 +156,50 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn with_model_target(
+        mut self,
+        mut target: super::nested::ModelExecutionTarget,
+    ) -> Result<Self, GatewayError> {
+        self.validate()?;
+        let scope = self.client.policy.account_scope();
+        if target
+            .provider
+            .as_ref()
+            .is_some_and(|provider| !scope.provider_kinds().contains(provider))
+            || target.account.as_ref().is_some_and(|account| {
+                !scope.allows(account)
+                    || target.provider.as_ref().is_some_and(|provider| {
+                        scope
+                            .directory()
+                            .account(account)
+                            .is_none_or(|facts| facts.provider_kind() != provider)
+                    })
+            })
+        {
+            return Err(GatewayError::new(
+                GatewayErrorKind::PolicyDenied,
+                "requested execution target is outside the Key account scope",
+            ));
+        }
+        if target.account.is_some() && target.account == target.parent_account {
+            return Err(GatewayError::new(
+                GatewayErrorKind::NoAvailableProvider,
+                "nested execution cannot wait on its parent's account lease",
+            ));
+        }
+        if target.provider.is_none()
+            && let Some(account) = target.account.as_ref()
+        {
+            // A fixed account also fixes its Provider; a group's other Providers
+            // cannot receive this account ID as a fallback target.
+            target.provider = scope
+                .directory()
+                .account(account)
+                .map(|facts| facts.provider_kind().clone());
+        }
+        self.model_target = target;
+        Ok(self)
+    }
     pub fn nested_context(&self) -> super::nested::NestedExecutionContext {
         super::nested::NestedExecutionContext {
             lifetime: Arc::downgrade(&self.lifetime),
@@ -325,6 +370,10 @@ pub struct StartedExecution {
 }
 
 pub trait ExecutionSession: Send {
+    /// Monotonic execution fact; an implementation without evidence must stay conservative.
+    fn send_state(&self) -> UpstreamSendState {
+        UpstreamSendState::Ambiguous
+    }
     /// Optional active-response control, scoped to this execution only.
     fn response_control(&self) -> Option<super::response_control::ResponseControl> {
         None
@@ -416,6 +465,23 @@ pub trait ExecutionService: Send + Sync {
             GatewayErrorKind::Unsupported,
             "prepared execution is unavailable",
         ))
+    }
+    /// A standalone plugin call shares its host RPC's limits and cancellation.
+    /// It has no model parent; the management call context retains the instance and caller.
+    fn prepare_plugin_execution(
+        &self,
+        client: AuthenticatedClient,
+        initiating_plugin_instance_id: String,
+        call_scope: super::nested::ExtensionCallScope,
+        call_cancellation: CancellationToken,
+    ) -> Result<PreparedRootExecution, GatewayError> {
+        let mut prepared = self.prepare_execution(client)?;
+        prepared.extension_scope = call_scope.fork_call(None, initiating_plugin_instance_id)?;
+        prepared.lifetime.bind_scope(&prepared.extension_scope);
+        prepared.cancellation =
+            CancellationToken::linked([prepared.cancellation, call_cancellation]);
+        prepared.validate()?;
+        Ok(prepared)
     }
     /// Host-issued parent context preserves ancestry and cancellation even with an explicit other Key.
     fn prepare_nested(
@@ -622,8 +688,41 @@ impl DefaultExecutionService {
         mut request: PendingStartExecution,
     ) -> Result<StartedExecution, GatewayError> {
         let request_id = request.prepared.request_id.clone();
-        let routing_context = RoutingContext::default();
-        let account_scope = Arc::clone(request.prepared.client.policy.account_scope());
+        let routing_context = RoutingContext {
+            required_provider: request.prepared.model_target.provider.clone(),
+            ..Default::default()
+        };
+        let target = &request.prepared.model_target;
+        let target_restricted = target.provider.is_some()
+            || target.account.is_some()
+            || target.parent_account.is_some();
+        let account_scope = if target_restricted {
+            Arc::new(
+                request
+                    .prepared
+                    .client
+                    .policy
+                    .account_scope()
+                    .execution_target(
+                        target.provider.as_ref(),
+                        target.account.as_ref(),
+                        target.parent_account.as_ref(),
+                    ),
+            )
+        } else {
+            Arc::clone(request.prepared.client.policy.account_scope())
+        };
+        if target_restricted
+            && account_scope
+                .directory()
+                .providers_with_accounts()
+                .is_empty()
+        {
+            return Err(GatewayError::new(
+                GatewayErrorKind::NoAvailableProvider,
+                "execution target has no authorized available accounts",
+            ));
+        }
         let plan = match &request.target {
             ExecutionTarget::ProviderEndpoint(provider) => {
                 request.prepared.settings.snapshot().plan_provider_endpoint(
@@ -718,6 +817,12 @@ impl DefaultExecutionService {
                             "continuation account is outside the client account scope",
                         ));
                     }
+                    Some(pin) if !plan.account_scope().allows(pin.account()) => {
+                        return Err(GatewayError::new(
+                            GatewayErrorKind::PolicyDenied,
+                            "continuation account conflicts with the execution target",
+                        ));
+                    }
                     Some(pin)
                         if !plan
                             .candidates()
@@ -759,6 +864,7 @@ impl DefaultExecutionService {
         } = request;
         let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            model_target,
             lifetime,
             extension_scope,
             parent_deadline: _,
@@ -912,7 +1018,7 @@ impl DefaultExecutionService {
                 new_request,
                 operation,
                 plan,
-                None,
+                model_target.account,
                 continuation,
                 cancellation,
             )
@@ -1403,6 +1509,7 @@ impl ExecutionService for DefaultExecutionService {
         let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            model_target: Default::default(),
             lifetime,
             extension_scope: Default::default(),
             parent_deadline: Default::default(),
@@ -1584,6 +1691,9 @@ impl Drop for DefaultExecutionSession {
 }
 
 impl ExecutionSession for DefaultExecutionSession {
+    fn send_state(&self) -> UpstreamSendState {
+        self.core.current_send_state()
+    }
     fn response_control(&self) -> Option<super::response_control::ResponseControl> {
         Some(self.core.response_control())
     }

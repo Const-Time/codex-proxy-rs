@@ -1,5 +1,5 @@
 mod capabilities;
-mod plan;
+pub(crate) mod plan;
 mod settings;
 use bytes::Bytes;
 use futures::future::BoxFuture;

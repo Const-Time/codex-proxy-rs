@@ -2300,7 +2300,7 @@ where
         })
     }
 
-    fn current_send_state(&self) -> UpstreamSendState {
+    pub(crate) fn current_send_state(&self) -> UpstreamSendState {
         let observed = if self
             .current
             .as_ref()
