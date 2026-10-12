@@ -13,15 +13,22 @@ pub struct PluginMiddlewareBinding {
     pub mounts: Vec<PluginMiddlewareMount>,
     pub scope: PluginExecutionScope,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginMiddlewareMount {
+    Http,
+    #[serde(rename = "websocket")]
+    WebSocket,
+    Service,
     Request,
     Attempt,
 }
 impl PluginMiddlewareMount {
     pub fn mount(self) -> MiddlewareMount {
         match self {
+            Self::Http => MiddlewareMount::Http,
+            Self::WebSocket => MiddlewareMount::WebSocket,
+            Self::Service => MiddlewareMount::Service,
             Self::Request => MiddlewareMount::Request,
             Self::Attempt => MiddlewareMount::Attempt,
         }
@@ -63,8 +70,21 @@ impl PluginMiddlewareBinding {
     pub fn validate(&self) -> Result<(), super::super::AdminError> {
         if !(-10_000..=10_000).contains(&self.order)
             || self.mounts.is_empty()
-            || self.mounts.len() > 2
-            || (self.mounts.len() == 2 && self.mounts[0] == self.mounts[1])
+            || self.mounts.len() > 5
+            || self
+                .mounts
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.mounts.len()
+            || (self.mounts.iter().any(|m| {
+                matches!(
+                    m,
+                    PluginMiddlewareMount::Http
+                        | PluginMiddlewareMount::WebSocket
+                        | PluginMiddlewareMount::Service
+                )
+            }) && !matches!(self.scope, PluginExecutionScope::All {}))
             || !self.scope.is_valid()
         {
             return Err(super::super::AdminError::invalid(

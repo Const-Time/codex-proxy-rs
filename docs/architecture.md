@@ -70,7 +70,7 @@ flowchart LR
 
 依赖方向遵守四条规则：
 
-1. Core 不依赖 HTTP、数据库、Redis 或具体 Provider。
+1. Core 不依赖 HTTP 服务或客户端实现、数据库、Redis 或具体 Provider；中间件可使用协议值和惰性正文合同，网络传输仍由 API/Provider 实现。
 2. Provider 之间不互相依赖，也不决定跨 Provider fallback。
 3. API 只调用 Core/Admin 抽象；Store 只实现端口。
 4. 具体实现只在组合根相遇。
@@ -531,7 +531,9 @@ API 持续驱动已开始的 Core 启动过程，不随等待响应的 HTTP/WS �
 
 Core 的中间件组合器用不可复制的 `Next` 表示一次续体，Runtime 的 v4 RPC 再按父调用 scope 校验单次 `host.middleware.next`、正文读取、事实快照和关闭。正文透传不预读；改写使用 GMB1 来源映射，每个来源只保留一个在途帧，并限制展开数量和总字节。宿主事件信封不序列化为可写权限，也不实现 Clone；一对多改写只把信封交给最后一个输出。信封可携带整个 `CoordinatedEvent` 的批次结束标记，外层 delivery 必须等标记到达后才提交这一批，不能把首个改写输出当成 Core 已提交。
 
-RPC End 撤销插件回调句柄，外层响应仍保有原正文的提交和清理权限，直到交付或取消。读取的费用和会话事实只是快照，插件改写快照不修改 Core 结算。当前 RPC 内核已通过真实 SDK 子进程的 request/attempt 调用、嵌套改写、伪造来源和取消测试；它尚未发布为可安装启用的中间件能力。Responses HTTP JSON/SSE、Images 和 standalone Search 的 request/attempt 终端已接线，其余传输、HTTP/WS/service 挂载及执行设置/能力需求改写继续接入，未接线的设置改写明确返回 unsupported。
+RPC End 撤销插件回调句柄，外层响应仍保有原正文的提交和清理权限，直到交付或取消。读取的费用和会话事实只是快照，插件改写快照不修改 Core 结算。当前 RPC 内核已通过真实 SDK 子进程的 request/attempt 调用、嵌套改写、伪造来源和取消测试；它尚未发布为可安装启用的中间件能力。Responses HTTP JSON/SSE/WS、Images 和 standalone Search 的 request/attempt 终端、执行设置及能力转换已接线，HTTP/WS 会话/service 挂载继续接入，未接线的回调明确返回 unsupported。
+
+HTTP 入口合同单独保留原始请求/响应、惰性数据帧、trailers 和宿主扩展，不借用已鉴权的 request 正文。认证前上下文只持有宿主调用 ID、祖先排除、取消和期限，不虚构 Key 或管理身份。Admin 从同一发布快照冻结 HTTP 计划，匹配实例故障时保持门禁；响应正文在 RPC 返回后继续检查撤销，取消或期限到达立即释放原正文。升级响应保留尚未启动的会话任务，只有原握手状态成功交付后才可领取一次；响应被替换或丢弃时释放任务。HTTP、WebSocket 会话及服务上下文已建立，HTTP Runtime RPC、API 入口和其余两层的执行桥仍待接线，生产启用门禁不变。
 
 Admin 发布中间件绑定的同一份实例事实，Store 的 0031 迁移只追加 JSON 绑定字段；绑定不会进入插件握手或敏感配置。调用计划按宿主身份和挂载点筛选，固定顺序、进程及 generation，并关联发布 epoch 和进程撤销信号。状态不确定时关闭调用门禁；候选准备失败不修改已发布计划；恢复失败保留匹配范围的必需层。计划外层正文继续检查撤销并把 commit/status/close 委托原 owner，禁止在 RPC End 后使用旧代透传响应提交。API 在准备根请求前取得一次发布快照，绑定撤销信号与 Core 原请求和响应访问守卫。生产启用仍需其余声明范围的 API/Provider 适配完成。
 

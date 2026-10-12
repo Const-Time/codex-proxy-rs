@@ -1,3 +1,4 @@
+mod http;
 use bytes::Bytes;
 use gateway_core::{engine::middleware::*, operation::*};
 use serde_json::{Value, json};

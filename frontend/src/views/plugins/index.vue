@@ -80,6 +80,9 @@ function schedulerBinding(): PluginAccountSchedulerBinding | null {
 }
 const middlewareEnabled = ref(false)
 const middlewareOrder = ref('0')
+const middlewareHttp = ref(false)
+const middlewareWebSocket = ref(false)
+const middlewareService = ref(false)
 const middlewareRequest = ref(true)
 const middlewareAttempt = ref(false)
 const middlewareScope = ref<'all' | 'keys' | 'groups'>('all')
@@ -91,12 +94,20 @@ function middlewareBinding(): PluginMiddlewareBinding | null {
   if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
     throw new Error('中间件顺序必须是 -10000 到 10000 的整数')
   const mounts: PluginMiddlewareBinding['mounts'] = []
+  if (middlewareHttp.value)
+    mounts.push('http')
+  if (middlewareWebSocket.value)
+    mounts.push('websocket')
+  if (middlewareService.value)
+    mounts.push('service')
   if (middlewareRequest.value)
     mounts.push('request')
   if (middlewareAttempt.value)
     mounts.push('attempt')
   if (!mounts.length)
     throw new Error('请选择中间件挂载位置')
+  if ((middlewareHttp.value || middlewareWebSocket.value || middlewareService.value) && middlewareScope.value !== 'all')
+    throw new Error('HTTP、WebSocket 会话与宿主服务中间件需选择全部请求')
   const ids = middlewareIds.value.split(/\s+/u).filter(Boolean)
   if (middlewareScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
     throw new Error('作用范围需填写 1～256 个不重复的 ID')
@@ -175,6 +186,9 @@ function edit(item?: PluginInstance) {
   schedulerFailure.value = item?.accountScheduler?.failurePolicy ?? 'reject'
   middlewareEnabled.value = !!item?.middleware
   middlewareOrder.value = String(item?.middleware?.order ?? 0)
+  middlewareHttp.value = item?.middleware?.mounts.includes('http') ?? false
+  middlewareWebSocket.value = item?.middleware?.mounts.includes('websocket') ?? false
+  middlewareService.value = item?.middleware?.mounts.includes('service') ?? false
   middlewareRequest.value = item?.middleware?.mounts.includes('request') ?? true
   middlewareAttempt.value = item?.middleware?.mounts.includes('attempt') ?? false
   middlewareScope.value = item?.middleware?.scope.kind ?? 'all'
@@ -319,10 +333,16 @@ onMounted(() => perform(async () => { }))
           <!-- eslint-disable-next-line vue-a11y/label-has-for -->
           <label for="plugin-middleware-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-middleware-order" v-model="middlewareOrder" type="number" :disabled="busy" /></label>
           <div class="flex flex-wrap gap-4">
+            <BaseCheckbox v-model="middlewareHttp" show-label label="HTTP 入口" :disabled="busy" />
+            <BaseCheckbox v-model="middlewareWebSocket" show-label label="WebSocket 会话" :disabled="busy" />
+            <BaseCheckbox v-model="middlewareService" show-label label="宿主服务调用" :disabled="busy" />
             <BaseCheckbox v-model="middlewareRequest" show-label label="每个逻辑请求" :disabled="busy" />
             <BaseCheckbox v-model="middlewareAttempt" show-label label="每次上游尝试" :disabled="busy" />
           </div>
           <BaseSelect v-model="middlewareScope" aria-label="中间件作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+          <p v-if="middlewareHttp || middlewareWebSocket || middlewareService" class="text-sm text-cp-text-secondary">
+            HTTP、WebSocket 会话与宿主服务调用需选择全部请求。指定 Key 或分组仅适用于逻辑请求与上游尝试。
+          </p>
           <!-- eslint-disable-next-line vue-a11y/label-has-for -->
           <label v-if="middlewareScope !== 'all'" for="plugin-middleware-ids" class="block">{{ middlewareScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-middleware-ids" v-model="middlewareIds" :rows="3" :disabled="busy" /></label>
           <p class="text-sm text-cp-text-secondary">
