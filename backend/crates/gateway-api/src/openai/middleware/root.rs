@@ -23,6 +23,11 @@ pub(super) fn context(
     model: Option<String>,
 ) -> MiddlewareContext {
     MiddlewareContext {
+        excluded_plugin_instances: prepared
+            .nested_context()
+            .scope()
+            .excluded_instances()
+            .clone(),
         request_id: prepared.request_id().clone(),
         client_key_id: prepared.client().policy().key_id().clone(),
         account_group_ids: prepared

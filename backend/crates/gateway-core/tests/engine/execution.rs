@@ -2584,3 +2584,533 @@ fn timeout_overrides_use_original_start_and_can_remove_the_total_deadline() {
     );
     assert!(admissions.limits.lock().unwrap().is_empty());
 }
+
+use gateway_core::{
+    account::FastMode,
+    engine::{execution::PreparedExecutionRequest, middleware::MiddlewareRequest},
+};
+
+fn prepare(
+    service: &DefaultExecutionService,
+) -> gateway_core::engine::execution::PreparedRootExecution {
+    service
+        .prepare_execution(service.authenticate("sk_start_test").unwrap())
+        .unwrap()
+}
+
+fn assert_failure<T>(result: Result<T, GatewayError>, kind: GatewayErrorKind) {
+    match result {
+        Err(error) => assert_eq!(error.kind(), kind),
+        Ok(_) => panic!("nested preparation should fail with {kind:?}"),
+    }
+}
+
+#[test]
+fn nested_preparation_is_lazy_inherits_settings_and_bounds_its_deadline() {
+    let admissions = Arc::new(Admissions::default());
+    let service = service(admissions.clone(), Arc::new(Budget::default()));
+    let parent = prepare(&service);
+    let mut values = parent.settings().execution_values().unwrap();
+    values.fast_mode = FastMode::Disabled;
+    values.client_limits = RateLimits {
+        max_concurrency: 3,
+        requests_per_minute: 17,
+    };
+    values.timeout_ms = Some(60_000);
+    let changed = parent
+        .settings()
+        .replace_execution(&values, "plugin-a")
+        .unwrap();
+    let parent = parent.with_settings(changed).unwrap();
+    let child = service
+        .prepare_nested(parent.nested_context(), "plugin-a".into(), None)
+        .unwrap();
+    assert_ne!(child.request_id(), parent.request_id());
+    assert_eq!(child.client().policy(), parent.client().policy());
+    assert_eq!(child.settings().execution_values().unwrap(), values);
+    assert_eq!(child.deadline_at(), parent.deadline_at());
+    assert_eq!(
+        child.nested_context().scope().parent_request_id(),
+        Some(parent.request_id())
+    );
+    assert_eq!(
+        child
+            .nested_context()
+            .scope()
+            .initiating_plugin_instance_id(),
+        Some("plugin-a")
+    );
+    assert_eq!(
+        child.nested_context().scope().excluded_instances(),
+        &BTreeSet::from(["plugin-a".into()])
+    );
+    let mut unbounded = values;
+    unbounded.timeout_ms = None;
+    let settings = child
+        .settings()
+        .replace_execution(&unbounded, "plugin-b")
+        .unwrap();
+    let child = child.with_settings(settings).unwrap();
+    assert_eq!(
+        child.deadline_at(),
+        parent.deadline_at(),
+        "a child cannot remove the parent deadline"
+    );
+    assert!(admissions.limits.lock().unwrap().is_empty());
+    parent.cancellation().cancel();
+    assert!(child.cancellation().is_cancelled());
+    assert_failure(
+        service.prepare_nested(child.nested_context(), "plugin-b".into(), None),
+        GatewayErrorKind::Cancelled,
+    );
+}
+
+#[test]
+fn choosing_another_key_resets_execution_overrides_but_keeps_runtime_sources() {
+    let provider = ProviderKind::new("openai").unwrap();
+    let first = start_snapshot().client_policies().next().unwrap().clone();
+    let second = ClientPolicy::new(
+        ClientApiKeyId::new("key_other").unwrap(),
+        PlaintextClientApiKey::new("sk_other").unwrap(),
+        account_scope(&provider, "acct_start"),
+        true,
+        RateLimits {
+            max_concurrency: 2,
+            requests_per_minute: 31,
+        },
+    );
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(start_snapshot_with_clients(1, vec![first, second.clone()])),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        Arc::new(Admissions::default()),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let parent = prepare(&service);
+    let mut values = parent.settings().execution_values().unwrap();
+    values.fast_mode = FastMode::Enabled;
+    values.client_limits = RateLimits {
+        max_concurrency: 7,
+        requests_per_minute: 99,
+    };
+    values.timeout_ms = Some(60_000);
+    let mut runtime = serde_json::to_value(&values.runtime).unwrap();
+    runtime["max_concurrent_per_account"] = json!(5);
+    values.runtime = serde_json::from_value(runtime).unwrap();
+    let settings = parent
+        .settings()
+        .replace_execution(&values, "plugin-a")
+        .unwrap();
+    let parent = parent.with_settings(settings).unwrap();
+    let other = service.authenticate("sk_other").unwrap();
+    let child = service
+        .prepare_nested(parent.nested_context(), "plugin-a".into(), Some(other))
+        .unwrap();
+    let actual = child.settings().execution_values().unwrap();
+    assert_eq!(actual.fast_mode, FastMode::Default);
+    assert_eq!(actual.client_limits, second.limits());
+    assert_eq!(actual.timeout_ms, None);
+    assert_eq!(
+        serde_json::to_value(&actual.runtime).unwrap()["max_concurrent_per_account"],
+        5
+    );
+    assert_eq!(
+        child.settings().inspect()["overrides"]["max_concurrent_per_account"]["instance_id"],
+        "plugin-a"
+    );
+    assert_eq!(
+        child.settings().inspect()["execution"]["fast_mode"],
+        serde_json::Value::Null
+    );
+    assert_eq!(child.deadline_at(), parent.deadline_at());
+    assert_eq!(child.client().policy().key_id(), second.key_id());
+}
+
+#[test]
+fn retaining_authority_does_not_keep_parent_alive_or_pin_graph_capacity() {
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let parent = prepare(&service);
+    let authority = parent.nested_context();
+    let mut retained = Vec::new();
+    for _ in 0..64 {
+        let child = service
+            .prepare_nested(authority.clone(), "plugin-a".into(), None)
+            .unwrap();
+        retained.push(child.nested_context());
+        drop(child);
+    }
+    assert!(
+        retained
+            .iter()
+            .all(|context| context.cancellation().is_cancelled())
+    );
+    assert_failure(
+        service.prepare_nested(authority.clone(), "plugin-a".into(), None),
+        GatewayErrorKind::RateLimited,
+    );
+    drop(parent);
+    assert!(authority.cancellation().is_cancelled());
+    assert_failure(
+        service.prepare_nested(authority, "plugin-a".into(), None),
+        GatewayErrorKind::Cancelled,
+    );
+    let fresh_root = prepare(&service);
+    assert!(
+        service
+            .prepare_nested(fresh_root.nested_context(), "plugin-a".into(), None)
+            .is_ok()
+    );
+}
+
+#[test]
+fn graph_limits_bound_active_children_depth_and_ancestor_recursion() {
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let root = prepare(&service);
+    for invalid in ["", "plugin\nforged"] {
+        assert_failure(
+            service.prepare_nested(root.nested_context(), invalid.into(), None),
+            GatewayErrorKind::InvalidRequest,
+        );
+    }
+    let mut children = Vec::new();
+    for _ in 0..16 {
+        children.push(
+            service
+                .prepare_nested(root.nested_context(), "plugin-a".into(), None)
+                .unwrap(),
+        );
+    }
+    assert_failure(
+        service.prepare_nested(root.nested_context(), "plugin-a".into(), None),
+        GatewayErrorKind::RateLimited,
+    );
+    let context = children.pop().unwrap().nested_context();
+    assert!(context.cancellation().is_cancelled());
+    assert!(
+        service
+            .prepare_nested(root.nested_context(), "plugin-a".into(), None)
+            .is_ok()
+    );
+    children.clear();
+    let mut ancestors = vec![root];
+    for depth in 0..8 {
+        let previous = ancestors.last().unwrap().nested_context();
+        let child = service
+            .prepare_nested(previous, format!("depth-{depth}"), None)
+            .unwrap();
+        ancestors.push(child);
+    }
+    assert_failure(
+        service.prepare_nested(ancestors[1].nested_context(), "depth-0".into(), None),
+        GatewayErrorKind::Unsupported,
+    );
+    assert_failure(
+        service.prepare_nested(
+            ancestors.last().unwrap().nested_context(),
+            "depth-8".into(),
+            None,
+        ),
+        GatewayErrorKind::Unsupported,
+    );
+}
+
+#[test]
+fn revoking_the_parent_key_rejects_children_even_with_an_explicit_live_other_key() {
+    let other = ClientPolicy::new(
+        ClientApiKeyId::new("key_other").unwrap(),
+        PlaintextClientApiKey::new("sk_other").unwrap(),
+        account_scope(&ProviderKind::new("openai").unwrap(), "acct_start"),
+        true,
+        RateLimits::unlimited(),
+    );
+    let first = start_snapshot().client_policies().next().unwrap().clone();
+    let snapshots =
+        RuntimeSnapshotHandle::new(start_snapshot_with_clients(1, vec![first, other.clone()]));
+    let service = DefaultExecutionService::new(
+        snapshots.clone(),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        Arc::new(Admissions::default()),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let parent = prepare(&service);
+    let context = parent.nested_context();
+    snapshots.publish(start_snapshot_with_clients(2, vec![other]));
+    let live_other = service.authenticate("sk_other").unwrap();
+    assert_failure(
+        service.prepare_nested(context, "plugin-a".into(), Some(live_other)),
+        GatewayErrorKind::Unauthorized,
+    );
+    let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+    let service = DefaultExecutionService::new(
+        snapshots,
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        Arc::new(Admissions::default()),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let parent = prepare(&service);
+    let revocation = gateway_core::lifecycle::CancellationToken::new();
+    let authority = parent.nested_context().with_revocation(revocation.clone());
+    revocation.cancel();
+    assert_failure(
+        service.prepare_nested(
+            authority,
+            "plugin-a".into(),
+            Some(service.authenticate("sk_start_test").unwrap()),
+        ),
+        GatewayErrorKind::Cancelled,
+    );
+}
+
+#[test]
+fn middleware_body_replacement_preserves_authority_and_uses_current_settings() {
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let parent = prepare(&service);
+    let authority = parent.nested_context();
+    let request = MiddlewareRequest::new("openai", vec![], bytes::Bytes::from_static(b"{}"))
+        .with_execution_context(authority)
+        .with_settings(parent.settings().clone());
+    let mut values = parent.settings().execution_values().unwrap();
+    values.fast_mode = FastMode::Disabled;
+    let settings = parent
+        .settings()
+        .replace_execution(&values, "plugin-a")
+        .unwrap();
+    let request = request
+        .replace_parts(
+            "openai".into(),
+            vec![],
+            bytes::Bytes::from_static(b"{\"input\":\"changed\"}"),
+            None,
+        )
+        .unwrap()
+        .with_settings(settings);
+    let child = service
+        .prepare_nested(
+            request.nested_context().unwrap().unwrap(),
+            "plugin-a".into(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        child.settings().execution_values().unwrap().fast_mode,
+        FastMode::Disabled
+    );
+    assert_eq!(
+        parent.settings().execution_values().unwrap().fast_mode,
+        FastMode::Default
+    );
+    let foreign = prepare(&service);
+    let foreign_settings = foreign.settings().clone();
+    // Two executions on the same Key/snapshot may exchange values, but not opaque ancestry.
+    let request = request.with_settings(foreign_settings);
+    assert_eq!(
+        request.nested_context().unwrap().unwrap().request_id(),
+        parent.request_id()
+    );
+}
+
+#[test]
+fn child_and_parent_settle_distinct_calls_once_and_child_authority_expires_after_cleanup() {
+    block_on(async {
+        let admissions = Arc::new(Admissions::default());
+        let budget = Arc::new(Budget {
+            active: admissions.active.clone(),
+            ..Default::default()
+        });
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot()),
+            store.clone(),
+            ProviderRegistry::new([Arc::new(ChargedProvider { fail: false }) as Arc<dyn Provider>])
+                .unwrap(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_budget(budget.clone());
+        let parent = prepare(&service);
+        let parent_id = parent.request_id().clone();
+        let child = service
+            .prepare_nested(parent.nested_context(), "plugin-a".into(), None)
+            .unwrap();
+        let child_authority = child.nested_context();
+        let child_id = child.request_id().clone();
+        for prepared in [child, parent] {
+            let input = request(&service, ClientTransport::HttpJson);
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: input.public_model,
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                started.session.collect_uncommitted().await.unwrap().len(),
+                3
+            );
+            started.session.commit_downstream(Some(200)).await.unwrap();
+            assert!(started.session.next_event().await.unwrap().is_none());
+            assert!(started.session.is_finalized());
+            // Keeping a finalized session and its context cannot start new descendants.
+            assert_failure(
+                service.prepare_nested(child_authority.clone(), "plugin-b".into(), None),
+                GatewayErrorKind::Cancelled,
+            );
+            started.session.detach_finalize().await;
+        }
+        let rows = store.requests.lock().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, child_id);
+        assert_eq!(rows[0].parent_request_id, Some(parent_id.clone()));
+        assert_eq!(
+            rows[0].initiating_plugin_instance_id.as_deref(),
+            Some("plugin-a")
+        );
+        assert_eq!(rows[1].id, parent_id);
+        assert_eq!(rows[1].parent_request_id, None);
+        let charges = budget.charges.lock().unwrap();
+        assert_eq!(charges.len(), 2);
+        assert_eq!(charges[0].request_id, child_id);
+        assert_eq!(charges[1].request_id, parent_id);
+        assert!(
+            charges
+                .iter()
+                .all(|charge| charge.amount_usd == known_charge())
+        );
+        assert_eq!(admissions.releases.load(Ordering::SeqCst), 2);
+        assert!(!admissions.active.load(Ordering::SeqCst));
+    });
+}
+
+struct NestedRetryProbe {
+    retry: AtomicBool,
+    calls: AtomicUsize,
+}
+#[async_trait]
+impl Provider for NestedRetryProbe {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![])
+    }
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.retry.load(Ordering::SeqCst) && call == 0 {
+            let candidate = request.candidate();
+            let metadata = ProviderCallMetadata::new(
+                candidate.provider().clone(),
+                candidate.upstream_model().unwrap().clone(),
+                ProviderAccountId::new("acct_start").unwrap(),
+                UpstreamTransport::new("websocket").unwrap(),
+            );
+            let error =
+                ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::NotSent)
+                    .with_replay_safe()
+                    .with_pre_delivery_transport_retry(
+                        std::num::NonZeroU32::new(1).unwrap(),
+                        Duration::ZERO,
+                    );
+            Ok(ProviderStream::new(
+                metadata,
+                futures::stream::iter([Err(error)]),
+                (),
+            ))
+        } else {
+            ChargedProvider { fail: false }
+                .execute(request, context)
+                .await
+        }
+    }
+}
+
+#[test]
+fn observed_child_effects_prevent_parent_replay_before_child_settlement() {
+    block_on(async {
+        for child_effects in [false, true] {
+            let provider = Arc::new(NestedRetryProbe {
+                retry: AtomicBool::new(false),
+                calls: AtomicUsize::new(0),
+            });
+            let store = Arc::new(TrackingExecutionStore::default());
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(start_snapshot()),
+                store,
+                ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                Arc::new(UnusedAdmissions),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            );
+            let parent = prepare(&service);
+            let mut child = if child_effects {
+                let prepared = service
+                    .prepare_nested(parent.nested_context(), "plugin-a".into(), None)
+                    .unwrap();
+                let cancellation = prepared.cancellation();
+                let input = request(&service, ClientTransport::HttpSse);
+                let mut child = service
+                    .start_prepared(
+                        prepared,
+                        PreparedExecutionRequest {
+                            public_model: input.public_model,
+                            operation: input.operation,
+                            metadata: input.metadata,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(child.session.next_event().await.unwrap().is_some());
+                assert!(!child.session.is_finalized());
+                Some((child, cancellation))
+            } else {
+                None
+            };
+            provider.calls.store(0, Ordering::SeqCst);
+            provider.retry.store(true, Ordering::SeqCst);
+            let input = request(&service, ClientTransport::HttpJson);
+            let mut started = service
+                .start_prepared(
+                    parent,
+                    PreparedExecutionRequest {
+                        public_model: input.public_model,
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            let result = started.session.collect_uncommitted().await;
+            if child_effects {
+                assert!(matches!(result, Err(EngineError::Provider(_))));
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(result.unwrap().len(), 3);
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+                started.session.commit_downstream(Some(200)).await.unwrap();
+            }
+            started.session.detach_finalize().await;
+            if let Some((child, cancellation)) = child.take() {
+                assert!(cancellation.is_cancelled());
+                child.session.detach_finalize().await;
+            }
+        }
+    });
+}

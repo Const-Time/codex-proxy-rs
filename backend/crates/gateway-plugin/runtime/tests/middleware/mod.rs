@@ -109,6 +109,7 @@ impl Fixture {
 }
 fn context(streaming: bool) -> MiddlewareContext {
     MiddlewareContext {
+        excluded_plugin_instances: Default::default(),
         request_id: gateway_core::engine::ModelRequestId::new("req_original").unwrap(),
         client_key_id: gateway_core::policy::ClientApiKeyId::new("key_original").unwrap(),
         account_group_ids: vec![],

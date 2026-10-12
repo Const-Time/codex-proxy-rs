@@ -82,7 +82,9 @@ impl Publication {
         let mut selected = self
             .entries
             .iter()
-            .filter(|(_, entry)| entry.binding.matches(&context))
+            .filter(|(id, entry)| {
+                !context.excluded_plugin_instances.contains(*id) && entry.binding.matches(&context)
+            })
             .collect::<Vec<_>>();
         selected.sort_by_key(|(id, entry)| (entry.binding.order, *id));
         let mut processes = Vec::with_capacity(selected.len());

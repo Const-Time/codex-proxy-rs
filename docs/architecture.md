@@ -587,3 +587,7 @@ Provider 的同步 `prepare_operation` 只形成原生请求默认值，不执�
 ProviderSchedulingLeaseRequest 同时携带 Deadline 与原请求取消信号。Redis ProviderAccount guard 按已有成员和 fencing token 续期，不重新准入或写 last_started；Drop/显式释放先停止续期。失去槽位取消该执行，有限期限到达不抢先转换为 cancelled；Core 保留 timeout 归类权。OAuth 刷新/互斥租约仍走原专属生命周期。
 
 SDK timeout_ms 为 0 表示立即到期，PreparedRoot 返回 Timeout 并阻止准入；null 不设总期限。插件修改来源展示对象不会进入宿主设置事实，未知字段按本地 ExecutionSettings 合同拒绝。
+
+原生模型子调用复用 Core 的 `prepare_execution`/`start_prepared` 和原准入、计费及清理链。Core 签发不可由 wire 构造的 `NestedExecutionContext`，以弱生命周期引用绑定父请求，继承其取消和绝对期限；父请求结束后保留上下文不能续命。子调用以当前所选 Key 重新认证，运行设置按显式字段 rebase，同 Key 保留执行覆盖，换 Key 清除旧 Key 的 Fast/准入/超时覆盖。
+
+调用图在准入前限制总数、并发及深度，实例祖先由宿主管理并从子请求的中间件计划排除。子请求的活动占用贯穿终态结算与准入释放；旧上下文不延长占用。每次真实调用拥有独立的请求记录及账单，Store 在原请求行保存历史父子关联而不引入另一套账本。子请求观察到发送或不确定发送会通知所有祖先并禁止其自动重放；自身正常重试仍由原发送规则决定。request/attempt 协议桥已传递该上下文，原生模型与流回调尚待接通。

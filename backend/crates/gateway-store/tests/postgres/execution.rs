@@ -30,6 +30,8 @@ fn postgres_execution_adapter_implements_core_port() {
 fn model_request_rejects_mismatched_client_key_live_id() {
     let started_at = Utc::now();
     let request = NewModelRequest {
+        parent_request_id: None,
+        initiating_plugin_instance_id: None,
         user_id: None,
 
         admission_decision_ms: None,
@@ -84,6 +86,8 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
     .await
     .expect("seed provider account");
     let request = NewModelRequest {
+        parent_request_id: Some("req_parent_not_yet_written".into()),
+        initiating_plugin_instance_id: Some("plugin-fixture".into()),
         user_id: None,
 
         admission_decision_ms: None,
@@ -189,6 +193,24 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
     .await
     .expect("load send state after retry");
     assert_eq!(send_state, "sent");
+    let ancestry: (Option<String>, Option<String>) = sqlx::query_as(
+        "select parent_request_id, initiating_plugin_instance_id from model_requests where id = 'req_merged'",
+    ).fetch_one(&database.pool).await.unwrap();
+    assert_eq!(
+        ancestry,
+        (
+            Some("req_parent_not_yet_written".into()),
+            Some("plugin-fixture".into())
+        )
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "select exists(select 1 from model_requests where id = 'req_parent_not_yet_written')"
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap()
+    );
     database.close().await;
 }
 
@@ -201,6 +223,8 @@ async fn model_request_persists_group_routing_snapshot_without_live_group_foreig
     let started_at = Utc::now();
     repository
         .insert_model_request(NewModelRequest {
+            parent_request_id: Some("req_unwritten_parent".into()),
+            initiating_plugin_instance_id: Some("plugin-nested".into()),
             user_id: None,
 
             admission_decision_ms: None,
@@ -253,6 +277,25 @@ async fn model_request_persists_group_routing_snapshot_without_live_group_foreig
         stored.2,
         serde_json::json!(["Production Pool", "Overflow Pool"])
     );
+    let ancestry: (Option<String>, Option<String>) = sqlx::query_as(
+        "select parent_request_id, initiating_plugin_instance_id from model_requests where id = 'req_group_history'",
+    ).fetch_one(&database.pool).await.unwrap();
+    assert_eq!(
+        ancestry,
+        (
+            Some("req_unwritten_parent".into()),
+            Some("plugin-nested".into())
+        )
+    );
+    for bad in [
+        "update model_requests set parent_request_id = null where id = 'req_group_history'",
+        "update model_requests set initiating_plugin_instance_id = null where id = 'req_group_history'",
+        "update model_requests set parent_request_id = id where id = 'req_group_history'",
+        "update model_requests set initiating_plugin_instance_id = '' where id = 'req_group_history'",
+        "update model_requests set parent_request_id = E'forged\\nparent' where id = 'req_group_history'",
+    ] {
+        assert!(sqlx::query(bad).execute(&database.pool).await.is_err());
+    }
     database.close().await;
 }
 
@@ -1619,7 +1662,13 @@ async fn entry_migration_recovers_only_recorded_context_and_preserves_historical
             .await
             .unwrap();
     super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
-    let after: serde_json::Value = sqlx::query_scalar("select to_jsonb(mr) - 'billing_multiplier_scope' from model_requests mr where id='req_old_bill'").fetch_one(&db.pool).await.unwrap();
+    let mut after: serde_json::Value = sqlx::query_scalar("select to_jsonb(mr) - 'billing_multiplier_scope' from model_requests mr where id='req_old_bill'").fetch_one(&db.pool).await.unwrap();
+    for field in ["parent_request_id", "initiating_plugin_instance_id"] {
+        assert_eq!(
+            after.as_object_mut().unwrap().remove(field),
+            Some(serde_json::Value::Null)
+        );
+    }
     assert_eq!(before, after);
     let rows: Vec<(String, Option<serde_json::Value>, String, Option<String>)> = sqlx::query_as(
         "select id,entry_context,message,upstream_send_state from ops_events order by id",

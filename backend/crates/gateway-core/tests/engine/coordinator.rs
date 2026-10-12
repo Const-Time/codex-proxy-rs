@@ -686,6 +686,8 @@ fn plan_with_policy(
 fn model_request(operation: &Operation, deadline: SystemTime) -> NewModelRequest {
     let client_key = ClientApiKeyId::new("key_client_1").expect("client key id");
     NewModelRequest {
+        parent_request_id: None,
+        initiating_plugin_instance_id: None,
         budget_scope: None,
         admission_decision_ms: None,
         id: ModelRequestId::new("req_core_1").expect("request id"),
