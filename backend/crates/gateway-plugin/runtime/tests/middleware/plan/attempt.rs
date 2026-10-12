@@ -220,6 +220,8 @@ fn routing(operation: &Operation) -> RoutingPlan {
 }
 fn request_row(context: &MiddlewareContext, operation: &Operation) -> NewModelRequest {
     NewModelRequest {
+        parent_request_id: None,
+        initiating_plugin_instance_id: None,
         budget_scope: None,
         admission_decision_ms: None,
         id: context.request_id.clone(),

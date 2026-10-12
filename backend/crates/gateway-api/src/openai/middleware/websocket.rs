@@ -118,7 +118,8 @@ pub(in crate::openai) async fn respond(
                 .collect(),
             body,
         )
-        .with_settings(root.prepared.settings().clone());
+        .with_settings(root.prepared.settings().clone())
+        .with_execution_context(root.prepared.nested_context());
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
             Box::pin(async move {
                 if request.protocol() != "openai" {

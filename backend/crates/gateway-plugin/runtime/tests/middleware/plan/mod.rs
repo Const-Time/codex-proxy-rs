@@ -112,6 +112,65 @@ async fn run_chain(manager: &PluginManager) -> (Vec<String>, Vec<String>) {
 }
 
 #[tokio::test]
+async fn nested_ancestry_excludes_initiating_instances_from_both_mounts() {
+    let f = Installation::new().await;
+    let a = f
+        .manager
+        .update(None, f.command(0, -1), &actor())
+        .await
+        .unwrap();
+    let b = f
+        .manager
+        .update(None, f.command(0, 1), &actor())
+        .await
+        .unwrap();
+    for mount in [MiddlewareMount::Request, MiddlewareMount::Attempt] {
+        let mut scoped = context(false);
+        scoped.mount = mount;
+        scoped.excluded_plugin_instances.insert(a.id.clone());
+        let plan = f.manager.freeze_middleware(scoped).unwrap();
+        assert!(!plan.is_empty());
+        if mount == MiddlewareMount::Request {
+            let trace = Arc::new(Trace::default());
+            let response = plan
+                .run(request("chain"), terminal(trace.clone(), false))
+                .await
+                .unwrap();
+            let values: Vec<String> = trace
+                .request
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .headers()
+                .iter()
+                .map(|header| String::from_utf8(header.value().to_vec()).unwrap())
+                .collect();
+            assert_eq!(values, vec![format!("{}:1", b.id)]);
+            let (_, _, _, body, _) = response.into_parts();
+            body.close().await;
+        }
+        let mut all = context(false);
+        all.mount = mount;
+        all.excluded_plugin_instances
+            .extend([a.id.clone(), b.id.clone()]);
+        assert!(f.manager.freeze_middleware(all).unwrap().is_empty());
+    }
+    // An initiating process that is unavailable still must not be re-entered.
+    assert!(
+        f.manager
+            .handle(&a.id, 1, crate::support::request("crash"))
+            .await
+            .is_err()
+    );
+    let mut descendant = context(false);
+    descendant.excluded_plugin_instances.insert(a.id);
+    assert!(f.manager.freeze_middleware(descendant).is_ok());
+    assert!(f.manager.freeze_middleware(context(false)).is_err());
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn frozen_binding_orders_nested_rpc_by_order_then_id_and_matches_host_scope() {
     let f = Installation::new().await;
     let empty = f.manager.freeze_middleware(context(false)).unwrap();

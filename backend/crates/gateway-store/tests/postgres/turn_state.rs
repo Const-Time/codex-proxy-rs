@@ -227,12 +227,18 @@ async fn migration_moves_only_system_probes_and_keeps_business_facts_unchanged()
     .await
     .unwrap();
     super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
-    let after: serde_json::Value = sqlx::query_scalar(
+    let mut after: serde_json::Value = sqlx::query_scalar(
         "select to_jsonb(m) - 'billing_snapshot_json' - 'billing_multiplier_scope' from model_requests m where id='business'",
     )
     .fetch_one(&db.pool)
     .await
     .unwrap();
+    for field in ["parent_request_id", "initiating_plugin_instance_id"] {
+        assert_eq!(
+            after.as_object_mut().unwrap().remove(field),
+            Some(serde_json::Value::Null)
+        );
+    }
     assert_eq!(before, after);
     let old: serde_json::Value =
         sqlx::query_scalar("select facts from turn_state_probe_records where id='old_probe'")

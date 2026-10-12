@@ -119,7 +119,8 @@ pub(in crate::openai) async fn respond(
                 .collect(),
             body,
         )
-        .with_settings(prepared.settings().clone());
+        .with_settings(prepared.settings().clone())
+        .with_execution_context(prepared.nested_context());
         let ip = input.decoded.metadata().client_ip();
         let agent = input.decoded.metadata().user_agent().map(str::to_owned);
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {

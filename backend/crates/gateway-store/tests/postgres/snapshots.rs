@@ -1035,6 +1035,8 @@ async fn renaming_account_should_not_rewrite_historical_snapshots() {
 
 fn new_request(id: &str, started_at: DateTime<Utc>) -> NewModelRequest {
     NewModelRequest {
+        parent_request_id: None,
+        initiating_plugin_instance_id: None,
         user_id: None,
 
         admission_decision_ms: None,

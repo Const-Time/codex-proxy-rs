@@ -73,7 +73,9 @@ pub(in crate::openai) async fn respond(
         }
     } else {
         let request = match request(&input.operation, &input.headers) {
-            Ok(request) => request.with_settings(prepared.settings().clone()),
+            Ok(request) => request
+                .with_settings(prepared.settings().clone())
+                .with_execution_context(prepared.nested_context()),
             Err(error) => return super::delivery::error_response(&error),
         };
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {

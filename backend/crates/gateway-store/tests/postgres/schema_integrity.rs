@@ -277,12 +277,20 @@ async fn response_model_migration_backfills_only_explicit_valid_openai_reports()
         .run(&db.pool)
         .await
         .expect("upgrade to 21");
-    let after: Vec<Value> = sqlx::query_scalar(
+    let mut after: Vec<Value> = sqlx::query_scalar(
         "select to_jsonb(mr) - 'upstream_response_model' - 'billing_snapshot_json' - 'billing_multiplier_scope' from model_requests mr order by id",
     )
     .fetch_all(&db.pool)
     .await
     .unwrap();
+    for row in &mut after {
+        for field in ["parent_request_id", "initiating_plugin_instance_id"] {
+            assert_eq!(
+                row.as_object_mut().unwrap().remove(field),
+                Some(Value::Null)
+            );
+        }
+    }
     assert_eq!(
         before, after,
         "migration must preserve costs, models and other historical facts"

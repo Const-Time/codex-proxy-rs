@@ -95,6 +95,7 @@ pub struct MiddlewareRequest {
     original_protocol: String,
     capabilities: Option<MiddlewareCapabilityDeclaration>,
     settings: Option<crate::routing::RequestSettings>,
+    execution_context: Option<super::nested::NestedExecutionContext>,
 }
 
 /// Features converted by request middleware and additional upstream requirements.
@@ -112,6 +113,7 @@ impl MiddlewareRequest {
             original_body: body.clone(),
             capabilities: None,
             settings: None,
+            execution_context: None,
             protocol,
             headers,
             body,
@@ -121,6 +123,24 @@ impl MiddlewareRequest {
     pub fn with_settings(mut self, settings: crate::routing::RequestSettings) -> Self {
         self.settings = Some(settings);
         self
+    }
+    pub fn with_execution_context(
+        mut self,
+        context: super::nested::NestedExecutionContext,
+    ) -> Self {
+        self.execution_context = Some(context);
+        self
+    }
+    pub fn nested_context(
+        &self,
+    ) -> Result<Option<super::nested::NestedExecutionContext>, crate::error::GatewayError> {
+        self.execution_context
+            .clone()
+            .map(|context| match &self.settings {
+                Some(settings) => context.with_settings(settings.clone()),
+                None => Ok(context),
+            })
+            .transpose()
     }
     pub fn settings(&self) -> Option<&crate::routing::RequestSettings> {
         self.settings.as_ref()
@@ -515,6 +535,7 @@ impl fmt::Debug for MiddlewareResponseEnvelope {
 /// Facts frozen by the host for one invocation; never decoded from plugin input.
 #[derive(Clone)]
 pub struct MiddlewareContext {
+    pub excluded_plugin_instances: BTreeSet<String>,
     pub request_id: ModelRequestId,
     pub client_key_id: ClientApiKeyId,
     pub account_group_ids: Vec<AccountGroupId>,

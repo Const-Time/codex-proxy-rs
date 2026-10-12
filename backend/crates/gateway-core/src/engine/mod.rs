@@ -8,6 +8,7 @@ pub mod continuation;
 pub mod coordinator;
 pub mod execution;
 pub mod middleware;
+pub mod nested;
 mod observation;
 pub mod probe;
 pub mod provider;
@@ -318,6 +319,7 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context。
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
+    execution_context: Option<nested::NestedExecutionContext>,
     settings: Option<crate::routing::RequestSettings>,
     fast_mode: crate::account::FastMode,
     response_control: Option<response_control::ResponseControl>,
@@ -330,6 +332,13 @@ pub struct RequestAttemptContext {
 }
 
 impl RequestAttemptContext {
+    pub fn with_execution_context(
+        mut self,
+        context: Option<nested::NestedExecutionContext>,
+    ) -> Self {
+        self.execution_context = context;
+        self
+    }
     pub fn with_request_settings(
         mut self,
         settings: Option<crate::routing::RequestSettings>,
@@ -363,6 +372,7 @@ impl RequestAttemptContext {
         Self {
             fast_mode: crate::account::FastMode::Default,
             settings: None,
+            execution_context: None,
             response_control: None,
             request_id,
             client_api_key_ref,
@@ -425,6 +435,9 @@ pub struct AttemptContext {
 }
 
 impl AttemptContext {
+    pub fn nested_context(&self) -> Option<&nested::NestedExecutionContext> {
+        self.request.execution_context.as_ref()
+    }
     pub fn settings(&self) -> Option<&crate::routing::RequestSettings> {
         self.request.settings.as_ref()
     }
@@ -588,6 +601,8 @@ impl AttemptContext {
 /// 创建唯一 `model_requests` 行所需的入口事实。
 #[derive(Debug, Clone)]
 pub struct NewModelRequest {
+    pub parent_request_id: Option<ModelRequestId>,
+    pub initiating_plugin_instance_id: Option<String>,
     pub budget_scope: Option<budget::ClientBudgetScope>,
     pub id: ModelRequestId,
     pub client_api_key_id: Option<ClientApiKeyId>,

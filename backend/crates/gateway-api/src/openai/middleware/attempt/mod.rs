@@ -39,6 +39,11 @@ impl AttemptMiddleware for ResponsesAttempt {
             context.operation = original.operation().kind();
             context.cancellation = attempt.cancellation().clone();
             context.deadline_at = attempt.deadline();
+            context.excluded_plugin_instances = attempt
+                .nested_context()
+                .map_or_else(Default::default, |context| {
+                    context.scope().excluded_instances().clone()
+                });
             let plan = registry
                 .freeze(context)
                 .map_err(|_| MiddlewareError::Fault)?;
@@ -69,6 +74,10 @@ impl AttemptMiddleware for ResponsesAttempt {
             );
             let request = match attempt.settings() {
                 Some(settings) => request.with_settings(settings.clone()),
+                None => request,
+            };
+            let request = match attempt.nested_context() {
+                Some(context) => request.with_execution_context(context.clone()),
                 None => request,
             };
             let terminal =

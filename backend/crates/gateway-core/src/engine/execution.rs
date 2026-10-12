@@ -142,6 +142,9 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    lifetime: Arc<super::nested::ExecutionLifetime>,
+    extension_scope: super::nested::ExtensionCallScope,
+    parent_deadline: crate::lifecycle::Deadline,
     settings: crate::routing::RequestSettings,
     attempt_middleware: Option<Arc<dyn super::attempt_middleware::AttemptMiddleware>>,
     client: AuthenticatedClient,
@@ -152,6 +155,22 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn nested_context(&self) -> super::nested::NestedExecutionContext {
+        super::nested::NestedExecutionContext {
+            lifetime: Arc::downgrade(&self.lifetime),
+            client: self.client.clone(),
+            settings: self.settings.clone(),
+            request_id: self.request_id.clone(),
+            started_at: self.started_at,
+            parent_deadline: self.parent_deadline,
+            deadline: self.deadline_at,
+            cancellation: CancellationToken::linked([
+                self.cancellation.clone(),
+                self.lifetime.cancellation(),
+            ]),
+            scope: self.extension_scope.clone(),
+        }
+    }
     pub fn settings(&self) -> &crate::routing::RequestSettings {
         &self.settings
     }
@@ -189,6 +208,9 @@ impl PreparedRootExecution {
                 "execution timeout is outside the supported range",
             )
         })?;
+        if let Some(parent) = self.parent_deadline.at() {
+            self.deadline_at = self.deadline_at.cap(parent);
+        }
         self.settings = settings;
         self.validate()?;
         Ok(self)
@@ -394,6 +416,35 @@ pub trait ExecutionService: Send + Sync {
             GatewayErrorKind::Unsupported,
             "prepared execution is unavailable",
         ))
+    }
+    /// Host-issued parent context preserves ancestry and cancellation even with an explicit other Key.
+    fn prepare_nested(
+        &self,
+        parent: super::nested::NestedExecutionContext,
+        initiating_plugin_instance_id: String,
+        selected_client: Option<AuthenticatedClient>,
+    ) -> Result<PreparedRootExecution, GatewayError> {
+        parent.validate()?;
+        let client = selected_client.unwrap_or_else(|| parent.client.clone());
+        let mut prepared = self.prepare_execution(client)?;
+        prepared.extension_scope = parent
+            .scope
+            .fork(parent.request_id, initiating_plugin_instance_id)?;
+        prepared.lifetime.bind_scope(&prepared.extension_scope);
+        prepared.parent_deadline = parent.deadline;
+        prepared.cancellation =
+            CancellationToken::linked([prepared.cancellation, parent.cancellation]);
+        let settings = parent
+            .settings
+            .rebase(prepared.client.snapshot.clone())
+            .map_err(|_| {
+                GatewayError::new(
+                    GatewayErrorKind::InvalidRequest,
+                    "nested settings cannot be rebased",
+                )
+            })?
+            .with_execution(&prepared.client.policy, None);
+        prepared.with_settings(settings)
     }
     fn start_prepared(
         &self,
@@ -706,7 +757,11 @@ impl DefaultExecutionService {
             operation,
             metadata,
         } = request;
+        let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            lifetime,
+            extension_scope,
+            parent_deadline: _,
             settings,
             attempt_middleware,
             client,
@@ -820,6 +875,10 @@ impl DefaultExecutionService {
                 )
             });
         let new_request = NewModelRequest {
+            parent_request_id: extension_scope.parent_request_id().cloned(),
+            initiating_plugin_instance_id: extension_scope
+                .initiating_plugin_instance_id()
+                .map(str::to_owned),
             budget_scope: budget_scope.clone(),
             id: request_id.clone(),
             client_api_key_id: Some(client.policy.key_id().clone()),
@@ -848,6 +907,7 @@ impl DefaultExecutionService {
             .coordinator
             .with_attempt_middleware(attempt_middleware)
             .with_request_settings(request_settings)
+            .with_execution_context(execution_context)
             .start(
                 new_request,
                 operation,
@@ -887,6 +947,7 @@ impl DefaultExecutionService {
                 Arc::clone(&self.continuation),
                 self.budget.clone(),
                 client.bound_authorization,
+                lifetime,
             )),
         })
     }
@@ -939,6 +1000,8 @@ impl DefaultExecutionService {
         let actor = ClientApiKeyId::new("admin_connection_test")
             .map_err(|_| GatewayError::new(GatewayErrorKind::Internal, "invalid admin actor"))?;
         let new_request = NewModelRequest {
+            parent_request_id: None,
+            initiating_plugin_instance_id: None,
             id: request_id,
             budget_scope: None,
             client_api_key_id: None,
@@ -1337,8 +1400,12 @@ impl ExecutionService for DefaultExecutionService {
                 "prepared authorization is unavailable",
             )
         })?;
+        let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            lifetime,
+            extension_scope: Default::default(),
+            parent_deadline: Default::default(),
             settings: crate::routing::RequestSettings::new(client.snapshot.clone())
                 .with_execution(&client.policy, None),
             attempt_middleware: None,
@@ -1431,6 +1498,7 @@ impl AdmissionLease {
 }
 
 struct DefaultExecutionSession {
+    lifetime: Option<Arc<super::nested::ExecutionLifetime>>,
     // Retain snapshot revocation registration after the request's AuthenticatedClient is consumed.
     _authorization: Option<crate::runtime::ClientAccessGuard>,
     core: ResponseExecutionSession<dyn ExecutionStore>,
@@ -1448,9 +1516,11 @@ impl DefaultExecutionSession {
         continuation: Arc<dyn NativeContinuationPort>,
         budget: Option<Arc<dyn ClientBudgetPort>>,
         authorization: Option<crate::runtime::ClientAccessGuard>,
+        lifetime: Arc<super::nested::ExecutionLifetime>,
     ) -> Self {
         Self {
             _authorization: authorization,
+            lifetime: Some(lifetime),
             core,
             admission: Some(admission),
             cleanup: None,
@@ -1478,6 +1548,10 @@ impl DefaultExecutionSession {
         if let Some(cleanup) = self.cleanup.as_mut() {
             cleanup.await;
             self.cleanup = None;
+        }
+        if self.core.is_finalized() && self.admission.is_none() && self.cleanup.is_none() {
+            self.core.release_nested_permit();
+            self.lifetime.take();
         }
     }
 

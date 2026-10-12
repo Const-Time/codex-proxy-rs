@@ -46,6 +46,7 @@ use futures_timer::Delay;
 pub struct AttemptCoordinator<S: ?Sized> {
     middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
+    execution_context: Option<super::nested::NestedExecutionContext>,
     engine: Arc<GatewayEngine<S>>,
 }
 
@@ -78,9 +79,17 @@ where
             engine: Arc::new(engine),
             middleware: None,
             request_settings: None,
+            execution_context: None,
         }
     }
 
+    pub fn with_execution_context(
+        mut self,
+        context: super::nested::NestedExecutionContext,
+    ) -> Self {
+        self.execution_context = Some(context);
+        self
+    }
     pub fn with_request_settings(mut self, settings: crate::routing::RequestSettings) -> Self {
         self.request_settings = Some(settings);
         self
@@ -92,6 +101,7 @@ where
             engine: Arc::clone(&self.engine),
             middleware,
             request_settings: self.request_settings.clone(),
+            execution_context: self.execution_context.clone(),
         }
     }
 
@@ -194,6 +204,7 @@ where
             engine: Arc::clone(&self.engine),
             attempt_middleware: self.middleware.clone(),
             request_settings: self.request_settings.clone(),
+            execution_context: self.execution_context.clone(),
             middleware_response_head: None,
             middleware_invocation: None,
             middleware_preparation: None,
@@ -309,6 +320,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     recovery_lease: Option<Box<dyn super::ExecutionRecoveryLeaseGuard>>,
     attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
+    execution_context: Option<super::nested::NestedExecutionContext>,
     middleware_response_head: Option<AttemptResponseHead>,
     middleware_invocation: Option<Invocation>,
     middleware_preparation: Option<MiddlewarePreparation>,
@@ -1086,6 +1098,7 @@ where
                     self.request_id.clone(),
                     self.client_api_key_ref.clone(),
                 )
+                .with_execution_context(self.execution_context.clone())
                 .with_request_settings(self.request_settings.clone())
                 .with_pricing(self.plan.pricing())
                 .with_fast_mode(self.plan.fast_mode())
@@ -1538,6 +1551,9 @@ where
             return;
         };
         if !current.send_observed {
+            if let Some(context) = &self.execution_context {
+                context.scope().observe_upstream_effect();
+            }
             if self.request_persisted {
                 best_effort_store_write(
                     "mark_send_state",
@@ -1706,7 +1722,11 @@ where
             && !self
                 .credential_recovery_attempted_accounts
                 .contains(current.metadata.provider_account_id());
-        let retryable = !error.retry_is_prohibited()
+        let retryable = self
+            .execution_context
+            .as_ref()
+            .is_none_or(|context| !context.scope().has_descendant_effects())
+            && !error.retry_is_prohibited()
             && (continuation_retry
                 || same_account_retry
                 || ordinary_retry
@@ -2293,9 +2313,18 @@ where
         escalate_send_state(self.send_state_watermark, observed)
     }
 
-    /// 抬升并返回请求级发送水位；attempt 间切换（`current` 被取走）后，
-    /// 后续终态沿用已达到的最高档，不会把已落库的 `sent` 写回 `not_sent`。
+    pub(crate) fn release_nested_permit(&self) {
+        if let Some(context) = &self.execution_context {
+            context.scope().release();
+        }
+    }
+    /// 抬升并返回请求级发送水位；attempt 间切换后保留已观察到的发送事实。
     fn raise_send_watermark(&mut self, observed: UpstreamSendState) -> UpstreamSendState {
+        if observed != UpstreamSendState::NotSent
+            && let Some(context) = &self.execution_context
+        {
+            context.scope().observe_upstream_effect();
+        }
         self.send_state_watermark = escalate_send_state(self.send_state_watermark, observed);
         self.send_state_watermark
     }
