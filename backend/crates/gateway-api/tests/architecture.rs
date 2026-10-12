@@ -77,6 +77,8 @@ fn source_tree_should_match_frozen_machine_manifest() {
         "src/openai/middleware/body.rs",
         "src/openai/middleware/delivery.rs",
         "src/openai/middleware/mod.rs",
+        "src/openai/middleware/native/mod.rs",
+        "src/openai/middleware/native/session.rs",
         "src/openai/middleware/headers.rs",
         "src/openai/middleware/root.rs",
         "src/openai/middleware/raw.rs",

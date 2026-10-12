@@ -1,6 +1,6 @@
 //! OpenAI protocol bridges for Core-owned, per-attempt middleware.
 mod body;
-mod output;
+pub(super) mod output;
 mod raw;
 pub(super) mod request;
 

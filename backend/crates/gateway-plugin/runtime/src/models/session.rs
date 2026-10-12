@@ -80,7 +80,14 @@ pub(super) async fn open(
                 stop,
                 _permit: permit,
             })
-            .map_err(gateway_fault);
+            .map_err(|error| {
+                let unknown = error.upstream_failure().is_none();
+                let mut fault = gateway_fault(error);
+                if unknown {
+                    fault.send_state = gateway_plugin_sdk::SendState::Ambiguous;
+                }
+                fault
+            });
         let _ = sender.send(result);
     }));
     receiver

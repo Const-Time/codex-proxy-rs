@@ -262,7 +262,9 @@ fn websocket_message(payload: Bytes) -> Result<(ProtocolWireEvent, bool), Middle
     Ok((wire, terminal))
 }
 
-fn sse(payload: Bytes) -> Result<(ProtocolWireEvent, bool), MiddlewareError> {
+pub(in crate::openai::middleware) fn sse(
+    payload: Bytes,
+) -> Result<(ProtocolWireEvent, bool), MiddlewareError> {
     if !(payload.ends_with(b"\n\n") || payload.ends_with(b"\r\n\r\n")) {
         return Err(MiddlewareError::InvalidState);
     }

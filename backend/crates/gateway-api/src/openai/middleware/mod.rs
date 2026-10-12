@@ -3,6 +3,7 @@ mod attempt;
 mod body;
 mod delivery;
 mod headers;
+mod native;
 pub(super) mod raw;
 pub(super) mod request;
 mod root;
@@ -14,6 +15,7 @@ use gateway_core::engine::{
     execution::ExecutionSession,
     middleware::{MiddlewareError, MiddlewareResponse},
 };
+pub use native::PluginModelExecution;
 
 /// Build an uncommitted response for a middleware terminal. Dropping the response
 /// delegates cancellation and settlement to the existing PendingExecution owner.

@@ -33,6 +33,10 @@ mod worker_models {
                 )
                 .await
                 .map_err(|e| e.into_plugin_fault())?;
+            if input["method"] == "host.model.execute" {
+                let batch = ModelEventBatch::decode(&reply.payload).unwrap();
+                return Ok(json!({"result":reply.result,"batch":batch.events}));
+            }
             return Ok(json!({"result":reply.result}));
         }
         let model = input["model"].as_str().unwrap_or("gpt-native");
@@ -46,7 +50,7 @@ mod worker_models {
             previous_response_id: None,
         };
         let body = serde_json::to_vec(
-            &json!({"model":model,"input":"fixture","mode":input["provider_mode"]}),
+            &json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"]}),
         )
         .unwrap();
         if mode == "capacity" {
@@ -97,7 +101,9 @@ mod worker_models {
             let metadata: ModelExecuteResult = serde_json::from_value(reply.result).unwrap();
             let batch = ModelEventBatch::decode(&reply.payload).unwrap();
             assert_eq!(batch.events.len(), metadata.events as usize);
-            return Ok(json!({"request":metadata.request_id,"events":metadata.events}));
+            return Ok(
+                json!({"request":metadata.request_id,"events":metadata.events,"batch":batch.events}),
+            );
         }
         let reply = call
             .host
@@ -149,6 +155,7 @@ mod worker_models {
             assert_eq!(error.code, gateway_plugin_sdk::ErrorCode::Capacity);
         }
         let mut events = 0;
+        let mut snapshots = vec![];
         loop {
             let reply = call
                 .host
@@ -163,6 +170,7 @@ mod worker_models {
             if !reply.payload.is_empty() {
                 let batch = ModelEventBatch::decode(&reply.payload).unwrap();
                 assert_eq!(batch.events.len(), metadata.events as usize);
+                snapshots.extend(batch.events);
             } else {
                 assert_eq!(metadata.events, 0);
             }
@@ -171,7 +179,7 @@ mod worker_models {
                 break;
             }
         }
-        Ok(json!({"request":stream.request_id,"events":events,"ended":true}))
+        Ok(json!({"request":stream.request_id,"events":events,"ended":true,"batch":snapshots}))
     }
 }
 
@@ -298,6 +306,65 @@ mod worker_middleware {
         }
         if mode == "reject" {
             return Err(PluginFault::new(ErrorCode::Rejected, "rejected by fixture"));
+        }
+        if mode == "native-short" {
+            return Ok(CallReply::stream(
+                json!({"response":null,"protocol":"openai","status":403,"header_mutations":[],"body":{"kind":"stream","framing":"raw_bytes"}}),
+                vec![],
+                ResponseStream::from_chunks(vec![
+                    MiddlewareBodyFrame::new(
+                        br#"{"error":{"message":"native blocked"}}"#.to_vec(),
+                        true,
+                    )
+                    .encode(),
+                ]),
+            ));
+        }
+        if mode == "native-transform" {
+            let stage = match call.context.stage {
+                gateway_plugin_sdk::Stage::Request => "plugin_request",
+                gateway_plugin_sdk::Stage::Attempt => "plugin_attempt",
+                _ => panic!("model chain uses request/attempt"),
+            };
+            if stage == "plugin_request" && input["nested_model"] == true {
+                let nested = super::worker_models::handle(&call, &json!({"mode":"unary"})).await;
+                assert!(nested.get("error").is_none(), "{nested}");
+            }
+            let RequestCall {
+                mut request, next, ..
+            } = RequestCall::try_from(call)?;
+            assert_eq!(request.head.client_key_id, "key_alice");
+            let mut body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            body[stage] = json!(true);
+            request.replace_body(serde_json::to_vec(&body).unwrap());
+            let mut response = next.run(request).await?;
+            response.body = response.body.with_facts()?.map_frames(move |mut frame| {
+                if let Some(facts) = &mut frame.facts {
+                    facts.facts.clear();
+                    facts.host = None;
+                }
+                if !frame.payload.is_empty() {
+                    if frame.payload.starts_with(b"{") {
+                        let mut value: serde_json::Value =
+                            serde_json::from_slice(&frame.payload).unwrap();
+                        value[stage] = json!(true);
+                        frame.payload = serde_json::to_vec(&value).unwrap();
+                    } else {
+                        let text = std::str::from_utf8(&frame.payload).unwrap();
+                        if let Some(start) = text.find("data: ") {
+                            let start = start + 6;
+                            let end = start + text[start..].find('\n').unwrap();
+                            let mut value: serde_json::Value =
+                                serde_json::from_str(&text[start..end]).unwrap();
+                            value[stage] = json!(true);
+                            frame.payload =
+                                format!("{}{}{}", &text[..start], value, &text[end..]).into_bytes();
+                        }
+                    }
+                }
+                Ok(vec![frame])
+            })?;
+            return response.encode();
         }
         if mode == "ws-short" {
             return Ok(CallReply::stream(

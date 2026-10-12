@@ -1052,9 +1052,28 @@ pub struct GatewayError {
 struct GatewayClientErrorDetails {
     code: Option<&'static str>,
     retry_after: Option<Duration>,
+    upstream_failure: Option<(UpstreamSendState, Option<u16>)>,
 }
 
 impl GatewayError {
+    /// Execution adapters may preserve known provider effects without exposing secrets.
+    #[must_use]
+    pub fn with_upstream_failure(
+        mut self,
+        send_state: UpstreamSendState,
+        status: Option<u16>,
+    ) -> Self {
+        self.client_details
+            .get_or_insert_with(Default::default)
+            .upstream_failure = Some((send_state, status));
+        self
+    }
+    #[must_use]
+    pub fn upstream_failure(&self) -> Option<(UpstreamSendState, Option<u16>)> {
+        self.client_details
+            .as_ref()
+            .and_then(|details| details.upstream_failure)
+    }
     /// 使用静态安全消息创建错误。
     #[must_use]
     pub const fn new(kind: GatewayErrorKind, message: &'static str) -> Self {
@@ -1144,6 +1163,7 @@ impl GatewayError {
                 "upstream service is unavailable",
             ),
         };
+        let gateway = gateway.with_upstream_failure(error.send_state(), error.upstream_status());
         let gateway = match error.diagnostic() {
             Some(diagnostic) => gateway.with_diagnostic(diagnostic.clone()),
             None => gateway,

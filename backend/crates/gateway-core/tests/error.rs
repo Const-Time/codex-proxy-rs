@@ -8,6 +8,19 @@ use gateway_core::upstream::UpstreamSendState;
 use serde_json::json;
 
 #[test]
+fn provider_failure_preserves_send_state_and_status_through_gateway_projection() {
+    for state in [
+        UpstreamSendState::NotSent,
+        UpstreamSendState::Sent,
+        UpstreamSendState::Ambiguous,
+    ] {
+        let error = ProviderError::new(ProviderErrorKind::InvalidRequest, state).with_status(400);
+        let gateway = GatewayError::from_provider(&error);
+        assert_eq!(gateway.clone().upstream_failure(), Some((state, Some(400))));
+    }
+}
+
+#[test]
 fn provider_error_debug_should_not_expose_sensitive_context() {
     let secret = "sk-do-not-log-this";
     let error = ProviderError::new(ProviderErrorKind::Unauthorized, UpstreamSendState::Sent)

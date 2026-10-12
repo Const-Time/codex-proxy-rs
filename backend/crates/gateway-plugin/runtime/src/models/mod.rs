@@ -23,7 +23,7 @@ use gateway_plugin_sdk::{CallContext, ErrorCode, PluginFault, SendState, call::h
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex},
 };
 
 pub(super) const MAXIMUM_BYTES: usize = 8 * 1024 * 1024;
@@ -39,7 +39,7 @@ pub(crate) fn is_method(method: &str) -> bool {
     )
 }
 pub(crate) struct ModelServices {
-    execution: Weak<dyn ExecutionService>,
+    execution: Arc<dyn ExecutionService>,
     keys: Arc<dyn ClientKeyService>,
 }
 impl ModelServices {
@@ -47,10 +47,7 @@ impl ModelServices {
         execution: Arc<dyn ExecutionService>,
         keys: Arc<dyn ClientKeyService>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            execution: Arc::downgrade(&execution),
-            keys,
-        })
+        Arc::new(Self { execution, keys })
     }
 }
 struct Scope {
@@ -232,7 +229,16 @@ fn gateway_fault(error: GatewayError) -> PluginFault {
         GatewayErrorKind::Internal => ErrorCode::Fault,
         _ => ErrorCode::Upstream,
     };
-    PluginFault::new(code, error.safe_message())
+    let mut fault = PluginFault::new(code, error.safe_message());
+    if let Some((send_state, status)) = error.upstream_failure() {
+        fault.send_state = match send_state {
+            gateway_core::upstream::UpstreamSendState::NotSent => SendState::NotSent,
+            gateway_core::upstream::UpstreamSendState::Sent => SendState::Sent,
+            gateway_core::upstream::UpstreamSendState::Ambiguous => SendState::Ambiguous,
+        };
+        fault.http_status = status;
+    }
+    fault
 }
 fn engine_fault(error: EngineError) -> PluginFault {
     let mut fault = gateway_fault(gateway_error_from_engine(&error));
@@ -364,10 +370,7 @@ async fn call(
                     "host model protocol is unsupported",
                 ));
             }
-            let execution = services
-                .execution
-                .upgrade()
-                .ok_or_else(|| PluginFault::new(ErrorCode::Fault, "model service stopped"))?;
+            let execution = services.execution.clone();
             let client =
                 client(&services, execution.as_ref(), scope, &request.client_key_id).await?;
             let catalog = execution
@@ -400,10 +403,7 @@ async fn call(
             let metadata: ModelExecuteRequest = parse(params)?;
             let streaming = method == "host.model.execute_stream";
             let request = request::decode(&scope.context, &metadata, payload, streaming)?;
-            let execution = services
-                .execution
-                .upgrade()
-                .ok_or_else(|| PluginFault::new(ErrorCode::Fault, "model service stopped"))?;
+            let execution = services.execution.clone();
             let selected = match metadata.client_key_id.as_deref() {
                 Some(key) => Some(client(&services, execution.as_ref(), scope, key).await?),
                 None if scope.parent.is_some() => None,

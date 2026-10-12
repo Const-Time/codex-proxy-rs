@@ -9,7 +9,7 @@ use axum::{
 use futures::{StreamExt, stream};
 use gateway_core::{
     engine::{CommitRequirement, middleware::*},
-    event::{GatewayEvent, ProviderResponseHeader},
+    event::{GatewayEvent, ProtocolWireEvent, ProviderEvent, ProviderResponseHeader},
     lifecycle::ConnectionGuard,
     operation::ProviderSessionState,
 };
@@ -24,6 +24,7 @@ struct Batch {
     bytes: VecDeque<Bytes>,
     requirement: Option<CommitRequirement>,
     terminal: bool,
+    facts: Vec<ProviderEvent>,
 }
 pub(super) struct Delivery {
     body: Option<Box<dyn MiddlewareBody>>,
@@ -90,7 +91,7 @@ impl Delivery {
     pub(super) async fn document(&mut self) -> Result<Vec<u8>, MiddlewareError> {
         let mut bytes = Vec::new();
         let mut batches = Vec::new();
-        while let Some(batch) = self.batch().await? {
+        while let Some(batch) = self.batch(false).await? {
             for chunk in &batch.bytes {
                 if bytes.len().saturating_add(chunk.len()) > MAX_BATCH_BYTES {
                     return Err(MiddlewareError::InvalidState);
@@ -126,6 +127,120 @@ impl Delivery {
             return Err(MiddlewareError::InvalidState);
         }
         Ok(bytes)
+    }
+    /// Return validated protocol projection and original read-only facts without
+    /// acknowledging the original Core barrier. The native RPC encoder is outermost.
+    pub(super) async fn model_batch(
+        &mut self,
+        raw_json: bool,
+    ) -> Result<Option<(gateway_core::engine::CoordinatedEvent, bool)>, MiddlewareError> {
+        self.validate()?;
+        if self.finished {
+            return Ok(None);
+        }
+        let Some(mut batch) = self.batch(true).await? else {
+            if !self.is_finalized() || (self.streaming && !self.wire_terminal) {
+                return Err(MiddlewareError::InvalidState);
+            }
+            self.finished = true;
+            return Ok(None);
+        };
+        let requirement = batch
+            .requirement
+            .unwrap_or(CommitRequirement::AlreadyCommitted);
+        let mut wires = vec![];
+        if self.streaming {
+            if (batch.terminal && !self.wire_terminal)
+                || (requirement == CommitRequirement::CommitBeforeDelivery
+                    && batch.bytes.is_empty())
+            {
+                return Err(MiddlewareError::InvalidState);
+            }
+            for bytes in batch.bytes {
+                let (wire, _) = super::attempt::output::sse(bytes)?;
+                wires.push(wire);
+            }
+        } else {
+            let mut bytes = vec![];
+            loop {
+                for chunk in &batch.bytes {
+                    if bytes.len().saturating_add(chunk.len()) > MAX_BATCH_BYTES {
+                        return Err(MiddlewareError::InvalidState);
+                    }
+                    bytes.extend_from_slice(chunk);
+                }
+                if batch.terminal {
+                    break;
+                }
+                let next = self
+                    .batch(true)
+                    .await?
+                    .ok_or(MiddlewareError::InvalidState)?;
+                batch.facts.extend(next.facts);
+                batch.bytes = next.bytes;
+                batch.terminal = next.terminal;
+                if next.requirement != batch.requirement {
+                    return Err(MiddlewareError::InvalidState);
+                }
+            }
+            let wire = if raw_json || !(200..300).contains(&self.status) {
+                ProtocolWireEvent::raw_json("openai", Bytes::from(bytes))
+                    .map_err(|_| MiddlewareError::InvalidState)?
+            } else {
+                let response: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|_| MiddlewareError::InvalidState)?;
+                ProtocolWireEvent::json(
+                    "openai",
+                    Some("response.completed".into()),
+                    serde_json::json!({"type":"response.completed","response":response}),
+                )
+                .map_err(|_| MiddlewareError::InvalidState)?
+            };
+            wires.push(wire);
+        }
+        let last_wire = wires.pop();
+        let last_fact = last_wire.as_ref().and_then(|_| batch.facts.pop());
+        let mut events = batch
+            .facts
+            .into_iter()
+            .map(|event| event.with_wire_projection(None))
+            .collect::<Vec<_>>();
+        events.extend(wires.into_iter().map(ProviderEvent::wire));
+        if let Some(wire) = last_wire {
+            events.push(match last_fact {
+                Some(event) => event.with_wire_projection(Some(wire)),
+                None => ProviderEvent::wire(wire),
+            });
+        }
+        let event = gateway_core::engine::CoordinatedEvent::try_batch(events, requirement)?;
+        let terminal = batch.terminal;
+        if terminal && requirement == CommitRequirement::AlreadyCommitted {
+            self.model_commit(terminal, requirement).await?;
+        }
+        Ok(Some((event, terminal)))
+    }
+    pub(super) async fn model_commit(
+        &mut self,
+        terminal: bool,
+        requirement: CommitRequirement,
+    ) -> Result<(), MiddlewareError> {
+        match (self.committed, requirement) {
+            (false, CommitRequirement::CommitBeforeDelivery) => {
+                let status = self.status;
+                self.body()?.commit_downstream(Some(status)).await?;
+                self.committed = true;
+            }
+            (true, CommitRequirement::AlreadyCommitted) => {}
+            (false, CommitRequirement::AlreadyCommitted) if self.is_finalized() => {}
+            _ => return Err(MiddlewareError::InvalidState),
+        }
+        if terminal {
+            if self.body()?.next_frame().await?.is_some() || !self.is_finalized() {
+                return Err(MiddlewareError::InvalidState);
+            }
+            self.finished = true;
+        }
+        Ok(())
     }
     fn observe_message(&mut self, payload: &[u8]) -> Result<(), MiddlewareError> {
         if self.wire_terminal {
@@ -167,8 +282,11 @@ impl Delivery {
             .as_deref_mut()
             .ok_or(MiddlewareError::InvalidState)
     }
-    fn is_finalized(&self) -> bool {
+    pub(super) fn is_finalized(&self) -> bool {
         self.body.as_ref().is_none_or(|body| body.is_finalized())
+    }
+    pub(super) fn model_finalized(&self) -> bool {
+        self.finished && self.is_finalized()
     }
     pub(super) async fn close(&mut self) {
         if let Some(body) = self.body.take() {
@@ -176,8 +294,9 @@ impl Delivery {
         }
     }
 
-    async fn batch(&mut self) -> Result<Option<Batch>, MiddlewareError> {
+    async fn batch(&mut self, capture_events: bool) -> Result<Option<Batch>, MiddlewareError> {
         let mut bytes = VecDeque::new();
+        let mut facts = vec![];
         let mut length = 0usize;
         let mut host_events = false;
         for _ in 0..MAX_BATCH_FRAMES {
@@ -189,10 +308,14 @@ impl Delivery {
                     bytes,
                     requirement: None,
                     terminal: true,
+                    facts,
                 }));
             };
             let (payload, framing, terminal, envelope) = frame.into_parts();
             host_events |= envelope.is_some();
+            if capture_events && let Some(envelope) = envelope.as_ref() {
+                facts.extend(envelope.events().cloned());
+            }
             length = length
                 .checked_add(payload.len())
                 .ok_or(MiddlewareError::InvalidState)?;
@@ -253,6 +376,7 @@ impl Delivery {
                     bytes,
                     requirement,
                     terminal,
+                    facts,
                 }));
             }
         }
@@ -306,7 +430,7 @@ impl Delivery {
         Ok(())
     }
     pub(super) async fn advance(&mut self) -> Result<(), MiddlewareError> {
-        match self.batch().await? {
+        match self.batch(false).await? {
             Some(batch) => {
                 if batch.terminal && !self.wire_terminal {
                     return Err(MiddlewareError::InvalidState);
