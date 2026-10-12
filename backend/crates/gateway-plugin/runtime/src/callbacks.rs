@@ -145,11 +145,26 @@ impl CallbackHandler for Callbacks {
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
                 || context.generation != revision
-                || (context.stage != Stage::Management && context.stage != Stage::Authentication)
+                || !matches!(
+                    context.stage,
+                    Stage::Management | Stage::Authentication | Stage::Routing
+                )
             {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
                     "plugin generation is not active",
+                ));
+            }
+            if context.stage == Stage::Routing
+                && !crate::models::is_method(&method)
+                && !matches!(
+                    method.as_str(),
+                    "host.state.get" | "host.state.put" | "host.state.delete"
+                )
+            {
+                return Err(PluginFault::new(
+                    ErrorCode::PermissionDenied,
+                    "routing callbacks cannot access management capabilities",
                 ));
             }
             if context.stage == Stage::Authentication

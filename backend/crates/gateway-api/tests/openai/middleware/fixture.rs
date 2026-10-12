@@ -114,6 +114,7 @@ pub(super) struct Plugin {
     pub(super) mode: Mode,
     pub(super) seen: Mutex<Vec<MiddlewareContext>>,
     pub(super) headers: Mutex<Vec<String>>,
+    pub(super) routing_calls: AtomicUsize,
 }
 struct Runtime(Arc<Plugin>);
 #[async_trait]
@@ -159,6 +160,25 @@ impl PluginProcess for Plugin {
         self.access.revoke();
     }
     async fn stop(&self) {}
+    async fn route_model(
+        &self,
+        input: gateway_core::engine::model_routing::ModelRouteInput,
+    ) -> Result<
+        gateway_core::engine::model_routing::ModelRouteDecision,
+        gateway_core::engine::model_routing::ModelRoutingFault,
+    > {
+        use gateway_core::{
+            engine::model_routing::ModelRouteDecision, identity::ProviderKind,
+            routing::PublicModelId,
+        };
+        self.routing_calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(input.requested_model().as_str(), "model-a");
+        assert_eq!(input.client_key_id().as_str(), "key_api_test");
+        Ok(ModelRouteDecision::Route {
+            provider: Some(ProviderKind::new("openai").unwrap()),
+            model: Some(PublicModelId::new("model-b").unwrap()),
+        })
+    }
     async fn resource(&self, _: &str) -> AdminResult<PluginHttpResponse> {
         unreachable!()
     }
@@ -591,14 +611,31 @@ impl Fixture {
         mounts: Vec<PluginMiddlewareMount>,
         features: &[gateway_core::operation::Feature],
     ) -> Self {
+        Self::with_policy(mode, mounts, features, false).await
+    }
+    pub(super) async fn with_router() -> Self {
+        Self::with_policy(Mode::Rewrite, vec![], &[], true).await
+    }
+    async fn with_policy(
+        mode: Mode,
+        mounts: Vec<PluginMiddlewareMount>,
+        features: &[gateway_core::operation::Feature],
+        routing: bool,
+    ) -> Self {
         let plugin = Arc::new(Plugin {
             access: PluginAccess::default(),
             mode,
             seen: Mutex::new(vec![]),
             headers: Mutex::new(vec![]),
+            routing_calls: AtomicUsize::new(0),
         });
-        let records = if !mounts.is_empty() {
+        let records = if !mounts.is_empty() || routing {
             vec![PluginRecord {
+                model_router: routing.then_some(PluginModelRouterBinding {
+                    order: 0,
+                    scope: PluginExecutionScope::All {},
+                    failure_policy: PluginRoutingFailurePolicy::Reject,
+                }),
                 id: "fixture".into(),
                 revision: 1,
                 name: "fixture".into(),
@@ -607,10 +644,10 @@ impl Fixture {
                 configuration: json!({}),
                 secrets: Default::default(),
                 frontend_authentication: None,
-                middleware: Some(PluginMiddlewareBinding {
+                middleware: (!mounts.is_empty()).then_some(PluginMiddlewareBinding {
                     order: 0,
                     mounts,
-                    scope: PluginMiddlewareScope::All {},
+                    scope: PluginExecutionScope::All {},
                 }),
             }]
         } else {

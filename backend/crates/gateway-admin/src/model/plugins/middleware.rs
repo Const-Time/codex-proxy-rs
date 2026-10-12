@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct PluginMiddlewareBinding {
     pub order: i32,
     pub mounts: Vec<PluginMiddlewareMount>,
-    pub scope: PluginMiddlewareScope,
+    pub scope: PluginExecutionScope,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,32 +29,43 @@ impl PluginMiddlewareMount {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PluginMiddlewareScope {
+pub enum PluginExecutionScope {
     All {},
     Keys { ids: Vec<String> },
     Groups { ids: Vec<String> },
 }
-impl PluginMiddlewareBinding {
-    pub fn validate(&self) -> Result<(), super::super::AdminError> {
+impl PluginExecutionScope {
+    pub fn is_valid(&self) -> bool {
         let valid_ids = |ids: &[String]| {
             !ids.is_empty()
                 && ids.len() <= 256
                 && ids.iter().collect::<std::collections::BTreeSet<_>>().len() == ids.len()
         };
-        let valid_scope = match &self.scope {
-            PluginMiddlewareScope::All {} => true,
-            PluginMiddlewareScope::Keys { ids } => {
+        match self {
+            PluginExecutionScope::All {} => true,
+            PluginExecutionScope::Keys { ids } => {
                 valid_ids(ids) && ids.iter().all(|id| ClientApiKeyId::new(id).is_ok())
             }
-            PluginMiddlewareScope::Groups { ids } => {
+            PluginExecutionScope::Groups { ids } => {
                 valid_ids(ids) && ids.iter().all(|id| AccountGroupId::new(id).is_ok())
             }
-        };
+        }
+    }
+    pub fn matches(&self, key: &ClientApiKeyId, groups: &[AccountGroupId]) -> bool {
+        match self {
+            Self::All {} => true,
+            Self::Keys { ids } => ids.iter().any(|id| id == key.as_str()),
+            Self::Groups { ids } => groups.iter().any(|g| ids.iter().any(|id| id == g.as_str())),
+        }
+    }
+}
+impl PluginMiddlewareBinding {
+    pub fn validate(&self) -> Result<(), super::super::AdminError> {
         if !(-10_000..=10_000).contains(&self.order)
             || self.mounts.is_empty()
             || self.mounts.len() > 2
             || (self.mounts.len() == 2 && self.mounts[0] == self.mounts[1])
-            || !valid_scope
+            || !self.scope.is_valid()
         {
             return Err(super::super::AdminError::invalid(
                 "中间件顺序、挂载位置或作用范围无效",
@@ -66,15 +77,8 @@ impl PluginMiddlewareBinding {
         self.mounts
             .iter()
             .any(|mount| mount.mount() == context.mount)
-            && match &self.scope {
-                PluginMiddlewareScope::All {} => true,
-                PluginMiddlewareScope::Keys { ids } => {
-                    ids.iter().any(|id| id == context.client_key_id.as_str())
-                }
-                PluginMiddlewareScope::Groups { ids } => context
-                    .account_group_ids
-                    .iter()
-                    .any(|group| ids.iter().any(|id| id == group.as_str())),
-            }
+            && self
+                .scope
+                .matches(&context.client_key_id, &context.account_group_ids)
     }
 }

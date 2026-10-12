@@ -142,6 +142,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    model_router: Option<Arc<dyn super::model_routing::ModelRouter>>,
     model_target: super::nested::ModelExecutionTarget,
     lifetime: Arc<super::nested::ExecutionLifetime>,
     extension_scope: super::nested::ExtensionCallScope,
@@ -156,6 +157,11 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn with_model_router(mut self, router: Arc<dyn super::model_routing::ModelRouter>) -> Self {
+        self.cancellation = CancellationToken::linked([self.cancellation, router.cancellation()]);
+        self.model_router = Some(router);
+        self
+    }
     pub fn with_model_target(
         mut self,
         mut target: super::nested::ModelExecutionTarget,
@@ -692,7 +698,7 @@ impl DefaultExecutionService {
         mut request: PendingStartExecution,
     ) -> Result<StartedExecution, GatewayError> {
         let request_id = request.prepared.request_id.clone();
-        let routing_context = RoutingContext {
+        let mut routing_context = RoutingContext {
             required_provider: request.prepared.model_target.provider.clone(),
             ..Default::default()
         };
@@ -728,6 +734,76 @@ impl DefaultExecutionService {
                 "execution target has no authorized available accounts",
             ));
         }
+        let mut routed_model = None;
+        if let ExecutionTarget::Model(model) = &request.target
+            && let Some(router) = request.prepared.model_router.clone()
+        {
+            use super::model_routing::*;
+            let available_providers = request
+                .prepared
+                .settings
+                .snapshot()
+                .providers_for_scope(&account_scope)
+                .into_iter()
+                .filter(|provider| {
+                    self.providers.get(provider).is_some()
+                        && routing_context
+                            .required_provider
+                            .as_ref()
+                            .is_none_or(|required| required == provider)
+                        && !routing_context.blocked_providers.contains(provider)
+                })
+                .collect();
+            let input = ModelRouteInput {
+                parent: request.prepared.nested_context(),
+                operation: request.operation.clone(),
+                requested_model: model.clone(),
+                available_providers,
+            };
+            let allowed = input.available_providers().clone();
+            let route = router.route_model(input).fuse();
+            let cancellation = request.prepared.cancellation();
+            let cancelled = cancellation.cancelled().fuse();
+            let timeout = request.prepared.deadline_at.wait().fuse();
+            pin_mut!(route, cancelled, timeout);
+            let result = select_biased! {
+                _ = cancelled => return Err(GatewayError::new(GatewayErrorKind::Cancelled, "request cancelled during model routing")),
+                _ = timeout => return Err(GatewayError::new(GatewayErrorKind::Timeout, "request deadline reached during model routing")),
+                result = route => result.map_err(|_| GatewayError::new(GatewayErrorKind::NoAvailableProvider, "model routing policy is unavailable"))?,
+            };
+            request.prepared = request.prepared.with_revocation(result.revocation);
+            request.prepared.validate()?;
+            match result.decision {
+                ModelRouteDecision::Unhandled => {}
+                ModelRouteDecision::Reject => {
+                    return Err(GatewayError::new(
+                        GatewayErrorKind::PolicyDenied,
+                        "model routing policy rejected this request",
+                    ));
+                }
+                ModelRouteDecision::Route { provider, model } => {
+                    if provider.is_none() && model.is_none() {
+                        return Err(GatewayError::new(
+                            GatewayErrorKind::InvalidRequest,
+                            "model routing decision has no target",
+                        ));
+                    }
+                    if provider
+                        .as_ref()
+                        .is_some_and(|provider| !allowed.contains(provider))
+                    {
+                        return Err(GatewayError::new(
+                            GatewayErrorKind::PolicyDenied,
+                            "model routing Provider is outside the execution scope",
+                        ));
+                    }
+                    if let Some(provider) = provider {
+                        routing_context.required_provider = Some(provider);
+                    }
+                    routed_model = model;
+                }
+            }
+        }
         let plan = match &request.target {
             ExecutionTarget::ProviderEndpoint(provider) => {
                 request.prepared.settings.snapshot().plan_provider_endpoint(
@@ -738,7 +814,7 @@ impl DefaultExecutionService {
                 )
             }
             ExecutionTarget::Model(public_model) => request.prepared.settings.snapshot().plan(
-                public_model,
+                routed_model.as_ref().unwrap_or(public_model),
                 &request.operation,
                 account_scope,
                 &routing_context,
@@ -869,6 +945,7 @@ impl DefaultExecutionService {
         } = request;
         let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            model_router: _,
             model_target,
             lifetime,
             extension_scope,
@@ -1514,6 +1591,7 @@ impl ExecutionService for DefaultExecutionService {
         let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            model_router: None,
             model_target: Default::default(),
             lifetime,
             extension_scope: Default::default(),

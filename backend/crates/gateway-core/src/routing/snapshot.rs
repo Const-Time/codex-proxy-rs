@@ -822,6 +822,13 @@ impl RuntimeSnapshot {
         self.client_policies.values()
     }
 
+    pub fn providers_for_scope(&self, scope: &FrozenAccountScope) -> BTreeSet<ProviderKind> {
+        self.providers
+            .intersection(scope.provider_kinds())
+            .cloned()
+            .collect()
+    }
+
     #[must_use]
     pub const fn min_codex_client_versions(&self) -> &CodexClientMinVersions {
         &self.min_codex_client_versions

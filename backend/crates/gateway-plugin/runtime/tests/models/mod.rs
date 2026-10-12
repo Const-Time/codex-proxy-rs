@@ -1,4 +1,4 @@
-mod fixture;
+pub(crate) mod fixture;
 use fixture::*;
 use gateway_admin::ports::plugins::PluginService;
 use gateway_core::engine::{execution::ExecutionService, middleware::*};

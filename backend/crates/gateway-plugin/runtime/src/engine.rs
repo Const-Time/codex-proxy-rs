@@ -150,7 +150,9 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
         .filter(|(cap, decl)| {
             !matches!(
                 cap,
-                Capability::Management | Capability::FrontendAuthentication
+                Capability::Management
+                    | Capability::FrontendAuthentication
+                    | Capability::ModelRouter
             ) || decl.version != 1
         })
         .map(|(cap, _)| cap.identifier().into())
@@ -206,6 +208,16 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if let Some(binding) = &record.model_router {
+            binding.validate()?;
+            if manifest
+                .contributes
+                .get(&Capability::ModelRouter)
+                .is_none_or(|d| d.version != 1 || !d.stages.contains(&Stage::Routing))
+            {
+                return Err(AdminError::invalid("此制品未提供模型路由能力"));
+            }
+        }
         if let Some(binding) = &record.middleware {
             binding.validate()?;
             let declaration = manifest
@@ -298,7 +310,8 @@ impl PluginRuntime for PluginEngine {
             .with_models(models.clone()),
         );
         let calls = callbacks.calls.clone();
-        let middleware = crate::middleware::MiddlewareCallbacks::new(callbacks).with_models(models);
+        let middleware =
+            crate::middleware::MiddlewareCallbacks::new(callbacks).with_models(models.clone());
         let session = Arc::new(
             RpcSession::start_supervised(
                 prepared.clone(),
@@ -406,6 +419,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            models,
             middleware,
             authentication,
             calls,
@@ -418,6 +432,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    models: Option<Arc<crate::models::Models>>,
     middleware: Arc<crate::middleware::MiddlewareCallbacks>,
     authentication: bool,
     calls: Arc<crate::resources::ManagementCalls>,
@@ -429,6 +444,18 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn route_model(
+        &self,
+        input: gateway_core::engine::model_routing::ModelRouteInput,
+    ) -> Result<
+        gateway_core::engine::model_routing::ModelRouteDecision,
+        gateway_core::engine::model_routing::ModelRoutingFault,
+    > {
+        if self.status() != "ready" || self.access.is_revoked() {
+            return Err(gateway_core::engine::model_routing::ModelRoutingFault);
+        }
+        crate::model_routing::invoke(&self.session, self.models.clone(), input).await
+    }
     async fn middleware(
         &self,
         mut context: gateway_core::engine::middleware::MiddlewareContext,

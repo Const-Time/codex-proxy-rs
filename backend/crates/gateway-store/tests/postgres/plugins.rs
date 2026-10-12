@@ -37,10 +37,11 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
         .await
         .unwrap();
     let mut first = PluginRecord {
+        model_router: None,
         middleware: Some(PluginMiddlewareBinding {
             order: 12,
             mounts: vec![PluginMiddlewareMount::Request],
-            scope: PluginMiddlewareScope::Keys {
+            scope: PluginExecutionScope::Keys {
                 ids: vec!["key_owner".into()],
             },
         }),
@@ -235,13 +236,18 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         "local.fixture"
     );
     let mut record = PluginRecord {
+        model_router: Some(PluginModelRouterBinding {
+            order: 4,
+            scope: PluginExecutionScope::All {},
+            failure_policy: PluginRoutingFailurePolicy::Reject,
+        }),
         middleware: Some(PluginMiddlewareBinding {
             order: -1,
             mounts: vec![
                 PluginMiddlewareMount::Request,
                 PluginMiddlewareMount::Attempt,
             ],
-            scope: PluginMiddlewareScope::All {},
+            scope: PluginExecutionScope::All {},
         }),
         frontend_authentication: None,
         id: "plugin-a".into(),
@@ -253,6 +259,21 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         secrets: BTreeMap::from([("token".into(), "not-in-audit".into())]),
     };
     store.save(&record, 0, &actor).await.unwrap();
+    assert!(store.list().await.unwrap()[0].model_router == record.model_router);
+    let mut invalid_router = record.clone();
+    invalid_router.revision += 1;
+    invalid_router.model_router.as_mut().unwrap().scope =
+        PluginExecutionScope::Keys { ids: vec![] };
+    assert_eq!(
+        store
+            .save(&invalid_router, record.revision, &actor)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Invalid
+    );
+    assert!(store.list().await.unwrap()[0].model_router == record.model_router);
     assert!(store.list().await.unwrap()[0].middleware == record.middleware);
     let mut invalid_binding = record.clone();
     invalid_binding.revision += 1;

@@ -75,6 +75,25 @@ async fn released(f: &Fixture) {
     .unwrap();
 }
 #[tokio::test]
+async fn model_routing_runs_for_websocket_without_request_middleware() {
+    let f = Fixture::with_router().await;
+    let (_server, mut socket) = connect(&f).await;
+    send(&mut socket, create()).await;
+    for kind in ["response.created", "response.completed"] {
+        let value = event(&mut socket).await;
+        assert_eq!(value["type"], kind, "{value}");
+    }
+    f.settled().await;
+    assert_eq!(f.plugin.routing_calls.load(Ordering::SeqCst), 1);
+    assert!(f.plugin.seen.lock().unwrap().is_empty());
+    let seen = f.effects.requests.lock().unwrap();
+    assert_eq!(
+        (&seen[0].0[..], &seen[0].1[..], &seen[0].2[..]),
+        ("key_api_test", "model-b", "original input")
+    );
+    assert_eq!(f.effects.commits.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
 async fn ws_layers_uses_json_messages_and_preserves_core_identity_and_cost() {
     for mounts in mount_combinations() {
         for mode in [Mode::Rewrite, Mode::MessageRewrite, Mode::Head] {

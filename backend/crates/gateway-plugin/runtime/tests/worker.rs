@@ -48,7 +48,7 @@ mod worker_models {
             account_id: input["account"].as_str().map(str::to_owned),
             previous_response_id: input["previous"].as_str().map(str::to_owned),
         };
-        let mut body = json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"],"after_next":input["after_next"],"retry_child":input["retry_child"]});
+        let mut body = json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"],"after_next":input["after_next"],"retry_child":input["retry_child"],"route":input["route"]});
         if let Some(previous) = request.previous_response_id.as_ref() {
             body["previous_response_id"] = json!(previous);
         }
@@ -182,6 +182,42 @@ impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "policy.route_model" => {
+                use gateway_plugin_sdk::call::policy::ModelRouteRequest;
+                let head: ModelRouteRequest = serde_json::from_value(call.params.clone()).unwrap();
+                assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Routing);
+                assert_eq!(call.context.request_id.as_deref(), Some(head.request_id.as_str()));
+                assert_eq!(head.operation, "generate");
+                assert_eq!(head.protocol, "openai");
+                let body:serde_json::Value=serde_json::from_slice(&call.payload).unwrap();
+                assert_eq!(head.model, body["model"]);
+                assert!(call.host.call("host.data.accounts.list",json!({}),vec![]).await.is_err());
+                let decision = match body["route"].as_str() {
+                    Some("reject") => json!({"decision":"reject"}),
+                    Some("empty") => json!({"decision":"route"}),
+                    Some("fault") => return Err(PluginFault::new(ErrorCode::Fault,"private plugin error detail")),
+                    Some("wait") => {
+                        call.host.call("host.models.list", json!({"client_key_id":"key_alice","protocol":"openai","client_version":"fixture"}), vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                        futures::future::pending::<()>().await;
+                        unreachable!()
+                    },
+                    Some("child" | "child-unhandled") => {
+                        let nested = worker_models::handle(&call.host, &json!({"mode":"unary"})).await;
+                        assert!(nested.get("error").is_none(), "{nested}");
+                        if body["route"] == "child-unhandled" { json!({"decision":"unhandled"}) }
+                        else { json!({"decision":"route","provider":"openai"}) }
+                    },
+                    Some("xai") => {
+                        assert!(head.available_providers.contains(&"xai".into()) || head.available_providers == vec!["openai"]);
+                        json!({"decision":"route","provider":"xai"})
+                    },
+                    Some("openai") => json!({"decision":"route","provider":"openai"}),
+                    Some("malformed") => json!({"decision":"route","provider":"openai","unexpected":true}),
+                    Some("payload") => return Ok(CallReply::unary(json!({"decision":"unhandled"}), b"invalid".to_vec())),
+                    _ => body["route"].as_object().map_or(json!({"decision":"unhandled"}), |value| json!(value)),
+                };
+                Ok(CallReply::unary(decision,vec![]))
+            },
             "middleware.handle" => worker_middleware::handle(call).await,
             "plugin.register" if !self.fail=>Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![])),
             "frontend_auth.identifier"=>Ok(CallReply::unary(json!({"identifier":"fixture-auth"}),vec![])),

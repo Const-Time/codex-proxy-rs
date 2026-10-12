@@ -7,4 +7,5 @@ mod quota;
 
 mod authentication;
 mod middleware;
+mod model_routing;
 mod models;

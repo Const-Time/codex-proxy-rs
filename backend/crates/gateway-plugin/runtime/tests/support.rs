@@ -179,12 +179,20 @@ impl PluginStore for MemoryStore {
     }
 }
 pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
-    build_archive(version, extra_capability, false)
+    build_archive(version, extra_capability, false, false)
 }
 pub fn authentication_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, true)
+    build_archive(version, false, true, false)
 }
-fn build_archive(version: &str, extra_capability: bool, authentication: bool) -> Arc<[u8]> {
+pub fn routing_archive(version: &str) -> Arc<[u8]> {
+    build_archive(version, false, false, true)
+}
+fn build_archive(
+    version: &str,
+    extra_capability: bool,
+    authentication: bool,
+    routing: bool,
+) -> Arc<[u8]> {
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
     let page = b"<!doctype html><html><body>Plugin fixture</body></html>";
     let mut contributes =
@@ -192,6 +200,10 @@ fn build_archive(version: &str, extra_capability: bool, authentication: bool) ->
     if authentication {
         contributes["frontend_authentication"] =
             json!({"id":"local.fixture.auth","version":1,"stages":["authentication"]});
+    }
+    if routing {
+        contributes["model_router"] =
+            json!({"id":"local.fixture.routing","version":1,"stages":["routing"]});
     }
     if extra_capability {
         contributes["middleware"] =
@@ -220,6 +232,7 @@ fn build_archive(version: &str, extra_capability: bool, authentication: bool) ->
 }
 pub fn update(sha: &str, revision: u64, enabled: bool) -> PluginUpdate {
     PluginUpdate {
+        model_router: None,
         middleware: None,
         frontend_authentication: None,
         revision,

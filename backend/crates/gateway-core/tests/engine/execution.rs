@@ -154,6 +154,105 @@ fn request(service: &DefaultExecutionService, transport: ClientTransport) -> Sta
 }
 
 #[test]
+fn routing_policy_preserves_requested_model_and_revalidates_original_capability_limits() {
+    use gateway_core::engine::{execution::PreparedExecutionRequest, model_routing::*};
+    use gateway_core::lifecycle::CancellationToken;
+    struct Router(AtomicUsize);
+    impl ModelRouter for Router {
+        fn cancellation(&self) -> CancellationToken {
+            CancellationToken::new()
+        }
+        fn route_model(
+            &self,
+            input: ModelRouteInput,
+        ) -> BoxFuture<'static, Result<ModelRouteResult, ModelRoutingFault>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(input.requested_model().as_str(), "gpt-alias");
+            assert_eq!(input.client_key_id().as_str(), "key_start_test");
+            assert_eq!(
+                input.available_providers(),
+                &BTreeSet::from([ProviderKind::new("openai").unwrap()])
+            );
+            Box::pin(async {
+                Ok(ModelRouteResult {
+                    decision: ModelRouteDecision::Route {
+                        provider: None,
+                        model: Some(PublicModelId::new("gpt-start").unwrap()),
+                    },
+                    revocation: CancellationToken::new(),
+                })
+            })
+        }
+    }
+    block_on(async {
+        for max_tokens in [20_001, 128] {
+            let admissions = Arc::new(Admissions::default());
+            let store = Arc::new(TrackingExecutionStore::default());
+            let router = Arc::new(Router(AtomicUsize::new(0)));
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(start_snapshot()),
+                store.clone(),
+                ProviderRegistry::new([
+                    Arc::new(ChargedProvider { fail: false }) as Arc<dyn Provider>
+                ])
+                .unwrap(),
+                admissions.clone(),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            );
+            let request = request(&service, ClientTransport::HttpJson);
+            let body = json!({"model":"gpt-alias","input":"original input","max_output_tokens":max_tokens});
+            let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+                ProtocolPayload::json_object("openai", body.as_object().unwrap().clone()).unwrap(),
+            ));
+            let prepared = service
+                .prepare_execution(request.client)
+                .unwrap()
+                .with_model_router(router.clone());
+            let result = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: PublicModelId::new("gpt-alias").unwrap(),
+                        operation,
+                        metadata: request.metadata,
+                    },
+                )
+                .await;
+            assert_eq!(router.0.load(Ordering::SeqCst), 1);
+            if max_tokens > 16_000 {
+                assert!(
+                    matches!(result, Err(e) if e.kind() == GatewayErrorKind::NoAvailableProvider)
+                );
+                assert!(admissions.limits.lock().unwrap().is_empty());
+                assert!(store.requests.lock().unwrap().is_empty());
+            } else {
+                let mut started = result.unwrap();
+                consume_charged_prefix(started.session.as_mut()).await;
+                started.session.detach_finalize().await;
+                assert_eq!(
+                    store.requests.lock().unwrap()[0]
+                        .requested_model
+                        .as_ref()
+                        .unwrap()
+                        .as_str(),
+                    "gpt-alias"
+                );
+                assert_eq!(
+                    store.attempts.lock().unwrap()[0]
+                        .upstream_model_id
+                        .as_ref()
+                        .unwrap()
+                        .as_str(),
+                    "gpt-start"
+                );
+                assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
+            }
+        }
+    });
+}
+
+#[test]
 fn preparing_middleware_execution_is_lazy_and_preserves_one_identity_and_deadline() {
     use gateway_core::engine::execution::PreparedExecutionRequest;
     block_on(async {

@@ -34,6 +34,15 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn route_model(
+        &self,
+        _input: gateway_core::engine::model_routing::ModelRouteInput,
+    ) -> std::result::Result<
+        gateway_core::engine::model_routing::ModelRouteDecision,
+        gateway_core::engine::model_routing::ModelRoutingFault,
+    > {
+        Err(gateway_core::engine::model_routing::ModelRoutingFault)
+    }
     async fn middleware(
         &self,
         _context: gateway_core::engine::middleware::MiddlewareContext,

@@ -76,7 +76,7 @@ impl Installation {
                 PluginMiddlewareMount::Request,
                 PluginMiddlewareMount::Attempt,
             ],
-            scope: PluginMiddlewareScope::All {},
+            scope: PluginExecutionScope::All {},
         });
         command
     }
@@ -187,7 +187,7 @@ async fn frozen_binding_orders_nested_rpc_by_order_then_id_and_matches_host_scop
         .await
         .unwrap();
     let mut excluded = f.command(0, -10);
-    excluded.middleware.as_mut().unwrap().scope = PluginMiddlewareScope::Keys {
+    excluded.middleware.as_mut().unwrap().scope = PluginExecutionScope::Keys {
         ids: vec!["key_other".into()],
     };
     let excluded = f.manager.update(None, excluded, &actor()).await.unwrap();
@@ -197,7 +197,7 @@ async fn frozen_binding_orders_nested_rpc_by_order_then_id_and_matches_host_scop
         (expected.clone(), expected.into_iter().rev().collect())
     );
     let mut equal = f.command(1, 10);
-    equal.middleware.as_mut().unwrap().scope = PluginMiddlewareScope::Groups {
+    equal.middleware.as_mut().unwrap().scope = PluginExecutionScope::Groups {
         ids: vec!["grp_00000000000000000000000000000077".into()],
     };
     f.manager

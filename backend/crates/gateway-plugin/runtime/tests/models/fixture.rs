@@ -41,6 +41,7 @@ pub struct Core {
     pub polled: Arc<AtomicUsize>,
     pub commits: AtomicUsize,
     pub requests: Mutex<Vec<NewModelRequest>>,
+    pub attempts: Mutex<Vec<AttemptRecord>>,
     pub bodies: Mutex<Vec<Value>>,
     pub selected: Mutex<Vec<ProviderAccountId>>,
     pub leases: Arc<Mutex<BTreeMap<ProviderAccountId, usize>>>,
@@ -90,7 +91,8 @@ impl ExecutionStore for Core {
         self.requests.lock().unwrap().push(request);
         Ok(())
     }
-    async fn record_attempt(&self, _: AttemptRecord) -> Result<(), StoreError> {
+    async fn record_attempt(&self, attempt: AttemptRecord) -> Result<(), StoreError> {
+        self.attempts.lock().unwrap().push(attempt);
         Ok(())
     }
     async fn mark_send_state(
@@ -690,7 +692,7 @@ impl Fixture {
             command.middleware = Some(gateway_admin::model::plugins::PluginMiddlewareBinding {
                 order: 0,
                 mounts: vec![gateway_admin::model::plugins::PluginMiddlewareMount::Request],
-                scope: gateway_admin::model::plugins::PluginMiddlewareScope::All {},
+                scope: gateway_admin::model::plugins::PluginExecutionScope::All {},
             });
         }
         let installed = manager.update(None, command, &actor()).await.unwrap();
@@ -757,7 +759,7 @@ impl Fixture {
                 gateway_admin::model::plugins::PluginMiddlewareMount::Request,
                 gateway_admin::model::plugins::PluginMiddlewareMount::Attempt,
             ],
-            scope: gateway_admin::model::plugins::PluginMiddlewareScope::All {},
+            scope: gateway_admin::model::plugins::PluginExecutionScope::All {},
         });
         self.manager
             .update(None, command, &actor())
