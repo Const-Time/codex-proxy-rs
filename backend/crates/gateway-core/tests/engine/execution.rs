@@ -3805,3 +3805,322 @@ fn child_effects_observed_during_parent_backoff_prevent_the_next_attempt() {
         }
     });
 }
+
+mod retry_policy {
+    use super::*;
+    use gateway_core::engine::retry_policy::{
+        RetryDecision, RetryInput, RetryPolicy, RetryPolicyFault, RetryResult,
+    };
+
+    struct Policy {
+        decision: RetryDecision,
+        inputs: Mutex<Vec<RetryInput>>,
+        gate: Mutex<Option<oneshot::Receiver<()>>>,
+        revocation: gateway_core::lifecycle::CancellationToken,
+    }
+    impl Policy {
+        fn new(decision: RetryDecision) -> Arc<Self> {
+            Arc::new(Self {
+                decision,
+                inputs: Mutex::new(vec![]),
+                gate: Mutex::new(None),
+                revocation: Default::default(),
+            })
+        }
+    }
+    impl RetryPolicy for Policy {
+        fn cancellation(&self) -> gateway_core::lifecycle::CancellationToken {
+            self.revocation.clone()
+        }
+        fn decide_retry(
+            &self,
+            input: RetryInput,
+        ) -> BoxFuture<'static, Result<RetryResult, RetryPolicyFault>> {
+            self.inputs.lock().unwrap().push(input);
+            let gate = self.gate.lock().unwrap().take();
+            let decision = self.decision;
+            let revocation = self.revocation.clone();
+            Box::pin(async move {
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                Ok(RetryResult {
+                    decision,
+                    revocation,
+                })
+            })
+        }
+    }
+
+    struct TwoAccountProvider {
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl Provider for TwoAccountProvider {
+        fn name(&self) -> &'static str {
+            "openai"
+        }
+        fn catalog_generation(&self) -> ProviderCatalogGeneration {
+            Default::default()
+        }
+        async fn query_model_capabilities(
+            &self,
+        ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+            Ok(vec![])
+        }
+        async fn execute(
+            &self,
+            request: ProviderRequest,
+            context: AttemptContext,
+        ) -> Result<ProviderStream, ProviderError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let account = context.required_account().cloned().unwrap_or_else(|| {
+                ProviderAccountId::new(if call == 0 {
+                    "acct_start"
+                } else {
+                    "acct_second"
+                })
+                .unwrap()
+            });
+            let metadata = ProviderCallMetadata::new(
+                request.candidate().provider().clone(),
+                request.candidate().upstream_model().unwrap().clone(),
+                account,
+                UpstreamTransport::new("websocket").unwrap(),
+            );
+            let events = if call == 0 {
+                vec![Err(ProviderError::new(
+                    ProviderErrorKind::Transport,
+                    UpstreamSendState::NotSent,
+                )
+                .with_replay_safe()
+                .with_pre_delivery_transport_retry(
+                    std::num::NonZeroU32::MIN,
+                    Duration::ZERO,
+                ))]
+            } else {
+                let response = ResponseMeta::new("retry-complete", "gpt-start");
+                vec![
+                    Ok(GatewayEvent::Started(response.clone()).into()),
+                    Ok(GatewayEvent::ProviderCost(
+                        ProviderReportedCost::from_usd_ticks(known_charge().scaled()).unwrap(),
+                    )
+                    .into()),
+                    Ok(GatewayEvent::Completed(response).into()),
+                ]
+            };
+            Ok(ProviderStream::new(
+                metadata,
+                futures::stream::iter(events),
+                (),
+            ))
+        }
+    }
+    fn two_account_snapshot() -> RuntimeSnapshot {
+        let provider = ProviderKind::new("openai").unwrap();
+        let directory = Arc::new(RuntimeAccountDirectory::new(
+            ["acct_start", "acct_second"]
+                .into_iter()
+                .map(|id| {
+                    (
+                        ProviderAccountId::new(id).unwrap(),
+                        RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+                    )
+                })
+                .collect(),
+        ));
+        start_snapshot_with_clients(
+            1,
+            vec![ClientPolicy::new(
+                ClientApiKeyId::new("key_start_test").unwrap(),
+                PlaintextClientApiKey::new("sk_start_test").unwrap(),
+                Arc::new(FrozenAccountScope::new(
+                    directory,
+                    ClientRoutingScope::all_accounts(),
+                )),
+                true,
+                RateLimits::unlimited(),
+            )],
+        )
+    }
+
+    #[test]
+    fn prepared_retry_policy_vetoes_early_cross_provider_recovery() {
+        block_on(async {
+            for stop in [false, true] {
+                let (service, admissions, budget, _, _) = scheduling_fixture("busy");
+                let input = request(&service, ClientTransport::HttpJson);
+                let policy = Policy::new(if stop {
+                    RetryDecision::Stop
+                } else {
+                    RetryDecision::Retry
+                });
+                let prepared = service
+                    .prepare_execution(input.client)
+                    .unwrap()
+                    .with_retry_policy(policy.clone());
+                let mut started = service
+                    .start_prepared(
+                        prepared,
+                        PreparedExecutionRequest {
+                            public_model: input.public_model,
+                            operation: input.operation,
+                            metadata: input.metadata,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    started.session.collect_uncommitted().await,
+                    Err(EngineError::Provider(_))
+                ));
+                started.session.detach_finalize().await;
+                assert!(!admissions.active.load(Ordering::SeqCst));
+                assert_eq!(budget.charges.lock().unwrap().len(), 1);
+                let inputs = policy.inputs.lock().unwrap();
+                assert_eq!(inputs.len(), if stop { 1 } else { 2 });
+                assert!(inputs[0].retry_allowed());
+                assert_eq!(inputs[0].provider().as_str(), "openai");
+                assert_eq!(inputs[0].client_key_id().as_str(), "key_start_test");
+                assert_eq!(inputs[0].send_state(), UpstreamSendState::NotSent);
+                assert_eq!(inputs[0].error_kind(), ProviderErrorKind::NoEligibleAccount);
+                if !stop {
+                    assert_eq!(inputs[1].provider().as_str(), "xai");
+                    assert!(!inputs[1].retry_allowed());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn child_effects_during_policy_wait_veto_original_parent_recovery() {
+        block_on(async {
+            for child_effects in [false, true] {
+                let provider = Arc::new(TwoAccountProvider {
+                    calls: AtomicUsize::new(0),
+                });
+                let store = Arc::new(TrackingExecutionStore::default());
+                let service = DefaultExecutionService::new(
+                    RuntimeSnapshotHandle::new(two_account_snapshot()),
+                    store.clone(),
+                    ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                    Arc::new(UnusedAdmissions),
+                    Arc::new(UnusedContinuation),
+                    Arc::new(RecordingClientApiKeyUsage::default()),
+                );
+                let policy = Policy::new(RetryDecision::Retry);
+                let (send, receive) = oneshot::channel();
+                *policy.gate.lock().unwrap() = Some(receive);
+                let parent = prepare(&service).with_retry_policy(policy.clone());
+                let prepared = service
+                    .prepare_nested(parent.nested_context(), "origin-plugin".into(), None)
+                    .unwrap();
+                let input = request(&service, ClientTransport::HttpSse);
+                let mut child = service
+                    .start_prepared(
+                        prepared,
+                        PreparedExecutionRequest {
+                            public_model: input.public_model,
+                            operation: input.operation,
+                            metadata: input.metadata,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let input = request(&service, ClientTransport::HttpJson);
+                let mut parent = service
+                    .start_prepared(
+                        parent,
+                        PreparedExecutionRequest {
+                            public_model: input.public_model,
+                            operation: input.operation,
+                            metadata: input.metadata,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let mut read = Box::pin(parent.session.collect_uncommitted());
+                assert!(futures::poll!(&mut read).is_pending());
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                assert!(policy.inputs.lock().unwrap()[0].retry_allowed());
+                if child_effects {
+                    child.session.next_event().await.unwrap().unwrap();
+                }
+                send.send(()).unwrap();
+                let result = read.await;
+                if child_effects {
+                    assert!(matches!(result, Err(EngineError::Provider(_))));
+                } else {
+                    result.unwrap();
+                    parent.session.commit_downstream(Some(200)).await.unwrap();
+                }
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+                parent.session.detach_finalize().await;
+                child.session.detach_finalize().await;
+                assert_eq!(
+                    store
+                        .finalizations
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|f| f.request_id == parent.request_id)
+                        .unwrap()
+                        .attempt_count,
+                    if child_effects { 1 } else { 2 }
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn nested_retry_input_keeps_host_key_and_all_plugin_ancestors() {
+        block_on(async {
+            let provider = Arc::new(NestedRetryProbe {
+                retry: AtomicBool::new(true),
+                calls: AtomicUsize::new(0),
+                delay: Duration::ZERO,
+            });
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(start_snapshot()),
+                Arc::new(TrackingExecutionStore::default()),
+                ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                Arc::new(UnusedAdmissions),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            );
+            let parent = prepare(&service);
+            let middle = service
+                .prepare_nested(parent.nested_context(), "origin-plugin".into(), None)
+                .unwrap();
+            let policy = Policy::new(RetryDecision::Retry);
+            let nested = service
+                .prepare_nested(middle.nested_context(), "middle-plugin".into(), None)
+                .unwrap()
+                .with_retry_policy(policy.clone());
+            let input = request(&service, ClientTransport::HttpJson);
+            let mut started = service
+                .start_prepared(
+                    nested,
+                    PreparedExecutionRequest {
+                        public_model: input.public_model,
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            started.session.collect_uncommitted().await.unwrap();
+            started.session.commit_downstream(Some(200)).await.unwrap();
+            started.session.detach_finalize().await;
+            let inputs = policy.inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 1);
+            assert_eq!(inputs[0].request_id(), &started.request_id);
+            assert_eq!(inputs[0].client_key_id().as_str(), "key_start_test");
+            assert_eq!(
+                inputs[0].excluded_instances(),
+                &BTreeSet::from(["origin-plugin".into(), "middle-plugin".into()])
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        });
+    }
+}

@@ -142,6 +142,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     model_router: Option<Arc<dyn super::model_routing::ModelRouter>>,
     model_target: super::nested::ModelExecutionTarget,
@@ -158,6 +159,11 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn with_retry_policy(mut self, policy: Arc<dyn super::retry_policy::RetryPolicy>) -> Self {
+        self = self.with_revocation(policy.cancellation());
+        self.retry_policy = Some(policy);
+        self
+    }
     pub fn with_account_scheduler(
         mut self,
         scheduler: Arc<dyn super::account_scheduling::AccountScheduler>,
@@ -954,6 +960,7 @@ impl DefaultExecutionService {
         } = request;
         let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            retry_policy,
             account_scheduler,
             model_router: _,
             model_target,
@@ -1107,6 +1114,7 @@ impl DefaultExecutionService {
             .with_request_settings(request_settings)
             .with_execution_context(execution_context)
             .with_account_scheduler(account_scheduler)
+            .with_retry_policy(retry_policy)
             .start(
                 new_request,
                 operation,
@@ -1602,6 +1610,7 @@ impl ExecutionService for DefaultExecutionService {
         let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            retry_policy: None,
             account_scheduler: None,
             model_router: None,
             model_target: Default::default(),

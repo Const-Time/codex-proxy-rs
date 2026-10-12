@@ -5591,3 +5591,718 @@ fn unlimited_execution_still_cancels_pending_preparation_and_streams_once() {
         }
     });
 }
+
+mod retry_policy {
+    use super::*;
+    use futures::future::BoxFuture;
+    use gateway_core::engine::retry_policy::{
+        RetryDecision, RetryInput, RetryPolicy, RetryPolicyFault, RetryResult,
+    };
+
+    struct Policy {
+        decision: RetryDecision,
+        fault: bool,
+        global: CancellationToken,
+        consultation: CancellationToken,
+        inputs: Mutex<Vec<RetryInput>>,
+        gate: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+    impl Policy {
+        fn new(decision: RetryDecision) -> Arc<Self> {
+            Arc::new(Self {
+                decision,
+                fault: false,
+                global: CancellationToken::new(),
+                consultation: CancellationToken::new(),
+                inputs: Mutex::new(vec![]),
+                gate: Mutex::new(None),
+            })
+        }
+    }
+    impl RetryPolicy for Policy {
+        fn cancellation(&self) -> CancellationToken {
+            self.global.clone()
+        }
+        fn decide_retry(
+            &self,
+            input: RetryInput,
+        ) -> BoxFuture<'static, Result<RetryResult, RetryPolicyFault>> {
+            self.inputs.lock().unwrap().push(input);
+            let gate = self.gate.lock().unwrap().take();
+            let decision = self.decision;
+            let fault = self.fault;
+            let revocation = self.consultation.clone();
+            Box::pin(async move {
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                if fault {
+                    Err(RetryPolicyFault)
+                } else {
+                    Ok(RetryResult {
+                        decision,
+                        revocation,
+                    })
+                }
+            })
+        }
+    }
+    fn failure_items(error: ProviderError) -> Vec<Result<GatewayEvent, ProviderError>> {
+        vec![
+            Ok(GatewayEvent::Started(ResponseMeta::new(
+                "response-1",
+                "gpt-5",
+            ))),
+            Ok(GatewayEvent::ProviderCost(
+                ProviderReportedCost::from_usd_ticks(123).unwrap(),
+            )),
+            Err(error),
+        ]
+    }
+    fn safe_failure() -> ProviderError {
+        ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Sent)
+            .with_status(429)
+            .with_replay_safe()
+    }
+
+    #[test]
+    fn stop_preserves_original_atomic_failure_fee_and_single_finalization() {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let mut error = atomic_response_failed("original-policy-failure", "original-wire-marker");
+        let mut events = error.take_atomic_client_events();
+        events.insert(
+            1,
+            ProviderEvent::canonical(GatewayEvent::ProviderCost(
+                ProviderReportedCost::from_usd_ticks(123).unwrap(),
+            )),
+        );
+        let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(error.with_atomic_client_events(events))],
+        }]);
+        let policy = Policy::new(RetryDecision::Stop);
+        let mut session = block_on(coordinator.with_retry_policy(Some(policy.clone())).start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        let batch = block_on(session.next_event()).unwrap().unwrap();
+        let wire = batch
+            .into_provider_events()
+            .iter()
+            .filter_map(ProviderEvent::wire_event)
+            .map(|wire| wire.data().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wire.contains("original-policy-failure"));
+        assert!(wire.contains("original-wire-marker"));
+        block_on(session.commit_downstream(Some(429))).unwrap();
+        assert!(matches!(
+            block_on(session.next_event()),
+            Err(EngineError::Provider(_))
+        ));
+        assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+        drop(session);
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+        assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.finalizations.len(), 1);
+        assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+        assert_eq!(state.finalizations[0].send_state, UpstreamSendState::Sent);
+        assert_eq!(state.intermediate_failures, 0);
+        assert_eq!(
+            policy.inputs.lock().unwrap()[0].upstream_status(),
+            Some(429)
+        );
+    }
+
+    #[test]
+    fn delegate_retry_and_policy_fault_continue_only_original_recovery() {
+        for (decision, fault) in [
+            (RetryDecision::Delegate, false),
+            (RetryDecision::Retry, false),
+            (RetryDecision::Stop, true),
+        ] {
+            let operation = generate_operation();
+            let route_plan = plan(&operation);
+            let budget = route_plan.max_attempts().get();
+            let (coordinator, store, provider) = coordinator(vec![
+                Script::Stream {
+                    account_id: "acct_first",
+                    items: failure_items(safe_failure()),
+                },
+                Script::Stream {
+                    account_id: "acct_second",
+                    items: complete_stream(None),
+                },
+            ]);
+            let mut policy = Policy::new(decision);
+            Arc::get_mut(&mut policy).unwrap().fault = fault;
+            let mut session = block_on(coordinator.with_retry_policy(Some(policy.clone())).start(
+                model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                operation,
+                route_plan,
+                None,
+                None,
+                CancellationToken::new(),
+            ))
+            .unwrap();
+            block_on(session.collect_uncommitted()).unwrap();
+            block_on(session.commit_downstream(Some(200))).unwrap();
+            assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+            drop(session);
+            let inputs = policy.inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 1);
+            let input = &inputs[0];
+            assert_eq!(input.request_id().as_str(), "req_core_1");
+            assert_eq!(input.client_key_id().as_str(), "key_client_1");
+            assert_eq!(input.attempt_index().get(), 1);
+            assert_eq!(input.provider().as_str(), "openai");
+            assert_eq!(input.model(), Some("gpt-5"));
+            assert_eq!(input.error_kind(), ProviderErrorKind::RateLimited);
+            assert_eq!(input.send_state(), UpstreamSendState::Sent);
+            assert_eq!(input.remaining_routing_attempts(), budget - 1);
+            assert!(input.retry_allowed());
+            assert!(input.excluded_instances().is_empty());
+            assert_eq!(provider.contexts.lock().unwrap().len(), 2);
+            assert_eq!(provider.released_leases.load(Ordering::SeqCst), 2);
+            assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+        }
+    }
+
+    #[test]
+    fn retry_cannot_override_ambiguous_unproved_prohibited_or_hard_pinned_failure() {
+        for (error, required) in [
+            (
+                ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Sent),
+                None,
+            ),
+            (
+                ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Ambiguous)
+                    .with_replay_safe(),
+                None,
+            ),
+            (
+                ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::NotSent)
+                    .with_retry_prohibited(),
+                None,
+            ),
+            (
+                safe_failure(),
+                Some(ProviderAccountId::new("acct_first").unwrap()),
+            ),
+        ] {
+            let operation = generate_operation();
+            let route_plan = plan(&operation);
+            let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+                account_id: "acct_first",
+                items: vec![Err(error)],
+            }]);
+            let policy = Policy::new(RetryDecision::Retry);
+            let mut session = block_on(coordinator.with_retry_policy(Some(policy.clone())).start(
+                model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                operation,
+                route_plan,
+                required,
+                None,
+                CancellationToken::new(),
+            ))
+            .unwrap();
+            assert!(matches!(
+                block_on(session.collect_uncommitted()),
+                Err(EngineError::Provider(_))
+            ));
+            assert!(!policy.inputs.lock().unwrap()[0].retry_allowed());
+            assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+            assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+        }
+    }
+
+    #[test]
+    fn retry_cannot_override_delivery_commit_or_routing_budget() {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_first",
+            items: vec![
+                Ok(GatewayEvent::Started(ResponseMeta::new(
+                    "committed",
+                    "gpt-5",
+                ))),
+                Err(safe_failure()),
+            ],
+        }]);
+        let policy = Policy::new(RetryDecision::Retry);
+        let mut session = block_on(coordinator.with_retry_policy(Some(policy.clone())).start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        block_on(session.next_event()).unwrap().unwrap();
+        block_on(session.commit_downstream(Some(200))).unwrap();
+        assert!(matches!(
+            block_on(session.next_event()),
+            Err(EngineError::Provider(_))
+        ));
+        assert!(!policy.inputs.lock().unwrap()[0].retry_allowed());
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+        assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let budget = route_plan.max_attempts().get();
+        let (coordinator, store, provider) = super::coordinator(
+            (0..budget)
+                .map(|_| Script::Stream {
+                    account_id: "acct_first",
+                    items: vec![Err(safe_failure())],
+                })
+                .collect(),
+        );
+        let policy = Policy::new(RetryDecision::Retry);
+        let mut session = block_on(coordinator.with_retry_policy(Some(policy.clone())).start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        assert!(matches!(
+            block_on(session.collect_uncommitted()),
+            Err(EngineError::Provider(_))
+        ));
+        assert!(
+            !policy
+                .inputs
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .retry_allowed()
+        );
+        assert_eq!(
+            policy
+                .inputs
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .remaining_routing_attempts(),
+            0
+        );
+        assert_eq!(provider.contexts.lock().unwrap().len(), budget as usize);
+        assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+    }
+
+    #[test]
+    fn dropping_a_read_keeps_one_policy_call_original_lease_and_recovery() {
+        block_on(async {
+            let operation = generate_operation();
+            let route_plan = plan(&operation);
+            let (coordinator, store, provider) = coordinator(vec![
+                Script::Stream {
+                    account_id: "acct_first",
+                    items: failure_items(safe_failure()),
+                },
+                Script::Stream {
+                    account_id: "acct_second",
+                    items: complete_stream(None),
+                },
+            ]);
+            let policy = Policy::new(RetryDecision::Retry);
+            let hook = attempt_hook(AttemptMiddlewareMode::Pass, &store);
+            let coordinator = coordinator.with_attempt_middleware(Some(hook.clone()));
+            let (send, receive) = oneshot::channel();
+            *policy.gate.lock().unwrap() = Some(receive);
+            let mut session = coordinator
+                .with_retry_policy(Some(policy.clone()))
+                .start(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation,
+                    route_plan,
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let mut read = Box::pin(session.collect_uncommitted());
+            assert!(futures::poll!(&mut read).is_pending());
+            assert_eq!(policy.inputs.lock().unwrap().len(), 1);
+            assert_eq!(provider.released_leases.load(Ordering::SeqCst), 0);
+            drop(read);
+            let mut resumed = Box::pin(session.collect_uncommitted());
+            assert!(futures::poll!(&mut resumed).is_pending());
+            assert_eq!(policy.inputs.lock().unwrap().len(), 1);
+            assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+            send.send(()).unwrap();
+            resumed.await.unwrap();
+            session.commit_downstream(Some(200)).await.unwrap();
+            assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+            drop(session);
+            assert_eq!(provider.contexts.lock().unwrap().len(), 2);
+            assert_eq!(provider.released_leases.load(Ordering::SeqCst), 2);
+            assert_eq!(hook.contexts.lock().unwrap().len(), 2);
+            assert_eq!(store.state.lock().unwrap().finalizations.len(), 1);
+        });
+    }
+
+    #[test]
+    fn cancellation_and_deadline_while_policy_waits_preserve_cost_and_release_once() {
+        block_on(async {
+            for deadline in [false, true] {
+                let operation = generate_operation();
+                let route_plan = plan(&operation);
+                let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+                    account_id: "acct_first",
+                    items: failure_items(safe_failure()),
+                }]);
+                let policy = Policy::new(RetryDecision::Retry);
+                let (_send, receive) = oneshot::channel();
+                *policy.gate.lock().unwrap() = Some(receive);
+                let cancellation = CancellationToken::new();
+                let mut session = coordinator
+                    .with_retry_policy(Some(policy.clone()))
+                    .start(
+                        model_request(
+                            &operation,
+                            SystemTime::now()
+                                + if deadline {
+                                    Duration::from_millis(40)
+                                } else {
+                                    Duration::from_secs(30)
+                                },
+                        ),
+                        operation,
+                        route_plan,
+                        None,
+                        None,
+                        cancellation.clone(),
+                    )
+                    .await
+                    .unwrap();
+                let mut read = Box::pin(session.collect_uncommitted());
+                assert!(futures::poll!(&mut read).is_pending());
+                if !deadline {
+                    cancellation.cancel();
+                }
+                let result = read.await;
+                assert!(matches!(
+                    (deadline, result),
+                    (true, Err(EngineError::Deadline)) | (false, Err(EngineError::Cancelled))
+                ));
+                session.cancel_and_finalize().await.unwrap();
+                assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+                drop(session);
+                assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+                assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
+                assert_eq!(store.recovery_leases.load(Ordering::SeqCst), 0);
+                let state = store.state.lock().unwrap();
+                assert_eq!(state.finalizations.len(), 1);
+                assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+                assert_eq!(state.finalizations[0].send_state, UpstreamSendState::Sent);
+            }
+        });
+    }
+
+    #[test]
+    fn explicit_finalize_after_abandoning_policy_wait_preserves_original_receipts() {
+        block_on(async {
+            let operation = generate_operation();
+            let route_plan = plan(&operation);
+            let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+                account_id: "acct_first",
+                items: failure_items(safe_failure()),
+            }]);
+            let policy = Policy::new(RetryDecision::Retry);
+            let (_send, receive) = oneshot::channel();
+            *policy.gate.lock().unwrap() = Some(receive);
+            let mut session = coordinator
+                .with_retry_policy(Some(policy))
+                .start(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation,
+                    route_plan,
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let mut read = Box::pin(session.collect_uncommitted());
+            assert!(futures::poll!(&mut read).is_pending());
+            drop(read);
+            session.cancel_and_finalize().await.unwrap();
+            assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+            drop(session);
+            assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
+            let state = store.state.lock().unwrap();
+            assert_eq!(state.finalizations.len(), 1);
+            assert_eq!(state.finalizations[0].cost_ticks, Some(123));
+        });
+    }
+
+    #[test]
+    fn successful_consultation_revocation_cancels_later_attempt_and_keeps_both_fees() {
+        block_on(async {
+            let operation = generate_operation();
+            let route_plan = plan(&operation);
+            let (coordinator, store, provider) = coordinator(vec![
+                Script::Stream {
+                    account_id: "acct_first",
+                    items: failure_items(safe_failure()),
+                },
+                Script::HangingStream {
+                    account_id: "acct_second",
+                    items: vec![
+                        Ok(GatewayEvent::Started(ResponseMeta::new("second", "gpt-5"))),
+                        Ok(GatewayEvent::ProviderCost(
+                            ProviderReportedCost::from_usd_ticks(200).unwrap(),
+                        )),
+                    ],
+                },
+            ]);
+            let policy = Policy::new(RetryDecision::Retry);
+            let mut session = coordinator
+                .with_retry_policy(Some(policy.clone()))
+                .start(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation,
+                    route_plan,
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let mut read = Box::pin(session.collect_uncommitted());
+            assert!(futures::poll!(&mut read).is_pending());
+            assert_eq!(provider.contexts.lock().unwrap().len(), 2);
+            policy.consultation.cancel();
+            assert!(matches!(read.await, Err(EngineError::Cancelled)));
+            assert_eq!(session.budget_charge().amount_usd.scaled(), 323);
+            drop(session);
+            assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1); // hanging fixture has no tracked guard
+            let state = store.state.lock().unwrap();
+            assert_eq!(state.finalizations.len(), 1);
+            assert_eq!(state.finalizations[0].cost_ticks, Some(200));
+        });
+    }
+
+    #[test]
+    fn retry_does_not_shorten_server_backoff_or_change_pinned_transport() {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let (coordinator, _, provider) = coordinator(vec![
+            Script::Stream {
+                account_id: "acct_first",
+                items: vec![Err(ProviderError::new(
+                    ProviderErrorKind::Transport,
+                    UpstreamSendState::NotSent,
+                )
+                .with_replay_safe()
+                .with_pre_delivery_transport_fallback()
+                .with_retry_after(Duration::from_millis(100)))],
+            },
+            Script::Stream {
+                account_id: "acct_first",
+                items: complete_stream(None),
+            },
+        ]);
+        let policy = Policy::new(RetryDecision::Retry);
+        let mut session = block_on(coordinator.with_retry_policy(Some(policy)).start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        let began = std::time::Instant::now();
+        block_on(session.collect_uncommitted()).unwrap();
+        assert!(began.elapsed() >= Duration::from_millis(100));
+        let contexts = provider.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(
+            contexts[1].required_account(),
+            Some(&ProviderAccountId::new("acct_first").unwrap())
+        );
+        assert_eq!(contexts[1].transport(), AttemptTransport::Fallback);
+    }
+
+    #[test]
+    fn unbounded_root_still_delegates_after_the_policy_wait_limit() {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let (coordinator, _, provider) = coordinator(vec![
+            Script::Stream {
+                account_id: "acct_first",
+                items: vec![Err(safe_failure())],
+            },
+            Script::Stream {
+                account_id: "acct_second",
+                items: complete_stream(None),
+            },
+        ]);
+        let policy = Policy::new(RetryDecision::Stop);
+        let (_send, receive) = oneshot::channel();
+        *policy.gate.lock().unwrap() = Some(receive);
+        let mut request = model_request(&operation, SystemTime::now() + Duration::from_secs(30));
+        request.deadline_at = Default::default();
+        let mut session = block_on(coordinator.with_retry_policy(Some(policy.clone())).start(
+            request,
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        let began = std::time::Instant::now();
+        block_on(session.collect_uncommitted()).unwrap();
+        assert!(began.elapsed() >= Duration::from_secs(2));
+        assert!(began.elapsed() < Duration::from_secs(8));
+        assert_eq!(provider.contexts.lock().unwrap().len(), 2);
+        assert!(policy.inputs.lock().unwrap()[0].deadline().at().is_none());
+    }
+
+    #[test]
+    fn dropping_an_early_failure_wait_does_not_repeat_provider_preparation() {
+        block_on(async {
+            let operation = generate_operation();
+            let route_plan = plan(&operation);
+            let (coordinator, store, provider) =
+                coordinator(vec![Script::Error(ProviderError::new(
+                    ProviderErrorKind::NoEligibleAccount,
+                    UpstreamSendState::NotSent,
+                ))]);
+            let policy = Policy::new(RetryDecision::Retry);
+            let (send, receive) = oneshot::channel();
+            *policy.gate.lock().unwrap() = Some(receive);
+            let mut session = coordinator
+                .with_retry_policy(Some(policy.clone()))
+                .start(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation,
+                    route_plan,
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let mut read = Box::pin(session.collect_uncommitted());
+            assert!(futures::poll!(&mut read).is_pending());
+            drop(read);
+            let mut resumed = Box::pin(session.collect_uncommitted());
+            assert!(futures::poll!(&mut resumed).is_pending());
+            assert_eq!(policy.inputs.lock().unwrap().len(), 1);
+            assert!(!policy.inputs.lock().unwrap()[0].retry_allowed());
+            assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+            send.send(()).unwrap();
+            assert!(
+                matches!(resumed.await,Err(EngineError::Provider(error)) if error.kind()==ProviderErrorKind::NoEligibleAccount)
+            );
+            let state = store.state.lock().unwrap();
+            assert_eq!(state.finalizations.len(), 1);
+            assert_eq!(state.finalizations[0].attempt_count, 0);
+            assert_eq!(
+                state.finalizations[0].send_state,
+                UpstreamSendState::NotSent
+            );
+        });
+    }
+
+    #[test]
+    fn fixed_account_diagnostics_do_not_consult_plugin_retry_policies() {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let (coordinator, _, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(safe_failure())],
+        }]);
+        let policy = Policy::new(RetryDecision::Stop);
+        let mut session = block_on(
+            coordinator
+                .with_retry_policy(Some(policy.clone()))
+                .start_diagnostic(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation,
+                    route_plan,
+                    ProviderAccountId::new("acct_first").unwrap(),
+                    None,
+                    CancellationToken::new(),
+                ),
+        )
+        .unwrap();
+        assert!(matches!(
+            block_on(session.collect_uncommitted()),
+            Err(EngineError::Provider(_))
+        ));
+        assert!(policy.inputs.lock().unwrap().is_empty());
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancellation_racing_a_policy_fault_wins_over_delegation() {
+        struct CancelOnFault;
+        impl RetryPolicy for CancelOnFault {
+            fn cancellation(&self) -> CancellationToken {
+                CancellationToken::new()
+            }
+            fn decide_retry(
+                &self,
+                input: RetryInput,
+            ) -> BoxFuture<'static, Result<RetryResult, RetryPolicyFault>> {
+                Box::pin(async move {
+                    input.cancellation().cancel();
+                    Err(RetryPolicyFault)
+                })
+            }
+        }
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_first",
+            items: failure_items(safe_failure()),
+        }]);
+        let mut session = block_on(
+            coordinator
+                .with_retry_policy(Some(Arc::new(CancelOnFault)))
+                .start(
+                    model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                    operation,
+                    route_plan,
+                    None,
+                    None,
+                    CancellationToken::new(),
+                ),
+        )
+        .unwrap();
+        assert!(matches!(
+            block_on(session.collect_uncommitted()),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+        drop(session);
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.finalizations.len(), 1);
+        assert_eq!(
+            state.finalizations[0].error_kind,
+            Some(GatewayErrorKind::Cancelled)
+        );
+    }
+}
