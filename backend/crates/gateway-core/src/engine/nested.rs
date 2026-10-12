@@ -165,12 +165,23 @@ impl ExtensionCallScope {
 pub(crate) struct ExecutionLifetime {
     cancellation: CancellationToken,
     permit: Mutex<Option<Arc<ActiveChild>>>,
+    parent: Mutex<std::sync::Weak<Self>>,
+    // The current attempt owns the strong reference alongside its Provider lease.
+    // This projection cannot retain a completed attempt or a parent execution.
+    account: Mutex<AccountProjection>,
+}
+#[derive(Default)]
+struct AccountProjection {
+    account: std::sync::Weak<crate::account::ProviderAccountId>,
+    changed: CancellationToken,
 }
 impl ExecutionLifetime {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             cancellation: CancellationToken::new(),
             permit: Mutex::default(),
+            parent: Mutex::default(),
+            account: Mutex::default(),
         })
     }
     pub(crate) fn cancellation(&self) -> CancellationToken {
@@ -181,6 +192,61 @@ impl ExecutionLifetime {
             .permit
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = scope.permit.clone();
+    }
+    pub(crate) fn bind_parent(&self, parent: std::sync::Weak<Self>) {
+        *self
+            .parent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = parent;
+    }
+    fn bind_account(
+        &self,
+        account: &crate::account::ProviderAccountId,
+    ) -> Arc<crate::account::ProviderAccountId> {
+        let account = Arc::new(account.clone());
+        let mut projection = self
+            .account
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        projection.account = Arc::downgrade(&account);
+        std::mem::take(&mut projection.changed).cancel();
+        account
+    }
+    pub(crate) fn ancestor_accounts(&self) -> BTreeSet<crate::account::ProviderAccountId> {
+        self.ancestor_account_snapshot().0
+    }
+    fn ancestor_account_snapshot(
+        &self,
+    ) -> (
+        BTreeSet<crate::account::ProviderAccountId>,
+        Option<CancellationToken>,
+    ) {
+        let mut accounts = BTreeSet::new();
+        let mut changes = vec![];
+        let mut parent = self
+            .parent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade();
+        while let Some(lifetime) = parent {
+            {
+                let projection = lifetime
+                    .account
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                changes.push(projection.changed.clone());
+                if let Some(account) = projection.account.upgrade() {
+                    accounts.insert(account.as_ref().clone());
+                }
+            }
+            parent = lifetime
+                .parent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .upgrade();
+        }
+        let changed = (!changes.is_empty()).then(|| CancellationToken::linked(changes));
+        (accounts, changed)
     }
 }
 impl Drop for ExecutionLifetime {
@@ -219,6 +285,30 @@ impl std::fmt::Debug for NestedExecutionContext {
     }
 }
 impl NestedExecutionContext {
+    pub(crate) fn bind_account(
+        &self,
+        account: &crate::account::ProviderAccountId,
+    ) -> Option<Arc<crate::account::ProviderAccountId>> {
+        self.lifetime
+            .upgrade()
+            .map(|lifetime| lifetime.bind_account(account))
+    }
+    pub(crate) fn ancestor_accounts(&self) -> BTreeSet<crate::account::ProviderAccountId> {
+        self.lifetime
+            .upgrade()
+            .map_or_else(BTreeSet::new, |lifetime| lifetime.ancestor_accounts())
+    }
+    pub(crate) fn ancestor_account_snapshot(
+        &self,
+    ) -> (
+        BTreeSet<crate::account::ProviderAccountId>,
+        Option<CancellationToken>,
+    ) {
+        self.lifetime.upgrade().map_or_else(
+            || (BTreeSet::new(), None),
+            |lifetime| lifetime.ancestor_account_snapshot(),
+        )
+    }
     pub fn request_id(&self) -> &ModelRequestId {
         &self.request_id
     }

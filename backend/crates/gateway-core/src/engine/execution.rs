@@ -181,7 +181,10 @@ impl PreparedRootExecution {
                 "requested execution target is outside the Key account scope",
             ));
         }
-        if target.account.is_some() && target.account == target.parent_account {
+        if target.account.as_ref().is_some_and(|account| {
+            target.parent_account.as_ref() == Some(account)
+                || self.lifetime.ancestor_accounts().contains(account)
+        }) {
             return Err(GatewayError::new(
                 GatewayErrorKind::NoAvailableProvider,
                 "nested execution cannot wait on its parent's account lease",
@@ -493,6 +496,7 @@ pub trait ExecutionService: Send + Sync {
         parent.validate()?;
         let client = selected_client.unwrap_or_else(|| parent.client.clone());
         let mut prepared = self.prepare_execution(client)?;
+        prepared.lifetime.bind_parent(parent.lifetime.clone());
         prepared.extension_scope = parent
             .scope
             .fork(parent.request_id, initiating_plugin_instance_id)?;
@@ -693,9 +697,10 @@ impl DefaultExecutionService {
             ..Default::default()
         };
         let target = &request.prepared.model_target;
-        let target_restricted = target.provider.is_some()
-            || target.account.is_some()
-            || target.parent_account.is_some();
+        let mut excluded_accounts = request.prepared.lifetime.ancestor_accounts();
+        excluded_accounts.extend(target.parent_account.iter().cloned());
+        let target_restricted =
+            target.provider.is_some() || target.account.is_some() || !excluded_accounts.is_empty();
         let account_scope = if target_restricted {
             Arc::new(
                 request
@@ -706,7 +711,7 @@ impl DefaultExecutionService {
                     .execution_target(
                         target.provider.as_ref(),
                         target.account.as_ref(),
-                        target.parent_account.as_ref(),
+                        &excluded_accounts,
                     ),
             )
         } else {

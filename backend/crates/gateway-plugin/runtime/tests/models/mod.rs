@@ -98,6 +98,307 @@ async fn native_request_short_circuit_returns_wire_without_admission_or_charge()
 }
 
 #[tokio::test]
+async fn native_attempt_calls_after_next_use_the_actual_parent_account_without_wire_ids() {
+    for (accounts, target, expected) in [
+        (vec!["acct_allowed"], None, None),
+        (
+            vec!["acct_allowed", "acct_alternative"],
+            Some("acct_allowed"),
+            None,
+        ),
+        (
+            vec!["acct_allowed", "acct_alternative"],
+            None,
+            Some("acct_alternative"),
+        ),
+        (
+            vec!["acct_allowed", "acct_alternative"],
+            Some("acct_alternative"),
+            Some("acct_alternative"),
+        ),
+    ] {
+        let fixture = Fixture::with_accounts(&accounts).await;
+        fixture.install_layers().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            fixture.call(json!({
+                "key":"key_alice", "provider_mode":"native-transform",
+                "after_next":{"account":target},
+            })),
+        )
+        .await
+        .expect("child cannot wait on its parent's account lease");
+        assert!(result.get("error").is_none(), "{result}");
+        let nested = result["batch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|event| event.pointer("/wire/payload/data/response/nested"))
+            .unwrap();
+        let count = if let Some(expected) = expected {
+            assert!(nested.get("error").is_none(), "{nested}");
+            assert_eq!(fixture.core.selected.lock().unwrap()[1].as_str(), expected);
+            2
+        } else {
+            assert_eq!(nested["error"]["code"], "upstream", "{nested}");
+            1
+        };
+        fixture.clean(count).await;
+        assert_eq!(fixture.core.starts.load(Ordering::SeqCst), count);
+        assert!(fixture.core.leases.lock().unwrap().is_empty());
+        assert!(
+            fixture
+                .core
+                .charges
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|c| c.amount_usd.scaled() == 123)
+        );
+        fixture.manager.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn native_grandchildren_exclude_all_live_ancestors_and_refresh_after_late_selection() {
+    let fixture = Fixture::with_accounts(&["acct_allowed", "acct_alternative", "acct_third"]).await;
+    let parent = fixture
+        .execution
+        .prepare_execution(fixture.execution.authenticate("sk_native_fixture").unwrap())
+        .unwrap();
+    let child = fixture
+        .execution
+        .prepare_nested(parent.nested_context(), "parent-plugin".into(), None)
+        .unwrap();
+    let context = native_context(&child);
+    let authority = child.nested_context();
+    let settings = child.settings().clone();
+    // Both routes freeze before either Provider selects an account.
+    let mut parent = fixture.start(parent).await;
+    let mut child = fixture.start(child).await;
+    parent.session.collect_uncommitted().await.unwrap();
+    child.session.collect_uncommitted().await.unwrap();
+    assert_eq!(
+        fixture
+            .core
+            .selected
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct_allowed", "acct_alternative"]
+    );
+    assert_eq!(fixture.core.leases.lock().unwrap().len(), 2);
+    for account in [Some("acct_allowed"), Some("acct_alternative"), None] {
+        let request = MiddlewareRequest::new(
+            "openai",
+            vec![],
+            bytes::Bytes::from(
+                serde_json::to_vec(&json!({"mode":"native-model","native":{"account":account}}))
+                    .unwrap(),
+            ),
+        )
+        .with_execution_context(authority.clone())
+        .with_settings(settings.clone());
+        let response = fixture
+            .manager
+            .freeze_middleware(context.clone())
+            .unwrap()
+            .run(
+                request,
+                gateway_core::middleware::compose(vec![], |_| {
+                    Box::pin(async { panic!("native fixture short circuits") })
+                }),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_parts().3;
+        let frame = body.next_frame().await.unwrap().unwrap();
+        let result: serde_json::Value = serde_json::from_slice(frame.bytes()).unwrap();
+        if account.is_some() {
+            assert_eq!(result["error"]["code"], "upstream", "{result}");
+            assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 2);
+        } else {
+            assert!(result.get("error").is_none(), "{result}");
+            assert_eq!(
+                fixture.core.selected.lock().unwrap()[2].as_str(),
+                "acct_third"
+            );
+        }
+        body.close().await;
+    }
+    for mut started in [child, parent] {
+        started.session.commit_downstream(Some(200)).await.unwrap();
+        started.session.detach_finalize().await;
+    }
+    fixture.clean(3).await;
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_fixed_child_target_selected_before_its_parent_fails_before_provider_entry() {
+    let fixture = Fixture::with_accounts(&["acct_allowed", "acct_alternative"]).await;
+    let parent = fixture
+        .execution
+        .prepare_execution(fixture.execution.authenticate("sk_native_fixture").unwrap())
+        .unwrap();
+    let child = fixture
+        .execution
+        .prepare_nested(parent.nested_context(), "parent-plugin".into(), None)
+        .unwrap()
+        .with_model_target(gateway_core::engine::nested::ModelExecutionTarget {
+            account: Some(gateway_core::account::ProviderAccountId::new("acct_allowed").unwrap()),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut parent = fixture.start(parent).await;
+    let mut child = fixture.start(child).await;
+    parent.session.collect_uncommitted().await.unwrap();
+    let error = child.session.collect_uncommitted().await.unwrap_err();
+    match error {
+        gateway_core::engine::EngineError::Provider(error) => {
+            assert_eq!(
+                error.kind(),
+                gateway_core::error::ProviderErrorKind::NoEligibleAccount
+            );
+            assert_eq!(
+                error.send_state(),
+                gateway_core::upstream::UpstreamSendState::NotSent
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.core.charges.lock().unwrap()[0].amount_usd.scaled(),
+        0
+    );
+    child.session.detach_finalize().await;
+    parent.session.commit_downstream(Some(200)).await.unwrap();
+    parent.session.detach_finalize().await;
+    fixture.clean(2).await;
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn acquiring_an_ancestor_account_interrupts_a_child_already_waiting_for_selection() {
+    let fixture = Fixture::with_accounts(&["acct_allowed", "acct_alternative"]).await;
+    let parent = fixture
+        .execution
+        .prepare_execution(fixture.execution.authenticate("sk_native_fixture").unwrap())
+        .unwrap();
+    let child = fixture
+        .execution
+        .prepare_nested(parent.nested_context(), "parent-plugin".into(), None)
+        .unwrap()
+        .with_model_target(gateway_core::engine::nested::ModelExecutionTarget {
+            account: Some(gateway_core::account::ProviderAccountId::new("acct_allowed").unwrap()),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut parent = fixture.start(parent).await;
+    let mut child = fixture.start(child).await;
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.core.selection_gate.lock().unwrap() = Some(gate);
+    let mut waiting = tokio::spawn(async move {
+        let error = child.session.collect_uncommitted().await.unwrap_err();
+        child.session.detach_finalize().await;
+        error
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.core.selection_waiters.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    parent.session.collect_uncommitted().await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut waiting).await;
+    let _ = release.send(());
+    if result.is_err() {
+        let _ = waiting.await;
+        panic!("a child's pending selection must stop when its ancestor acquires an account");
+    }
+    match result.unwrap().unwrap() {
+        gateway_core::engine::EngineError::Provider(error) => {
+            assert_eq!(
+                error.kind(),
+                gateway_core::error::ProviderErrorKind::NoEligibleAccount
+            );
+            assert_eq!(
+                error.send_state(),
+                gateway_core::upstream::UpstreamSendState::NotSent
+            );
+        }
+        error => panic!("unexpected error: {error:?}"),
+    }
+    assert_eq!(fixture.core.selection_waiters.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.core.selected.lock().unwrap().len(), 1);
+    parent.session.commit_downstream(Some(200)).await.unwrap();
+    parent.session.detach_finalize().await;
+    fixture.clean(2).await;
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unrelated_ancestor_account_keeps_a_valid_child_selection_waiting() {
+    let fixture = Fixture::with_accounts(&["acct_allowed", "acct_alternative"]).await;
+    let parent = fixture
+        .execution
+        .prepare_execution(fixture.execution.authenticate("sk_native_fixture").unwrap())
+        .unwrap();
+    let child = fixture
+        .execution
+        .prepare_nested(parent.nested_context(), "parent-plugin".into(), None)
+        .unwrap()
+        .with_model_target(gateway_core::engine::nested::ModelExecutionTarget {
+            account: Some(
+                gateway_core::account::ProviderAccountId::new("acct_alternative").unwrap(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut parent = fixture.start(parent).await;
+    let mut child = fixture.start(child).await;
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.core.selection_gate.lock().unwrap() = Some(gate);
+    let mut waiting = tokio::spawn(async move {
+        child.session.collect_uncommitted().await.unwrap();
+        child.session.commit_downstream(Some(200)).await.unwrap();
+        child.session.detach_finalize().await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.core.selection_waiters.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    parent.session.collect_uncommitted().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.core.selection_waiters.load(Ordering::SeqCst), 1);
+    release.send(()).unwrap();
+    waiting.await.unwrap();
+    parent.session.commit_downstream(Some(200)).await.unwrap();
+    parent.session.detach_finalize().await;
+    fixture.clean(2).await;
+    assert_eq!(
+        fixture.core.selected.lock().unwrap()[1].as_str(),
+        "acct_alternative"
+    );
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn native_chain_errors_keep_provider_send_state_and_http_status() {
     let fixture = Fixture::with_middleware().await;
     fixture.install_layers().await;

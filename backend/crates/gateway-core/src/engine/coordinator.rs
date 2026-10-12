@@ -283,6 +283,7 @@ struct MiddlewarePreparation {
 
 struct CurrentAttempt {
     stream: ProviderStream,
+    _account: Option<Arc<crate::account::ProviderAccountId>>,
     metadata: ProviderCallMetadata,
     trigger: AttemptTrigger,
     transport: AttemptTransport,
@@ -1370,9 +1371,14 @@ where
         let selection_observation = metadata.selection_observation();
         let capacity = selection_observation.and_then(|observation| observation.capacity());
         if !self.account_selection.is_diagnostic()
-            && !candidate
+            && (!candidate
                 .account_scope()
                 .allows(metadata.provider_account_id())
+                || self.execution_context.as_ref().is_some_and(|context| {
+                    context
+                        .ancestor_accounts()
+                        .contains(metadata.provider_account_id())
+                }))
         {
             drop(stream);
             let error = GatewayError::new(
@@ -1468,8 +1474,13 @@ where
         if !is_transport_recovery {
             self.routing_attempts = self.routing_attempts.saturating_add(1);
         }
+        let account = self
+            .execution_context
+            .as_ref()
+            .and_then(|context| context.bind_account(metadata.provider_account_id()));
         self.current = Some(CurrentAttempt {
             stream,
+            _account: account,
             metadata,
             trigger,
             transport: attempt_transport,
@@ -2502,21 +2513,88 @@ async fn poll_retry_delay(
 async fn poll_provider(
     provider: Arc<dyn Provider>,
     request: ProviderRequest,
-    context: AttemptContext,
+    mut context: AttemptContext,
     cancellation: CancellationToken,
     deadline: crate::lifecycle::Deadline,
 ) -> ProviderBoundary {
     if deadline.is_elapsed() {
         return ProviderBoundary::Deadline;
     }
+    if cancellation.is_cancelled() {
+        return ProviderBoundary::Cancelled;
+    }
+    // Recheck after middleware next and admission waits. Only Core-issued ancestry
+    // can narrow the original authorization; plugin wire cannot grant accounts.
+    let (ancestors, changes) = context.nested_context().map_or_else(
+        || (BTreeSet::new(), None),
+        |context| context.ancestor_account_snapshot(),
+    );
+    if !ancestors.is_empty() {
+        context
+            .account
+            .excluded_accounts
+            .extend(ancestors.iter().cloned());
+        if let Some(scope) = context.account.account_scope.as_ref() {
+            context.account.account_scope =
+                Some(Arc::new(scope.execution_target(None, None, &ancestors)));
+        }
+        if context
+            .required_account()
+            .is_some_and(|account| ancestors.contains(account))
+            || context.account_scope().is_some_and(|scope| {
+                !scope
+                    .directory()
+                    .providers_with_accounts()
+                    .contains(request.candidate().provider())
+            })
+        {
+            return ProviderBoundary::Result(Box::new(Err(ProviderError::new(
+                ProviderErrorKind::NoEligibleAccount,
+                UpstreamSendState::NotSent,
+            ))));
+        }
+    }
+    let authority = context.nested_context().cloned();
+    let scope = context.account_scope().cloned();
+    let required = context.required_account().cloned();
+    let excluded = context.excluded_accounts().clone();
+    let candidate_provider = request.candidate().provider().clone();
+    let account_changed = async move {
+        let mut changes = changes;
+        loop {
+            match changes.take() {
+                Some(changes) => changes.cancelled().await,
+                None => futures::future::pending::<()>().await,
+            }
+            let (accounts, next) = authority.as_ref().map_or_else(
+                || (BTreeSet::new(), None),
+                |context| context.ancestor_account_snapshot(),
+            );
+            if accounts.iter().any(|account| {
+                required.as_ref() == Some(account)
+                    || (!excluded.contains(account)
+                        && scope.as_ref().is_some_and(|scope| {
+                            scope.allows(account)
+                                && scope.directory().account(account).is_some_and(|facts| {
+                                    facts.provider_kind() == &candidate_provider
+                                })
+                        }))
+            }) {
+                return;
+            }
+            changes = next;
+        }
+    }
+    .fuse();
     let execution = provider.execute(request, context).fuse();
     let cancelled = cancellation.cancelled().fuse();
     let timeout = deadline.wait().fuse();
-    pin_mut!(execution, cancelled, timeout);
+    pin_mut!(execution, cancelled, timeout, account_changed);
     select_biased! {
         _ = cancelled => ProviderBoundary::Cancelled,
         _ = timeout => ProviderBoundary::Deadline,
         result = execution => ProviderBoundary::Result(Box::new(result)),
+        _ = account_changed => ProviderBoundary::Result(Box::new(Err(ProviderError::new(ProviderErrorKind::NoEligibleAccount, UpstreamSendState::NotSent)))),
     }
 }
 
