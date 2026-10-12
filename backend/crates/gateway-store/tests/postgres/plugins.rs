@@ -37,6 +37,7 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
         .await
         .unwrap();
     let mut first = PluginRecord {
+        account_scheduler: None,
         model_router: None,
         middleware: Some(PluginMiddlewareBinding {
             order: 12,
@@ -236,10 +237,17 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         "local.fixture"
     );
     let mut record = PluginRecord {
+        account_scheduler: Some(PluginAccountSchedulerBinding {
+            order: -5,
+            scope: PluginExecutionScope::Keys {
+                ids: vec!["key_test".into()],
+            },
+            failure_policy: PluginPolicyFailurePolicy::Delegate,
+        }),
         model_router: Some(PluginModelRouterBinding {
             order: 4,
             scope: PluginExecutionScope::All {},
-            failure_policy: PluginRoutingFailurePolicy::Reject,
+            failure_policy: PluginPolicyFailurePolicy::Reject,
         }),
         middleware: Some(PluginMiddlewareBinding {
             order: -1,
@@ -259,6 +267,20 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         secrets: BTreeMap::from([("token".into(), "not-in-audit".into())]),
     };
     store.save(&record, 0, &actor).await.unwrap();
+    assert!(store.list().await.unwrap()[0].account_scheduler == record.account_scheduler);
+    let mut invalid_scheduler = record.clone();
+    invalid_scheduler.revision += 1;
+    invalid_scheduler.account_scheduler.as_mut().unwrap().order = 10_001;
+    assert_eq!(
+        store
+            .save(&invalid_scheduler, record.revision, &actor)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Invalid
+    );
+    assert!(store.list().await.unwrap()[0].account_scheduler == record.account_scheduler);
     assert!(store.list().await.unwrap()[0].model_router == record.model_router);
     let mut invalid_router = record.clone();
     invalid_router.revision += 1;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding } from '@/api/modules/plugins'
+import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
 import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
@@ -46,6 +46,22 @@ function routerBinding(): PluginModelRouterBinding | null {
   if (routerScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
     throw new Error('请填写不重复的路由作用范围 ID，最多 256 个')
   return { order, failurePolicy: routerFailure.value, scope: routerScope.value === 'all' ? { kind: 'all' } : { kind: routerScope.value, ids } }
+}
+const schedulerEnabled = ref(false)
+const schedulerOrder = ref('0')
+const schedulerScope = ref<'all' | 'keys' | 'groups'>('all')
+const schedulerIds = ref('')
+const schedulerFailure = ref<'reject' | 'delegate'>('reject')
+function schedulerBinding(): PluginAccountSchedulerBinding | null {
+  if (!schedulerEnabled.value)
+    return null
+  const order = Number(schedulerOrder.value)
+  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
+    throw new Error('账号调度顺序必须是 -10000 到 10000 的整数')
+  const ids = schedulerIds.value.split(/\s+/u).filter(Boolean)
+  if (schedulerScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
+    throw new Error('请填写不重复的调度作用范围 ID，最多 256 个')
+  return { order, failurePolicy: schedulerFailure.value, scope: schedulerScope.value === 'all' ? { kind: 'all' } : { kind: schedulerScope.value, ids } }
 }
 const middlewareEnabled = ref(false)
 const middlewareOrder = ref('0')
@@ -133,6 +149,11 @@ function edit(item?: PluginInstance) {
   routerScope.value = item?.modelRouter?.scope.kind ?? 'all'
   routerIds.value = item?.modelRouter && item.modelRouter.scope.kind !== 'all' ? item.modelRouter.scope.ids.join('\n') : ''
   routerFailure.value = item?.modelRouter?.failurePolicy ?? 'reject'
+  schedulerEnabled.value = !!item?.accountScheduler
+  schedulerOrder.value = String(item?.accountScheduler?.order ?? 0)
+  schedulerScope.value = item?.accountScheduler?.scope.kind ?? 'all'
+  schedulerIds.value = item?.accountScheduler && item.accountScheduler.scope.kind !== 'all' ? item.accountScheduler.scope.ids.join('\n') : ''
+  schedulerFailure.value = item?.accountScheduler?.failurePolicy ?? 'reject'
   middlewareEnabled.value = !!item?.middleware
   middlewareOrder.value = String(item?.middleware?.order ?? 0)
   middlewareRequest.value = item?.middleware?.mounts.includes('request') ?? true
@@ -171,7 +192,7 @@ async function save(enabled: boolean) {
       else if (secrets.value[key])
         values[key] = secrets.value[key]!
     }
-    await savePlugin(editing.value?.id, { modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+    await savePlugin(editing.value?.id, { accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
     editOpen.value = false
     secrets.value = {}
   })
@@ -179,7 +200,7 @@ async function save(enabled: boolean) {
 async function disable(item: PluginInstance) {
   selected.value = undefined
   await perform(async () => {
-    await savePlugin(item.id, { modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
+    await savePlugin(item.id, { accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
   })
 }
 onMounted(() => perform(async () => { }))
@@ -237,6 +258,21 @@ onMounted(() => perform(async () => { }))
           <BaseSelect v-model="routerFailure" aria-label="路由插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '委托后续路由策略', value: 'delegate' }]" :disabled="busy" />
           <p class="text-sm text-cp-text-secondary">
             路由选择仍受 Key 权限、模型能力和续接约束。首个明确决定生效；明确拒绝不会继续委托。插件变更或停用会撤销旧请求。
+          </p>
+        </template>
+      </details>
+      <details class="space-y-3">
+        <summary>账号调度</summary>
+        <BaseCheckbox v-model="schedulerEnabled" show-label label="使用此插件选择上游账号" :disabled="busy" />
+        <template v-if="schedulerEnabled">
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label for="plugin-scheduler-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-scheduler-order" v-model="schedulerOrder" type="number" :disabled="busy" /></label>
+          <BaseSelect v-model="schedulerScope" aria-label="账号调度作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label v-if="schedulerScope !== 'all'" for="plugin-scheduler-ids" class="block">{{ schedulerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-scheduler-ids" v-model="schedulerIds" :rows="3" :disabled="busy" /></label>
+          <BaseSelect v-model="schedulerFailure" aria-label="调度插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '使用宿主账号调度', value: 'delegate' }]" :disabled="busy" />
+          <p class="text-sm text-cp-text-secondary">
+            按顺序只调用首个匹配的调度插件，委托时使用宿主选号。账号选择仍受 Key 权限、续接绑定和可用容量约束。明确拒绝会终止请求；插件变更或停用会撤销旧请求。
           </p>
         </template>
       </details>

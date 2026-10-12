@@ -115,6 +115,7 @@ pub(super) struct Plugin {
     pub(super) seen: Mutex<Vec<MiddlewareContext>>,
     pub(super) headers: Mutex<Vec<String>>,
     pub(super) routing_calls: AtomicUsize,
+    pub(super) scheduling_calls: AtomicUsize,
 }
 struct Runtime(Arc<Plugin>);
 #[async_trait]
@@ -143,6 +144,22 @@ impl PluginRuntime for Runtime {
 }
 #[async_trait]
 impl PluginProcess for Plugin {
+    async fn schedule_account(
+        &self,
+        input: gateway_core::engine::account_scheduling::AccountScheduleInput,
+    ) -> Result<
+        gateway_core::engine::account_scheduling::AccountScheduleDecision,
+        gateway_core::engine::account_scheduling::AccountSchedulingFault,
+    > {
+        self.scheduling_calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(input.candidates().len(), 1);
+        assert_eq!(input.candidates()[0].account_id.as_str(), "acct_api_test");
+        Ok(
+            gateway_core::engine::account_scheduling::AccountScheduleDecision::Pick(
+                input.candidates()[0].account_id.clone(),
+            ),
+        )
+    }
     fn access(&self) -> PluginAccess {
         self.access.clone()
     }
@@ -537,10 +554,68 @@ impl Provider for Effects {
             payload.body()["input"].as_str().unwrap().into(),
             context.deadline(),
         ));
+        use gateway_core::account::*;
+        let candidates = [AccountCandidate {
+            account: ProviderAccount::new(
+                ProviderAccountId::new("acct_api_test").unwrap(),
+                request.candidate().provider().clone(),
+                "test".into(),
+                Some("test-upstream".into()),
+                "oauth".into(),
+                CredentialRevision::new(1).unwrap(),
+                None,
+            )
+            .with_account_facts(
+                true,
+                CredentialState::Ready,
+                QuotaState::unknown(),
+                None,
+                None,
+            ),
+            signals: AccountRuntimeSignals {
+                in_flight: 0,
+                last_started_at: None,
+                quota_reset_at: None,
+                quota_remaining_rank: None,
+                rate_limited_until: None,
+                failure_rate_basis_points: None,
+                first_output_latency_ms: None,
+            },
+        }];
+        let selection = AccountSelectionContext {
+            policy: context.account_selection_policy(),
+            now: SystemTime::now(),
+            excluded_accounts: context.excluded_accounts().clone(),
+            preferred_account: None,
+            preferred_account_overrides_weight: false,
+            round_robin_cursor: 0,
+            eligibility: AccountEligibilityPolicy::Enforce,
+            account_scope: context.account_scope().cloned(),
+        };
+        let account = context
+            .select_account(
+                request.candidate().provider(),
+                request.candidate().upstream_model().map(|m| m.as_str()),
+                &candidates,
+                &selection,
+                context.required_account(),
+            )
+            .await
+            .map_err(|e| e.into_provider_error())?
+            .ok_or_else(|| {
+                ProviderError::new(
+                    gateway_core::error::ProviderErrorKind::NoEligibleAccount,
+                    UpstreamSendState::NotSent,
+                )
+            })?
+            .candidate()
+            .account
+            .id()
+            .clone();
         let meta = ProviderCallMetadata::new(
             request.candidate().provider().clone(),
             request.candidate().upstream_model().unwrap().clone(),
-            ProviderAccountId::new("acct_api_test").unwrap(),
+            account,
             UpstreamTransport::new("http").unwrap(),
         );
         let created = ProviderEvent::canonical_with_wire(
@@ -611,16 +686,20 @@ impl Fixture {
         mounts: Vec<PluginMiddlewareMount>,
         features: &[gateway_core::operation::Feature],
     ) -> Self {
-        Self::with_policy(mode, mounts, features, false).await
+        Self::with_policy(mode, mounts, features, false, false).await
     }
     pub(super) async fn with_router() -> Self {
-        Self::with_policy(Mode::Rewrite, vec![], &[], true).await
+        Self::with_policy(Mode::Rewrite, vec![], &[], true, false).await
+    }
+    pub(super) async fn with_scheduler() -> Self {
+        Self::with_policy(Mode::Rewrite, vec![], &[], false, true).await
     }
     async fn with_policy(
         mode: Mode,
         mounts: Vec<PluginMiddlewareMount>,
         features: &[gateway_core::operation::Feature],
         routing: bool,
+        scheduling: bool,
     ) -> Self {
         let plugin = Arc::new(Plugin {
             access: PluginAccess::default(),
@@ -628,13 +707,19 @@ impl Fixture {
             seen: Mutex::new(vec![]),
             headers: Mutex::new(vec![]),
             routing_calls: AtomicUsize::new(0),
+            scheduling_calls: AtomicUsize::new(0),
         });
-        let records = if !mounts.is_empty() || routing {
+        let records = if !mounts.is_empty() || routing || scheduling {
             vec![PluginRecord {
+                account_scheduler: scheduling.then_some(PluginAccountSchedulerBinding {
+                    order: 0,
+                    scope: PluginExecutionScope::All {},
+                    failure_policy: PluginPolicyFailurePolicy::Reject,
+                }),
                 model_router: routing.then_some(PluginModelRouterBinding {
                     order: 0,
                     scope: PluginExecutionScope::All {},
-                    failure_policy: PluginRoutingFailurePolicy::Reject,
+                    failure_policy: PluginPolicyFailurePolicy::Reject,
                 }),
                 id: "fixture".into(),
                 revision: 1,

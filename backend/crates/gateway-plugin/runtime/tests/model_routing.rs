@@ -9,7 +9,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 async fn install(
     fixture: &Fixture,
     scope: PluginExecutionScope,
-    failure_policy: PluginRoutingFailurePolicy,
+    failure_policy: PluginPolicyFailurePolicy,
 ) -> (String, String) {
     let artifact = fixture
         .manager
@@ -36,7 +36,7 @@ async fn sdk_routing_selects_an_authorized_provider_and_public_model_before_admi
     install(
         &fixture,
         PluginExecutionScope::All {},
-        PluginRoutingFailurePolicy::Reject,
+        PluginPolicyFailurePolicy::Reject,
     )
     .await;
     let result = fixture.call(json!({"key":"key_alice","route":"xai"})).await;
@@ -89,7 +89,7 @@ async fn sdk_routing_rejects_cross_scope_targets_and_invalid_decisions_without_c
     install(
         &fixture,
         PluginExecutionScope::All {},
-        PluginRoutingFailurePolicy::Reject,
+        PluginPolicyFailurePolicy::Reject,
     )
     .await;
     for (route, provider, expected) in [
@@ -99,6 +99,8 @@ async fn sdk_routing_rejects_cross_scope_targets_and_invalid_decisions_without_c
         ("empty", None, "upstream"),
         ("fault", None, "upstream"),
         ("malformed", None, "upstream"),
+        ("malformed-unhandled", None, "upstream"),
+        ("malformed-reject", None, "upstream"),
         ("payload", None, "upstream"),
     ] {
         let result = fixture
@@ -119,7 +121,7 @@ async fn sdk_routing_child_inherits_core_authority_skips_ancestors_and_keeps_ind
     let (id, _) = install(
         &fixture,
         PluginExecutionScope::All {},
-        PluginRoutingFailurePolicy::Reject,
+        PluginPolicyFailurePolicy::Reject,
     )
     .await;
     let result = fixture
@@ -162,7 +164,7 @@ async fn sdk_routing_scope_and_explicit_fault_delegation_do_not_delegate_a_rejec
         PluginExecutionScope::Keys {
             ids: vec!["key_other".into()],
         },
-        PluginRoutingFailurePolicy::Delegate,
+        PluginPolicyFailurePolicy::Delegate,
     )
     .await;
     let result = fixture
@@ -173,7 +175,7 @@ async fn sdk_routing_scope_and_explicit_fault_delegation_do_not_delegate_a_rejec
     command.model_router = Some(PluginModelRouterBinding {
         order: 0,
         scope: PluginExecutionScope::All {},
-        failure_policy: PluginRoutingFailurePolicy::Delegate,
+        failure_policy: PluginPolicyFailurePolicy::Delegate,
     });
     fixture
         .manager
@@ -199,7 +201,7 @@ async fn key_revocation_interrupts_sdk_routing_before_core_admission() {
     install(
         &fixture,
         PluginExecutionScope::All {},
-        PluginRoutingFailurePolicy::Reject,
+        PluginPolicyFailurePolicy::Reject,
     )
     .await;
     let mut call = Box::pin(fixture.call(json!({"key":"key_alice","route":"wait"})));
@@ -225,7 +227,7 @@ async fn sent_routing_child_blocks_parent_provider_fallback_without_duplicate_ch
     install(
         &fixture,
         PluginExecutionScope::All {},
-        PluginRoutingFailurePolicy::Reject,
+        PluginPolicyFailurePolicy::Reject,
     )
     .await;
     let result = fixture
@@ -267,7 +269,7 @@ async fn disabling_a_consulted_router_revokes_execution_after_its_rpc_has_return
     let (id, sha) = install(
         &fixture,
         PluginExecutionScope::All {},
-        PluginRoutingFailurePolicy::Reject,
+        PluginPolicyFailurePolicy::Reject,
     )
     .await;
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -304,7 +306,7 @@ async fn a_failed_router_upgrade_keeps_the_ready_generation_and_binding() {
     let (id, _) = install(
         &fixture,
         PluginExecutionScope::All {},
-        PluginRoutingFailurePolicy::Reject,
+        PluginPolicyFailurePolicy::Reject,
     )
     .await;
     let old_access = fixture.manager.access(&id, 1).unwrap();
@@ -318,7 +320,7 @@ async fn a_failed_router_upgrade_keeps_the_ready_generation_and_binding() {
     command.model_router = Some(PluginModelRouterBinding {
         order: 0,
         scope: PluginExecutionScope::All {},
-        failure_policy: PluginRoutingFailurePolicy::Reject,
+        failure_policy: PluginPolicyFailurePolicy::Reject,
     });
     assert!(
         fixture

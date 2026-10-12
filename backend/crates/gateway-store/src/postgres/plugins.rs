@@ -167,10 +167,16 @@ impl PluginStore for PgPluginStore {
         tx.commit().await.map_err(|_| unavailable())
     }
     async fn list(&self) -> Result<Vec<PluginRecord>, AdminError> {
-        let rows = sqlx::query("select id,revision,name,artifact_sha256,enabled,configuration,secrets,frontend_authentication,middleware,model_router from plugin_instances order by name,id").fetch_all(&self.pool).await.map_err(|_| unavailable())?;
+        let rows = sqlx::query("select id,revision,name,artifact_sha256,enabled,configuration,secrets,frontend_authentication,middleware,model_router,account_scheduler from plugin_instances order by name,id").fetch_all(&self.pool).await.map_err(|_| unavailable())?;
         rows.into_iter()
             .map(|row| {
                 Ok(PluginRecord {
+                    account_scheduler: row
+                        .try_get::<Option<serde_json::Value>, _>("account_scheduler")
+                        .map_err(|_| unavailable())?
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| unavailable())?,
                     model_router: row
                         .try_get::<Option<serde_json::Value>, _>("model_router")
                         .map_err(|_| unavailable())?
@@ -212,6 +218,9 @@ impl PluginStore for PgPluginStore {
         actor: &MutationContext,
     ) -> Result<(), AdminError> {
         let mut tx = self.pool.begin().await.map_err(|_| unavailable())?;
+        if let Some(binding) = &record.account_scheduler {
+            binding.validate()?;
+        }
         if let Some(binding) = &record.model_router {
             binding.validate()?;
         }
@@ -222,9 +231,9 @@ impl PluginStore for PgPluginStore {
             binding.validate()?;
         }
         let query = if expected == 0 {
-            "insert into plugin_instances(id,revision,name,artifact_sha256,enabled,configuration,secrets,frontend_authentication,middleware,model_router) select $1,$2,$3,$4,$5,$6,$7,$9,$10,$11 where $8=0 on conflict do nothing"
+            "insert into plugin_instances(id,revision,name,artifact_sha256,enabled,configuration,secrets,frontend_authentication,middleware,model_router,account_scheduler) select $1,$2,$3,$4,$5,$6,$7,$9,$10,$11,$12 where $8=0 on conflict do nothing"
         } else {
-            "update plugin_instances set revision=$2,name=$3,artifact_sha256=$4,enabled=$5,configuration=$6,secrets=$7,frontend_authentication=$9,middleware=$10,model_router=$11,updated_at=now() where id=$1 and revision=$8"
+            "update plugin_instances set revision=$2,name=$3,artifact_sha256=$4,enabled=$5,configuration=$6,secrets=$7,frontend_authentication=$9,middleware=$10,model_router=$11,account_scheduler=$12,updated_at=now() where id=$1 and revision=$8"
         };
         let result = sqlx::query(query)
             .bind(&record.id)
@@ -254,6 +263,14 @@ impl PluginStore for PgPluginStore {
             .bind(
                 record
                     .model_router
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|_| unavailable())?,
+            )
+            .bind(
+                record
+                    .account_scheduler
                     .as_ref()
                     .map(serde_json::to_value)
                     .transpose()

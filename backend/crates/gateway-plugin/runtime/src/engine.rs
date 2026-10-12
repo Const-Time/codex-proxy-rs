@@ -153,6 +153,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
                 Capability::Management
                     | Capability::FrontendAuthentication
                     | Capability::ModelRouter
+                    | Capability::Scheduler
             ) || decl.version != 1
         })
         .map(|(cap, _)| cap.identifier().into())
@@ -208,6 +209,16 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if let Some(binding) = &record.account_scheduler {
+            binding.validate()?;
+            if manifest
+                .contributes
+                .get(&Capability::Scheduler)
+                .is_none_or(|d| d.version != 1 || !d.stages.contains(&Stage::Scheduling))
+            {
+                return Err(AdminError::invalid("此制品未提供账号调度能力"));
+            }
+        }
         if let Some(binding) = &record.model_router {
             binding.validate()?;
             if manifest
@@ -444,6 +455,18 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn schedule_account(
+        &self,
+        input: gateway_core::engine::account_scheduling::AccountScheduleInput,
+    ) -> Result<
+        gateway_core::engine::account_scheduling::AccountScheduleDecision,
+        gateway_core::engine::account_scheduling::AccountSchedulingFault,
+    > {
+        if self.status() != "ready" || self.access.is_revoked() {
+            return Err(gateway_core::engine::account_scheduling::AccountSchedulingFault);
+        }
+        crate::account_scheduling::invoke(&self.session, self.models.clone(), input).await
+    }
     async fn route_model(
         &self,
         input: gateway_core::engine::model_routing::ModelRouteInput,

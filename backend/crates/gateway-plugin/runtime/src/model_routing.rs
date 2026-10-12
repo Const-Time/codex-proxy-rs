@@ -87,6 +87,22 @@ pub(crate) async fn invoke(
         session.invalid_response(Stage::Routing);
         return Err(ModelRoutingFault);
     }
+    // Unit variants need an explicit shape check: Serde otherwise ignores
+    // additional fields on internally tagged unhandled/reject decisions.
+    let valid_shape = reply.result.as_object().is_some_and(|fields| {
+        let route = fields.get("decision").and_then(serde_json::Value::as_str) == Some("route");
+        if route {
+            fields
+                .keys()
+                .all(|key| matches!(key.as_str(), "decision" | "provider" | "model"))
+        } else {
+            fields.len() == 1 && fields.contains_key("decision")
+        }
+    });
+    if !valid_shape {
+        session.invalid_response(Stage::Routing);
+        return Err(ModelRoutingFault);
+    }
     let decision: WireDecision = session
         .decode_response(Stage::Routing, reply.result)
         .map_err(|_| ModelRoutingFault)?;
