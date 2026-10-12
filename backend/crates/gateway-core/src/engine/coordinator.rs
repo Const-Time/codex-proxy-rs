@@ -1036,6 +1036,9 @@ where
                     }
                 }
             }
+            if self.last_retryable_failure.is_some() && self.has_descendant_effects() {
+                return self.finish_last_retryable_failure().await;
+            }
             let Some(candidate) = self.plan.candidates().get(self.candidate_index).cloned() else {
                 let error = GatewayError::new(
                     GatewayErrorKind::NoAvailableProvider,
@@ -1309,21 +1312,9 @@ where
                         ProviderErrorKind::AccountCapacityUnavailable
                             | ProviderErrorKind::NoEligibleAccount
                             | ProviderErrorKind::QuotaExhausted
-                    ) && let Some(last_failure) = self.last_retryable_failure.take()
+                    ) && self.last_retryable_failure.is_some()
                     {
-                        let send_state = self.current_send_state();
-                        let mut events = std::mem::take(&mut self.last_retryable_failure_events);
-                        if !events.is_empty() {
-                            self.observe_atomic_terminal_events(&mut events);
-                            self.budget_attempt_already_counted = true;
-                            return Ok(Some(PullOutcome::TerminalFailure {
-                                events,
-                                error: last_failure,
-                                send_state,
-                            }));
-                        }
-                        self.finish_provider_error(&last_failure).await?;
-                        return Err(provider_engine_error(last_failure));
+                        return self.finish_last_retryable_failure().await;
                     }
                     if !(matches!(
                         error.kind(),
@@ -1528,6 +1519,9 @@ where
     }
 
     fn advance_provider_candidate(&mut self) -> bool {
+        if self.has_descendant_effects() {
+            return false;
+        }
         let Some(next) = self.candidate_index.checked_add(1) else {
             return false;
         };
@@ -1536,6 +1530,31 @@ where
         }
         self.candidate_index = next;
         true
+    }
+    fn has_descendant_effects(&self) -> bool {
+        self.execution_context
+            .as_ref()
+            .is_some_and(|context| context.scope().has_descendant_effects())
+    }
+
+    async fn finish_last_retryable_failure(&mut self) -> Result<Option<PullOutcome>, EngineError> {
+        let error = self
+            .last_retryable_failure
+            .take()
+            .ok_or(EngineError::InvalidDeliveryState)?;
+        let send_state = self.current_send_state();
+        let mut events = std::mem::take(&mut self.last_retryable_failure_events);
+        if !events.is_empty() {
+            self.observe_atomic_terminal_events(&mut events);
+            self.budget_attempt_already_counted = true;
+            return Ok(Some(PullOutcome::TerminalFailure {
+                events,
+                error,
+                send_state,
+            }));
+        }
+        self.finish_provider_error(&error).await?;
+        Err(provider_engine_error(error))
     }
 
     async fn observe_event(&mut self, event: &GatewayEvent) {
@@ -1733,10 +1752,7 @@ where
             && !self
                 .credential_recovery_attempted_accounts
                 .contains(current.metadata.provider_account_id());
-        let retryable = self
-            .execution_context
-            .as_ref()
-            .is_none_or(|context| !context.scope().has_descendant_effects())
+        let retryable = !self.has_descendant_effects()
             && !error.retry_is_prohibited()
             && (continuation_retry
                 || same_account_retry
@@ -1857,7 +1873,8 @@ where
         send_state: UpstreamSendState,
         provider_proved_replay_safe: bool,
     ) -> bool {
-        if self.account_selection.required_account().is_some()
+        if self.has_descendant_effects()
+            || self.account_selection.required_account().is_some()
             || self.continuation_attempt == ContinuationAttempt::None
             || self.downstream_committed_at.is_some()
             || self.delivery_pending
@@ -1913,7 +1930,8 @@ where
     /// 对应 Provider 的会话状态时才进入恢复；是否保留 native handle、执行 probe
     /// 或使用完整 transcript，由 Provider 自己的协议边界决定。
     fn prepare_unavailable_native_continuation_replay(&mut self, error: &ProviderError) -> bool {
-        if self.account_selection.required_account().is_some()
+        if self.has_descendant_effects()
+            || self.account_selection.required_account().is_some()
             || self.continuation_attempt != ContinuationAttempt::Native
             || !matches!(
                 error.kind(),

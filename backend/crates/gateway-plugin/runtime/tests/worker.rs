@@ -46,12 +46,13 @@ mod worker_models {
             operation: ModelOperation::Generate,
             provider: input["provider"].as_str().map(str::to_owned),
             account_id: input["account"].as_str().map(str::to_owned),
-            previous_response_id: None,
+            previous_response_id: input["previous"].as_str().map(str::to_owned),
         };
-        let body = serde_json::to_vec(
-            &json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"],"after_next":input["after_next"]}),
-        )
-        .unwrap();
+        let mut body = json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"],"after_next":input["after_next"],"retry_child":input["retry_child"]});
+        if let Some(previous) = request.previous_response_id.as_ref() {
+            body["previous_response_id"] = json!(previous);
+        }
+        let body = serde_json::to_vec(&body).unwrap();
         if mode == "capacity" {
             let mut handles = vec![];
             for _ in 0..16 {
@@ -321,6 +322,16 @@ mod worker_middleware {
                 let nested =
                     super::worker_models::handle(&call.host, &json!({"mode":"unary"})).await;
                 assert!(nested.get("error").is_none(), "{nested}");
+            }
+            if stage == "plugin_attempt" && input["retry_child"].is_string() {
+                let nested =
+                    super::worker_models::handle(&host, &json!({"failure":input["retry_child"]}))
+                        .await;
+                if input["retry_child"] == "success" {
+                    assert!(nested.get("error").is_none(), "{nested}");
+                } else {
+                    assert!(nested.get("error").is_some(), "{nested}");
+                }
             }
             let RequestCall {
                 mut request, next, ..

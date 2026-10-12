@@ -48,6 +48,7 @@ pub struct Core {
     pub selection_waiters: Arc<AtomicUsize>,
     pub finalizations: Mutex<Vec<ModelRequestFinalization>>,
     pub charges: Mutex<Vec<ClientBudgetCharge>>,
+    pub continuation: Mutex<Option<NativeContinuationPin>>,
     pub admit_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub commit_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub settle_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -197,10 +198,18 @@ impl ClientBudgetPort for Core {
 impl NativeContinuationPort for Core {
     fn resolve<'a>(
         &'a self,
-        _: &'a ClientApiKeyId,
-        _: &'a PreviousResponseId,
+        key: &'a ClientApiKeyId,
+        previous: &'a PreviousResponseId,
     ) -> BoxFuture<'a, Result<Option<NativeContinuationPin>, NativeContinuationStoreError>> {
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            Ok(self
+                .continuation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|pin| pin.matches_client(key) && pin.previous_response_id() == previous)
+                .cloned())
+        })
     }
     fn record<'a>(
         &'a self,
@@ -267,14 +276,27 @@ impl Provider for Core {
         }
         assert_eq!(context.client_api_key_ref().as_str(), "key_alice");
         let account = context.required_account().cloned().unwrap_or_else(|| {
-            ["acct_allowed", "acct_alternative", "acct_third"]
-                .into_iter()
-                .map(|id| ProviderAccountId::new(id).unwrap())
-                .find(|id| {
-                    context.account_scope().unwrap().allows(id)
-                        && !context.excluded_accounts().contains(id)
-                })
-                .expect("Core must preserve at least one eligible account")
+            [
+                "acct_allowed",
+                "acct_alternative",
+                "acct_third",
+                "acct_fallback",
+            ]
+            .into_iter()
+            .map(|id| ProviderAccountId::new(id).unwrap())
+            .find(|id| {
+                context.account_scope().unwrap().allows(id)
+                    && !context.excluded_accounts().contains(id)
+                    && context
+                        .account_scope()
+                        .unwrap()
+                        .directory()
+                        .account(id)
+                        .unwrap()
+                        .provider_kind()
+                        == request.candidate().provider()
+            })
+            .expect("Core must preserve at least one eligible account")
         });
         assert!(context.account_scope().unwrap().allows(&account));
         assert!(!context.excluded_accounts().contains(&account));
@@ -308,6 +330,23 @@ impl Provider for Core {
                 .unwrap_or_default(),
             _ => "",
         };
+        if request.candidate().provider().as_str() == "openai" {
+            let kind = match mode {
+                "fail-no-account" => Some(ProviderErrorKind::NoEligibleAccount),
+                "fail-capacity" => Some(ProviderErrorKind::AccountCapacityUnavailable),
+                "fail-quota" => Some(ProviderErrorKind::QuotaExhausted),
+                "fail-infrastructure" => Some(ProviderErrorKind::ProviderInfrastructureUnavailable),
+                "fail-native-selection"
+                    if context.continuation_attempt() == ContinuationAttempt::Native =>
+                {
+                    Some(ProviderErrorKind::NoEligibleAccount)
+                }
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Err(ProviderError::new(kind, UpstreamSendState::NotSent));
+            }
+        }
         if let Some(send_state) = match mode {
             "fail-not-sent" => Some(UpstreamSendState::NotSent),
             "fail-sent" => Some(UpstreamSendState::Sent),
@@ -391,6 +430,28 @@ impl Provider for Core {
                 }
             },
         ))
+    }
+}
+struct FallbackProvider(Arc<Core>);
+#[async_trait]
+impl Provider for FallbackProvider {
+    fn name(&self) -> &'static str {
+        "xai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![])
+    }
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.0.execute(request, context).await
     }
 }
 fn key_record(id: &str, enabled: bool) -> ClientKeyRecord {
@@ -497,13 +558,24 @@ pub fn snapshot(revision: u64, enabled: bool) -> RuntimeSnapshot {
 }
 fn snapshot_with_accounts(revision: u64, enabled: bool, accounts: &[&str]) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").unwrap();
+    let mut providers = vec![provider.clone()];
+    if accounts.contains(&"acct_fallback") {
+        providers.push(ProviderKind::new("xai").unwrap());
+    }
     let directory = Arc::new(RuntimeAccountDirectory::new(
         accounts
             .iter()
             .map(|id| {
                 (
                     ProviderAccountId::new(*id).unwrap(),
-                    RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+                    RuntimeAccount::new(
+                        if *id == "acct_fallback" {
+                            ProviderKind::new("xai").unwrap()
+                        } else {
+                            provider.clone()
+                        },
+                        BTreeSet::new(),
+                    ),
                 )
             })
             .collect(),
@@ -519,13 +591,18 @@ fn snapshot_with_accounts(revision: u64, enabled: bool, accounts: &[&str]) -> Ru
             NonZeroU32::new(1).unwrap(),
             Duration::ZERO,
         ),
-        vec![provider.clone()],
-        vec![ProviderModel::new(
-            provider,
-            UpstreamModelId::new("gpt-native").unwrap(),
-            ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
-                .with_upstream_feature_validation(),
-        )],
+        providers.clone(),
+        providers
+            .into_iter()
+            .map(|provider| {
+                ProviderModel::new(
+                    provider,
+                    UpstreamModelId::new("gpt-native").unwrap(),
+                    ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
+                        .with_upstream_feature_validation(),
+                )
+            })
+            .collect(),
         vec![
             ClientPolicy::new(
                 ClientApiKeyId::new("key_alice").unwrap(),
@@ -566,12 +643,16 @@ impl Fixture {
     }
     async fn build(middleware: bool, accounts: &[&str]) -> Self {
         let core = Arc::new(Core::default());
+        let mut providers: Vec<Arc<dyn Provider>> = vec![core.clone()];
+        if accounts.contains(&"acct_fallback") {
+            providers.push(Arc::new(FallbackProvider(core.clone())));
+        }
         let snapshot = RuntimeSnapshotHandle::new(snapshot_with_accounts(1, true, accounts));
         let execution = Arc::new(
             DefaultExecutionService::new(
                 snapshot.clone(),
                 core.clone(),
-                ProviderRegistry::new([core.clone() as Arc<dyn Provider>]).unwrap(),
+                ProviderRegistry::new(providers).unwrap(),
                 core.clone(),
                 core.clone(),
                 core.clone(),

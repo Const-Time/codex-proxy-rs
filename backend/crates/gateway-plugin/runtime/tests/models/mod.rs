@@ -417,6 +417,112 @@ async fn native_chain_errors_keep_provider_send_state_and_http_status() {
 }
 
 #[tokio::test]
+async fn child_send_facts_gate_provider_fallback_and_native_continuation_replay() {
+    for native in [false, true] {
+        for child in ["success", "fail-ambiguous", "fail-not-sent"] {
+            let fixture = Fixture::with_accounts(if native {
+                &["acct_allowed", "acct_alternative"]
+            } else {
+                &["acct_allowed", "acct_fallback"]
+            })
+            .await;
+            fixture.install_layers().await;
+            if native {
+                *fixture.core.continuation.lock().unwrap() = Some(
+                    gateway_core::engine::continuation::NativeContinuationPin::new(
+                        gateway_core::engine::continuation::PreviousResponseId::new(
+                            "previous-native",
+                        ),
+                        gateway_core::engine::continuation::PreviousResponseId::new(
+                            "upstream-native",
+                        ),
+                        gateway_core::policy::ClientApiKeyId::new("key_alice").unwrap(),
+                        gateway_core::identity::ProviderKind::new("openai").unwrap(),
+                        gateway_core::account::ProviderAccountId::new("acct_allowed").unwrap(),
+                    )
+                    .with_session_state(
+                        gateway_core::operation::ProviderSessionState::new(
+                            "openai",
+                            serde_json::Map::new(),
+                        )
+                        .unwrap(),
+                    ),
+                );
+            }
+            let result = fixture
+                .call(json!({
+                    "key":"key_alice", "provider_mode":"native-transform", "retry_child":child,
+                    "failure": if native { "fail-native-selection" } else { "fail-no-account" },
+                    "previous": if native { Some("previous-native") } else { None },
+                }))
+                .await;
+            let safe = child == "fail-not-sent";
+            let calls = if safe { 3 } else { 2 };
+            fixture.clean(calls).await;
+            fixture.manager.shutdown().await;
+            if safe {
+                assert!(result.get("error").is_none(), "{native}/{child}: {result}");
+            } else {
+                assert_eq!(
+                    result["error"]["code"], "upstream",
+                    "{native}/{child}: {result}"
+                );
+            }
+            assert_eq!(
+                fixture.core.requests.lock().unwrap().len(),
+                if child == "fail-ambiguous" { 1 } else { calls },
+                "{native}/{child}: ambiguous selection does not invent a request row"
+            );
+            assert_eq!(
+                fixture.core.starts.load(Ordering::SeqCst),
+                if safe { 4 } else { 2 }
+            );
+            let charges = fixture.core.charges.lock().unwrap();
+            assert_eq!(
+                charges
+                    .iter()
+                    .map(|c| c.request_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                calls,
+                "each re-entered attempt creates another native child"
+            );
+            assert_eq!(
+                charges.iter().map(|c| c.amount_usd.scaled()).sum::<u128>(),
+                if safe || child == "success" { 123 } else { 0 }
+            );
+            assert!(fixture.core.leases.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_sent_native_child_blocks_every_presend_selection_fallback_category() {
+    for failure in [
+        "fail-no-account",
+        "fail-capacity",
+        "fail-quota",
+        "fail-infrastructure",
+    ] {
+        let fixture = Fixture::with_accounts(&["acct_allowed", "acct_fallback"]).await;
+        fixture.install_layers().await;
+        let result = fixture.call(json!({"key":"key_alice", "provider_mode":"native-transform", "retry_child":"success", "failure":failure})).await;
+        let rows = fixture.core.requests.lock().unwrap().len();
+        fixture.clean(rows).await;
+        fixture.manager.shutdown().await;
+        assert!(result.get("error").is_some(), "{failure}: {result}");
+        assert_eq!(rows, 2, "{failure} must not run the attempt plugin again");
+        assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 2);
+        let charges = fixture.core.charges.lock().unwrap();
+        assert_eq!(
+            charges.iter().map(|c| c.amount_usd.scaled()).sum::<u128>(),
+            123
+        );
+        assert!(fixture.core.leases.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn native_grandchild_skips_every_initiating_ancestor_and_charges_each_call_once() {
     let fixture = Fixture::with_middleware().await;
     let other = fixture.install_layers().await;
