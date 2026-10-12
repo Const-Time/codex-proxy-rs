@@ -157,6 +157,7 @@ impl PluginManager {
                 )
         };
         Ok(PluginView {
+            retry_policy: record.retry_policy,
             account_scheduler: record.account_scheduler,
             model_router: record.model_router,
             middleware: record.middleware,
@@ -326,6 +327,9 @@ impl PluginService for PluginManager {
         if let Some(binding) = &update.middleware {
             binding.validate()?;
         }
+        if let Some(binding) = &update.retry_policy {
+            binding.validate()?;
+        }
         if let Some(binding) = &update.account_scheduler {
             binding.validate()?;
         }
@@ -344,6 +348,7 @@ impl PluginService for PluginManager {
             return Err(AdminError::conflict("只能启用一个入口认证器"));
         }
         let record = PluginRecord {
+            retry_policy: update.retry_policy,
             account_scheduler: update.account_scheduler,
             model_router: update.model_router,
             middleware: update.middleware,
@@ -381,6 +386,8 @@ impl PluginService for PluginManager {
                 if !unchanged {
                     if record.middleware.is_some()
                         || previous.is_some_and(|r| r.middleware.is_some())
+                        || record.retry_policy.is_some()
+                        || previous.is_some_and(|r| r.retry_policy.is_some())
                         || record.account_scheduler.is_some()
                         || previous.is_some_and(|r| r.account_scheduler.is_some())
                         || record.model_router.is_some()

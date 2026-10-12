@@ -147,7 +147,11 @@ impl CallbackHandler for Callbacks {
                 || context.generation != revision
                 || !matches!(
                     context.stage,
-                    Stage::Management | Stage::Authentication | Stage::Routing | Stage::Scheduling
+                    Stage::Management
+                        | Stage::Authentication
+                        | Stage::Routing
+                        | Stage::Scheduling
+                        | Stage::Retry
                 )
             {
                 return Err(PluginFault::new(
@@ -167,7 +171,7 @@ impl CallbackHandler for Callbacks {
                     "policy callbacks cannot access management capabilities",
                 ));
             }
-            if context.stage == Stage::Authentication
+            if matches!(context.stage, Stage::Authentication | Stage::Retry)
                 && !matches!(
                     method.as_str(),
                     "host.state.get" | "host.state.put" | "host.state.delete"
@@ -175,7 +179,7 @@ impl CallbackHandler for Callbacks {
             {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
-                    "authentication callbacks cannot access management capabilities",
+                    "this policy stage only permits private state callbacks",
                 ));
             }
             if crate::models::is_method(&method) {

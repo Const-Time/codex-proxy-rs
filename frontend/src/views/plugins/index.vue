@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding } from '@/api/modules/plugins'
+import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginRetryPolicyBinding } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
 import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
@@ -46,6 +46,21 @@ function routerBinding(): PluginModelRouterBinding | null {
   if (routerScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
     throw new Error('请填写不重复的路由作用范围 ID，最多 256 个')
   return { order, failurePolicy: routerFailure.value, scope: routerScope.value === 'all' ? { kind: 'all' } : { kind: routerScope.value, ids } }
+}
+const retryEnabled = ref(false)
+const retryOrder = ref('0')
+const retryScope = ref<'all' | 'keys' | 'groups'>('all')
+const retryIds = ref('')
+function retryBinding(): PluginRetryPolicyBinding | null {
+  if (!retryEnabled.value)
+    return null
+  const order = Number(retryOrder.value)
+  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
+    throw new Error('重试策略顺序必须是 -10000 到 10000 的整数')
+  const ids = retryIds.value.split(/\s+/u).filter(Boolean)
+  if (retryScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
+    throw new Error('请填写不重复的重试作用范围 ID，最多 256 个')
+  return { order, scope: retryScope.value === 'all' ? { kind: 'all' } : { kind: retryScope.value, ids } }
 }
 const schedulerEnabled = ref(false)
 const schedulerOrder = ref('0')
@@ -149,6 +164,10 @@ function edit(item?: PluginInstance) {
   routerScope.value = item?.modelRouter?.scope.kind ?? 'all'
   routerIds.value = item?.modelRouter && item.modelRouter.scope.kind !== 'all' ? item.modelRouter.scope.ids.join('\n') : ''
   routerFailure.value = item?.modelRouter?.failurePolicy ?? 'reject'
+  retryEnabled.value = !!item?.retryPolicy
+  retryOrder.value = String(item?.retryPolicy?.order ?? 0)
+  retryScope.value = item?.retryPolicy?.scope.kind ?? 'all'
+  retryIds.value = item?.retryPolicy && item.retryPolicy.scope.kind !== 'all' ? item.retryPolicy.scope.ids.join('\n') : ''
   schedulerEnabled.value = !!item?.accountScheduler
   schedulerOrder.value = String(item?.accountScheduler?.order ?? 0)
   schedulerScope.value = item?.accountScheduler?.scope.kind ?? 'all'
@@ -192,7 +211,7 @@ async function save(enabled: boolean) {
       else if (secrets.value[key])
         values[key] = secrets.value[key]!
     }
-    await savePlugin(editing.value?.id, { accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+    await savePlugin(editing.value?.id, { retryPolicy: retryBinding(), accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
     editOpen.value = false
     secrets.value = {}
   })
@@ -200,7 +219,7 @@ async function save(enabled: boolean) {
 async function disable(item: PluginInstance) {
   selected.value = undefined
   await perform(async () => {
-    await savePlugin(item.id, { accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
+    await savePlugin(item.id, { retryPolicy: item.retryPolicy ?? null, accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
   })
 }
 onMounted(() => perform(async () => { }))
@@ -273,6 +292,20 @@ onMounted(() => perform(async () => { }))
           <BaseSelect v-model="schedulerFailure" aria-label="调度插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '使用宿主账号调度', value: 'delegate' }]" :disabled="busy" />
           <p class="text-sm text-cp-text-secondary">
             按顺序只调用首个匹配的调度插件，委托时使用宿主选号。账号选择仍受 Key 权限、续接绑定和可用容量约束。明确拒绝会终止请求；插件变更或停用会撤销旧请求。
+          </p>
+        </template>
+      </details>
+      <details class="space-y-3">
+        <summary>重试策略</summary>
+        <BaseCheckbox v-model="retryEnabled" show-label label="由此插件决定是否继续恢复请求" :disabled="busy" />
+        <template v-if="retryEnabled">
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label for="plugin-retry-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-retry-order" v-model="retryOrder" type="number" :disabled="busy" /></label>
+          <BaseSelect v-model="retryScope" aria-label="重试策略作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label v-if="retryScope !== 'all'" for="plugin-retry-ids" class="block">{{ retryScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-retry-ids" v-model="retryIds" :rows="3" :disabled="busy" /></label>
+          <p class="text-sm text-cp-text-secondary">
+            依次咨询匹配的策略，插件委托或故障时交给后续策略处理。明确停止会保留原始失败。整条链最多等待两秒；插件不能增加重试次数、缩短退避或绕过安全恢复条件。
           </p>
         </template>
       </details>

@@ -154,6 +154,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
                     | Capability::FrontendAuthentication
                     | Capability::ModelRouter
                     | Capability::Scheduler
+                    | Capability::RetryPolicy
             ) || decl.version != 1
         })
         .map(|(cap, _)| cap.identifier().into())
@@ -209,6 +210,16 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if let Some(binding) = &record.retry_policy {
+            binding.validate()?;
+            if manifest
+                .contributes
+                .get(&Capability::RetryPolicy)
+                .is_none_or(|d| d.version != 1 || !d.stages.contains(&Stage::Retry))
+            {
+                return Err(AdminError::invalid("此制品未提供重试策略能力"));
+            }
+        }
         if let Some(binding) = &record.account_scheduler {
             binding.validate()?;
             if manifest
@@ -455,6 +466,19 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn retry_decision(
+        &self,
+        input: gateway_core::engine::retry_policy::RetryInput,
+        timeout: Duration,
+    ) -> Result<
+        gateway_core::engine::retry_policy::RetryDecision,
+        gateway_core::engine::retry_policy::RetryPolicyFault,
+    > {
+        if self.status() != "ready" || self.access.is_revoked() {
+            return Err(gateway_core::engine::retry_policy::RetryPolicyFault);
+        }
+        crate::retry_policy::invoke(&self.session, input, timeout).await
+    }
     async fn schedule_account(
         &self,
         input: gateway_core::engine::account_scheduling::AccountScheduleInput,

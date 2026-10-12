@@ -9,7 +9,7 @@ mod responses;
 mod router;
 mod search;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -170,11 +170,31 @@ fn snapshot_with_capabilities(
     provider_name: &str,
     capabilities: ModelCapabilities,
 ) -> RuntimeSnapshot {
+    snapshot_with_capabilities_and_accounts(
+        plaintext,
+        provider_name,
+        capabilities,
+        &["acct_api_test"],
+    )
+}
+fn snapshot_with_capabilities_and_accounts(
+    plaintext: &str,
+    provider_name: &str,
+    capabilities: ModelCapabilities,
+    accounts: &[&str],
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new(provider_name).expect("provider");
-    let account_directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
-        ProviderAccountId::new("acct_api_test").expect("account ID"),
-        RuntimeAccount::new(provider.clone(), BTreeSet::new()),
-    )])));
+    let account_directory = Arc::new(RuntimeAccountDirectory::new(
+        accounts
+            .iter()
+            .map(|id| {
+                (
+                    ProviderAccountId::new(*id).expect("account ID"),
+                    RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+                )
+            })
+            .collect(),
+    ));
     RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
         AccountSelectionPolicy::new(

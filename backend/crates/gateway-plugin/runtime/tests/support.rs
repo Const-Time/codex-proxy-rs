@@ -179,16 +179,19 @@ impl PluginStore for MemoryStore {
     }
 }
 pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
-    build_archive(version, extra_capability, false, false, false)
+    build_archive(version, extra_capability, false, false, false, false)
 }
 pub fn authentication_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, true, false, false)
+    build_archive(version, false, true, false, false, false)
 }
 pub fn routing_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, false, true, false)
+    build_archive(version, false, false, true, false, false)
 }
 pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, false, false, true)
+    build_archive(version, false, false, false, true, false)
+}
+pub fn retry_archive(version: &str) -> Arc<[u8]> {
+    build_archive(version, false, false, false, false, true)
 }
 fn build_archive(
     version: &str,
@@ -196,6 +199,7 @@ fn build_archive(
     authentication: bool,
     routing: bool,
     scheduling: bool,
+    retry: bool,
 ) -> Arc<[u8]> {
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
     let page = b"<!doctype html><html><body>Plugin fixture</body></html>";
@@ -213,13 +217,17 @@ fn build_archive(
         contributes["scheduler"] =
             json!({"id":"local.fixture.scheduling","version":1,"stages":["scheduling"]});
     }
+    if retry {
+        contributes["retry_policy"] =
+            json!({"id":"local.fixture.retry","version":1,"stages":["retry"]});
+    }
     if extra_capability {
         contributes["middleware"] =
             json!({"id":"local.fixture.middleware","version":4,"stages":["request","attempt"]});
     }
     let manifest = json!({"manifestVersion":2,"name":"fixture","displayName":"Fixture","publisher":"local","version":version,"description":"Lifecycle fixture","license":"MIT",
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,
-        "configurationSchema":{"type":"object","properties":{"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
+        "configurationSchema":{"type":"object","properties":{"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
         "state":[{"namespace":"counter","schemaVersion":1,"schema":{"type":"integer"},"maximumRecords":10,"maximumBytes":1024,"maximumValueBytes":128}],
         "resources":{"index.html":"text/html"},"package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},
         "files":{"bin/plugin":hex::encode(Sha256::digest(&executable)),"index.html":hex::encode(Sha256::digest(page))}}});
@@ -240,6 +248,7 @@ fn build_archive(
 }
 pub fn update(sha: &str, revision: u64, enabled: bool) -> PluginUpdate {
     PluginUpdate {
+        retry_policy: None,
         account_scheduler: None,
         model_router: None,
         middleware: None,

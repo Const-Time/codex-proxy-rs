@@ -94,6 +94,22 @@ async fn model_routing_runs_for_websocket_without_request_middleware() {
     assert_eq!(f.effects.commits.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
+async fn retry_policy_runs_for_websocket_before_visible_delivery_with_one_charge() {
+    let f = Fixture::with_retry().await;
+    let (_server, mut socket) = connect(&f).await;
+    send(&mut socket, create()).await;
+    for kind in ["response.created", "response.completed"] {
+        let value = event(&mut socket).await;
+        assert_eq!(value["type"], kind, "{value}");
+    }
+    f.settled().await;
+    assert_eq!(f.plugin.retry_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+    assert_eq!(f.effects.charges.lock().unwrap()[0].amount_usd.scaled(), 25);
+    f.manager.shutdown().await;
+}
+#[tokio::test]
 async fn account_scheduling_runs_for_websocket_without_request_middleware() {
     let f = Fixture::with_scheduler().await;
     let (_server, mut socket) = connect(&f).await;

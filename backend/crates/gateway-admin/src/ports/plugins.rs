@@ -34,6 +34,16 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn retry_decision(
+        &self,
+        _input: gateway_core::engine::retry_policy::RetryInput,
+        _timeout: std::time::Duration,
+    ) -> std::result::Result<
+        gateway_core::engine::retry_policy::RetryDecision,
+        gateway_core::engine::retry_policy::RetryPolicyFault,
+    > {
+        Err(gateway_core::engine::retry_policy::RetryPolicyFault)
+    }
     async fn schedule_account(
         &self,
         _input: gateway_core::engine::account_scheduling::AccountScheduleInput,
