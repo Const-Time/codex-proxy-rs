@@ -289,6 +289,7 @@ fn local_provider_capacity_exhaustion_should_map_to_service_unavailable() {
             GatewayErrorKind::AccountCapacityUnavailable,
             "all eligible upstream accounts are temporarily busy"
         )
+        .with_upstream_failure(UpstreamSendState::NotSent, None)
     );
 }
 
@@ -337,6 +338,7 @@ fn provider_infrastructure_failure_should_have_a_distinct_client_contract() {
             GatewayErrorKind::ProviderInfrastructureUnavailable,
             "provider account infrastructure is temporarily unavailable"
         )
+        .with_upstream_failure(UpstreamSendState::NotSent, None)
     );
 }
 
@@ -353,6 +355,7 @@ fn no_eligible_provider_account_should_map_to_service_unavailable() {
             GatewayErrorKind::NoAvailableProvider,
             "no upstream provider is currently available for this request"
         )
+        .with_upstream_failure(UpstreamSendState::NotSent, None)
     );
 }
 
@@ -463,6 +466,7 @@ fn engine_provider_runtime_failures_should_collapse_to_safe_unavailability() {
                 GatewayErrorKind::UpstreamUnavailable,
                 "upstream service is unavailable"
             )
+            .with_upstream_failure(UpstreamSendState::Ambiguous, None)
         );
     }
 }

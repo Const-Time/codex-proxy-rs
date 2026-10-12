@@ -737,6 +737,12 @@ pub struct ProviderEvent {
 }
 
 impl ProviderEvent {
+    /// Protocol adapters replace only the delivery projection, retaining host receipts.
+    #[must_use]
+    pub fn with_wire_projection(mut self, wire: Option<ProtocolWireEvent>) -> Self {
+        self.wire = wire.map(Box::new);
+        self
+    }
     /// 创建只有一个 canonical fact 的事件。
     #[must_use]
     pub fn canonical(event: GatewayEvent) -> Self {

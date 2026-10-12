@@ -26,6 +26,7 @@ struct BodyState {
     read_started: bool,
     next_source_id: u64,
     source: Option<(u64, SourceFrame)>,
+    delivery_pending: bool,
 }
 
 struct SourceFrame {
@@ -133,6 +134,10 @@ impl MiddlewareBodyAuthority {
         self.0
             .finalized
             .store(body.is_finalized(), Ordering::Release);
+        if result.is_ok() {
+            state.delivery_pending = false;
+            self.0.source_released.notify_waiters();
+        }
         result
     }
 
@@ -170,6 +175,7 @@ impl BodyResource {
                 read_started: false,
                 next_source_id: 0,
                 source: None,
+                delivery_pending: false,
             }),
             source_released: tokio::sync::Notify::new(),
         })
@@ -185,7 +191,7 @@ impl BodyResource {
         let mut state = loop {
             let released = self.source_released.notified();
             let state = self.state.lock().await;
-            if state.source.is_none() {
+            if state.source.is_none() && !state.delivery_pending {
                 break state;
             }
             drop(state);
@@ -215,6 +221,13 @@ impl BodyResource {
         };
         let transformed = frame.transformed();
         let (bytes, framing, terminal, envelope) = frame.into_parts();
+        // A mapped source may be returned before the outer RPC accepts its bytes.
+        // Wait outside the body mutex, so that the authoritative commit can enter.
+        // Terminal bodies may expose EOF before commit without advancing Core.
+        state.delivery_pending |= !terminal
+            && envelope.as_ref().is_some_and(|e| {
+                e.batch_end() == Some(gateway_core::engine::CommitRequirement::CommitBeforeDelivery)
+            });
         // canonical-only 事件没有客户端正文，仍须保留并允许读取其完整事实
         let facts_only =
             framing == MiddlewareFraming::RawBytes && bytes.is_empty() && envelope.is_some();
@@ -280,6 +293,7 @@ impl BodyResource {
         let body = {
             let mut state = self.state.lock().await;
             state.source.take();
+            state.delivery_pending = false;
             self.source_released.notify_waiters();
             state.body.take()
         };

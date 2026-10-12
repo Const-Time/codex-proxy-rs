@@ -102,20 +102,30 @@ pub async fn run() -> Result<(), BootstrapError> {
     )
     .await?;
     host.report_startup_ready("Admin");
-    let plugins = Arc::new(gateway_admin::plugins::PluginManager::new(
-        store.plugin_store(),
-        Arc::new(
-            gateway_plugin_runtime::PluginEngine::new(
-                plugin_cache,
-                plugin_version,
+    let plugins = Arc::new_cyclic(
+        |plugins: &std::sync::Weak<gateway_admin::plugins::PluginManager>| {
+            gateway_admin::plugins::PluginManager::new(
                 store.plugin_store(),
+                Arc::new(
+                    gateway_plugin_runtime::PluginEngine::new(
+                        plugin_cache,
+                        plugin_version,
+                        store.plugin_store(),
+                    )
+                    .with_data(admin.services().plugin_data())
+                    .with_resources(admin.services().plugin_resources())
+                    .with_quota(admin.services().plugin_quota())
+                    .with_models(
+                        Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
+                            core.execution_service(),
+                            plugins.clone(),
+                        )),
+                        admin.services().client_keys(),
+                    ),
+                ),
             )
-            .with_data(admin.services().plugin_data())
-            .with_resources(admin.services().plugin_resources())
-            .with_quota(admin.services().plugin_quota())
-            .with_models(core.execution_service(), admin.services().client_keys()),
-        ),
-    ));
+        },
+    );
     plugins.restore().await?;
     host.report_startup_ready("Plugins");
 

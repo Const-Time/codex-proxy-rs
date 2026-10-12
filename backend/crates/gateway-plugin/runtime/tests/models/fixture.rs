@@ -11,7 +11,7 @@ use gateway_core::{
     account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy},
     engine::{admission::*, budget::*, continuation::*, execution::*, provider::*, *},
     error::{GatewayError, ProviderError, ProviderErrorKind, StoreError},
-    event::{GatewayEvent, ProviderEvent, ResponseMeta},
+    event::{GatewayEvent, ProtocolWireEvent, ProviderEvent, ResponseMeta},
     lifecycle::CancellationToken,
     metering::ProviderReportedCost,
     operation::{Operation, OperationKind, RawJsonPayload},
@@ -41,6 +41,7 @@ pub struct Core {
     pub polled: Arc<AtomicUsize>,
     pub commits: AtomicUsize,
     pub requests: Mutex<Vec<NewModelRequest>>,
+    pub bodies: Mutex<Vec<Value>>,
     pub finalizations: Mutex<Vec<ModelRequestFinalization>>,
     pub charges: Mutex<Vec<ClientBudgetCharge>>,
     pub admit_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -228,6 +229,12 @@ impl Provider for Core {
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
+        if let Operation::Generate(generate) = request.operation() {
+            self.bodies
+                .lock()
+                .unwrap()
+                .push(generate.protocol_payload().body().clone().into());
+        }
         assert_eq!(context.client_api_key_ref().as_str(), "key_alice");
         let account = context
             .required_account()
@@ -251,8 +258,14 @@ impl Provider for Core {
             Operation::Generate(g) => g
                 .protocol_payload()
                 .body()
-                .get("mode")
+                .get("failure")
                 .and_then(Value::as_str)
+                .or_else(|| {
+                    g.protocol_payload()
+                        .body()
+                        .get("mode")
+                        .and_then(Value::as_str)
+                })
                 .unwrap_or_default(),
             _ => "",
         };
@@ -271,13 +284,47 @@ impl Provider for Core {
         } else {
             ResponseMeta::for_provider_endpoint(context.request_id().as_str())
         };
+        let response =
+            json!({"id":meta.response_id(),"model":"gpt-native","output":[],"status":"completed"});
+        let start = ProviderEvent::canonical_with_wire(
+            vec![GatewayEvent::Started(meta.clone())],
+            ProtocolWireEvent::json(
+                "openai",
+                Some("response.created".into()),
+                json!({"type":"response.created","response":response}),
+            )
+            .unwrap(),
+        );
+        let wire = if matches!(request.operation(), Operation::Generate(_)) {
+            ProtocolWireEvent::json(
+                "openai",
+                Some("response.completed".into()),
+                json!({"type":"response.completed","response":response}),
+            )
+            .unwrap()
+        } else {
+            ProtocolWireEvent::raw_json(
+                "openai",
+                bytes::Bytes::from_static(br#"{"result":"fixture"}"#),
+            )
+            .unwrap()
+        };
         let events: Vec<Result<ProviderEvent, ProviderError>> = vec![
-            Ok(GatewayEvent::Started(meta.clone()).into()),
-            Ok(
-                GatewayEvent::ProviderCost(ProviderReportedCost::from_usd_ticks(123).unwrap())
-                    .into(),
-            ),
-            Ok(GatewayEvent::Completed(meta).into()),
+            Ok(start),
+            Ok(ProviderEvent::canonical_with_wire(
+                vec![GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(123).unwrap(),
+                )],
+                ProtocolWireEvent::raw_sse(
+                    "openai",
+                    bytes::Bytes::from_static(b": fixture cost\n\n"),
+                )
+                .unwrap(),
+            )),
+            Ok(ProviderEvent::canonical_with_wire(
+                vec![GatewayEvent::Completed(meta)],
+                wire,
+            )),
         ];
         let polled = self.polled.clone();
         let stream: EventStream = if mode == "stall" {
@@ -470,18 +517,26 @@ impl Fixture {
         );
         let store = Arc::new(MemoryStore::default());
         let cache = tempfile::tempdir().unwrap();
-        let engine = PluginEngine::new(
-            cache.path().into(),
-            "3.11.2".parse().unwrap(),
-            store.clone(),
-        )
-        .with_models(execution.clone(), Arc::new(Keys));
-        let runtime: Arc<dyn PluginRuntime> = if middleware {
-            Arc::new(crate::middleware::plan::KernelRuntime(engine))
-        } else {
-            Arc::new(engine)
-        };
-        let manager = Arc::new(PluginManager::new(store, runtime));
+        let manager = Arc::new_cyclic(|plugins| {
+            let engine = PluginEngine::new(
+                cache.path().into(),
+                "3.11.2".parse().unwrap(),
+                store.clone(),
+            )
+            .with_models(
+                Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
+                    execution.clone(),
+                    plugins.clone(),
+                )),
+                Arc::new(Keys),
+            );
+            let runtime: Arc<dyn PluginRuntime> = if middleware {
+                Arc::new(crate::middleware::plan::KernelRuntime(engine))
+            } else {
+                Arc::new(engine)
+            };
+            PluginManager::new(store, runtime)
+        });
         let artifact = manager
             .upload(archive("1.0.0", middleware), &actor())
             .await
@@ -512,6 +567,27 @@ impl Fixture {
             },
         )
         .await
+    }
+    pub async fn install_layers(&self) -> String {
+        let artifact = self
+            .manager
+            .upload(archive("1.0.0", true), &actor())
+            .await
+            .unwrap();
+        let mut command = update(&artifact.sha256, 0, true);
+        command.middleware = Some(gateway_admin::model::plugins::PluginMiddlewareBinding {
+            order: 1,
+            mounts: vec![
+                gateway_admin::model::plugins::PluginMiddlewareMount::Request,
+                gateway_admin::model::plugins::PluginMiddlewareMount::Attempt,
+            ],
+            scope: gateway_admin::model::plugins::PluginMiddlewareScope::All {},
+        });
+        self.manager
+            .update(None, command, &actor())
+            .await
+            .unwrap()
+            .id
     }
     pub async fn call_as(
         &self,

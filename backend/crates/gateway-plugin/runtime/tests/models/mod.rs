@@ -27,6 +27,227 @@ fn native_context(
 }
 
 #[tokio::test]
+async fn native_children_run_request_and_attempt_rewrites_with_one_original_charge() {
+    let fixture = Fixture::with_middleware().await;
+    fixture.install_layers().await;
+    for (index, mode) in ["unary", "stream", "small"].into_iter().enumerate() {
+        let result = fixture
+            .call(json!({"mode":mode,"key":"key_alice","provider_mode":"native-transform"}))
+            .await;
+        assert!(result.get("error").is_none(), "{mode}: {result}");
+        fixture.clean(index + 1).await;
+        {
+            let bodies = fixture.core.bodies.lock().unwrap();
+            assert_eq!(bodies[index]["plugin_request"], true);
+            assert_eq!(bodies[index]["plugin_attempt"], true);
+        }
+        let snapshots = result["batch"].as_array().unwrap();
+        let costs = snapshots
+            .iter()
+            .map(|e| {
+                e.pointer("/host/costs")
+                    .and_then(|c| c.as_array())
+                    .map_or(0, Vec::len)
+            })
+            .sum::<usize>();
+        assert_eq!(
+            costs, 1,
+            "rewritten facts remain the original read-only receipt: {result}"
+        );
+        assert!(
+            snapshots.iter().any(|e| {
+                let data = &e["wire"]["payload"]["data"];
+                let projected = if mode == "unary" {
+                    &data["response"]
+                } else {
+                    data
+                };
+                projected["plugin_request"] == true && projected["plugin_attempt"] == true
+            }),
+            "{result}"
+        );
+    }
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.core.commits.load(Ordering::SeqCst), 3);
+    assert!(
+        fixture
+            .core
+            .charges
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c.amount_usd.scaled() == 123)
+    );
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_request_short_circuit_returns_wire_without_admission_or_charge() {
+    let fixture = Fixture::with_middleware().await;
+    fixture.install_layers().await;
+    let result = fixture
+        .call(json!({"key":"key_alice","provider_mode":"native-short"}))
+        .await;
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["events"], 1);
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.core.active.load(Ordering::SeqCst), 0);
+    assert!(fixture.core.requests.lock().unwrap().is_empty());
+    assert!(fixture.core.charges.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_chain_errors_keep_provider_send_state_and_http_status() {
+    let fixture = Fixture::with_middleware().await;
+    fixture.install_layers().await;
+    for (index, state) in ["not-sent", "sent", "ambiguous"].into_iter().enumerate() {
+        let result = fixture.call(json!({"key":"key_alice","provider_mode":"native-transform","failure":format!("fail-{state}")})).await;
+        assert_eq!(result["error"]["code"], "invalid_input", "{result}");
+        assert_eq!(
+            result["error"]["send_state"],
+            state.replace('-', "_"),
+            "{result}"
+        );
+        assert_eq!(result["error"]["http_status"], 400, "{result}");
+        fixture.clean(index + 1).await;
+    }
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_grandchild_skips_every_initiating_ancestor_and_charges_each_call_once() {
+    let fixture = Fixture::with_middleware().await;
+    let other = fixture.install_layers().await;
+    let result = fixture
+        .call(json!({"key":"key_alice","provider_mode":"native-transform","nested_model":true}))
+        .await;
+    assert!(result.get("error").is_none(), "{result}");
+    fixture.clean(2).await;
+    {
+        let rows = fixture.core.requests.lock().unwrap();
+        assert_eq!(rows.len(), 2);
+        let child = rows.iter().find(|r| r.parent_request_id.is_none()).unwrap();
+        let grandchild = rows.iter().find(|r| r.parent_request_id.is_some()).unwrap();
+        assert_eq!(grandchild.parent_request_id.as_ref(), Some(&child.id));
+        assert_eq!(
+            grandchild.initiating_plugin_instance_id.as_deref(),
+            Some(other.as_str())
+        );
+        assert_eq!(grandchild.client_api_key_ref.as_str(), "key_alice");
+    }
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.core.commits.load(Ordering::SeqCst), 2);
+    assert!(
+        fixture
+            .core
+            .charges
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c.amount_usd.scaled() == 123)
+    );
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_raw_endpoints_run_both_mounts_and_preserve_original_fees() {
+    let fixture = Fixture::with_middleware().await;
+    fixture.install_layers().await;
+    for (index, operation) in ["generate_image", "edit_image", "search"]
+        .into_iter()
+        .enumerate()
+    {
+        let result = fixture.call(json!({"mode":"raw","method":"host.model.execute","params":{"client_key_id":"key_alice","model":"gpt-native","protocol":"openai","operation":operation},"body":{"mode":"native-transform"}})).await;
+        assert!(result.get("error").is_none(), "{result}");
+        fixture.clean(index + 1).await;
+        let wire = result["batch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|event| event.pointer("/wire/payload/body"))
+            .unwrap();
+        let bytes = wire
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b.as_u64().unwrap() as u8)
+            .collect::<Vec<_>>();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["plugin_request"], true);
+        assert_eq!(body["plugin_attempt"], true);
+    }
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 3);
+    assert!(
+        fixture
+            .core
+            .charges
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c.amount_usd.scaled() == 123)
+    );
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_chain_retains_a_commit_when_its_rpc_receiver_is_cancelled() {
+    let fixture = Fixture::with_middleware().await;
+    fixture.install_layers().await;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    *fixture.core.commit_gate.lock().unwrap() = Some(receiver);
+    let mut call = Box::pin(
+        fixture.call(json!({"mode":"stream","key":"key_alice","provider_mode":"native-transform"})),
+    );
+    tokio::select! { _=&mut call=>panic!("commit should wait"), _=async {while fixture.core.commits.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}}=>{} }
+    drop(call);
+    sender.send(()).unwrap();
+    fixture.clean(1).await;
+    assert_eq!(fixture.core.commits.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.core.finalizations.lock().unwrap().len(), 1);
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_native_chain_during_admission_retains_the_granted_slot_cleanup() {
+    let fixture = Fixture::with_middleware().await;
+    fixture.install_layers().await;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    *fixture.core.admit_gate.lock().unwrap() = Some(receiver);
+    let mut call =
+        Box::pin(fixture.call(json!({"key":"key_alice","provider_mode":"native-transform"})));
+    tokio::select! { _=&mut call=>panic!("admission should wait"), _=async {while fixture.core.active.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}}=>{} }
+    drop(call);
+    sender.send(()).unwrap();
+    fixture.clean(1).await;
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.core.charges.lock().unwrap()[0].amount_usd.scaled(),
+        0
+    );
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn revoking_key_while_native_chain_waits_keeps_observed_cost_and_releases() {
+    let fixture = Fixture::with_middleware().await;
+    fixture.install_layers().await;
+    let mut call = Box::pin(fixture.call(json!({"mode":"stream","key":"key_alice","provider_mode":"native-transform","failure":"stall"})));
+    tokio::select! { _=&mut call=>panic!("provider should wait"), _=async {while fixture.core.polled.load(Ordering::SeqCst)<2 {tokio::task::yield_now().await;}}=>{} }
+    fixture.snapshot.publish(snapshot(2, false));
+    let result = tokio::time::timeout(Duration::from_secs(3), call)
+        .await
+        .unwrap();
+    assert!(result.get("error").is_some(), "{result}");
+    fixture.clean(1).await;
+    assert_eq!(
+        fixture.core.charges.lock().unwrap()[0].amount_usd.scaled(),
+        123
+    );
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn native_protocol_and_metadata_mismatches_fail_before_admission() {
     let fixture = Fixture::new().await;
     let base = json!({"client_key_id":"key_alice","model":"gpt-native","protocol":"openai","operation":"generate"});
@@ -317,7 +538,7 @@ async fn native_stable_image_and_search_operations_use_the_existing_openai_endpo
     for (index, (operation, endpoint)) in [
         ("generate_image", "/v1/images/generations"),
         ("edit_image", "/v1/images/edits"),
-        ("search", "/v1/search"),
+        ("search", "/v1/alpha/search"),
     ]
     .into_iter()
     .enumerate()

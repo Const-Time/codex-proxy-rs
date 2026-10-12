@@ -106,7 +106,7 @@ pub(super) fn decode(
         ),
         ModelOperation::Search => (
             Operation::Search(StandaloneSearchRequest::from_raw_json(raw()?)),
-            "/v1/search",
+            "/v1/alpha/search",
             Some(ProviderKind::new("openai").map_err(|_| invalid())?),
         ),
     };
@@ -129,7 +129,7 @@ pub(super) fn decode(
             metadata: ExecutionRequestMetadata {
                 protocol: metadata.protocol.clone(),
                 endpoint: endpoint.into(),
-                transport: if streaming {
+                transport: if streaming && metadata.operation == ModelOperation::Generate {
                     ClientTransport::HttpSse
                 } else {
                     ClientTransport::HttpJson

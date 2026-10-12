@@ -214,4 +214,8 @@ Core 已提供宿主签发的父请求上下文，request/attempt 协议桥传�
 
 当前原生模型协议支持 openai，Generate 走现有模型路由；Images generation/edit 与 standalone Search 沿用本地固定 OpenAI 端点，不参与文本模型映射。它们的正文模型若存在必须与 SDK 元数据一致，仍由 Provider 解释原生正文；续接仅允许 Generate 且元数据必须匹配正文。认证、命令、维护和观察阶段的原生模型回调尚未开放。
 
-原生 RPC 已通过真实 SDK 子进程和本地 Core 验证；子调用进入完整插件中间件链、其余挂载和上游适配器仍在实施，生产 middleware 和 upstream_adapter 启用门禁继续保留。这不构成任意上游插件完整兼容的承诺。
+账号排除当前使用宿主签发的回调 account_id。本地 Provider 在 next 后才确定真实账号；该动态租约事实向后续模型回调传递仍待接通，不能据此认为所有 attempt 回调的父账号排除已完成。
+
+原生子调用已进入同一份冻结的 request/attempt 计划，发起插件和全部实例祖先由宿主排除。Responses JSON/SSE 与 Images/Search 复用现有 API 协议桥；插件改写后的正文投影为 HME1 返回，原会话继续拥有费用、账号、续接和交付提交。SDK 提前请求下一源时，在原提交屏障完成前等待；读取容量不足不会提前推进上游。只有外层终态及 Core 清理均完成后才返回 end=true。
+
+已知 Provider 失败沿网关错误保留发送状态和 HTTP 状态码；无法证明发送状态的中间件启动失败使用 ambiguous，不能据此自动重放。管理调用中的模型与孙调用已通过真实 SDK 子进程和本地 Core 验证，包含两层改写后原费用只结算一次、祖先排除、错误短路和提交中取消。其余挂载、路由/选号、上游适配器与目标插件兼容验收仍在实施，生产 middleware 和 upstream_adapter 启用门禁继续保留。这不构成任意上游插件完整兼容的承诺。
