@@ -21,6 +21,7 @@ use std::{
 };
 
 pub struct PluginEngine {
+    models: Option<Arc<crate::models::ModelServices>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
     resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
     cache: PathBuf,
@@ -33,6 +34,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            models: None,
             quota: None,
             resources: None,
             cache,
@@ -42,6 +44,14 @@ impl PluginEngine {
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
             data: None,
         }
+    }
+    pub fn with_models(
+        mut self,
+        execution: Arc<dyn gateway_core::engine::execution::ExecutionService>,
+        keys: Arc<dyn gateway_admin::ClientKeyService>,
+    ) -> Self {
+        self.models = Some(crate::models::ModelServices::new(execution, keys));
+        self
     }
     pub fn with_quota(
         mut self,
@@ -271,6 +281,10 @@ impl PluginRuntime for PluginEngine {
         let access = PluginAccess::default();
         let failed_access = access.clone();
         let ended_access = access.clone();
+        let models = self
+            .models
+            .clone()
+            .map(|services| crate::models::Models::new(services, access.cancellation()));
         let callbacks = Arc::new(
             crate::callbacks::Callbacks::new(
                 self.store.clone(),
@@ -280,10 +294,11 @@ impl PluginRuntime for PluginEngine {
                 self.data.clone(),
             )?
             .with_resources(self.resources.clone())
-            .with_quota(self.quota.clone()),
+            .with_quota(self.quota.clone())
+            .with_models(models.clone()),
         );
         let calls = callbacks.calls.clone();
-        let middleware = crate::middleware::MiddlewareCallbacks::new(callbacks);
+        let middleware = crate::middleware::MiddlewareCallbacks::new(callbacks).with_models(models);
         let session = Arc::new(
             RpcSession::start_supervised(
                 prepared.clone(),

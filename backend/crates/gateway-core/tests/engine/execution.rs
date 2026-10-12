@@ -2606,6 +2606,100 @@ fn assert_failure<T>(result: Result<T, GatewayError>, kind: GatewayErrorKind) {
 }
 
 #[test]
+fn explicit_model_targets_cannot_escape_key_scope_or_wait_on_the_parent_account() {
+    use gateway_core::engine::nested::ModelExecutionTarget;
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    for target in [
+        ModelExecutionTarget {
+            provider: Some(ProviderKind::new("xai").unwrap()),
+            ..Default::default()
+        },
+        ModelExecutionTarget {
+            account: Some(ProviderAccountId::new("acct_other").unwrap()),
+            ..Default::default()
+        },
+    ] {
+        assert_failure(
+            prepare(&service).with_model_target(target),
+            GatewayErrorKind::PolicyDenied,
+        );
+    }
+    let account = ProviderAccountId::new("acct_start").unwrap();
+    assert_failure(
+        prepare(&service).with_model_target(ModelExecutionTarget {
+            account: Some(account.clone()),
+            parent_account: Some(account),
+            ..Default::default()
+        }),
+        GatewayErrorKind::NoAvailableProvider,
+    );
+}
+#[test]
+fn an_excluded_parent_account_with_no_alternative_fails_before_admission() {
+    use gateway_core::engine::nested::ModelExecutionTarget;
+    block_on(async {
+        let admissions = Arc::new(Admissions::default());
+        let service = service(admissions.clone(), Arc::new(Budget::default()));
+        let prepared = prepare(&service)
+            .with_model_target(ModelExecutionTarget {
+                parent_account: Some(ProviderAccountId::new("acct_start").unwrap()),
+                ..Default::default()
+            })
+            .unwrap();
+        let input = request(&service, ClientTransport::HttpJson);
+        assert_failure(
+            service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: input.public_model,
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await,
+            GatewayErrorKind::NoAvailableProvider,
+        );
+        assert!(admissions.limits.lock().unwrap().is_empty());
+    });
+}
+#[test]
+fn standalone_plugin_calls_share_limits_and_have_no_fictitious_parent_request() {
+    use gateway_core::engine::nested::ExtensionCallScope;
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let graph = ExtensionCallScope::default();
+    let cancellation = gateway_core::lifecycle::CancellationToken::new();
+    for _ in 0..64 {
+        let prepared = service
+            .prepare_plugin_execution(
+                service.authenticate("sk_start_test").unwrap(),
+                "plugin-standalone".into(),
+                graph.clone(),
+                cancellation.clone(),
+            )
+            .unwrap();
+        let authority = prepared.nested_context();
+        assert!(authority.scope().parent_request_id().is_none());
+        assert!(authority.scope().initiating_plugin_instance_id().is_none());
+        assert!(
+            authority
+                .scope()
+                .excluded_instances()
+                .contains("plugin-standalone")
+        );
+    }
+    assert_failure(
+        service.prepare_plugin_execution(
+            service.authenticate("sk_start_test").unwrap(),
+            "plugin-standalone".into(),
+            graph,
+            cancellation,
+        ),
+        GatewayErrorKind::RateLimited,
+    );
+}
+
+#[test]
 fn nested_preparation_is_lazy_inherits_settings_and_bounds_its_deadline() {
     let admissions = Arc::new(Admissions::default());
     let service = service(admissions.clone(), Arc::new(Budget::default()));

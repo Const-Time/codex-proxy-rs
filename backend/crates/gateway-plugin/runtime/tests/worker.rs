@@ -3,6 +3,177 @@ use gateway_plugin_sdk::{
     client::{CallFuture, CallReply, PluginCall, PluginHandler, PluginSession, SessionConfig},
 };
 use serde_json::json;
+mod worker_models {
+    //! Exercise the real SDK host methods and event codec from a separate process.
+    use gateway_plugin_sdk::{call::host::*, client::PluginCall};
+    use serde_json::{Value, json};
+    pub async fn handle(call: &PluginCall, input: &Value) -> Value {
+        let result = handle_inner(call, input).await;
+        match result {
+            Ok(value) => value,
+            Err(error) => json!({"error":error}),
+        }
+    }
+    async fn handle_inner(
+        call: &PluginCall,
+        input: &Value,
+    ) -> Result<Value, gateway_plugin_sdk::PluginFault> {
+        let mode = input["mode"].as_str().unwrap_or("unary");
+        if mode == "raw" {
+            let payload = input
+                .get("body")
+                .map(|b| serde_json::to_vec(b).unwrap())
+                .unwrap_or_default();
+            let reply = call
+                .host
+                .call(
+                    input["method"].as_str().unwrap(),
+                    input["params"].clone(),
+                    payload,
+                )
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            return Ok(json!({"result":reply.result}));
+        }
+        let model = input["model"].as_str().unwrap_or("gpt-native");
+        let request = ModelExecuteRequest {
+            client_key_id: input["key"].as_str().map(str::to_owned),
+            model: model.into(),
+            protocol: "openai".into(),
+            operation: ModelOperation::Generate,
+            provider: input["provider"].as_str().map(str::to_owned),
+            account_id: input["account"].as_str().map(str::to_owned),
+            previous_response_id: None,
+        };
+        let body = serde_json::to_vec(
+            &json!({"model":model,"input":"fixture","mode":input["provider_mode"]}),
+        )
+        .unwrap();
+        if mode == "capacity" {
+            let mut handles = vec![];
+            for _ in 0..16 {
+                let reply = call
+                    .host
+                    .call(
+                        "host.model.execute_stream",
+                        serde_json::to_value(&request).unwrap(),
+                        body.clone(),
+                    )
+                    .await
+                    .map_err(|e| e.into_plugin_fault())?;
+                let stream: ModelStreamResult = serde_json::from_value(reply.result).unwrap();
+                handles.push(stream.stream);
+            }
+            let error = call
+                .host
+                .call(
+                    "host.model.execute_stream",
+                    serde_json::to_value(&request).unwrap(),
+                    body,
+                )
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault();
+            assert_eq!(error.code, gateway_plugin_sdk::ErrorCode::Capacity);
+            for stream in handles {
+                call.host
+                    .call("host.model.stream_close", json!({"stream":stream}), vec![])
+                    .await
+                    .map_err(|e| e.into_plugin_fault())?;
+            }
+            return Ok(json!({"capacity":true}));
+        }
+        if mode == "unary" {
+            let reply = call
+                .host
+                .call(
+                    "host.model.execute",
+                    serde_json::to_value(request).unwrap(),
+                    body,
+                )
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            let metadata: ModelExecuteResult = serde_json::from_value(reply.result).unwrap();
+            let batch = ModelEventBatch::decode(&reply.payload).unwrap();
+            assert_eq!(batch.events.len(), metadata.events as usize);
+            return Ok(json!({"request":metadata.request_id,"events":metadata.events}));
+        }
+        let reply = call
+            .host
+            .call(
+                "host.model.execute_stream",
+                serde_json::to_value(request).unwrap(),
+                body,
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+        let stream: ModelStreamResult = serde_json::from_value(reply.result).unwrap();
+        if mode == "leak" {
+            return Ok(json!({"stream":stream.stream}));
+        }
+        if mode == "crash-stream" {
+            std::process::exit(2);
+        }
+        if mode == "close" {
+            call.host
+                .call(
+                    "host.model.stream_read",
+                    json!({"stream":stream.stream,"maximum_bytes":8388608}),
+                    vec![],
+                )
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            call.host
+                .call(
+                    "host.model.stream_close",
+                    json!({"stream":stream.stream}),
+                    vec![],
+                )
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            return Ok(json!({"closed":true}));
+        }
+        if mode == "small" {
+            let error = call
+                .host
+                .call(
+                    "host.model.stream_read",
+                    json!({"stream":stream.stream,"maximum_bytes":1}),
+                    vec![],
+                )
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault();
+            assert_eq!(error.code, gateway_plugin_sdk::ErrorCode::Capacity);
+        }
+        let mut events = 0;
+        loop {
+            let reply = call
+                .host
+                .call(
+                    "host.model.stream_read",
+                    json!({"stream":stream.stream,"maximum_bytes":8388608}),
+                    vec![],
+                )
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            let metadata: ModelStreamReadResult = serde_json::from_value(reply.result).unwrap();
+            if !reply.payload.is_empty() {
+                let batch = ModelEventBatch::decode(&reply.payload).unwrap();
+                assert_eq!(batch.events.len(), metadata.events as usize);
+            } else {
+                assert_eq!(metadata.events, 0);
+            }
+            events += metadata.events;
+            if metadata.end {
+                break;
+            }
+        }
+        Ok(json!({"request":stream.request_id,"events":events,"ended":true}))
+    }
+}
 
 struct Worker {
     contributes: serde_json::Value,
@@ -74,6 +245,8 @@ impl PluginHandler for Worker {
                         Ok(reply)=>json!({"result":serde_json::from_slice::<serde_json::Value>(&reply.payload).unwrap()}),
                         Err(error)=>json!({"error":error.into_plugin_fault()})
                     }
+                } else if input["operation"]=="models" {
+                    worker_models::handle(&call, &input).await
                 } else if input["operation"]=="crash" { std::process::exit(2); }
                 else { input };
                 Ok(CallReply::unary(json!({"status":200,"content_type":"application/json","headers":[]}),serde_json::to_vec(&result).unwrap()))
@@ -113,6 +286,16 @@ mod worker_middleware {
     pub async fn handle(call: PluginCall) -> Result<CallReply, PluginFault> {
         let input: serde_json::Value = serde_json::from_slice(&call.payload).unwrap();
         let mode = input["mode"].as_str().unwrap().to_owned();
+        if mode == "native-model" {
+            let result = super::worker_models::handle(&call, &input["native"]).await;
+            return Ok(CallReply::stream(
+                json!({"response":null,"protocol":"openai","status":200,"header_mutations":[],"body":{"kind":"stream","framing":"json_document"}}),
+                vec![],
+                ResponseStream::from_chunks(vec![
+                    MiddlewareBodyFrame::new(serde_json::to_vec(&result).unwrap(), true).encode(),
+                ]),
+            ));
+        }
         if mode == "reject" {
             return Err(PluginFault::new(ErrorCode::Rejected, "rejected by fixture"));
         }

@@ -22,6 +22,7 @@ struct Namespace {
     schema: jsonschema::Validator,
 }
 pub(crate) struct Callbacks {
+    models: Option<Arc<crate::models::Models>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
     resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
     pub(crate) calls: Arc<crate::resources::ManagementCalls>,
@@ -33,6 +34,10 @@ pub(crate) struct Callbacks {
     data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl Callbacks {
+    pub(crate) fn with_models(mut self, models: Option<Arc<crate::models::Models>>) -> Self {
+        self.models = models;
+        self
+    }
     pub(crate) fn with_quota(
         mut self,
         service: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
@@ -68,6 +73,7 @@ impl Callbacks {
             })
             .collect::<Result<_, gateway_admin::model::AdminError>>()?;
         Ok(Self {
+            models: None,
             quota: None,
             resources: None,
             calls: Arc::default(),
@@ -100,6 +106,24 @@ fn store_error(error: gateway_admin::model::AdminError) -> PluginFault {
     )
 }
 impl CallbackHandler for Callbacks {
+    fn begin(&self, context: &CallContext) {
+        if context.stage == Stage::Management
+            && let Some(models) = &self.models
+        {
+            // LivePlugin registers the authenticated actor before the RPC begins.
+            let _ = models.bind(
+                context,
+                None,
+                self.calls.actor(&context.resource_scope_id),
+                gateway_core::lifecycle::CancellationToken::new(),
+            );
+        }
+    }
+    fn finish(&self, context: &CallContext) {
+        if let Some(models) = &self.models {
+            models.finish(context);
+        }
+    }
     fn call(
         &self,
         context: CallContext,
@@ -116,6 +140,7 @@ impl CallbackHandler for Callbacks {
         let resources = self.resources.clone();
         let calls = self.calls.clone();
         let quota = self.quota.clone();
+        let models = self.models.clone();
         Box::pin(async move {
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
@@ -137,6 +162,15 @@ impl CallbackHandler for Callbacks {
                     ErrorCode::PermissionDenied,
                     "authentication callbacks cannot access management capabilities",
                 ));
+            }
+            if crate::models::is_method(&method) {
+                let models = models.ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::Unsupported,
+                        "host model service is not configured",
+                    )
+                })?;
+                return models.call(context, method, params, payload).await;
             }
             if matches!(
                 method.as_str(),

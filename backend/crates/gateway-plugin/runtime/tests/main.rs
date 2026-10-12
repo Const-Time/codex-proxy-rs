@@ -7,3 +7,4 @@ mod quota;
 
 mod authentication;
 mod middleware;
+mod models;

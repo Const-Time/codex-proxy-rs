@@ -16,11 +16,12 @@
 | 私有状态 | `host.state.get/put/delete`，实例和命名空间隔离，版本比较交换、schema 和配额校验 |
 | 只读事实 | management 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`；不含密钥或凭据 |
 | 页面推理 | 本人管理员会话显式选择自己的 Key，复用正常 Responses 的权限、路由、预算、倍率和结算 |
+| 原生模型 RPC | management 调用的本人 Key 列表、模型目录与普通/流式推理；HME1 事件批次、调用范围内的读取/关闭与原 Core 结算 |
 | 分组资源 | `host.groups.ensure` 幂等创建实例自有分组，`host.groups.change_members` 增量修改成员；使用真实管理请求的审计身份 |
 | Key 资源 | `host.keys.ensure` 幂等创建本人 Key；只绑定一个本实例分组，预算参数校验当前共享额度，不返回密钥明文 |
 | 共享额度 | 本地扩展 `host.cpr.shared_budgets.v1.*`：显式用户＋分组查询、整组基础限额 CAS 更新、选定订阅幂等重置 |
 | 外部认证 | frontend_authentication v1；单一入口认证器，宿主将外部 principal 映射到现有 Key，沿用正常权限及共享计费 |
-| 未开放的能力 | 原生进程 `host.models.*`、middleware、upstream_adapter、路由/选号、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移 |
+| 未开放的能力 | middleware、upstream_adapter、路由/选号、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt 阶段的原生模型回调 |
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
@@ -118,7 +119,7 @@ SDK `ensure_key` 已开放，每个实例最多登记 256 个 Key 资源，只�
 
 ## 后续改造边界
 
-只读事实、实例自有分组/Key 和显式共享额度管理已接入；后续继续接入中间件和具体业务插件；原生进程模型回调与深度扩展仍未开放。现有差异功能尚未从主程序移出。用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
+只读事实、实例自有分组/Key、显式共享额度管理和 management 原生模型回调已接入；后续继续接入完整深度扩展与具体业务插件。现有差异功能尚未从主程序移出。用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
 
 本轮实际运行验证平台为 Linux x86_64。CLI 可生成 Linux x86_64 / aarch64、macOS aarch64 制品，但本轮未完成其他平台的真实进程验证，不提供 Windows 插件制品兼容保证。
 
@@ -205,4 +206,12 @@ Core 已提供宿主签发的父请求上下文，request/attempt 协议桥传�
 
 每个根调用最多产生 64 个子调用，同时最多 16 个活动子调用，最多 8 层插件祖先；发起插件及全部祖先从子请求的 request/attempt 计划中排除。并发占用保留至原结算和清理完成，保留旧上下文不会锁住已结束的占用。子调用使用自己的请求 ID、原账本和准入链，历史记录保存父请求与发起实例；父记录尚未创建也可记录子调用。观察到子调用上游发送或不确定发送后，父请求不再自动重试。
 
-以上是 Core、持久化和协议桥的接线基础；原生 `host.model.execute`、`execute_stream` 及流句柄 RPC 尚未接通，生产 middleware 和 upstream_adapter 启用门禁继续保留。
+原生 `host.keys.list`、`host.models.list`、`host.model.execute`、`host.model.execute_stream`、`host.model.stream_read` 和 `host.model.stream_close` 已接通。管理调用必须由本人管理员会话发起并显式选 Key；Key 列表只返回本人非秘密信息，部署级管理 API Key 或 System 没有个人推理身份。request/attempt 内核中的子调用可以继承宿主签发的父身份；显式 Key 继续由 Core 检查其当前授权，父身份结束或撤销同样终止子调用。
+
+管理调用中的推理没有虚构的模型父请求，仍共用调用图限额并排除发起实例；其管理调用上下文保留真实实例与操作者。显式 Provider/账号不得超出 Key 范围，子调用排除父 attempt 已持有的账号；没有其他授权账号时立即失败。续接账号与显式目标冲突时拒绝，不能换号发送原生续接。
+
+请求正文与 HME1 事件批次最多 8 MiB，每个 RPC 范围最多 16 个活动模型资源。流句柄只属于创建它的宿主调用；结束、取消、停用、换代或进程退出时撤销并交回 Core 清理。一次读取保持完整事件批次，maximum_bytes 太小返回 capacity 并保留待交付批次，调用者可加大上限再读；end=true 仅在原终态、结算和准入释放完成后返回。RPC 取消不会丢掉已开始的准入、交付提交或结算。
+
+当前原生模型协议支持 openai，Generate 走现有模型路由；Images generation/edit 与 standalone Search 沿用本地固定 OpenAI 端点，不参与文本模型映射。它们的正文模型若存在必须与 SDK 元数据一致，仍由 Provider 解释原生正文；续接仅允许 Generate 且元数据必须匹配正文。认证、命令、维护和观察阶段的原生模型回调尚未开放。
+
+原生 RPC 已通过真实 SDK 子进程和本地 Core 验证；子调用进入完整插件中间件链、其余挂载和上游适配器仍在实施，生产 middleware 和 upstream_adapter 启用门禁继续保留。这不构成任意上游插件完整兼容的承诺。

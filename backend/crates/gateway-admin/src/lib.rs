@@ -225,8 +225,8 @@ impl AdminServices {
     }
 
     #[must_use]
-    pub fn client_keys(&self) -> &dyn ClientKeyService {
-        self.client_keys.as_ref()
+    pub fn client_keys(&self) -> Arc<dyn ClientKeyService> {
+        self.client_keys.clone()
     }
 
     #[must_use]
