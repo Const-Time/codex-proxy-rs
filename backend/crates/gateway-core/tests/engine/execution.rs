@@ -3088,6 +3088,7 @@ fn child_and_parent_settle_distinct_calls_once_and_child_authority_expires_after
 struct NestedRetryProbe {
     retry: AtomicBool,
     calls: AtomicUsize,
+    delay: Duration,
 }
 #[async_trait]
 impl Provider for NestedRetryProbe {
@@ -3121,7 +3122,7 @@ impl Provider for NestedRetryProbe {
                     .with_replay_safe()
                     .with_pre_delivery_transport_retry(
                         std::num::NonZeroU32::new(1).unwrap(),
-                        Duration::ZERO,
+                        self.delay,
                     );
             Ok(ProviderStream::new(
                 metadata,
@@ -3143,6 +3144,7 @@ fn observed_child_effects_prevent_parent_replay_before_child_settlement() {
             let provider = Arc::new(NestedRetryProbe {
                 retry: AtomicBool::new(false),
                 calls: AtomicUsize::new(0),
+                delay: Duration::ZERO,
             });
             let store = Arc::new(TrackingExecutionStore::default());
             let service = DefaultExecutionService::new(
@@ -3205,6 +3207,96 @@ fn observed_child_effects_prevent_parent_replay_before_child_settlement() {
                 assert!(cancellation.is_cancelled());
                 child.session.detach_finalize().await;
             }
+        }
+    });
+}
+
+#[test]
+fn child_effects_observed_during_parent_backoff_prevent_the_next_attempt() {
+    block_on(async {
+        for child_effects in [false, true] {
+            let provider = Arc::new(NestedRetryProbe {
+                retry: AtomicBool::new(true),
+                calls: AtomicUsize::new(0),
+                delay: Duration::from_secs(1),
+            });
+            let store = Arc::new(TrackingExecutionStore::default());
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(start_snapshot()),
+                store.clone(),
+                ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                Arc::new(UnusedAdmissions),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            );
+            let parent = prepare(&service);
+            let prepared = service
+                .prepare_nested(parent.nested_context(), "plugin-a".into(), None)
+                .unwrap();
+            let cancellation = prepared.cancellation();
+            let input = request(&service, ClientTransport::HttpSse);
+            let mut child = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: input.public_model,
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            let input = request(&service, ClientTransport::HttpJson);
+            let mut started = service
+                .start_prepared(
+                    parent,
+                    PreparedExecutionRequest {
+                        public_model: input.public_model,
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            let mut collecting = Box::pin(started.session.collect_uncommitted());
+            assert!(futures::poll!(&mut collecting).is_pending());
+            assert_eq!(
+                provider.calls.load(Ordering::SeqCst),
+                1,
+                "parent must be waiting in the retry backoff"
+            );
+            if child_effects {
+                assert!(child.session.next_event().await.unwrap().is_some());
+                assert!(!child.session.is_finalized());
+            }
+            let result = collecting.await;
+            if child_effects {
+                assert!(
+                    matches!(result, Err(EngineError::Provider(_))),
+                    "a late child effect must retain the original parent failure: {result:?}"
+                );
+            } else {
+                assert_eq!(result.unwrap().len(), 3);
+                started.session.commit_downstream(Some(200)).await.unwrap();
+            }
+            assert_eq!(
+                provider.calls.load(Ordering::SeqCst),
+                2,
+                "a sent child must replace, not add to, the parent retry"
+            );
+            started.session.detach_finalize().await;
+            assert!(cancellation.is_cancelled());
+            child.session.detach_finalize().await;
+            let finalizations = store.finalizations.lock().unwrap();
+            assert_eq!(finalizations.len(), 2);
+            assert_eq!(
+                finalizations
+                    .iter()
+                    .find(|f| f.request_id == started.request_id)
+                    .unwrap()
+                    .attempt_count,
+                if child_effects { 1 } else { 2 }
+            );
         }
     });
 }
