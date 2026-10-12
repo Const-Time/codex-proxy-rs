@@ -1,4 +1,5 @@
 //! 上游插件包和 RPC 协议适配；本地管理生命周期通过 Admin 端口组合。
+mod account_scheduling;
 mod callbacks;
 mod data;
 mod engine;

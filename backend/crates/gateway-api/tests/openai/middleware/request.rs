@@ -5,6 +5,26 @@ use futures::StreamExt;
 use gateway_admin::model::plugins::PluginMiddlewareMount;
 use gateway_core::metering::Decimal;
 #[tokio::test]
+async fn consulted_policy_revocation_blocks_buffered_json_after_core_settlement() {
+    for f in [
+        Fixture::with_router().await,
+        Fixture::with_scheduler().await,
+    ] {
+        let response = f.request(false).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        f.settled().await;
+        f.plugin.access.revoke();
+        assert!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .is_err(),
+            "revocation must guard already buffered delivery"
+        );
+        assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+        f.manager.shutdown().await;
+    }
+}
+#[tokio::test]
 async fn model_routing_runs_without_request_middleware_for_json_and_sse() {
     for streaming in [false, true] {
         let f = Fixture::with_router().await;
@@ -25,6 +45,20 @@ async fn model_routing_runs_without_request_middleware_for_json_and_sse() {
         );
         assert_eq!(f.effects.charges.lock().unwrap()[0].request_id.as_str(), id);
         assert_eq!(f.effects.commits.load(Ordering::SeqCst), 1);
+    }
+}
+#[tokio::test]
+async fn account_scheduling_runs_for_json_and_sse_with_one_original_charge() {
+    for streaming in [false, true] {
+        let f = Fixture::with_scheduler().await;
+        let response = f.request(streaming).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(String::from_utf8_lossy(&bytes(response).await).contains("resp_original"));
+        f.settled().await;
+        assert_eq!(f.plugin.scheduling_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.plugin.routing_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+        f.manager.shutdown().await;
     }
 }
 #[tokio::test]

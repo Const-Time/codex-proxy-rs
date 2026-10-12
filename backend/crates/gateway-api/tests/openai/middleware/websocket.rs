@@ -94,6 +94,21 @@ async fn model_routing_runs_for_websocket_without_request_middleware() {
     assert_eq!(f.effects.commits.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
+async fn account_scheduling_runs_for_websocket_without_request_middleware() {
+    let f = Fixture::with_scheduler().await;
+    let (_server, mut socket) = connect(&f).await;
+    send(&mut socket, create()).await;
+    for kind in ["response.created", "response.completed"] {
+        let value = event(&mut socket).await;
+        assert_eq!(value["type"], kind, "{value}");
+    }
+    f.settled().await;
+    assert_eq!(f.plugin.scheduling_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.effects.commits.load(Ordering::SeqCst), 1);
+    f.manager.shutdown().await;
+}
+#[tokio::test]
 async fn ws_layers_uses_json_messages_and_preserves_core_identity_and_cost() {
     for mounts in mount_combinations() {
         for mode in [Mode::Rewrite, Mode::MessageRewrite, Mode::Head] {

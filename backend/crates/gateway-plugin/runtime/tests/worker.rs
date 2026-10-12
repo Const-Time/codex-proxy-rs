@@ -177,11 +177,44 @@ mod worker_models {
 struct Worker {
     contributes: serde_json::Value,
     fail: bool,
+    schedule: String,
 }
 impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "policy.schedule_account" => {
+                use gateway_plugin_sdk::call::policy::AccountScheduleRequest;
+                let head:AccountScheduleRequest=serde_json::from_value(call.params.clone()).unwrap();
+                assert!(call.payload.is_empty());
+                assert_eq!(call.context.stage,gateway_plugin_sdk::Stage::Scheduling);
+                assert_eq!(call.context.request_id.as_deref(),Some(head.request_id.as_str()));
+                assert_eq!(call.context.attempt_id,Some(format!("{}:{}",head.request_id,head.attempt_index)));
+                assert!(head.attempt_index>0);
+                assert_eq!(head.model.as_deref(),Some("gpt-native"));
+                assert!(head.candidates.iter().all(|c| c.account_id!="acct_forbidden" && c.maximum_concurrency==1 && c.in_flight==0 && c.quota_remaining_rank==Some(7500) && c.failure_rate_basis_points==Some(300) && c.first_output_latency_ms==Some(250)));
+                assert!(call.host.call("host.data.accounts.list",json!({}),vec![]).await.is_err());
+                let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":"schedules"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                call.host.call("host.state.put",json!({"namespace":"counter","key":"schedules","value":existing.result["record"]["value"].as_u64().unwrap_or(0)+1,"expected_version":existing.result["record"]["version"].as_u64()}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                let decision=match self.schedule.as_str() {
+                    "reject"=>json!({"decision":"reject"}),
+                    "foreign"=>json!({"decision":"pick","account_id":"acct_forbidden"}),
+                    "fault"=>return Err(PluginFault::new(ErrorCode::Fault,"private scheduling error detail")),
+                    "payload"=>return Ok(CallReply::unary(json!({"decision":"delegate"}),b"invalid".to_vec())),
+                    "malformed"=>json!({"decision":"delegate","unexpected":true}),
+                    "wait"=>{
+                        call.host.call("host.models.list",json!({"client_key_id":"key_alice","protocol":"openai","client_version":"fixture"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                        futures::future::pending::<()>().await; unreachable!()
+                    },
+                    "child"=>{
+                        let nested=worker_models::handle(&call.host,&json!({"mode":"unary"})).await;
+                        assert!(nested.get("error").is_none(),"{nested}"); json!({"decision":"delegate"})
+                    },
+                    "pick-last"=>json!({"decision":"pick","account_id":head.candidates.last().unwrap().account_id}),
+                    _=>json!({"decision":"delegate"}),
+                };
+                Ok(CallReply::unary(decision,vec![]))
+            },
             "policy.route_model" => {
                 use gateway_plugin_sdk::call::policy::ModelRouteRequest;
                 let head: ModelRouteRequest = serde_json::from_value(call.params.clone()).unwrap();
@@ -213,6 +246,8 @@ impl PluginHandler for Worker {
                     },
                     Some("openai") => json!({"decision":"route","provider":"openai"}),
                     Some("malformed") => json!({"decision":"route","provider":"openai","unexpected":true}),
+                    Some("malformed-unhandled") => json!({"decision":"unhandled","unexpected":true}),
+                    Some("malformed-reject") => json!({"decision":"reject","unexpected":true}),
                     Some("payload") => return Ok(CallReply::unary(json!({"decision":"unhandled"}), b"invalid".to_vec())),
                     _ => body["route"].as_object().map_or(json!({"decision":"unhandled"}), |value| json!(value)),
                 };
@@ -302,6 +337,10 @@ async fn main() {
     .unwrap();
     let handler = Worker {
         contributes: serde_json::to_value(&session.handshake().contributes).unwrap(),
+        schedule: session.handshake().configuration["schedule"]
+            .as_str()
+            .unwrap_or("delegate")
+            .into(),
         fail: session.handshake().configuration["fail"]
             .as_bool()
             .unwrap_or(false),

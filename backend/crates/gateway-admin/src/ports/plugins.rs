@@ -34,6 +34,15 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn schedule_account(
+        &self,
+        _input: gateway_core::engine::account_scheduling::AccountScheduleInput,
+    ) -> std::result::Result<
+        gateway_core::engine::account_scheduling::AccountScheduleDecision,
+        gateway_core::engine::account_scheduling::AccountSchedulingFault,
+    > {
+        Err(gateway_core::engine::account_scheduling::AccountSchedulingFault)
+    }
     async fn route_model(
         &self,
         _input: gateway_core::engine::model_routing::ModelRouteInput,

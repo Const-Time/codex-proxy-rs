@@ -264,12 +264,6 @@ impl Provider for Core {
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
-        let gate = self.selection_gate.lock().unwrap().take();
-        if let Some(gate) = gate {
-            self.selection_waiters.fetch_add(1, Ordering::SeqCst);
-            let _wait = SelectionWait(self.selection_waiters.clone());
-            gate.await.unwrap();
-        }
         if let Operation::Generate(generate) = request.operation() {
             self.bodies
                 .lock()
@@ -277,7 +271,7 @@ impl Provider for Core {
                 .push(generate.protocol_payload().body().clone().into());
         }
         assert_eq!(context.client_api_key_ref().as_str(), "key_alice");
-        let account = context.required_account().cloned().unwrap_or_else(|| {
+        let preferred = context.required_account().cloned().or_else(|| {
             [
                 "acct_allowed",
                 "acct_alternative",
@@ -298,8 +292,94 @@ impl Provider for Core {
                         .provider_kind()
                         == request.candidate().provider()
             })
-            .expect("Core must preserve at least one eligible account")
         });
+
+        use gateway_core::account::*;
+        let now = SystemTime::now();
+        let candidates = [
+            "acct_allowed",
+            "acct_alternative",
+            "acct_third",
+            "acct_fallback",
+            "acct_forbidden",
+        ]
+        .into_iter()
+        .filter(|id| (*id == "acct_fallback") == (request.candidate().provider().as_str() == "xai"))
+        .map(|id| AccountCandidate {
+            account: ProviderAccount::new(
+                ProviderAccountId::new(id).unwrap(),
+                ProviderKind::new(if id == "acct_fallback" {
+                    "xai"
+                } else {
+                    "openai"
+                })
+                .unwrap(),
+                id.into(),
+                Some(id.into()),
+                "oauth".into(),
+                CredentialRevision::new(1).unwrap(),
+                None,
+            )
+            .with_account_facts(
+                true,
+                CredentialState::Ready,
+                QuotaState::unknown(),
+                None,
+                None,
+            ),
+            signals: AccountRuntimeSignals {
+                in_flight: self
+                    .leases
+                    .lock()
+                    .unwrap()
+                    .get(&ProviderAccountId::new(id).unwrap())
+                    .copied()
+                    .unwrap_or(0) as u32,
+                last_started_at: Some(now - Duration::from_secs(3)),
+                quota_reset_at: Some(now + Duration::from_secs(60)),
+                quota_remaining_rank: Some(7500),
+                rate_limited_until: None,
+                failure_rate_basis_points: Some(300),
+                first_output_latency_ms: Some(250),
+            },
+        })
+        .collect::<Vec<_>>();
+        let selection = AccountSelectionContext {
+            policy: context.account_selection_policy(),
+            now,
+            excluded_accounts: context.excluded_accounts().clone(),
+            preferred_account: preferred,
+            preferred_account_overrides_weight: true,
+            round_robin_cursor: 0,
+            eligibility: AccountEligibilityPolicy::Enforce,
+            account_scope: context.account_scope().cloned(),
+        };
+        let account = context
+            .select_account(
+                request.candidate().provider(),
+                request.candidate().upstream_model().map(|m| m.as_str()),
+                &candidates,
+                &selection,
+                context.required_account(),
+            )
+            .await
+            .map_err(|e| e.into_provider_error())?
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::NoEligibleAccount,
+                    UpstreamSendState::NotSent,
+                )
+            })?
+            .candidate()
+            .account
+            .id()
+            .clone();
+        let gate = self.selection_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            self.selection_waiters.fetch_add(1, Ordering::SeqCst);
+            let _wait = SelectionWait(self.selection_waiters.clone());
+            gate.await.unwrap();
+        }
         assert!(context.account_scope().unwrap().allows(&account));
         assert!(!context.excluded_accounts().contains(&account));
         self.selected.lock().unwrap().push(account.clone());
@@ -627,6 +707,7 @@ fn snapshot_with_accounts(revision: u64, enabled: bool, accounts: &[&str]) -> Ru
 }
 pub struct Fixture {
     pub core: Arc<Core>,
+    pub store: Arc<MemoryStore>,
     pub execution: Arc<DefaultExecutionService>,
     pub snapshot: RuntimeSnapshotHandle,
     pub manager: Arc<PluginManager>,
@@ -681,7 +762,7 @@ impl Fixture {
             } else {
                 Arc::new(engine)
             };
-            PluginManager::new(store, runtime)
+            PluginManager::new(store.clone(), runtime)
         });
         let artifact = manager
             .upload(archive("1.0.0", middleware), &actor())
@@ -697,6 +778,7 @@ impl Fixture {
         }
         let installed = manager.update(None, command, &actor()).await.unwrap();
         Self {
+            store,
             core,
             execution,
             snapshot,

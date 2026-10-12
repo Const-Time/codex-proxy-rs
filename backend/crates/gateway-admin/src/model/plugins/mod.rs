@@ -1,8 +1,8 @@
 //! 插件持久化事实和管理视图；配置与私有状态不实现内容型 Debug。
 pub mod middleware;
-pub mod routing;
+pub mod policy;
 pub use middleware::*;
-pub use routing::*;
+pub use policy::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
@@ -25,6 +25,7 @@ pub struct PluginArtifact {
 }
 #[derive(Clone, PartialEq)]
 pub struct PluginRecord {
+    pub account_scheduler: Option<PluginAccountSchedulerBinding>,
     pub model_router: Option<PluginModelRouterBinding>,
     pub middleware: Option<PluginMiddlewareBinding>,
     pub frontend_authentication: Option<PluginAuthenticationBinding>,
@@ -39,6 +40,7 @@ pub struct PluginRecord {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginUpdate {
+    pub account_scheduler: Option<PluginAccountSchedulerBinding>,
     pub model_router: Option<PluginModelRouterBinding>,
     pub middleware: Option<PluginMiddlewareBinding>,
     pub frontend_authentication: Option<PluginAuthenticationBinding>,
@@ -63,6 +65,7 @@ pub struct PluginPage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
+    pub account_scheduler: Option<PluginAccountSchedulerBinding>,
     pub model_router: Option<PluginModelRouterBinding>,
     pub middleware: Option<PluginMiddlewareBinding>,
     pub frontend_authentication: Option<PluginAuthenticationBinding>,

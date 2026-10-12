@@ -147,7 +147,7 @@ impl CallbackHandler for Callbacks {
                 || context.generation != revision
                 || !matches!(
                     context.stage,
-                    Stage::Management | Stage::Authentication | Stage::Routing
+                    Stage::Management | Stage::Authentication | Stage::Routing | Stage::Scheduling
                 )
             {
                 return Err(PluginFault::new(
@@ -155,7 +155,7 @@ impl CallbackHandler for Callbacks {
                     "plugin generation is not active",
                 ));
             }
-            if context.stage == Stage::Routing
+            if matches!(context.stage, Stage::Routing | Stage::Scheduling)
                 && !crate::models::is_method(&method)
                 && !matches!(
                     method.as_str(),
@@ -164,7 +164,7 @@ impl CallbackHandler for Callbacks {
             {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
-                    "routing callbacks cannot access management capabilities",
+                    "policy callbacks cannot access management capabilities",
                 ));
             }
             if context.stage == Stage::Authentication

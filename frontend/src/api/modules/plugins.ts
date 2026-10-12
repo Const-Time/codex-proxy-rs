@@ -27,7 +27,9 @@ export interface PluginMiddlewareBinding {
   scope: { kind: 'all' } | { kind: 'keys' | 'groups', ids: string[] }
 }
 export interface PluginModelRouterBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
+export interface PluginAccountSchedulerBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
 export interface PluginInstance {
+  accountScheduler: PluginAccountSchedulerBinding | null
   modelRouter: PluginModelRouterBinding | null
   middleware: PluginMiddlewareBinding | null
   frontendAuthentication: PluginAuthenticationBinding | null
@@ -43,6 +45,7 @@ export interface PluginInstance {
   resources: PluginManagementResource[]
 }
 export interface PluginUpdate {
+  accountScheduler: PluginAccountSchedulerBinding | null
   modelRouter: PluginModelRouterBinding | null
   middleware: PluginMiddlewareBinding | null
   frontendAuthentication: PluginAuthenticationBinding | null

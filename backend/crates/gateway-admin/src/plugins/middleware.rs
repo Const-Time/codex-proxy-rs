@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 struct Entry {
     binding: Option<PluginMiddlewareBinding>,
     router: Option<PluginModelRouterBinding>,
+    scheduler: Option<PluginAccountSchedulerBinding>,
     process: Option<Arc<dyn PluginProcess>>,
 }
 #[derive(Clone, Default)]
@@ -23,7 +24,10 @@ pub(super) struct Publication {
 }
 impl Publication {
     pub(super) fn snapshot(&self) -> PluginMiddlewareRegistry {
-        PluginMiddlewareRegistry(self.clone())
+        PluginMiddlewareRegistry(
+            self.clone(),
+            CancellationToken::linked([self.epoch.cancellation()]),
+        )
     }
     pub(super) fn publish(
         &mut self,
@@ -32,8 +36,10 @@ impl Publication {
     ) {
         let binding = record.middleware.as_ref().filter(|_| record.enabled);
         let router = record.model_router.as_ref().filter(|_| record.enabled);
+        let scheduler = record.account_scheduler.as_ref().filter(|_| record.enabled);
         if binding.is_some_and(|binding| binding.validate().is_err())
             || router.is_some_and(|r| r.validate().is_err())
+            || scheduler.is_some_and(|s| s.validate().is_err())
         {
             self.block(&record.id);
             return;
@@ -42,17 +48,19 @@ impl Publication {
             || self.blocked.contains(&record.id)
             || binding.is_some()
             || router.is_some()
+            || scheduler.is_some()
         {
             self.epoch.revoke();
             self.epoch = PluginAccess::default();
             self.entries.remove(&record.id);
             self.blocked.remove(&record.id);
-            if binding.is_some() || router.is_some() {
+            if binding.is_some() || router.is_some() || scheduler.is_some() {
                 self.entries.insert(
                     record.id.clone(),
                     Entry {
                         binding: binding.cloned(),
                         router: router.cloned(),
+                        scheduler: scheduler.cloned(),
                         process,
                     },
                 );
@@ -124,16 +132,20 @@ impl Publication {
 
 /// A single publication snapshot, captured before request preparation. A version
 /// switch revokes it even if preparation has not yet entered the first layer.
-pub struct PluginMiddlewareRegistry(Publication);
+pub struct PluginMiddlewareRegistry(Publication, CancellationToken);
 impl PluginMiddlewareRegistry {
-    pub fn freeze(&self, context: MiddlewareContext) -> Result<PluginMiddlewarePlan, AdminError> {
+    pub fn freeze(
+        &self,
+        mut context: MiddlewareContext,
+    ) -> Result<PluginMiddlewarePlan, AdminError> {
+        context.cancellation = CancellationToken::linked([context.cancellation, self.1.clone()]);
         self.0.freeze(context)
     }
 }
 
 impl gateway_core::engine::model_routing::ModelRouter for PluginMiddlewareRegistry {
     fn cancellation(&self) -> CancellationToken {
-        self.0.epoch.cancellation()
+        self.1.clone()
     }
     fn route_model(
         &self,
@@ -147,6 +159,7 @@ impl gateway_core::engine::model_routing::ModelRouter for PluginMiddlewareRegist
     > {
         use gateway_core::engine::model_routing::*;
         let publication = self.0.clone();
+        let revocation = self.1.clone();
         Box::pin(async move {
             if !publication.blocked.is_empty() || publication.epoch.is_revoked() {
                 return Err(ModelRoutingFault);
@@ -182,7 +195,7 @@ impl gateway_core::engine::model_routing::ModelRouter for PluginMiddlewareRegist
                     if result.is_ok() && !access.is_revoked() {
                         tokens.push(access.cancellation());
                     } else if access.is_revoked() {
-                        if binding.failure_policy == PluginRoutingFailurePolicy::Delegate {
+                        if binding.failure_policy == PluginPolicyFailurePolicy::Delegate {
                             continue;
                         } else {
                             return Err(ModelRoutingFault);
@@ -198,13 +211,97 @@ impl gateway_core::engine::model_routing::ModelRouter for PluginMiddlewareRegist
                         decision = result;
                         break;
                     }
-                    Err(_) if binding.failure_policy == PluginRoutingFailurePolicy::Delegate => {}
+                    Err(_) if binding.failure_policy == PluginPolicyFailurePolicy::Delegate => {}
                     Err(_) => return Err(ModelRoutingFault),
+                }
+            }
+            for token in tokens {
+                if !revocation.link_parent(token) {
+                    return Err(ModelRoutingFault);
                 }
             }
             Ok(ModelRouteResult {
                 decision,
-                revocation: CancellationToken::linked(tokens),
+                revocation,
+            })
+        })
+    }
+}
+
+impl gateway_core::engine::account_scheduling::AccountScheduler for PluginMiddlewareRegistry {
+    fn cancellation(&self) -> CancellationToken {
+        self.1.clone()
+    }
+    fn schedule_account(
+        &self,
+        input: gateway_core::engine::account_scheduling::AccountScheduleInput,
+    ) -> BoxFuture<
+        'static,
+        Result<
+            gateway_core::engine::account_scheduling::AccountScheduleResult,
+            gateway_core::engine::account_scheduling::AccountSchedulingFault,
+        >,
+    > {
+        use gateway_core::engine::account_scheduling::*;
+        let publication = self.0.clone();
+        let revocation = self.1.clone();
+        Box::pin(async move {
+            if !publication.blocked.is_empty() || publication.epoch.is_revoked() {
+                return Err(AccountSchedulingFault);
+            }
+            let selected = publication
+                .entries
+                .iter()
+                .filter(|(id, entry)| {
+                    !input.excluded_instances().contains(*id)
+                        && entry.scheduler.as_ref().is_some_and(|binding| {
+                            binding
+                                .scope
+                                .matches(input.client_key_id(), &input.account_group_ids())
+                        })
+                })
+                .min_by_key(|(id, entry)| (entry.scheduler.as_ref().map_or(0, |s| s.order), *id));
+            let mut tokens = vec![publication.epoch.cancellation()];
+            let decision = if let Some((_, entry)) = selected {
+                let binding = entry.scheduler.as_ref().ok_or(AccountSchedulingFault)?;
+                let result = if let Some(process) = entry
+                    .process
+                    .as_ref()
+                    .filter(|p| p.status() == "ready" && !p.access().is_revoked())
+                {
+                    let access = process.access();
+                    let result = tokio::select! {
+                        biased;
+                        ()=access.revoked()=>Err(AccountSchedulingFault),
+                        result=process.schedule_account(input)=>result,
+                    };
+                    if result.is_ok() && !access.is_revoked() {
+                        tokens.push(access.cancellation());
+                        result
+                    } else {
+                        Err(AccountSchedulingFault)
+                    }
+                } else {
+                    Err(AccountSchedulingFault)
+                };
+                match result {
+                    Ok(decision) => decision,
+                    Err(_) if binding.failure_policy == PluginPolicyFailurePolicy::Delegate => {
+                        AccountScheduleDecision::Delegate
+                    }
+                    Err(_) => return Err(AccountSchedulingFault),
+                }
+            } else {
+                AccountScheduleDecision::Delegate
+            };
+            for token in tokens {
+                if !revocation.link_parent(token) {
+                    return Err(AccountSchedulingFault);
+                }
+            }
+            Ok(AccountScheduleResult {
+                decision,
+                revocation,
             })
         })
     }
