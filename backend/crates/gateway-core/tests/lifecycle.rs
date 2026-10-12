@@ -304,3 +304,63 @@ fn optional_deadline_has_no_sentinel_and_bounds_only_explicit_limits() {
     assert_eq!(expired.bounded(Duration::from_secs(3)), Duration::ZERO);
     assert!(Deadline::from_timeout(SystemTime::now(), Some(Duration::MAX)).is_none());
 }
+
+#[test]
+fn late_revocation_sources_wake_existing_ancestor_waiters_without_cancelling_on_link() {
+    let root = CancellationToken::new();
+    let child = CancellationToken::linked([root.clone()]);
+    let revocation = CancellationToken::new();
+    let wait = child.cancelled();
+    futures::pin_mut!(wait);
+    assert!(wait.as_mut().now_or_never().is_none());
+    assert!(root.link_parent(revocation.clone()));
+    assert!(
+        wait.as_mut().now_or_never().is_none(),
+        "linking is not itself cancellation"
+    );
+    revocation.cancel();
+    assert!(wait.now_or_never().is_some());
+    assert!(root.is_cancelled());
+    assert!(child.is_cancelled());
+    let independent = CancellationToken::new();
+    let late = CancellationToken::new();
+    assert!(independent.link_parent(late.clone()));
+    independent.cancel();
+    assert!(
+        !late.is_cancelled(),
+        "execution cancellation must not revoke the plugin"
+    );
+}
+
+#[test]
+fn cancellation_links_reject_self_and_concurrent_indirect_cycles() {
+    let root = CancellationToken::new();
+    assert!(!root.link_parent(root.clone()));
+    let child = CancellationToken::linked([root.clone()]);
+    assert!(!root.link_parent(child));
+    for _ in 0..32 {
+        let first = CancellationToken::new();
+        let second = CancellationToken::new();
+        let barrier = Arc::new(Barrier::new(2));
+        let outcome = std::thread::scope(|scope| {
+            let barrier = &barrier;
+            let first = &first;
+            let second = &second;
+            let a = scope.spawn(move || {
+                barrier.wait();
+                first.link_parent(second.clone())
+            });
+            let b = scope.spawn(move || {
+                barrier.wait();
+                second.link_parent(first.clone())
+            });
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_ne!(
+            outcome.0, outcome.1,
+            "exactly one direction can be retained"
+        );
+        assert!(!first.is_cancelled());
+        assert!(!second.is_cancelled());
+    }
+}

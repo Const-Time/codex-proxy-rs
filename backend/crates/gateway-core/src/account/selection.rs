@@ -429,6 +429,7 @@ pub enum AccountSchedulingBlocker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferredAccountSelection {
     NotRequested,
+    OverriddenByPolicy,
     Hit,
     Missing,
     Blocked(AccountSchedulingBlocker),
@@ -437,11 +438,15 @@ pub enum PreferredAccountSelection {
 /// 一次完整账号选择；同时保留优先账号决策，供 Provider 记录调度遥测。
 #[derive(Debug, Clone, Copy)]
 pub struct AccountSelection<'a> {
+    policy_choice: bool,
     candidate: &'a AccountCandidate,
     preferred: PreferredAccountSelection,
 }
 
 impl<'a> AccountSelection<'a> {
+    pub const fn policy_choice(self) -> bool {
+        self.policy_choice
+    }
     #[must_use]
     pub const fn candidate(self) -> &'a AccountCandidate {
         self.candidate
@@ -458,6 +463,44 @@ impl<'a> AccountSelection<'a> {
 pub struct AccountSelector;
 
 impl AccountSelector {
+    pub(crate) fn policy_candidates<'a>(
+        &self,
+        candidates: &'a [AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> Vec<&'a AccountCandidate> {
+        candidates
+            .iter()
+            .filter(|candidate| self.scheduling_blocker(candidate, context).is_none())
+            .collect()
+    }
+    pub(crate) fn select_policy_candidate<'a>(
+        &self,
+        candidates: &'a [AccountCandidate],
+        context: &AccountSelectionContext,
+        account: &ProviderAccountId,
+    ) -> Option<AccountSelection<'a>> {
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.account.id() == account)?;
+        if self.scheduling_blocker(candidate, context).is_some() {
+            return None;
+        }
+        let preferred = context.preferred_account.as_ref().map_or(
+            PreferredAccountSelection::NotRequested,
+            |preferred| {
+                if preferred == account {
+                    PreferredAccountSelection::Hit
+                } else {
+                    PreferredAccountSelection::OverriddenByPolicy
+                }
+            },
+        );
+        Some(AccountSelection {
+            candidate,
+            preferred,
+            policy_choice: true,
+        })
+    }
     /// 汇总与本次调度约束一致的并发容量，供请求级观测使用。
     #[must_use]
     pub fn capacity_snapshot(
@@ -527,6 +570,7 @@ impl AccountSelector {
                     }
                     None => {
                         return Some(AccountSelection {
+                            policy_choice: false,
                             candidate,
                             preferred: PreferredAccountSelection::Hit,
                         });
@@ -585,6 +629,7 @@ impl AccountSelector {
             }
         };
         Some(AccountSelection {
+            policy_choice: false,
             candidate,
             preferred,
         })

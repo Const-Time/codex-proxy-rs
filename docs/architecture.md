@@ -601,3 +601,7 @@ API 的 PluginModelExecution 复用现有 request/attempt 协议桥，将最终�
 账号投影在同一把锁内读取当前事实及变更信号；新 attempt 绑定账号时唤醒旧观察者。Core 原 Provider 启动等待同时监听祖先变化，候选范围内的新占用会结束旧冷流准备，复用 NoEligibleAccount/not-sent 终态和原费用清理；候选之外或原排除范围内的变化继续等待。观察只持有取消信号及弱授权，不保活父执行，不建立独立选号或重试循环。
 
 模型路由通过 Core 的 ModelRouter 端口在原 PreparedRootExecution 中执行。Admin 的原插件发布快照同时保存中间件与路由绑定，共用 revision、配置 CAS 及撤销 epoch；按冻结 Key/分组匹配、排除全部发起祖先，并依次咨询策略。Runtime 在 routing RPC 中只绑定宿主签发的父执行，不通过 wire 请求 ID 恢复权限；API 的 Root.bind 为 JSON/SSE/WS 与原生模型入口接入同一个端口。Core 仅将路由决定用于缩小 Provider 与选择公开模型，之后仍以原 operation 校验能力、输出上限和续接账号，不修改客户端请求模型或费用 owner。成功咨询的进程代次加入原取消链，覆盖 RPC 返回后的执行；故障委托必须显式配置。固定 Provider 端点不调用模型策略。
+
+账号调度的 Core `AccountScheduler` 端口由同一 PreparedRootExecution 传入原 AttemptContext。OpenAI/xAI 在获取账号租约前交给该端口选择，Provider 继续拥有凭据读取、目录/版本检查和原子租约获取。策略只接收通过原 AccountSelector 资格检查的候选及并发、额度和健康投影，不接收凭据；Core 再按冻结 Key 的账号/模型范围、Provider 和硬绑定收窄候选。返回 Pick 只能选择初始合格账号，并按 RPC 返回后的当前时间再次检查；失效候选沿 Provider 既有快照/容量恢复路径处理。明确拒绝或策略故障不会当作账号不足跨 Provider 回退，显式选择也不会被软亲和绑定的 CAS 结果覆盖。没有调度端口和诊断请求继续使用原选择器。
+
+成功咨询的调度策略把撤销源单向加入原取消信号，已持有该信号的 API、Core、Provider 克隆及等待者都会观察后续停用。取消源只能单调增加，加入时检查并发间接环；新增源只唤醒等待者重新订阅，不表示请求已取消，也不反向取消插件发布代次。该端口已通过 Core 资格、硬绑定、过期、拒绝、故障和执行中撤销回归，并接入两个 Provider；SDK scheduling RPC、Admin 绑定和持久化配置尚未开放，不能据此启用 account_scheduler 插件能力。

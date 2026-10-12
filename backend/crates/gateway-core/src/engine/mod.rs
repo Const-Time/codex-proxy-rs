@@ -1,5 +1,6 @@
 //! 模型请求生命周期、单行持久化 port 与 commit/send/cancellation 边界。
 
+pub mod account_scheduling;
 pub mod admission;
 pub mod attempt_middleware;
 pub mod budget;
@@ -320,6 +321,7 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context。
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
+    account_scheduler: Option<account_scheduling::AccountScheduling>,
     execution_context: Option<nested::NestedExecutionContext>,
     settings: Option<crate::routing::RequestSettings>,
     fast_mode: crate::account::FastMode,
@@ -333,6 +335,13 @@ pub struct RequestAttemptContext {
 }
 
 impl RequestAttemptContext {
+    pub(crate) fn with_account_scheduler(
+        mut self,
+        scheduler: Option<account_scheduling::AccountScheduling>,
+    ) -> Self {
+        self.account_scheduler = scheduler;
+        self
+    }
     pub fn with_execution_context(
         mut self,
         context: Option<nested::NestedExecutionContext>,
@@ -371,6 +380,7 @@ impl RequestAttemptContext {
     #[must_use]
     pub fn new(request_id: ModelRequestId, client_api_key_ref: ClientApiKeyId) -> Self {
         Self {
+            account_scheduler: None,
             fast_mode: crate::account::FastMode::Default,
             settings: None,
             execution_context: None,
