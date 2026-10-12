@@ -153,6 +153,412 @@ fn request(service: &DefaultExecutionService, transport: ClientTransport) -> Sta
     }
 }
 
+struct SchedulingPolicy {
+    mode: &'static str,
+    revocation: gateway_core::lifecycle::CancellationToken,
+    observed: Mutex<Vec<gateway_core::engine::account_scheduling::AccountScheduleInput>>,
+}
+impl gateway_core::engine::account_scheduling::AccountScheduler for SchedulingPolicy {
+    fn cancellation(&self) -> gateway_core::lifecycle::CancellationToken {
+        gateway_core::lifecycle::CancellationToken::new()
+    }
+    fn schedule_account(
+        &self,
+        input: gateway_core::engine::account_scheduling::AccountScheduleInput,
+    ) -> BoxFuture<
+        'static,
+        Result<
+            gateway_core::engine::account_scheduling::AccountScheduleResult,
+            gateway_core::engine::account_scheduling::AccountSchedulingFault,
+        >,
+    > {
+        use gateway_core::engine::account_scheduling::*;
+        self.observed.lock().unwrap().push(input);
+        let mode = self.mode;
+        let revocation = self.revocation.clone();
+        Box::pin(async move {
+            if mode == "fault" {
+                return Err(AccountSchedulingFault);
+            }
+            Ok(AccountScheduleResult {
+                revocation,
+                decision: match mode {
+                    "reject" => AccountScheduleDecision::Reject,
+                    "foreign" => AccountScheduleDecision::Pick(
+                        ProviderAccountId::new("acct_foreign").unwrap(),
+                    ),
+                    "pick" | "hard" => AccountScheduleDecision::Pick(
+                        ProviderAccountId::new("acct_second").unwrap(),
+                    ),
+                    _ => AccountScheduleDecision::Delegate,
+                },
+            })
+        })
+    }
+}
+struct SchedulingProvider {
+    mode: &'static str,
+    outcomes: Arc<
+        Mutex<Vec<Result<String, gateway_core::engine::account_scheduling::AccountPolicyError>>>,
+    >,
+}
+#[async_trait]
+impl Provider for SchedulingProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![])
+    }
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        use gateway_core::account::*;
+        let now = SystemTime::now();
+        let candidates = ["acct_start", "acct_second", "acct_foreign"]
+            .into_iter()
+            .map(|id| AccountCandidate {
+                account: ProviderAccount::new(
+                    ProviderAccountId::new(id).unwrap(),
+                    ProviderKind::new("openai").unwrap(),
+                    id.into(),
+                    Some(id.into()),
+                    "oauth".into(),
+                    CredentialRevision::new(1).unwrap(),
+                    Some(if self.mode == "stale" {
+                        now - Duration::from_secs(1)
+                    } else {
+                        now + Duration::from_secs(3600)
+                    }),
+                )
+                .with_account_facts(
+                    true,
+                    CredentialState::Ready,
+                    QuotaState::unknown(),
+                    None,
+                    None,
+                ),
+                signals: AccountRuntimeSignals {
+                    in_flight: u32::from(self.mode == "busy"),
+                    last_started_at: None,
+                    quota_reset_at: None,
+                    quota_remaining_rank: Some(7500),
+                    rate_limited_until: None,
+                    failure_rate_basis_points: Some(300),
+                    first_output_latency_ms: Some(250),
+                },
+            })
+            .collect::<Vec<_>>();
+        let required = (self.mode == "hard").then(|| ProviderAccountId::new("acct_start").unwrap());
+        let selection_context = AccountSelectionContext {
+            policy: context.account_selection_policy(),
+            now: if self.mode == "stale" {
+                now - Duration::from_secs(2)
+            } else {
+                now
+            },
+            excluded_accounts: context.excluded_accounts().clone(),
+            preferred_account: Some(ProviderAccountId::new("acct_start").unwrap()),
+            preferred_account_overrides_weight: true,
+            round_robin_cursor: 0,
+            eligibility: AccountEligibilityPolicy::Enforce,
+            account_scope: context.account_scope().cloned(),
+        };
+        let result = context
+            .select_account(
+                request.candidate().provider(),
+                request.candidate().upstream_model().map(|m| m.as_str()),
+                &candidates,
+                &selection_context,
+                required.as_ref(),
+            )
+            .await;
+        self.outcomes.lock().unwrap().push(
+            result
+                .as_ref()
+                .map(|selection| {
+                    selection.map_or("none".into(), |s| {
+                        s.candidate().account.id().as_str().into()
+                    })
+                })
+                .map_err(|e| *e),
+        );
+        let selection = result
+            .map_err(|e| e.into_provider_error())?
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::NoEligibleAccount,
+                    UpstreamSendState::NotSent,
+                )
+            })?;
+        let metadata = ProviderCallMetadata::new(
+            request.candidate().provider().clone(),
+            request.candidate().upstream_model().unwrap().clone(),
+            selection.candidate().account.id().clone(),
+            UpstreamTransport::new("http").unwrap(),
+        );
+        let response = ResponseMeta::new("resp_schedule", "gpt-start");
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::iter(vec![
+                Ok(GatewayEvent::Started(response.clone()).into()),
+                Ok(GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(known_charge().scaled()).unwrap(),
+                )
+                .into()),
+                Ok(GatewayEvent::Completed(response).into()),
+            ]),
+            (),
+        ))
+    }
+}
+
+type SchedulingFixture = (
+    DefaultExecutionService,
+    Arc<Admissions>,
+    Arc<Budget>,
+    Arc<SchedulingPolicy>,
+    Arc<Mutex<Vec<Result<String, gateway_core::engine::account_scheduling::AccountPolicyError>>>>,
+);
+struct SchedulingFallback(&'static str);
+#[async_trait]
+impl Provider for SchedulingFallback {
+    fn name(&self) -> &'static str {
+        "xai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![])
+    }
+    async fn execute(
+        &self,
+        _: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        assert!(
+            matches!(self.0, "busy" | "stale"),
+            "a policy rejection/fault must not delegate to another Provider: {}",
+            self.0
+        );
+        Err(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        ))
+    }
+}
+fn scheduling_fixture(mode: &'static str) -> SchedulingFixture {
+    let admissions = Arc::new(Admissions::default());
+    let budget = Arc::new(Budget {
+        active: admissions.active.clone(),
+        ..Default::default()
+    });
+    let policy = Arc::new(SchedulingPolicy {
+        mode,
+        revocation: gateway_core::lifecycle::CancellationToken::new(),
+        observed: Mutex::new(vec![]),
+    });
+    let outcomes = Arc::new(Mutex::new(vec![]));
+    let provider = ProviderKind::new("openai").unwrap();
+    let xai = ProviderKind::new("xai").unwrap();
+    let directory = ["acct_start", "acct_second"]
+        .into_iter()
+        .map(|id| {
+            (
+                ProviderAccountId::new(id).unwrap(),
+                RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+            )
+        })
+        .chain([(
+            ProviderAccountId::new("acct_xai").unwrap(),
+            RuntimeAccount::new(xai.clone(), BTreeSet::new()),
+        )])
+        .collect();
+    let scope = Arc::new(FrozenAccountScope::new(
+        Arc::new(RuntimeAccountDirectory::new(directory)),
+        ClientRoutingScope::all_accounts(),
+    ));
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).unwrap(),
+        AccountSelectionPolicy::new(
+            RotationStrategy::Smart,
+            std::num::NonZeroU32::new(1).unwrap(),
+            Duration::from_millis(1),
+        ),
+        vec![provider.clone(), xai.clone()],
+        [provider, xai]
+            .into_iter()
+            .map(|p| {
+                ProviderModel::new(
+                    p,
+                    UpstreamModelId::new("gpt-start").unwrap(),
+                    ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000)),
+                )
+            })
+            .collect(),
+        vec![ClientPolicy::new(
+            ClientApiKeyId::new("key_start_test").unwrap(),
+            PlaintextClientApiKey::new("sk_start_test").unwrap(),
+            scope,
+            true,
+            RateLimits::unlimited(),
+        )],
+    )
+    .unwrap();
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(snapshot),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::new([
+            Arc::new(SchedulingProvider {
+                mode,
+                outcomes: outcomes.clone(),
+            }) as Arc<dyn Provider>,
+            Arc::new(SchedulingFallback(mode)) as Arc<dyn Provider>,
+        ])
+        .unwrap(),
+        admissions.clone(),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    )
+    .with_budget(budget.clone());
+    (service, admissions, budget, policy, outcomes)
+}
+
+#[test]
+fn account_scheduling_projects_core_scope_preserves_hard_pins_and_rechecks_expiry() {
+    block_on(async {
+        use gateway_core::engine::{
+            account_scheduling::AccountPolicyError, execution::PreparedExecutionRequest,
+        };
+        for mode in [
+            "pick", "delegate", "foreign", "hard", "stale", "reject", "fault", "busy",
+        ] {
+            let (service, admissions, budget, policy, outcomes) = scheduling_fixture(mode);
+            let r = request(&service, ClientTransport::HttpJson);
+            let prepared = service
+                .prepare_execution(r.client)
+                .unwrap()
+                .with_account_scheduler(policy.clone());
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: r.public_model,
+                        operation: r.operation,
+                        metadata: r.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            if matches!(mode, "pick" | "delegate") {
+                consume_charged_prefix(started.session.as_mut()).await;
+            } else {
+                assert!(started.session.next_event().await.is_err(), "{mode}");
+            }
+            started.session.detach_finalize().await;
+            assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
+            let observed = policy.observed.lock().unwrap();
+            if mode == "busy" {
+                assert!(observed.is_empty());
+            } else {
+                assert_eq!(
+                    observed.len(),
+                    1,
+                    "policy failure must not be retried: {mode}"
+                );
+                let input = &observed[0];
+                assert_eq!(input.client_key_id().as_str(), "key_start_test");
+                assert_eq!(input.model(), Some("gpt-start"));
+                assert_eq!(input.attempt_index().get(), 1);
+                let ids = input
+                    .candidates()
+                    .iter()
+                    .map(|c| c.account_id.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    ids,
+                    if mode == "hard" {
+                        vec!["acct_start"]
+                    } else {
+                        vec!["acct_start", "acct_second"]
+                    }
+                );
+                assert_eq!(input.candidates()[0].maximum_concurrency, 1);
+                assert_eq!(input.candidates()[0].quota_remaining_rank, Some(7500));
+                assert_eq!(input.candidates()[0].failure_rate_basis_points, Some(300));
+            }
+            let outcomes = outcomes.lock().unwrap();
+            let expected = match mode {
+                "foreign" | "hard" | "fault" => Err(AccountPolicyError::Fault),
+                "reject" => Err(AccountPolicyError::Rejected),
+                "stale" => Err(AccountPolicyError::StaleCandidate),
+                "pick" => Ok("acct_second".to_owned()),
+                "delegate" => Ok("acct_start".to_owned()),
+                _ => Ok("none".to_owned()),
+            };
+            assert_eq!(&outcomes[..], &[expected], "{mode}");
+            assert_eq!(
+                budget.charges.lock().unwrap()[0].amount_usd,
+                if matches!(mode, "pick" | "delegate") {
+                    known_charge()
+                } else {
+                    Decimal::ZERO
+                }
+            );
+        }
+    });
+}
+
+#[test]
+fn consulted_account_policy_revocation_reaches_original_execution_after_selection() {
+    block_on(async {
+        use gateway_core::engine::execution::PreparedExecutionRequest;
+        let (service, admissions, budget, policy, _) = scheduling_fixture("pick");
+        let r = request(&service, ClientTransport::HttpSse);
+        let prepared = service
+            .prepare_execution(r.client)
+            .unwrap()
+            .with_account_scheduler(policy.clone());
+        let cancellation = prepared.cancellation();
+        let mut started = service
+            .start_prepared(
+                prepared,
+                PreparedExecutionRequest {
+                    public_model: r.public_model,
+                    operation: r.operation,
+                    metadata: r.metadata,
+                },
+            )
+            .await
+            .unwrap();
+        consume_charged_prefix(started.session.as_mut()).await;
+        assert_eq!(policy.observed.lock().unwrap().len(), 1);
+        assert!(!cancellation.is_cancelled());
+        policy.revocation.cancel();
+        assert!(
+            cancellation.is_cancelled(),
+            "existing API/root clones must observe the consulted generation"
+        );
+        assert!(matches!(
+            started.session.next_event().await,
+            Err(gateway_core::engine::EngineError::Cancelled)
+        ));
+        started.session.detach_finalize().await;
+        assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.charges.lock().unwrap()[0].amount_usd, known_charge());
+    });
+}
+
 #[test]
 fn routing_policy_preserves_requested_model_and_revalidates_original_capability_limits() {
     use gateway_core::engine::{execution::PreparedExecutionRequest, model_routing::*};

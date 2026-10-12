@@ -142,6 +142,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     model_router: Option<Arc<dyn super::model_routing::ModelRouter>>,
     model_target: super::nested::ModelExecutionTarget,
     lifetime: Arc<super::nested::ExecutionLifetime>,
@@ -157,6 +158,14 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn with_account_scheduler(
+        mut self,
+        scheduler: Arc<dyn super::account_scheduling::AccountScheduler>,
+    ) -> Self {
+        self = self.with_revocation(scheduler.cancellation());
+        self.account_scheduler = Some(super::account_scheduling::AccountScheduling(scheduler));
+        self
+    }
     pub fn with_model_router(mut self, router: Arc<dyn super::model_routing::ModelRouter>) -> Self {
         self.cancellation = CancellationToken::linked([self.cancellation, router.cancellation()]);
         self.model_router = Some(router);
@@ -945,6 +954,7 @@ impl DefaultExecutionService {
         } = request;
         let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            account_scheduler,
             model_router: _,
             model_target,
             lifetime,
@@ -1096,6 +1106,7 @@ impl DefaultExecutionService {
             .with_attempt_middleware(attempt_middleware)
             .with_request_settings(request_settings)
             .with_execution_context(execution_context)
+            .with_account_scheduler(account_scheduler)
             .start(
                 new_request,
                 operation,
@@ -1591,6 +1602,7 @@ impl ExecutionService for DefaultExecutionService {
         let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            account_scheduler: None,
             model_router: None,
             model_target: Default::default(),
             lifetime,

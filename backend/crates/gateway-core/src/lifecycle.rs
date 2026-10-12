@@ -1,8 +1,8 @@
 //! Host 与 API 之间的连接注册、drain 与取消契约。
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use event_listener::Event;
 
@@ -67,8 +67,11 @@ impl From<std::time::SystemTime> for Deadline {
 struct CancellationState {
     cancelled: AtomicBool,
     event: Event,
-    parents: Vec<CancellationToken>,
+    parents: RwLock<Vec<CancellationToken>>,
 }
+
+// Serialize additions so simultaneous inverse links cannot create a reference cycle.
+static CANCELLATION_LINKS: Mutex<()> = Mutex::new(());
 
 /// 可克隆的请求、任务与连接取消信号。
 #[derive(Clone)]
@@ -95,7 +98,7 @@ impl CancellationToken {
         Self(Arc::new(CancellationState {
             cancelled: AtomicBool::new(false),
             event: Event::new(),
-            parents: Vec::new(),
+            parents: RwLock::new(Vec::new()),
         }))
     }
 
@@ -106,8 +109,46 @@ impl CancellationToken {
         Self(Arc::new(CancellationState {
             cancelled: AtomicBool::new(false),
             event: Event::new(),
-            parents: parents.into_iter().collect(),
+            parents: RwLock::new(parents.into_iter().collect()),
         }))
+    }
+
+    /// Add a revocation source after an asynchronous policy has been consulted.
+    /// Existing clones and waiters observe it; cancellation remains one-way.
+    /// Reject cycles without retaining the proposed parent.
+    #[must_use]
+    pub fn link_parent(&self, parent: Self) -> bool {
+        let _links = CANCELLATION_LINKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pending = vec![parent.clone()];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(token) = pending.pop() {
+            if Arc::ptr_eq(&self.0, &token.0) {
+                return false;
+            }
+            if visited.insert(Arc::as_ptr(&token.0) as usize) {
+                pending.extend(token.parents());
+            }
+        }
+        let mut parents = self
+            .0
+            .parents
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !parents.iter().any(|p| Arc::ptr_eq(&p.0, &parent.0)) {
+            parents.push(parent);
+            self.0.event.notify(usize::MAX);
+        }
+        true
+    }
+
+    fn parents(&self) -> Vec<Self> {
+        self.0
+            .parents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn cancel(&self) {
@@ -122,43 +163,40 @@ impl CancellationToken {
         if self.0.cancelled.load(Ordering::Acquire) {
             return true;
         }
-        let mut pending: Vec<_> = self.0.parents.iter().collect();
+        let mut pending = self.parents();
+        let mut visited = std::collections::HashSet::new();
         while let Some(token) = pending.pop() {
+            if !visited.insert(Arc::as_ptr(&token.0) as usize) {
+                continue;
+            }
             if token.0.cancelled.load(Ordering::Acquire) {
                 return true;
             }
-            pending.extend(&token.0.parents);
+            pending.extend(token.parents());
         }
         false
     }
 
     pub async fn cancelled(&self) {
-        if self.is_cancelled() {
-            return;
-        }
-        // 等待 future 被 select 丢弃时自动注销，不积累已失效的等待项。
-        let listener = self.0.event.listen();
-        // 注册后复查，避免取消发生在首次检查与注册之间时丢失通知。
-        if self.is_cancelled() {
-            return;
-        }
-        if self.0.parents.is_empty() {
-            listener.await;
-            return;
-        }
         use futures::{StreamExt as _, stream::FuturesUnordered};
-        let mut listeners = FuturesUnordered::new();
-        listeners.push(listener);
-        let mut pending: Vec<_> = self.0.parents.iter().collect();
-        while let Some(token) = pending.pop() {
-            let listener = token.0.event.listen();
-            if token.0.cancelled.load(Ordering::Acquire) {
-                return;
+        loop {
+            let mut listeners = FuturesUnordered::new();
+            let mut pending = vec![self.clone()];
+            let mut visited = std::collections::HashSet::new();
+            while let Some(token) = pending.pop() {
+                if !visited.insert(Arc::as_ptr(&token.0) as usize) {
+                    continue;
+                }
+                // Register before reading sources/state. A source addition wakes
+                // this loop to subscribe to its events without a background task.
+                listeners.push(token.0.event.listen());
+                if token.0.cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                pending.extend(token.parents());
             }
-            listeners.push(listener);
-            pending.extend(&token.0.parents);
+            listeners.next().await;
         }
-        listeners.next().await;
     }
 }
 

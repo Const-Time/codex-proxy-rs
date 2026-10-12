@@ -206,7 +206,7 @@ impl GrokAccountSessionSelector {
                 .max_by_key(|candidate| affinity.score(candidate.account.id()))
                 .map(|candidate| candidate.account.id().clone())
         });
-        let context = AccountSelectionContext {
+        let mut context = AccountSelectionContext {
             policy: request.account_selection_policy(),
             now: SystemTime::now(),
             excluded_accounts: request.excluded_accounts().clone(),
@@ -220,7 +220,16 @@ impl GrokAccountSessionSelector {
         let mut retry_after = None;
         loop {
             let capacity = AccountSelector.capacity_snapshot(&candidates, &context);
-            let Some(selection) = AccountSelector.select(&candidates, &context) else {
+            let selection = if let Some(attempt) = request.attempt_context() {
+                match attempt.select_account(&self.provider_kind, Some(request.upstream_model().as_str()), &candidates, &context, request.required_account()).await {
+                    Ok(selection) => selection,
+                    Err(gateway_core::engine::account_scheduling::AccountPolicyError::StaleCandidate) => { context.now = SystemTime::now(); continue; }
+                    Err(error) => return Err(GrokSessionSelectorError::Policy(error)),
+                }
+            } else {
+                AccountSelector.select(&candidates, &context)
+            };
+            let Some(selection) = selection else {
                 break;
             };
             let selected = selection.candidate();

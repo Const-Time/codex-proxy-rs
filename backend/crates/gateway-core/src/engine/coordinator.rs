@@ -46,6 +46,7 @@ use futures_timer::Delay;
 pub struct AttemptCoordinator<S: ?Sized> {
     middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
+    account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     execution_context: Option<super::nested::NestedExecutionContext>,
     engine: Arc<GatewayEngine<S>>,
 }
@@ -79,10 +80,18 @@ where
             engine: Arc::new(engine),
             middleware: None,
             request_settings: None,
+            account_scheduler: None,
             execution_context: None,
         }
     }
 
+    pub fn with_account_scheduler(
+        mut self,
+        scheduler: Option<super::account_scheduling::AccountScheduling>,
+    ) -> Self {
+        self.account_scheduler = scheduler;
+        self
+    }
     pub fn with_execution_context(
         mut self,
         context: super::nested::NestedExecutionContext,
@@ -101,6 +110,7 @@ where
             engine: Arc::clone(&self.engine),
             middleware,
             request_settings: self.request_settings.clone(),
+            account_scheduler: self.account_scheduler.clone(),
             execution_context: self.execution_context.clone(),
         }
     }
@@ -204,6 +214,7 @@ where
             engine: Arc::clone(&self.engine),
             attempt_middleware: self.middleware.clone(),
             request_settings: self.request_settings.clone(),
+            account_scheduler: self.account_scheduler.clone(),
             execution_context: self.execution_context.clone(),
             middleware_response_head: None,
             middleware_invocation: None,
@@ -321,6 +332,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     recovery_lease: Option<Box<dyn super::ExecutionRecoveryLeaseGuard>>,
     attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
+    account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     execution_context: Option<super::nested::NestedExecutionContext>,
     middleware_response_head: Option<AttemptResponseHead>,
     middleware_invocation: Option<Invocation>,
@@ -1102,6 +1114,7 @@ where
                     self.request_id.clone(),
                     self.client_api_key_ref.clone(),
                 )
+                .with_account_scheduler(self.account_scheduler.clone())
                 .with_execution_context(self.execution_context.clone())
                 .with_request_settings(self.request_settings.clone())
                 .with_pricing(self.plan.pricing())

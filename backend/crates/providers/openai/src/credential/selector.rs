@@ -140,6 +140,7 @@ enum AffinityEscapeReason {
     HigherPriority,
     PinnedAccount,
     SelectionInvariant,
+    SchedulingPolicy,
 }
 
 impl AffinityEscapeReason {
@@ -152,6 +153,7 @@ impl AffinityEscapeReason {
             Self::HigherPriority => "higher_priority",
             Self::PinnedAccount => "pinned_account",
             Self::SelectionInvariant => "selection_invariant",
+            Self::SchedulingPolicy => "scheduling_policy",
         }
     }
 }
@@ -204,6 +206,9 @@ impl AffinitySelection {
         }
         match selection {
             PreferredAccountSelection::Hit => {}
+            PreferredAccountSelection::OverriddenByPolicy => {
+                self.escape(AffinityEscapeReason::SchedulingPolicy)
+            }
             PreferredAccountSelection::Blocked(AccountSchedulingBlocker::ConcurrencyLimit) => {
                 self.escape(AffinityEscapeReason::LeaseSaturated);
             }
@@ -554,7 +559,26 @@ impl CodexCredentialSelector {
                 account_scope: request.attempt.account_scope().cloned(),
             };
             let capacity = AccountSelector.capacity_snapshot(&candidates, &context);
-            let selection = AccountSelector.select(&candidates, &context);
+            let selection = match request
+                .attempt
+                .select_account(
+                    &self.provider_kind,
+                    match model_catalog_eligibility {
+                        ModelCatalogEligibility::Required(model) => Some(model),
+                        ModelCatalogEligibility::NotApplicable => None,
+                    },
+                    &candidates,
+                    &context,
+                    pinned_account.as_ref(),
+                )
+                .await
+            {
+                Ok(selection) => selection,
+                Err(
+                    gateway_core::engine::account_scheduling::AccountPolicyError::StaleCandidate,
+                ) => return Err(CredentialSelectionError::AccountSnapshotChanged),
+                Err(error) => return Err(CredentialSelectionError::Policy(error)),
+            };
             request
                 .attempt
                 .trace()
@@ -634,6 +658,7 @@ impl CodexCredentialSelector {
                     // 原生 continuation/required account 比亲和绑定更严格；它可以
                     // 使用 owner 账号，但不能把已经迁移的会话拉回旧号。
                     if pinned_account.is_none()
+                        && !selection.policy_choice()
                         && let Some(effective_account) = initial_affinity_claim
                         && &effective_account != account.id()
                     {
@@ -1433,6 +1458,8 @@ impl fmt::Debug for CodexCredentialLease {
 
 #[derive(Debug, Error)]
 pub enum CredentialSelectionError {
+    #[error(transparent)]
+    Policy(gateway_core::engine::account_scheduling::AccountPolicyError),
     #[error("no eligible Codex account")]
     NoEligibleCredential,
     #[error("account snapshot changed during selection")]

@@ -451,7 +451,8 @@ async fn select_grok_session(
     } else {
         AccountEligibilityPolicy::Enforce
     })
-    .with_affinity(affinity);
+    .with_affinity(affinity)
+    .with_attempt_context(context.clone());
     if context.deadline().is_elapsed() {
         return Err(provider_error(
             ProviderErrorKind::Timeout,

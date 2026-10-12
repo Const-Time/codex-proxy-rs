@@ -228,6 +228,7 @@ impl fmt::Debug for SelectedGrokSession {
 /// 单次 selector 调用的入参，持有冻结且不含密钥的尝试视图。
 #[derive(Debug, Clone)]
 pub struct GrokSessionSelection {
+    attempt_context: Option<gateway_core::engine::AttemptContext>,
     upstream_model: UpstreamModelId,
     excluded_accounts: BTreeSet<ProviderAccountId>,
     required_account: Option<ProviderAccountId>,
@@ -241,6 +242,16 @@ pub struct GrokSessionSelection {
 }
 
 impl GrokSessionSelection {
+    pub(crate) fn with_attempt_context(
+        mut self,
+        context: gateway_core::engine::AttemptContext,
+    ) -> Self {
+        self.attempt_context = Some(context);
+        self
+    }
+    pub(crate) fn attempt_context(&self) -> Option<&gateway_core::engine::AttemptContext> {
+        self.attempt_context.as_ref()
+    }
     pub fn cancellation(&self) -> gateway_core::lifecycle::CancellationToken {
         self.cancellation.clone()
     }
@@ -262,6 +273,7 @@ impl GrokSessionSelection {
     ) -> Self {
         Self {
             upstream_model,
+            attempt_context: None,
             excluded_accounts,
             required_account,
             account_selection_policy,
@@ -419,6 +431,8 @@ pub trait GrokSessionSelector: Send + Sync {
 /// 不含密钥的选择器失败。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum GrokSessionSelectorError {
+    #[error(transparent)]
+    Policy(gateway_core::engine::account_scheduling::AccountPolicyError),
     /// 没有会话同时满足模型、状态与排除约束。
     #[error("no eligible Grok Build session is available")]
     NoEligibleSession,

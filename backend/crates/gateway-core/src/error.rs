@@ -18,6 +18,10 @@ pub use crate::validation::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ProviderErrorKind {
+    /// 宿主执行策略明确拒绝；不能通过换 Provider 绕过。
+    ExecutionPolicyRejected,
+    /// 宿主执行策略不可用；不能当作账号不足自动回退。
+    ExecutionPolicyUnavailable,
     /// 请求语义错误。
     InvalidRequest,
     /// previous-response 续接状态已不可用，需要客户端重建请求链。
@@ -62,6 +66,8 @@ impl ProviderErrorKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ExecutionPolicyRejected => "execution_policy_rejected",
+            Self::ExecutionPolicyUnavailable => "execution_policy_unavailable",
             Self::InvalidRequest => "invalid_request",
             Self::ContinuationRecoveryRequired => "continuation_recovery_required",
             Self::Unsupported => "unsupported",
@@ -1113,6 +1119,14 @@ impl GatewayError {
     #[must_use]
     pub fn from_provider(error: &ProviderError) -> Self {
         let gateway = match error.kind() {
+            ProviderErrorKind::ExecutionPolicyRejected => Self::new(
+                GatewayErrorKind::PolicyDenied,
+                "execution policy rejected the request",
+            ),
+            ProviderErrorKind::ExecutionPolicyUnavailable => Self::new(
+                GatewayErrorKind::UpstreamUnavailable,
+                "execution policy is unavailable",
+            ),
             ProviderErrorKind::InvalidRequest => {
                 Self::new(GatewayErrorKind::InvalidRequest, "invalid upstream request")
             }
