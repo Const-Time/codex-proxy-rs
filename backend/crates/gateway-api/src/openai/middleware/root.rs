@@ -65,7 +65,9 @@ pub(super) fn bind(
         .freeze(attempt_context.clone())
         .map_err(|_| MiddlewareError::Fault)?;
     let has_attempts = !attempts.is_empty();
-    let prepared = prepared.with_revocation(attempts.cancellation());
+    let prepared = prepared
+        .with_revocation(attempts.cancellation())
+        .with_model_router(registry.clone());
     let prepared = if has_attempts {
         let adapter = if context.operation == OperationKind::Generate {
             super::responses_attempt_middleware(registry.clone(), attempt_context)

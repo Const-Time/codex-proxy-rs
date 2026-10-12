@@ -599,3 +599,5 @@ Runtime 原生模型回调在宿主 RPC 范围内管理 HME1 事件批次和流�
 API 的 PluginModelExecution 复用现有 request/attempt 协议桥，将最终字节投影回原生事件，并保留宿主信封的原费用及会话事实；不建立另一套执行或账本。它只弱引用拥有 Runtime 的 PluginManager，Runtime 持有此执行服务，避免管理器与运行时形成引用环。原生交付在 HME1 编码及容量校验后委派 Core 提交；中间件正文资源依据 Core 信封等待首批提交，等待期间不持有正文锁。原生 end 还要求最外层改写终态已耗尽，不能只根据内层结算状态提前结束。GatewayError 保留 Provider 已知发送/HTTP 状态供原生错误映射，未知中间件副作用保守标为 ambiguous。
 
 账号投影在同一把锁内读取当前事实及变更信号；新 attempt 绑定账号时唤醒旧观察者。Core 原 Provider 启动等待同时监听祖先变化，候选范围内的新占用会结束旧冷流准备，复用 NoEligibleAccount/not-sent 终态和原费用清理；候选之外或原排除范围内的变化继续等待。观察只持有取消信号及弱授权，不保活父执行，不建立独立选号或重试循环。
+
+模型路由通过 Core 的 ModelRouter 端口在原 PreparedRootExecution 中执行。Admin 的原插件发布快照同时保存中间件与路由绑定，共用 revision、配置 CAS 及撤销 epoch；按冻结 Key/分组匹配、排除全部发起祖先，并依次咨询策略。Runtime 在 routing RPC 中只绑定宿主签发的父执行，不通过 wire 请求 ID 恢复权限；API 的 Root.bind 为 JSON/SSE/WS 与原生模型入口接入同一个端口。Core 仅将路由决定用于缩小 Provider 与选择公开模型，之后仍以原 operation 校验能力、输出上限和续接账号，不修改客户端请求模型或费用 owner。成功咨询的进程代次加入原取消链，覆盖 RPC 返回后的执行；故障委托必须显式配置。固定 Provider 端点不调用模型策略。

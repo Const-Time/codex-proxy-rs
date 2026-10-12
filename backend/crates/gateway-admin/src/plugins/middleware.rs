@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 
 #[derive(Clone)]
 struct Entry {
-    binding: PluginMiddlewareBinding,
+    binding: Option<PluginMiddlewareBinding>,
+    router: Option<PluginModelRouterBinding>,
     process: Option<Arc<dyn PluginProcess>>,
 }
 #[derive(Clone, Default)]
@@ -30,23 +31,28 @@ impl Publication {
         process: Option<Arc<dyn PluginProcess>>,
     ) {
         let binding = record.middleware.as_ref().filter(|_| record.enabled);
-        if binding.is_some_and(|binding| binding.validate().is_err()) {
+        let router = record.model_router.as_ref().filter(|_| record.enabled);
+        if binding.is_some_and(|binding| binding.validate().is_err())
+            || router.is_some_and(|r| r.validate().is_err())
+        {
             self.block(&record.id);
             return;
         }
         if self.entries.contains_key(&record.id)
             || self.blocked.contains(&record.id)
             || binding.is_some()
+            || router.is_some()
         {
             self.epoch.revoke();
             self.epoch = PluginAccess::default();
             self.entries.remove(&record.id);
             self.blocked.remove(&record.id);
-            if let Some(binding) = binding {
+            if binding.is_some() || router.is_some() {
                 self.entries.insert(
                     record.id.clone(),
                     Entry {
-                        binding: binding.clone(),
+                        binding: binding.cloned(),
+                        router: router.cloned(),
                         process,
                     },
                 );
@@ -83,10 +89,19 @@ impl Publication {
             .entries
             .iter()
             .filter(|(id, entry)| {
-                !context.excluded_plugin_instances.contains(*id) && entry.binding.matches(&context)
+                !context.excluded_plugin_instances.contains(*id)
+                    && entry
+                        .binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.matches(&context))
             })
             .collect::<Vec<_>>();
-        selected.sort_by_key(|(id, entry)| (entry.binding.order, *id));
+        selected.sort_by_key(|(id, entry)| {
+            (
+                entry.binding.as_ref().map_or(0, |binding| binding.order),
+                *id,
+            )
+        });
         let mut processes = Vec::with_capacity(selected.len());
         let mut tokens = vec![context.cancellation.clone(), self.epoch.cancellation()];
         for (_, entry) in selected {
@@ -113,6 +128,85 @@ pub struct PluginMiddlewareRegistry(Publication);
 impl PluginMiddlewareRegistry {
     pub fn freeze(&self, context: MiddlewareContext) -> Result<PluginMiddlewarePlan, AdminError> {
         self.0.freeze(context)
+    }
+}
+
+impl gateway_core::engine::model_routing::ModelRouter for PluginMiddlewareRegistry {
+    fn cancellation(&self) -> CancellationToken {
+        self.0.epoch.cancellation()
+    }
+    fn route_model(
+        &self,
+        input: gateway_core::engine::model_routing::ModelRouteInput,
+    ) -> BoxFuture<
+        'static,
+        Result<
+            gateway_core::engine::model_routing::ModelRouteResult,
+            gateway_core::engine::model_routing::ModelRoutingFault,
+        >,
+    > {
+        use gateway_core::engine::model_routing::*;
+        let publication = self.0.clone();
+        Box::pin(async move {
+            if !publication.blocked.is_empty() || publication.epoch.is_revoked() {
+                return Err(ModelRoutingFault);
+            }
+            let mut selected = publication
+                .entries
+                .iter()
+                .filter(|(id, entry)| {
+                    !input.excluded_instances().contains(*id)
+                        && entry.router.as_ref().is_some_and(|binding| {
+                            binding
+                                .scope
+                                .matches(input.client_key_id(), &input.account_group_ids())
+                        })
+                })
+                .collect::<Vec<_>>();
+            selected.sort_by_key(|(id, entry)| (entry.router.as_ref().map_or(0, |r| r.order), *id));
+            let mut tokens = vec![publication.epoch.cancellation()];
+            let mut decision = ModelRouteDecision::Unhandled;
+            for (_, entry) in selected {
+                let binding = entry.router.as_ref().ok_or(ModelRoutingFault)?;
+                let result = if let Some(process) = entry
+                    .process
+                    .as_ref()
+                    .filter(|p| p.status() == "ready" && !p.access().is_revoked())
+                {
+                    let access = process.access();
+                    let result = tokio::select! {
+                        biased;
+                        () = access.revoked() => Err(ModelRoutingFault),
+                        result = process.route_model(input.clone()) => result,
+                    };
+                    if result.is_ok() && !access.is_revoked() {
+                        tokens.push(access.cancellation());
+                    } else if access.is_revoked() {
+                        if binding.failure_policy == PluginRoutingFailurePolicy::Delegate {
+                            continue;
+                        } else {
+                            return Err(ModelRoutingFault);
+                        }
+                    }
+                    result
+                } else {
+                    Err(ModelRoutingFault)
+                };
+                match result {
+                    Ok(ModelRouteDecision::Unhandled) => {}
+                    Ok(result) => {
+                        decision = result;
+                        break;
+                    }
+                    Err(_) if binding.failure_policy == PluginRoutingFailurePolicy::Delegate => {}
+                    Err(_) => return Err(ModelRoutingFault),
+                }
+            }
+            Ok(ModelRouteResult {
+                decision,
+                revocation: CancellationToken::linked(tokens),
+            })
+        })
     }
 }
 

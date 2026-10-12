@@ -9,6 +9,19 @@ const ENDPOINTS: [&str; 3] = [
 ];
 
 #[tokio::test]
+async fn model_routing_preserves_fixed_provider_endpoints() {
+    for endpoint in ENDPOINTS {
+        let f = Fixture::with_router().await;
+        let response = f.raw_request(endpoint).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        bytes(response).await;
+        f.settled().await;
+        assert_eq!(f.plugin.routing_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
 async fn raw_endpoints_preserve_kind_context_fixed_route_and_one_settlement() {
     for endpoint in ENDPOINTS {
         for mounts in [

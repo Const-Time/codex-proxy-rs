@@ -26,7 +26,9 @@ export interface PluginMiddlewareBinding {
   mounts: ('request' | 'attempt')[]
   scope: { kind: 'all' } | { kind: 'keys' | 'groups', ids: string[] }
 }
+export interface PluginModelRouterBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
 export interface PluginInstance {
+  modelRouter: PluginModelRouterBinding | null
   middleware: PluginMiddlewareBinding | null
   frontendAuthentication: PluginAuthenticationBinding | null
   id: string
@@ -41,6 +43,7 @@ export interface PluginInstance {
   resources: PluginManagementResource[]
 }
 export interface PluginUpdate {
+  modelRouter: PluginModelRouterBinding | null
   middleware: PluginMiddlewareBinding | null
   frontendAuthentication: PluginAuthenticationBinding | null
   revision: number

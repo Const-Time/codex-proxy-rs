@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding } from '@/api/modules/plugins'
+import type { PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
 import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
@@ -31,6 +31,22 @@ async function searchKeys() {
 }
 const digest = ref('')
 const configuration = ref('{}')
+const routerEnabled = ref(false)
+const routerOrder = ref('0')
+const routerScope = ref<'all' | 'keys' | 'groups'>('all')
+const routerIds = ref('')
+const routerFailure = ref<'reject' | 'delegate'>('reject')
+function routerBinding(): PluginModelRouterBinding | null {
+  if (!routerEnabled.value)
+    return null
+  const order = Number(routerOrder.value)
+  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
+    throw new Error('模型路由顺序必须是 -10000 到 10000 的整数')
+  const ids = routerIds.value.split(/\s+/u).filter(Boolean)
+  if (routerScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
+    throw new Error('请填写不重复的路由作用范围 ID，最多 256 个')
+  return { order, failurePolicy: routerFailure.value, scope: routerScope.value === 'all' ? { kind: 'all' } : { kind: routerScope.value, ids } }
+}
 const middlewareEnabled = ref(false)
 const middlewareOrder = ref('0')
 const middlewareRequest = ref(true)
@@ -112,6 +128,11 @@ function edit(item?: PluginInstance) {
   name.value = item?.name ?? ''
   digest.value = item?.artifact.sha256 ?? artifacts.value[0]?.sha256 ?? ''
   configuration.value = JSON.stringify(item?.configuration ?? {}, null, 2)
+  routerEnabled.value = !!item?.modelRouter
+  routerOrder.value = String(item?.modelRouter?.order ?? 0)
+  routerScope.value = item?.modelRouter?.scope.kind ?? 'all'
+  routerIds.value = item?.modelRouter && item.modelRouter.scope.kind !== 'all' ? item.modelRouter.scope.ids.join('\n') : ''
+  routerFailure.value = item?.modelRouter?.failurePolicy ?? 'reject'
   middlewareEnabled.value = !!item?.middleware
   middlewareOrder.value = String(item?.middleware?.order ?? 0)
   middlewareRequest.value = item?.middleware?.mounts.includes('request') ?? true
@@ -150,7 +171,7 @@ async function save(enabled: boolean) {
       else if (secrets.value[key])
         values[key] = secrets.value[key]!
     }
-    await savePlugin(editing.value?.id, { middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+    await savePlugin(editing.value?.id, { modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
     editOpen.value = false
     secrets.value = {}
   })
@@ -158,7 +179,7 @@ async function save(enabled: boolean) {
 async function disable(item: PluginInstance) {
   selected.value = undefined
   await perform(async () => {
-    await savePlugin(item.id, { middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
+    await savePlugin(item.id, { modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
   })
 }
 onMounted(() => perform(async () => { }))
@@ -204,6 +225,21 @@ onMounted(() => perform(async () => { }))
         <label :for="`plugin-secret-${field}`" class="block">{{ field }}<BaseInput :id="`plugin-secret-${field}`" v-model="secrets[field]" type="password" autocomplete="new-password" :placeholder="editing?.configuredSecrets.includes(field) ? '已配置，留空保留' : '填写敏感配置'" :disabled="busy || !artifact?.manifest.secretFields.includes(field)" /></label>
         <BaseCheckbox v-if="editing?.configuredSecrets.includes(field)" v-model="removeSecrets[field]" show-label :label="`清除 ${field}`" :disabled="busy" />
       </div>
+      <details class="space-y-3">
+        <summary>模型路由</summary>
+        <BaseCheckbox v-model="routerEnabled" show-label label="使用此插件选择模型和 Provider" :disabled="busy" />
+        <template v-if="routerEnabled">
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label for="plugin-router-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-router-order" v-model="routerOrder" type="number" :disabled="busy" /></label>
+          <BaseSelect v-model="routerScope" aria-label="模型路由作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label v-if="routerScope !== 'all'" for="plugin-router-ids" class="block">{{ routerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-router-ids" v-model="routerIds" :rows="3" :disabled="busy" /></label>
+          <BaseSelect v-model="routerFailure" aria-label="路由插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '委托后续路由策略', value: 'delegate' }]" :disabled="busy" />
+          <p class="text-sm text-cp-text-secondary">
+            路由选择仍受 Key 权限、模型能力和续接约束。首个明确决定生效；明确拒绝不会继续委托。插件变更或停用会撤销旧请求。
+          </p>
+        </template>
+      </details>
       <details class="space-y-3">
         <summary>中间件绑定</summary>
         <p class="text-sm text-cp-text-secondary">

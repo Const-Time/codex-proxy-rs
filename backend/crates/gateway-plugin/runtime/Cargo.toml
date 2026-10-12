@@ -8,6 +8,7 @@ rust-version.workspace = true
 autotests = false
 
 [dependencies]
+base64 = "0.22.1"
 bytes = "1.11.1"
 gateway-core = { path = "../../gateway-core" }
 gateway-protocol = { path = "../../gateway-protocol" }

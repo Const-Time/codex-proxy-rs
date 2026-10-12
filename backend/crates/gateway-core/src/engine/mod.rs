@@ -8,6 +8,7 @@ pub mod continuation;
 pub mod coordinator;
 pub mod execution;
 pub mod middleware;
+pub mod model_routing;
 pub mod nested;
 mod observation;
 pub mod probe;

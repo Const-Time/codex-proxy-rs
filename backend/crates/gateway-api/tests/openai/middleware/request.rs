@@ -5,6 +5,29 @@ use futures::StreamExt;
 use gateway_admin::model::plugins::PluginMiddlewareMount;
 use gateway_core::metering::Decimal;
 #[tokio::test]
+async fn model_routing_runs_without_request_middleware_for_json_and_sse() {
+    for streaming in [false, true] {
+        let f = Fixture::with_router().await;
+        let response = f.request(streaming).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response.headers()["x-gateway-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(String::from_utf8_lossy(&bytes(response).await).contains("resp_original"));
+        f.settled().await;
+        assert_eq!(f.plugin.routing_calls.load(Ordering::SeqCst), 1);
+        assert!(f.plugin.seen.lock().unwrap().is_empty());
+        let seen = f.effects.requests.lock().unwrap();
+        assert_eq!(
+            (&seen[0].0[..], &seen[0].1[..], &seen[0].2[..]),
+            ("key_api_test", "model-b", "original input")
+        );
+        assert_eq!(f.effects.charges.lock().unwrap()[0].request_id.as_str(), id);
+        assert_eq!(f.effects.commits.load(Ordering::SeqCst), 1);
+    }
+}
+#[tokio::test]
 async fn request_rewrite_preserves_core_identity_deadline_and_single_settlement() {
     for streaming in [false, true] {
         let f = Fixture::new(Mode::Rewrite, true).await;
