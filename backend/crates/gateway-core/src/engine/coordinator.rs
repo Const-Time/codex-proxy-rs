@@ -44,6 +44,7 @@ use futures_timer::Delay;
 
 /// Request 级协调器；不会创建或写入 `request_attempts`。
 pub struct AttemptCoordinator<S: ?Sized> {
+    retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
     account_scheduler: Option<super::account_scheduling::AccountScheduling>,
@@ -80,11 +81,19 @@ where
             engine: Arc::new(engine),
             middleware: None,
             request_settings: None,
+            retry_policy: None,
             account_scheduler: None,
             execution_context: None,
         }
     }
 
+    pub fn with_retry_policy(
+        mut self,
+        policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
+    ) -> Self {
+        self.retry_policy = policy;
+        self
+    }
     pub fn with_account_scheduler(
         mut self,
         scheduler: Option<super::account_scheduling::AccountScheduling>,
@@ -110,6 +119,7 @@ where
             engine: Arc::clone(&self.engine),
             middleware,
             request_settings: self.request_settings.clone(),
+            retry_policy: self.retry_policy.clone(),
             account_scheduler: self.account_scheduler.clone(),
             execution_context: self.execution_context.clone(),
         }
@@ -172,6 +182,13 @@ where
         continuation: Option<ContinuationBinding>,
         cancellation: CancellationToken,
     ) -> Result<ResponseExecutionSession<S>, EngineError> {
+        let cancellation = if account_selection.is_diagnostic() {
+            cancellation
+        } else if let Some(policy) = &self.retry_policy {
+            CancellationToken::linked([cancellation, policy.cancellation()])
+        } else {
+            cancellation
+        };
         let request_id = request.id.clone();
         let client_api_key_ref = request.client_api_key_ref.clone();
         let timing_started_at = Instant::now();
@@ -214,6 +231,7 @@ where
             engine: Arc::clone(&self.engine),
             attempt_middleware: self.middleware.clone(),
             request_settings: self.request_settings.clone(),
+            retry_policy: self.retry_policy.clone(),
             account_scheduler: self.account_scheduler.clone(),
             execution_context: self.execution_context.clone(),
             middleware_response_head: None,
@@ -267,6 +285,7 @@ where
             last_retryable_failure_events: Vec::new(),
             provider_attempt_outcomes: Vec::new(),
             pending_terminal_failure: None,
+            pending_recovery: None,
         };
 
         if session.cancellation.is_cancelled() {
@@ -329,6 +348,8 @@ struct PendingAttemptRetry {
 /// API 只能提交下游 delivery 边界；账号重试、断流终结与
 /// `model_requests` 写回均留在本类型内。
 pub struct ResponseExecutionSession<S: ?Sized> {
+    retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
+    pending_recovery: Option<PendingRecovery>,
     recovery_lease: Option<Box<dyn super::ExecutionRecoveryLeaseGuard>>,
     attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
@@ -399,6 +420,30 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     provider_attempt_outcomes: Vec<ProviderAttemptOutcome>,
     /// 原子失败批次已交给协议层、但尚待下游提交后收敛的原 Provider 错误。
     pending_terminal_failure: Option<PendingTerminalFailure>,
+}
+
+struct PendingRecovery {
+    decision: BoxFuture<'static, Result<super::retry_policy::RetryDecision, EngineError>>,
+    retryable: bool,
+    failure: RecoveryFailure,
+}
+enum RecoveryFailure {
+    Start {
+        error: ProviderError,
+        provider: crate::identity::ProviderKind,
+    },
+    Stream(Box<StreamRecovery>),
+}
+struct StreamRecovery {
+    current: CurrentAttempt,
+    error: ProviderError,
+    atomic_client_events: Vec<ProviderEvent>,
+    send_state: UpstreamSendState,
+    continuation_retry: bool,
+    same_account_retry: bool,
+    transient_retry: Option<Duration>,
+    transport_recovery: Option<(AttemptTransport, Duration)>,
+    connection_dependent: bool,
 }
 
 struct PendingTerminalFailure {
@@ -694,6 +739,9 @@ where
     /// 观测写入失败只记录告警，不改变取消结果。
     pub async fn cancel_and_finalize(&mut self) -> Result<(), EngineError> {
         self.cancellation.cancel();
+        if let Some(pending) = self.pending_recovery.take() {
+            self.restore_recovery(pending.failure);
+        }
         self.finish_pending_middleware_error().await?;
         self.middleware_invocation = None;
         self.middleware_preparation = None;
@@ -716,6 +764,12 @@ where
 
     async fn pull(&mut self) -> Result<PullOutcome, EngineError> {
         loop {
+            if self.pending_recovery.is_some() {
+                return self
+                    .resume_recovery()
+                    .await
+                    .map(StreamErrorOutcome::into_pull_outcome);
+            }
             if self.middleware_preparation.is_some()
                 || (self.current.is_none() && self.middleware_invocation.is_none())
             {
@@ -1302,45 +1356,43 @@ where
                     self.middleware_reply = None;
                     self.middleware_invocation = None;
                     record_trace_error(&attempt_trace, &error);
-                    if self.prepare_unavailable_native_continuation_replay(&error) {
-                        return Ok(Some(PullOutcome::AttemptDiscarded));
-                    }
-                    if matches!(
-                        error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
-                            | ProviderErrorKind::NoEligibleAccount
-                            | ProviderErrorKind::QuotaExhausted
-                            | ProviderErrorKind::ProviderInfrastructureUnavailable
-                    ) && error.send_state() == UpstreamSendState::NotSent
+                    let continuation_retry =
+                        self.prepare_unavailable_native_continuation_replay(&error);
+                    let candidate_retry = !continuation_retry
+                        && matches!(
+                            error.kind(),
+                            ProviderErrorKind::AccountCapacityUnavailable
+                                | ProviderErrorKind::NoEligibleAccount
+                                | ProviderErrorKind::QuotaExhausted
+                                | ProviderErrorKind::ProviderInfrastructureUnavailable
+                        )
+                        && error.send_state() == UpstreamSendState::NotSent
                         && matches!(
                             self.continuation_attempt,
                             ContinuationAttempt::None | ContinuationAttempt::ReplayAny
                         )
-                        && self.advance_provider_candidate()
-                    {
-                        return Ok(Some(PullOutcome::AttemptDiscarded));
-                    }
-                    if matches!(
-                        error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
-                            | ProviderErrorKind::NoEligibleAccount
-                            | ProviderErrorKind::QuotaExhausted
-                    ) && self.last_retryable_failure.is_some()
-                    {
-                        return self.finish_last_retryable_failure().await;
-                    }
-                    if !(matches!(
-                        error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
-                            | ProviderErrorKind::NoEligibleAccount
-                            | ProviderErrorKind::QuotaExhausted
-                            | ProviderErrorKind::ProviderInfrastructureUnavailable
-                    ) && error.send_state() == UpstreamSendState::NotSent)
-                    {
-                        self.record_provider_failure(candidate.provider().clone(), error.kind());
-                    }
-                    self.finish_provider_error(&error).await?;
-                    return Err(provider_engine_error(error));
+                        && self.advance_provider_candidate();
+                    let input = self.retry_input(
+                        next_attempt,
+                        candidate.provider().clone(),
+                        candidate.upstream_model().map(|m| m.as_str().to_owned()),
+                        &error,
+                        error.send_state(),
+                        continuation_retry || candidate_retry,
+                    );
+                    self.raise_send_watermark(error.send_state());
+                    self.pending_recovery = Some(PendingRecovery {
+                        retryable: input.retry_allowed(),
+                        decision: super::retry_policy::invoke(self.active_retry_policy(), input),
+                        failure: RecoveryFailure::Start {
+                            error,
+                            provider: candidate.provider().clone(),
+                        },
+                    });
+                    return self
+                        .resume_recovery()
+                        .await
+                        .map(|outcome| Some(outcome.into_pull_outcome()));
                 }
             },
         };
@@ -1635,7 +1687,7 @@ where
         // 原始 wire 只活在 request-local 决策状态；clone、attempt 记录与持久化终态
         // 均只接触已剥离的稳定错误字段。
         record_trace_error(&self.trace.attempt(self.attempts), &error);
-        let mut atomic_client_events = error.take_atomic_client_events();
+        let atomic_client_events = error.take_atomic_client_events();
         let current = self.current.take().ok_or(EngineError::NoActiveAttempt)?;
         self.record_provider_failure(current.metadata.provider().clone(), error.kind());
         // attempt_send_state 是本 attempt 自身的发送事实，驱动重试门；
@@ -1773,7 +1825,7 @@ where
                 || account_rotation_retry
                 || transport_recovery.is_some());
 
-        self.trace.attempt(current.index.get()).record("retry.decided", json!({
+        self.trace.attempt(current.index.get()).record("retry.prepared", json!({
             "retryable": retryable, "continuationRetry": continuation_retry,
             "sameAccountRetry": same_account_retry, "accountRotationRetry": account_rotation_retry,
             "ordinaryRetry": ordinary_retry, "transportRecovery": transport_recovery.is_some(),
@@ -1785,6 +1837,192 @@ where
             "downstreamCommitted": self.downstream_committed_at.is_some(),
             "sendState": format!("{attempt_send_state:?}"),
         }));
+        let input = self.retry_input(
+            current.index,
+            current.metadata.provider().clone(),
+            current
+                .metadata
+                .upstream_model()
+                .map(|m| m.as_str().to_owned()),
+            &error,
+            attempt_send_state,
+            retryable,
+        );
+        self.pending_recovery = Some(PendingRecovery {
+            retryable: input.retry_allowed(),
+            decision: super::retry_policy::invoke(self.active_retry_policy(), input),
+            failure: RecoveryFailure::Stream(Box::new(StreamRecovery {
+                current,
+                error,
+                atomic_client_events,
+                send_state,
+                continuation_retry,
+                same_account_retry,
+                transient_retry,
+                transport_recovery,
+                connection_dependent: !same_account_retry
+                    && !continuation_retry
+                    && !account_rotation_retry,
+            })),
+        });
+        self.resume_recovery().await
+    }
+
+    fn active_retry_policy(&self) -> Option<Arc<dyn super::retry_policy::RetryPolicy>> {
+        (!self.account_selection.is_diagnostic())
+            .then(|| self.retry_policy.clone())
+            .flatten()
+    }
+    fn retry_input(
+        &self,
+        attempt_index: NonZeroU32,
+        provider: crate::identity::ProviderKind,
+        model: Option<String>,
+        error: &ProviderError,
+        send_state: UpstreamSendState,
+        retry_allowed: bool,
+    ) -> super::retry_policy::RetryInput {
+        super::retry_policy::RetryInput {
+            request_id: self.request_id.clone(),
+            client_key_id: self.client_api_key_ref.clone(),
+            account_group_ids: self
+                .plan
+                .account_scope()
+                .routing_snapshot()
+                .groups_snapshot()
+                .iter()
+                .map(|group| group.id().clone())
+                .collect(),
+            excluded_instances: self
+                .execution_context
+                .as_ref()
+                .map(|context| context.scope().excluded_instances().clone())
+                .unwrap_or_default(),
+            attempt_index,
+            provider,
+            model,
+            error_kind: error.kind(),
+            upstream_status: error.upstream_status(),
+            send_state,
+            remaining_routing_attempts: self
+                .plan
+                .max_attempts()
+                .get()
+                .saturating_sub(self.routing_attempts),
+            retry_allowed: retry_allowed
+                && !error.retry_is_prohibited()
+                && !self.has_descendant_effects()
+                && !self.cancellation.is_cancelled()
+                && !self.deadline.is_elapsed(),
+            deadline: self.deadline,
+            cancellation: self.cancellation.clone(),
+        }
+    }
+    fn restore_recovery(&mut self, failure: RecoveryFailure) {
+        if let RecoveryFailure::Stream(recovery) = failure {
+            let StreamRecovery {
+                current,
+                mut atomic_client_events,
+                ..
+            } = *recovery;
+            self.current = Some(current);
+            self.observe_atomic_terminal_events(&mut atomic_client_events);
+        }
+    }
+    async fn resume_recovery(&mut self) -> Result<StreamErrorOutcome, EngineError> {
+        let decision = self
+            .pending_recovery
+            .as_mut()
+            .ok_or(EngineError::NoActiveAttempt)?
+            .decision
+            .as_mut()
+            .await;
+        let pending = self
+            .pending_recovery
+            .take()
+            .ok_or(EngineError::NoActiveAttempt)?;
+        let decision = match decision {
+            Ok(decision) => decision,
+            Err(error) => {
+                self.restore_recovery(pending.failure);
+                self.finish_interruption(&error).await?;
+                return Err(error);
+            }
+        };
+        let retryable = pending.retryable
+            && decision != super::retry_policy::RetryDecision::Stop
+            && !self.has_descendant_effects()
+            && !self.cancellation.is_cancelled()
+            && !self.deadline.is_elapsed();
+        self.trace.attempt(self.attempts).record(
+            "retry.decided",
+            json!({ "retryable": retryable, "policy": format!("{decision:?}") }),
+        );
+        match pending.failure {
+            RecoveryFailure::Stream(recovery) => {
+                let retryable = retryable
+                    && (!recovery.connection_dependent || !self.connection_budget.exhausted());
+                self.finish_stream_recovery(*recovery, retryable).await
+            }
+            RecoveryFailure::Start { error, provider } => {
+                if retryable {
+                    return Ok(StreamErrorOutcome::AttemptDiscarded);
+                }
+                if matches!(
+                    error.kind(),
+                    ProviderErrorKind::AccountCapacityUnavailable
+                        | ProviderErrorKind::NoEligibleAccount
+                        | ProviderErrorKind::QuotaExhausted
+                ) && self.last_retryable_failure.is_some()
+                {
+                    return self
+                        .finish_last_retryable_failure()
+                        .await?
+                        .map(|outcome| match outcome {
+                            PullOutcome::TerminalFailure {
+                                events,
+                                error,
+                                send_state,
+                            } => StreamErrorOutcome::TerminalFailure {
+                                events,
+                                error,
+                                send_state,
+                            },
+                            _ => unreachable!("last retry failure only returns an atomic terminal"),
+                        })
+                        .ok_or(EngineError::NoActiveAttempt);
+                }
+                if !(matches!(
+                    error.kind(),
+                    ProviderErrorKind::AccountCapacityUnavailable
+                        | ProviderErrorKind::NoEligibleAccount
+                        | ProviderErrorKind::QuotaExhausted
+                        | ProviderErrorKind::ProviderInfrastructureUnavailable
+                ) && error.send_state() == UpstreamSendState::NotSent)
+                {
+                    self.record_provider_failure(provider, error.kind());
+                }
+                self.finish_provider_error(&error).await?;
+                Err(provider_engine_error(error))
+            }
+        }
+    }
+    async fn finish_stream_recovery(
+        &mut self,
+        recovery: StreamRecovery,
+        retryable: bool,
+    ) -> Result<StreamErrorOutcome, EngineError> {
+        let StreamRecovery {
+            current,
+            error,
+            mut atomic_client_events,
+            send_state,
+            continuation_retry,
+            same_account_retry,
+            transient_retry,
+            transport_recovery,
+            ..
+        } = recovery;
         if retryable {
             for event in &atomic_client_events {
                 for fact in event.canonical_facts() {

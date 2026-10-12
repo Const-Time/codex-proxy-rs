@@ -15,6 +15,7 @@ mod observation;
 pub mod probe;
 pub mod provider;
 pub mod response_control;
+pub mod retry_policy;
 
 pub use coordinator::{AttemptCoordinator, ResponseExecutionSession};
 
