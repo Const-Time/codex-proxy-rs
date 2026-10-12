@@ -325,7 +325,7 @@ impl FrozenAccountScope {
         &self,
         provider: Option<&ProviderKind>,
         account: Option<&ProviderAccountId>,
-        excluded: Option<&ProviderAccountId>,
+        excluded: &BTreeSet<ProviderAccountId>,
     ) -> Self {
         let selected = self
             .directory
@@ -335,7 +335,7 @@ impl FrozenAccountScope {
                 self.allows(id)
                     && account.is_none_or(|required| required == *id)
                     && provider.is_none_or(|required| facts.provider_kind() == required)
-                    && excluded != Some(*id)
+                    && !excluded.contains(*id)
             })
             .map(|(id, facts)| (id.clone(), facts.clone()))
             .collect();

@@ -42,6 +42,10 @@ pub struct Core {
     pub commits: AtomicUsize,
     pub requests: Mutex<Vec<NewModelRequest>>,
     pub bodies: Mutex<Vec<Value>>,
+    pub selected: Mutex<Vec<ProviderAccountId>>,
+    pub leases: Arc<Mutex<BTreeMap<ProviderAccountId, usize>>>,
+    pub selection_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub selection_waiters: Arc<AtomicUsize>,
     pub finalizations: Mutex<Vec<ModelRequestFinalization>>,
     pub charges: Mutex<Vec<ClientBudgetCharge>>,
     pub admit_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -49,6 +53,26 @@ pub struct Core {
     pub settle_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 struct Lease;
+struct SelectionWait(Arc<AtomicUsize>);
+impl Drop for SelectionWait {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+struct AccountLease {
+    account: ProviderAccountId,
+    leases: Arc<Mutex<BTreeMap<ProviderAccountId, usize>>>,
+}
+impl Drop for AccountLease {
+    fn drop(&mut self) {
+        let mut leases = self.leases.lock().unwrap();
+        let active = leases.get_mut(&self.account).unwrap();
+        *active -= 1;
+        if *active == 0 {
+            leases.remove(&self.account);
+        }
+    }
+}
 impl ExecutionRecoveryLeaseGuard for Lease {}
 impl ClientAdmissionLeaseGuard for Lease {}
 #[async_trait]
@@ -229,6 +253,12 @@ impl Provider for Core {
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
+        let gate = self.selection_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            self.selection_waiters.fetch_add(1, Ordering::SeqCst);
+            let _wait = SelectionWait(self.selection_waiters.clone());
+            gate.await.unwrap();
+        }
         if let Operation::Generate(generate) = request.operation() {
             self.bodies
                 .lock()
@@ -236,11 +266,20 @@ impl Provider for Core {
                 .push(generate.protocol_payload().body().clone().into());
         }
         assert_eq!(context.client_api_key_ref().as_str(), "key_alice");
-        let account = context
-            .required_account()
-            .cloned()
-            .unwrap_or_else(|| ProviderAccountId::new("acct_allowed").unwrap());
+        let account = context.required_account().cloned().unwrap_or_else(|| {
+            ["acct_allowed", "acct_alternative", "acct_third"]
+                .into_iter()
+                .map(|id| ProviderAccountId::new(id).unwrap())
+                .find(|id| {
+                    context.account_scope().unwrap().allows(id)
+                        && !context.excluded_accounts().contains(id)
+                })
+                .expect("Core must preserve at least one eligible account")
+        });
         assert!(context.account_scope().unwrap().allows(&account));
+        assert!(!context.excluded_accounts().contains(&account));
+        self.selected.lock().unwrap().push(account.clone());
+        let lease_account = account.clone();
         let metadata = match request.candidate().upstream_model() {
             Some(model) => ProviderCallMetadata::new(
                 request.candidate().provider().clone(),
@@ -339,7 +378,18 @@ impl Provider for Core {
             stream.inspect(move |_| {
                 polled.fetch_add(1, Ordering::SeqCst);
             }),
-            (),
+            {
+                *self
+                    .leases
+                    .lock()
+                    .unwrap()
+                    .entry(lease_account.clone())
+                    .or_default() += 1;
+                AccountLease {
+                    account: lease_account,
+                    leases: self.leases.clone(),
+                }
+            },
         ))
     }
 }
@@ -443,11 +493,21 @@ impl ClientKeyService for Keys {
     }
 }
 pub fn snapshot(revision: u64, enabled: bool) -> RuntimeSnapshot {
+    snapshot_with_accounts(revision, enabled, &["acct_allowed"])
+}
+fn snapshot_with_accounts(revision: u64, enabled: bool, accounts: &[&str]) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").unwrap();
-    let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
-        ProviderAccountId::new("acct_allowed").unwrap(),
-        RuntimeAccount::new(provider.clone(), BTreeSet::new()),
-    )])));
+    let directory = Arc::new(RuntimeAccountDirectory::new(
+        accounts
+            .iter()
+            .map(|id| {
+                (
+                    ProviderAccountId::new(*id).unwrap(),
+                    RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+                )
+            })
+            .collect(),
+    ));
     let scope = Arc::new(FrozenAccountScope::new(
         directory.clone(),
         ClientRoutingScope::all_accounts(),
@@ -496,14 +556,17 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new() -> Self {
-        Self::build(false).await
+        Self::build(false, &["acct_allowed"]).await
     }
     pub async fn with_middleware() -> Self {
-        Self::build(true).await
+        Self::build(true, &["acct_allowed"]).await
     }
-    async fn build(middleware: bool) -> Self {
+    pub async fn with_accounts(accounts: &[&str]) -> Self {
+        Self::build(true, accounts).await
+    }
+    async fn build(middleware: bool, accounts: &[&str]) -> Self {
         let core = Arc::new(Core::default());
-        let snapshot = RuntimeSnapshotHandle::new(snapshot(1, true));
+        let snapshot = RuntimeSnapshotHandle::new(snapshot_with_accounts(1, true, accounts));
         let execution = Arc::new(
             DefaultExecutionService::new(
                 snapshot.clone(),
@@ -567,6 +630,38 @@ impl Fixture {
             },
         )
         .await
+    }
+    pub async fn start(&self, prepared: PreparedRootExecution) -> StartedExecution {
+        self.execution
+            .start_prepared(
+                prepared,
+                PreparedExecutionRequest {
+                    public_model: PublicModelId::new("gpt-native").unwrap(),
+                    operation: Operation::Generate(
+                        gateway_core::operation::GenerateRequest::from_protocol_payload(
+                            gateway_core::operation::ProtocolPayload::json_object(
+                                "openai",
+                                serde_json::from_value(
+                                    json!({"model":"gpt-native","input":"parent"}),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                    metadata: ExecutionRequestMetadata {
+                        protocol: "openai".into(),
+                        endpoint: "/v1/responses".into(),
+                        transport: ClientTransport::HttpJson,
+                        stream: false,
+                        client_ip: None,
+                        user_agent: None,
+                        previous_response_id: None,
+                    },
+                },
+            )
+            .await
+            .unwrap()
     }
     pub async fn install_layers(&self) -> String {
         let artifact = self

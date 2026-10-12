@@ -5,17 +5,17 @@ use gateway_plugin_sdk::{
 use serde_json::json;
 mod worker_models {
     //! Exercise the real SDK host methods and event codec from a separate process.
-    use gateway_plugin_sdk::{call::host::*, client::PluginCall};
+    use gateway_plugin_sdk::{call::host::*, client::HostClient};
     use serde_json::{Value, json};
-    pub async fn handle(call: &PluginCall, input: &Value) -> Value {
-        let result = handle_inner(call, input).await;
+    pub async fn handle(host: &HostClient, input: &Value) -> Value {
+        let result = handle_inner(host, input).await;
         match result {
             Ok(value) => value,
             Err(error) => json!({"error":error}),
         }
     }
     async fn handle_inner(
-        call: &PluginCall,
+        host: &HostClient,
         input: &Value,
     ) -> Result<Value, gateway_plugin_sdk::PluginFault> {
         let mode = input["mode"].as_str().unwrap_or("unary");
@@ -24,8 +24,7 @@ mod worker_models {
                 .get("body")
                 .map(|b| serde_json::to_vec(b).unwrap())
                 .unwrap_or_default();
-            let reply = call
-                .host
+            let reply = host
                 .call(
                     input["method"].as_str().unwrap(),
                     input["params"].clone(),
@@ -50,14 +49,13 @@ mod worker_models {
             previous_response_id: None,
         };
         let body = serde_json::to_vec(
-            &json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"]}),
+            &json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"],"after_next":input["after_next"]}),
         )
         .unwrap();
         if mode == "capacity" {
             let mut handles = vec![];
             for _ in 0..16 {
-                let reply = call
-                    .host
+                let reply = host
                     .call(
                         "host.model.execute_stream",
                         serde_json::to_value(&request).unwrap(),
@@ -68,8 +66,7 @@ mod worker_models {
                 let stream: ModelStreamResult = serde_json::from_value(reply.result).unwrap();
                 handles.push(stream.stream);
             }
-            let error = call
-                .host
+            let error = host
                 .call(
                     "host.model.execute_stream",
                     serde_json::to_value(&request).unwrap(),
@@ -81,16 +78,14 @@ mod worker_models {
                 .into_plugin_fault();
             assert_eq!(error.code, gateway_plugin_sdk::ErrorCode::Capacity);
             for stream in handles {
-                call.host
-                    .call("host.model.stream_close", json!({"stream":stream}), vec![])
+                host.call("host.model.stream_close", json!({"stream":stream}), vec![])
                     .await
                     .map_err(|e| e.into_plugin_fault())?;
             }
             return Ok(json!({"capacity":true}));
         }
         if mode == "unary" {
-            let reply = call
-                .host
+            let reply = host
                 .call(
                     "host.model.execute",
                     serde_json::to_value(request).unwrap(),
@@ -105,8 +100,7 @@ mod worker_models {
                 json!({"request":metadata.request_id,"events":metadata.events,"batch":batch.events}),
             );
         }
-        let reply = call
-            .host
+        let reply = host
             .call(
                 "host.model.execute_stream",
                 serde_json::to_value(request).unwrap(),
@@ -122,27 +116,24 @@ mod worker_models {
             std::process::exit(2);
         }
         if mode == "close" {
-            call.host
-                .call(
-                    "host.model.stream_read",
-                    json!({"stream":stream.stream,"maximum_bytes":8388608}),
-                    vec![],
-                )
-                .await
-                .map_err(|e| e.into_plugin_fault())?;
-            call.host
-                .call(
-                    "host.model.stream_close",
-                    json!({"stream":stream.stream}),
-                    vec![],
-                )
-                .await
-                .map_err(|e| e.into_plugin_fault())?;
+            host.call(
+                "host.model.stream_read",
+                json!({"stream":stream.stream,"maximum_bytes":8388608}),
+                vec![],
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+            host.call(
+                "host.model.stream_close",
+                json!({"stream":stream.stream}),
+                vec![],
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
             return Ok(json!({"closed":true}));
         }
         if mode == "small" {
-            let error = call
-                .host
+            let error = host
                 .call(
                     "host.model.stream_read",
                     json!({"stream":stream.stream,"maximum_bytes":1}),
@@ -157,8 +148,7 @@ mod worker_models {
         let mut events = 0;
         let mut snapshots = vec![];
         loop {
-            let reply = call
-                .host
+            let reply = host
                 .call(
                     "host.model.stream_read",
                     json!({"stream":stream.stream,"maximum_bytes":8388608}),
@@ -254,7 +244,7 @@ impl PluginHandler for Worker {
                         Err(error)=>json!({"error":error.into_plugin_fault()})
                     }
                 } else if input["operation"]=="models" {
-                    worker_models::handle(&call, &input).await
+                    worker_models::handle(&call.host, &input).await
                 } else if input["operation"]=="crash" { std::process::exit(2); }
                 else { input };
                 Ok(CallReply::unary(json!({"status":200,"content_type":"application/json","headers":[]}),serde_json::to_vec(&result).unwrap()))
@@ -295,7 +285,7 @@ mod worker_middleware {
         let input: serde_json::Value = serde_json::from_slice(&call.payload).unwrap();
         let mode = input["mode"].as_str().unwrap().to_owned();
         if mode == "native-model" {
-            let result = super::worker_models::handle(&call, &input["native"]).await;
+            let result = super::worker_models::handle(&call.host, &input["native"]).await;
             return Ok(CallReply::stream(
                 json!({"response":null,"protocol":"openai","status":200,"header_mutations":[],"body":{"kind":"stream","framing":"json_document"}}),
                 vec![],
@@ -321,13 +311,15 @@ mod worker_middleware {
             ));
         }
         if mode == "native-transform" {
+            let host = call.host.clone();
             let stage = match call.context.stage {
                 gateway_plugin_sdk::Stage::Request => "plugin_request",
                 gateway_plugin_sdk::Stage::Attempt => "plugin_attempt",
                 _ => panic!("model chain uses request/attempt"),
             };
             if stage == "plugin_request" && input["nested_model"] == true {
-                let nested = super::worker_models::handle(&call, &json!({"mode":"unary"})).await;
+                let nested =
+                    super::worker_models::handle(&call.host, &json!({"mode":"unary"})).await;
                 assert!(nested.get("error").is_none(), "{nested}");
             }
             let RequestCall {
@@ -338,6 +330,11 @@ mod worker_middleware {
             body[stage] = json!(true);
             request.replace_body(serde_json::to_vec(&body).unwrap());
             let mut response = next.run(request).await?;
+            let nested = if stage == "plugin_attempt" && input["after_next"].is_object() {
+                Some(super::worker_models::handle(&host, &input["after_next"]).await)
+            } else {
+                None
+            };
             response.body = response.body.with_facts()?.map_frames(move |mut frame| {
                 if let Some(facts) = &mut frame.facts {
                     facts.facts.clear();
@@ -348,6 +345,9 @@ mod worker_middleware {
                         let mut value: serde_json::Value =
                             serde_json::from_slice(&frame.payload).unwrap();
                         value[stage] = json!(true);
+                        if let Some(nested) = nested.as_ref() {
+                            value["nested"] = nested.clone();
+                        }
                         frame.payload = serde_json::to_vec(&value).unwrap();
                     } else {
                         let text = std::str::from_utf8(&frame.payload).unwrap();
@@ -357,6 +357,9 @@ mod worker_middleware {
                             let mut value: serde_json::Value =
                                 serde_json::from_str(&text[start..end]).unwrap();
                             value[stage] = json!(true);
+                            if let Some(nested) = nested.as_ref() {
+                                value["nested"] = nested.clone();
+                            }
                             frame.payload =
                                 format!("{}{}{}", &text[..start], value, &text[end..]).into_bytes();
                         }

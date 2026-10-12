@@ -592,6 +592,8 @@ SDK timeout_ms 为 0 表示立即到期，PreparedRoot 返回 Timeout 并阻止�
 
 调用图在准入前限制总数、并发及深度，实例祖先由宿主管理并从子请求的中间件计划排除。子请求的活动占用贯穿终态结算与准入释放；旧上下文不延长占用。每次真实调用拥有独立的请求记录及账单，Store 在原请求行保存历史父子关联而不引入另一套账本。子请求观察到发送或不确定发送会通知所有祖先并禁止其自动重放；自身正常重试仍由原发送规则决定。request/attempt 协议桥传递该上下文，原生模型 RPC 子调用同样冻结并进入这两层计划。
 
-Runtime 原生模型回调在宿主 RPC 范围内管理 HME1 事件批次和流句柄。管理调用通过 Admin 本人 Key 校验后由 Core 准备独立执行，不虚构模型父请求；数据调用只接受 MiddlewareRequest 携带的 Core 不透明授权。显式目标在原冻结账号范围内收窄，宿主回调中明确提供的父账号从子调用池中排除；Provider 在 next 后选择的真实账号租约仍需传给后续回调，才能完整避免子调用等待父租约。续接 pin 仍须匹配收窄后的账号池。Runtime 持有启动和流读取任务直到 Core 的准入、提交与结算返回，RPC future 取消只撤销授权，不丢弃这些操作；未领取或关闭的会话交给原 detach_finalize 清理。ExecutionSession 公开原发送水位供错误协议映射，取消或容量错误不能将已发送降成 NotSent。
+Runtime 原生模型回调在宿主 RPC 范围内管理 HME1 事件批次和流句柄。管理调用通过 Admin 本人 Key 校验后由 Core 准备独立执行，不虚构模型父请求；数据调用只接受 MiddlewareRequest 携带的 Core 不透明授权。显式目标在原冻结账号范围内收窄，宿主回调中明确提供的父账号以及 Core 活动 attempt 持有的全部祖先账号均从子调用池中排除。ExecutionLifetime 弱引用父执行及当前 attempt 的只读账号事实；CurrentAttempt 在校验冷流元数据后持有该事实，随原 ProviderStream 一起释放，不能保活父请求或账号租约。子调用路由与每次 Provider 启动前检查当前祖先账号，后者覆盖准入等待和 middleware next 后才确定父账号的情况。续接 pin 仍须匹配收窄后的账号池。Runtime 持有启动和流读取任务直到 Core 的准入、提交与结算返回，RPC future 取消只撤销授权，不丢弃这些操作；未领取或关闭的会话交给原 detach_finalize 清理。ExecutionSession 公开原发送水位供错误协议映射，取消或容量错误不能将已发送降成 NotSent。
 
 API 的 PluginModelExecution 复用现有 request/attempt 协议桥，将最终字节投影回原生事件，并保留宿主信封的原费用及会话事实；不建立另一套执行或账本。它只弱引用拥有 Runtime 的 PluginManager，Runtime 持有此执行服务，避免管理器与运行时形成引用环。原生交付在 HME1 编码及容量校验后委派 Core 提交；中间件正文资源依据 Core 信封等待首批提交，等待期间不持有正文锁。原生 end 还要求最外层改写终态已耗尽，不能只根据内层结算状态提前结束。GatewayError 保留 Provider 已知发送/HTTP 状态供原生错误映射，未知中间件副作用保守标为 ambiguous。
+
+账号投影在同一把锁内读取当前事实及变更信号；新 attempt 绑定账号时唤醒旧观察者。Core 原 Provider 启动等待同时监听祖先变化，候选范围内的新占用会结束旧冷流准备，复用 NoEligibleAccount/not-sent 终态和原费用清理；候选之外或原排除范围内的变化继续等待。观察只持有取消信号及弱授权，不保活父执行，不建立独立选号或重试循环。
