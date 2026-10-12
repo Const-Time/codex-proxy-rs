@@ -9,6 +9,7 @@ async fn consulted_policy_revocation_blocks_buffered_json_after_core_settlement(
     for f in [
         Fixture::with_router().await,
         Fixture::with_scheduler().await,
+        Fixture::with_retry().await,
     ] {
         let response = f.request(false).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -21,6 +22,24 @@ async fn consulted_policy_revocation_blocks_buffered_json_after_core_settlement(
             "revocation must guard already buffered delivery"
         );
         assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+        f.manager.shutdown().await;
+    }
+}
+#[tokio::test]
+async fn retry_policy_runs_for_json_and_sse_before_visible_delivery_with_one_charge() {
+    for streaming in [false, true] {
+        let f = Fixture::with_retry().await;
+        let response = f.request(streaming).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let output = String::from_utf8_lossy(&bytes(response).await).into_owned();
+        assert!(output.contains("resp_original"), "{output}");
+        f.settled().await;
+        assert_eq!(f.plugin.retry_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 2);
+        assert!(f.plugin.seen.lock().unwrap().is_empty());
+        assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+        assert_eq!(f.effects.charges.lock().unwrap()[0].amount_usd.scaled(), 25);
+        assert_eq!(f.effects.finalizations.lock().unwrap().len(), 1);
         f.manager.shutdown().await;
     }
 }

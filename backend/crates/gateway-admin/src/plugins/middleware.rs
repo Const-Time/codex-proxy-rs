@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 struct Entry {
     binding: Option<PluginMiddlewareBinding>,
     router: Option<PluginModelRouterBinding>,
+    retry: Option<PluginRetryPolicyBinding>,
     scheduler: Option<PluginAccountSchedulerBinding>,
     process: Option<Arc<dyn PluginProcess>>,
 }
@@ -36,9 +37,11 @@ impl Publication {
     ) {
         let binding = record.middleware.as_ref().filter(|_| record.enabled);
         let router = record.model_router.as_ref().filter(|_| record.enabled);
+        let retry = record.retry_policy.as_ref().filter(|_| record.enabled);
         let scheduler = record.account_scheduler.as_ref().filter(|_| record.enabled);
         if binding.is_some_and(|binding| binding.validate().is_err())
             || router.is_some_and(|r| r.validate().is_err())
+            || retry.is_some_and(|r| r.validate().is_err())
             || scheduler.is_some_and(|s| s.validate().is_err())
         {
             self.block(&record.id);
@@ -48,18 +51,20 @@ impl Publication {
             || self.blocked.contains(&record.id)
             || binding.is_some()
             || router.is_some()
+            || retry.is_some()
             || scheduler.is_some()
         {
             self.epoch.revoke();
             self.epoch = PluginAccess::default();
             self.entries.remove(&record.id);
             self.blocked.remove(&record.id);
-            if binding.is_some() || router.is_some() || scheduler.is_some() {
+            if binding.is_some() || router.is_some() || scheduler.is_some() || retry.is_some() {
                 self.entries.insert(
                     record.id.clone(),
                     Entry {
                         binding: binding.cloned(),
                         router: router.cloned(),
+                        retry: retry.cloned(),
                         scheduler: scheduler.cloned(),
                         process,
                     },
@@ -393,5 +398,92 @@ impl MiddlewareBody for RevocableBody {
     }
     fn close(self: Box<Self>) -> BoxFuture<'static, ()> {
         self.body.close()
+    }
+}
+
+impl gateway_core::engine::retry_policy::RetryPolicy for PluginMiddlewareRegistry {
+    fn cancellation(&self) -> CancellationToken {
+        self.1.clone()
+    }
+    fn decide_retry(
+        &self,
+        input: gateway_core::engine::retry_policy::RetryInput,
+    ) -> BoxFuture<
+        'static,
+        Result<
+            gateway_core::engine::retry_policy::RetryResult,
+            gateway_core::engine::retry_policy::RetryPolicyFault,
+        >,
+    > {
+        use gateway_core::engine::retry_policy::*;
+        let publication = self.0.clone();
+        let revocation = self.1.clone();
+        Box::pin(async move {
+            if !publication.blocked.is_empty() || publication.epoch.is_revoked() {
+                return Err(RetryPolicyFault);
+            }
+            let began = std::time::Instant::now();
+            let budget = input.deadline().bounded(MAXIMUM_POLICY_WAIT);
+            let mut selected = publication
+                .entries
+                .iter()
+                .filter(|(id, entry)| {
+                    !input.excluded_instances().contains(*id)
+                        && entry.retry.as_ref().is_some_and(|binding| {
+                            binding
+                                .scope
+                                .matches(input.client_key_id(), input.account_group_ids())
+                        })
+                })
+                .collect::<Vec<_>>();
+            selected.sort_by_key(|(id, entry)| (entry.retry.as_ref().map_or(0, |r| r.order), *id));
+            let mut decision = RetryDecision::Delegate;
+            for (_, entry) in selected {
+                let timeout = input
+                    .deadline()
+                    .bounded(budget.saturating_sub(began.elapsed()));
+                if timeout.is_zero() {
+                    break;
+                }
+                if input.cancellation().is_cancelled() || revocation.is_cancelled() {
+                    return Err(RetryPolicyFault);
+                }
+                let Some(process) = entry
+                    .process
+                    .as_ref()
+                    .filter(|p| p.status() == "ready" && !p.access().is_revoked())
+                else {
+                    continue;
+                };
+                let access = process.access();
+                let result = tokio::select! {
+                    biased;
+                    ()=access.revoked()=>Err(RetryPolicyFault),
+                    result=process.retry_decision(input.clone(),timeout)=>result,
+                };
+                if access.is_revoked() {
+                    continue;
+                }
+                let Ok(result) = result else {
+                    continue;
+                };
+                // Link each successful consultation before entering the next RPC,
+                // so a crashed preceding delegate can still revoke the whole chain.
+                if !revocation.link_parent(access.cancellation()) {
+                    return Err(RetryPolicyFault);
+                }
+                if revocation.is_cancelled() {
+                    return Err(RetryPolicyFault);
+                }
+                if result != RetryDecision::Delegate {
+                    decision = result;
+                    break;
+                }
+            }
+            Ok(RetryResult {
+                decision,
+                revocation,
+            })
+        })
     }
 }

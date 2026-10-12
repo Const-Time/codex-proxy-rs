@@ -28,7 +28,9 @@ export interface PluginMiddlewareBinding {
 }
 export interface PluginModelRouterBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
 export interface PluginAccountSchedulerBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
+export interface PluginRetryPolicyBinding { order: number, scope: PluginMiddlewareBinding['scope'] }
 export interface PluginInstance {
+  retryPolicy: PluginRetryPolicyBinding | null
   accountScheduler: PluginAccountSchedulerBinding | null
   modelRouter: PluginModelRouterBinding | null
   middleware: PluginMiddlewareBinding | null
@@ -45,6 +47,7 @@ export interface PluginInstance {
   resources: PluginManagementResource[]
 }
 export interface PluginUpdate {
+  retryPolicy: PluginRetryPolicyBinding | null
   accountScheduler: PluginAccountSchedulerBinding | null
   modelRouter: PluginModelRouterBinding | null
   middleware: PluginMiddlewareBinding | null

@@ -178,11 +178,47 @@ struct Worker {
     contributes: serde_json::Value,
     fail: bool,
     schedule: String,
+    retry: String,
 }
 impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "policy.retry_decision" => {
+                use gateway_plugin_sdk::call::policy::{RetryDecisionRequest, RetryAction};
+                let head: RetryDecisionRequest = serde_json::from_value(call.params.clone()).unwrap();
+                assert!(call.payload.is_empty());
+                assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Retry);
+                assert_eq!(call.context.request_id.as_deref(), Some(head.request_id.as_str()));
+                assert_eq!(call.context.attempt_id, Some(format!("{}:{}",head.request_id,head.attempt_index)));
+                assert!(head.attempt_index > 0);
+                assert!(head.allowed_actions.contains(&RetryAction::Stop));
+                assert!(call.context.timeout_ms > 0 && call.context.timeout_ms <= 2000);
+                // Retry may consult its private state, but may not recursively execute models
+                // or access Key/credential/management facts at this policy stage.
+                for method in ["host.models.list", "host.model.execute", "host.data.accounts.list", "host.keys.reset_budget"] {
+                    let error = call.host.call(method,json!({}),vec![]).await.err().unwrap().into_plugin_fault();
+                    assert_eq!(error.code, ErrorCode::PermissionDenied);
+                }
+                for (key,value) in [("retry_budget",call.context.timeout_ms),("retry_allowed",u64::from(head.allowed_actions.contains(&RetryAction::Retry)))] {
+                    let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":key}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                    call.host.call("host.state.put",json!({"namespace":"counter","key":key,"value":value,"expected_version":existing.result["record"]["version"].as_u64()}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                }
+                let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":"retry_calls"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                call.host.call("host.state.put",json!({"namespace":"counter","key":"retry_calls","value":existing.result["record"]["value"].as_u64().unwrap_or(0)+1,"expected_version":existing.result["record"]["version"].as_u64()}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                let decision=match self.retry.as_str() {
+                    "stop"=>json!({"decision":"stop"}),
+                    "retry"=>json!({"decision":"retry"}),
+                    "fault"=>return Err(PluginFault::new(ErrorCode::Fault,"private retry error detail")),
+                    "payload"=>return Ok(CallReply::unary(json!({"decision":"delegate"}),b"invalid".to_vec())),
+                    "malformed"=>json!({"decision":"delegate","unexpected":true}),
+                    "unknown"=>json!({"decision":"force"}),
+                    "wait"=>{futures::future::pending::<()>().await;unreachable!()},
+                    "slow-delegate"=>{tokio::time::sleep(std::time::Duration::from_millis(750)).await;json!({"decision":"delegate"})},
+                    _=>json!({"decision":"delegate"}),
+                };
+                Ok(CallReply::unary(decision,vec![]))
+            },
             "policy.schedule_account" => {
                 use gateway_plugin_sdk::call::policy::AccountScheduleRequest;
                 let head:AccountScheduleRequest=serde_json::from_value(call.params.clone()).unwrap();
@@ -337,6 +373,10 @@ async fn main() {
     .unwrap();
     let handler = Worker {
         contributes: serde_json::to_value(&session.handshake().contributes).unwrap(),
+        retry: session.handshake().configuration["retry"]
+            .as_str()
+            .unwrap_or("delegate")
+            .into(),
         schedule: session.handshake().configuration["schedule"]
             .as_str()
             .unwrap_or("delegate")

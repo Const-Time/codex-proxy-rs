@@ -37,6 +37,7 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
         .await
         .unwrap();
     let mut first = PluginRecord {
+        retry_policy: None,
         account_scheduler: None,
         model_router: None,
         middleware: Some(PluginMiddlewareBinding {
@@ -237,6 +238,12 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         "local.fixture"
     );
     let mut record = PluginRecord {
+        retry_policy: Some(PluginRetryPolicyBinding {
+            order: -9,
+            scope: PluginExecutionScope::Keys {
+                ids: vec!["key_retry".into()],
+            },
+        }),
         account_scheduler: Some(PluginAccountSchedulerBinding {
             order: -5,
             scope: PluginExecutionScope::Keys {
@@ -267,6 +274,32 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         secrets: BTreeMap::from([("token".into(), "not-in-audit".into())]),
     };
     store.save(&record, 0, &actor).await.unwrap();
+    assert!(store.list().await.unwrap()[0].retry_policy == record.retry_policy);
+    for invalid in [
+        PluginRetryPolicyBinding {
+            order: 10_001,
+            scope: PluginExecutionScope::All {},
+        },
+        PluginRetryPolicyBinding {
+            order: 0,
+            scope: PluginExecutionScope::Keys { ids: vec![] },
+        },
+    ] {
+        let mut invalid_retry = record.clone();
+        invalid_retry.revision += 1;
+        invalid_retry.retry_policy = Some(invalid);
+        assert_eq!(
+            store
+                .save(&invalid_retry, record.revision, &actor)
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            AdminErrorKind::Invalid
+        );
+        assert!(store.list().await.unwrap()[0].retry_policy == record.retry_policy);
+        assert_eq!(store.list().await.unwrap()[0].revision, record.revision);
+    }
     assert!(store.list().await.unwrap()[0].account_scheduler == record.account_scheduler);
     let mut invalid_scheduler = record.clone();
     invalid_scheduler.revision += 1;

@@ -44,3 +44,21 @@ impl PluginAccountSchedulerBinding {
         Ok(())
     }
 }
+
+/// Retry faults always delegate; bindings cannot introduce a separate fail-closed policy.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginRetryPolicyBinding {
+    pub order: i32,
+    pub scope: PluginExecutionScope,
+}
+impl PluginRetryPolicyBinding {
+    pub fn validate(&self) -> Result<(), super::super::AdminError> {
+        if !(-10_000..=10_000).contains(&self.order) || !self.scope.is_valid() {
+            return Err(super::super::AdminError::invalid(
+                "重试策略顺序或作用范围无效",
+            ));
+        }
+        Ok(())
+    }
+}

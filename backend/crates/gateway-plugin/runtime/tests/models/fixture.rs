@@ -469,7 +469,7 @@ impl Provider for Core {
             )
             .unwrap()
         };
-        let events: Vec<Result<ProviderEvent, ProviderError>> = vec![
+        let mut events: Vec<Result<ProviderEvent, ProviderError>> = vec![
             Ok(start),
             Ok(ProviderEvent::canonical_with_wire(
                 vec![GatewayEvent::ProviderCost(
@@ -486,8 +486,21 @@ impl Provider for Core {
                 wire,
             )),
         ];
+        if mode == "retry-always"
+            || (matches!(mode, "retry-once" | "retry-stall")
+                && metadata.provider_account_id().as_str() == "acct_allowed")
+        {
+            *events.last_mut().unwrap() = Err(ProviderError::new(
+                ProviderErrorKind::RateLimited,
+                UpstreamSendState::Sent,
+            )
+            .with_status(429)
+            .with_replay_safe());
+        }
         let polled = self.polled.clone();
-        let stream: EventStream = if mode == "stall" {
+        let stream: EventStream = if mode == "stall"
+            || (mode == "retry-stall" && metadata.provider_account_id().as_str() != "acct_allowed")
+        {
             Box::pin(
                 futures::stream::iter(events.into_iter().take(2)).chain(futures::stream::pending()),
             )
@@ -797,6 +810,13 @@ impl Fixture {
         .await
     }
     pub async fn start(&self, prepared: PreparedRootExecution) -> StartedExecution {
+        self.start_with_failure(prepared, None).await
+    }
+    pub async fn start_with_failure(
+        &self,
+        prepared: PreparedRootExecution,
+        failure: Option<&str>,
+    ) -> StartedExecution {
         self.execution
             .start_prepared(
                 prepared,
@@ -807,7 +827,7 @@ impl Fixture {
                             gateway_core::operation::ProtocolPayload::json_object(
                                 "openai",
                                 serde_json::from_value(
-                                    json!({"model":"gpt-native","input":"parent"}),
+                                    json!({"model":"gpt-native","input":"parent","failure":failure}),
                                 )
                                 .unwrap(),
                             )

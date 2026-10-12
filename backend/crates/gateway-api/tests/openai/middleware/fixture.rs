@@ -1,7 +1,8 @@
 // Real HTTP routing, PluginManager publication, Core admission and settlement.
 use super::*;
 use crate::openai::{
-    EmptyWorkerHealth, IgnoredClientApiKeyUsage, TestLifecycle, snapshot_with_capabilities,
+    EmptyWorkerHealth, IgnoredClientApiKeyUsage, TestLifecycle,
+    snapshot_with_capabilities_and_accounts,
 };
 use async_trait::async_trait;
 use axum::{body::Body, http::Request};
@@ -116,6 +117,7 @@ pub(super) struct Plugin {
     pub(super) headers: Mutex<Vec<String>>,
     pub(super) routing_calls: AtomicUsize,
     pub(super) scheduling_calls: AtomicUsize,
+    pub(super) retry_calls: AtomicUsize,
 }
 struct Runtime(Arc<Plugin>);
 #[async_trait]
@@ -144,6 +146,19 @@ impl PluginRuntime for Runtime {
 }
 #[async_trait]
 impl PluginProcess for Plugin {
+    async fn retry_decision(
+        &self,
+        input: gateway_core::engine::retry_policy::RetryInput,
+        timeout: std::time::Duration,
+    ) -> Result<
+        gateway_core::engine::retry_policy::RetryDecision,
+        gateway_core::engine::retry_policy::RetryPolicyFault,
+    > {
+        assert!(input.retry_allowed());
+        assert!(timeout <= std::time::Duration::from_secs(2));
+        self.retry_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(gateway_core::engine::retry_policy::RetryDecision::Delegate)
+    }
     async fn schedule_account(
         &self,
         input: gateway_core::engine::account_scheduling::AccountScheduleInput,
@@ -361,6 +376,7 @@ impl PluginProcess for Plugin {
 #[derive(Default)]
 pub(super) struct Effects {
     pub(super) provider_failure: Mutex<Option<fn() -> ProviderError>>,
+    retry: AtomicBool,
     pub(super) active: AtomicUsize,
     pub(super) calls: AtomicUsize,
     pub(super) commits: AtomicUsize,
@@ -555,7 +571,7 @@ impl Provider for Effects {
             context.deadline(),
         ));
         use gateway_core::account::*;
-        let candidates = [AccountCandidate {
+        let candidate = AccountCandidate {
             account: ProviderAccount::new(
                 ProviderAccountId::new("acct_api_test").unwrap(),
                 request.candidate().provider().clone(),
@@ -581,13 +597,38 @@ impl Provider for Effects {
                 failure_rate_basis_points: None,
                 first_output_latency_ms: None,
             },
-        }];
+        };
+        let mut candidates = vec![candidate.clone()];
+        if self.retry.load(Ordering::SeqCst) {
+            candidates.push(AccountCandidate {
+                account: ProviderAccount::new(
+                    ProviderAccountId::new("acct_api_retry").unwrap(),
+                    request.candidate().provider().clone(),
+                    "retry".into(),
+                    Some("test-upstream".into()),
+                    "oauth".into(),
+                    CredentialRevision::new(1).unwrap(),
+                    None,
+                )
+                .with_account_facts(
+                    true,
+                    CredentialState::Ready,
+                    QuotaState::unknown(),
+                    None,
+                    None,
+                ),
+                signals: candidate.signals,
+            });
+        }
         let selection = AccountSelectionContext {
             policy: context.account_selection_policy(),
             now: SystemTime::now(),
             excluded_accounts: context.excluded_accounts().clone(),
-            preferred_account: None,
-            preferred_account_overrides_weight: false,
+            preferred_account: self
+                .retry
+                .load(Ordering::SeqCst)
+                .then(|| ProviderAccountId::new("acct_api_test").unwrap()),
+            preferred_account_overrides_weight: true,
             round_robin_cursor: 0,
             eligibility: AccountEligibilityPolicy::Enforce,
             account_scope: context.account_scope().cloned(),
@@ -618,6 +659,20 @@ impl Provider for Effects {
             account,
             UpstreamTransport::new("http").unwrap(),
         );
+        if self.retry.load(Ordering::SeqCst)
+            && meta.provider_account_id().as_str() == "acct_api_test"
+        {
+            return Ok(ProviderStream::new(
+                meta,
+                futures::stream::iter([Err(ProviderError::new(
+                    gateway_core::error::ProviderErrorKind::RateLimited,
+                    UpstreamSendState::Sent,
+                )
+                .with_status(429)
+                .with_replay_safe())]),
+                (),
+            ));
+        }
         let created = ProviderEvent::canonical_with_wire(
             vec![GatewayEvent::Started(ResponseMeta::new(
                 "resp_original",
@@ -686,13 +741,16 @@ impl Fixture {
         mounts: Vec<PluginMiddlewareMount>,
         features: &[gateway_core::operation::Feature],
     ) -> Self {
-        Self::with_policy(mode, mounts, features, false, false).await
+        Self::with_policy(mode, mounts, features, false, false, false).await
     }
     pub(super) async fn with_router() -> Self {
-        Self::with_policy(Mode::Rewrite, vec![], &[], true, false).await
+        Self::with_policy(Mode::Rewrite, vec![], &[], true, false, false).await
     }
     pub(super) async fn with_scheduler() -> Self {
-        Self::with_policy(Mode::Rewrite, vec![], &[], false, true).await
+        Self::with_policy(Mode::Rewrite, vec![], &[], false, true, false).await
+    }
+    pub(super) async fn with_retry() -> Self {
+        Self::with_policy(Mode::Rewrite, vec![], &[], false, false, true).await
     }
     async fn with_policy(
         mode: Mode,
@@ -700,6 +758,7 @@ impl Fixture {
         features: &[gateway_core::operation::Feature],
         routing: bool,
         scheduling: bool,
+        retry: bool,
     ) -> Self {
         let plugin = Arc::new(Plugin {
             access: PluginAccess::default(),
@@ -708,9 +767,14 @@ impl Fixture {
             headers: Mutex::new(vec![]),
             routing_calls: AtomicUsize::new(0),
             scheduling_calls: AtomicUsize::new(0),
+            retry_calls: AtomicUsize::new(0),
         });
-        let records = if !mounts.is_empty() || routing || scheduling {
+        let records = if !mounts.is_empty() || routing || scheduling || retry {
             vec![PluginRecord {
+                retry_policy: retry.then_some(PluginRetryPolicyBinding {
+                    order: 0,
+                    scope: PluginExecutionScope::All {},
+                }),
                 account_scheduler: scheduling.then_some(PluginAccountSchedulerBinding {
                     order: 0,
                     scope: PluginExecutionScope::All {},
@@ -744,9 +808,10 @@ impl Fixture {
         ));
         manager.restore().await.unwrap();
         let effects = Arc::new(Effects::default());
+        effects.retry.store(retry, Ordering::SeqCst);
         let execution = Arc::new(
             DefaultExecutionService::new(
-                RuntimeSnapshotHandle::new(snapshot_with_capabilities(
+                RuntimeSnapshotHandle::new(snapshot_with_capabilities_and_accounts(
                     "sk_middleware",
                     "openai",
                     features
@@ -765,6 +830,11 @@ impl Fixture {
                                 )
                             },
                         ),
+                    if retry {
+                        &["acct_api_test", "acct_api_retry"]
+                    } else {
+                        &["acct_api_test"]
+                    },
                 )),
                 effects.clone(),
                 ProviderRegistry::new([effects.clone() as Arc<dyn Provider>]).unwrap(),
