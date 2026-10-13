@@ -101,6 +101,7 @@ fn terminal(calls: Arc<AtomicUsize>) -> core::Next {
 #[derive(Clone, Default)]
 struct HostServices {
     contexts: Arc<std::sync::Mutex<Vec<core::Context>>>,
+    replies: Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     calls: Arc<std::sync::Mutex<Vec<(String, String, serde_json::Value)>>>,
     wait: Arc<std::sync::atomic::AtomicBool>,
     entered: Arc<tokio::sync::Notify>,
@@ -130,13 +131,19 @@ impl core::Dispatcher for HostServices {
             host.calls
                 .lock()
                 .unwrap()
-                .push((instance, operation, input));
+                .push((instance, operation.clone(), input));
             if host.wait.load(Ordering::SeqCst) {
                 let _waiting = WaitingCall(host.dropped.clone());
                 host.entered.notify_one();
                 return futures::future::pending().await;
             }
-            Ok(json!(true))
+            Ok(host
+                .replies
+                .lock()
+                .unwrap()
+                .get(&operation)
+                .cloned()
+                .unwrap_or(json!(true)))
         })
     }
 }
@@ -607,5 +614,74 @@ async fn service_disable_revokes_entered_rpc_and_replacement_cannot_rebind_a_fro
             .await
             .unwrap()
     );
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn sdk_local_services_preserve_subscription_and_pricing_extension_fields() {
+    let f = Fixture::new().await;
+    let id = f.manager.list().await.unwrap()[0].id.clone();
+    let host = HostServices::default();
+    let command = json!({"subscription_auto_reset_enabled":false,"model_mappings":{"alias":"upstream"},"refresh_margin_seconds":1800,"refresh_concurrency":4,"max_concurrent_per_account":5,"request_interval_ms":25,"rotation_strategy":"round_robin","min_codex_desktop_version":null,"min_codex_cli_version":null,"usage_retention_days":32,"ops_event_retention_days":31,"audit_retention_days":91});
+    let mut settings = command.clone();
+    settings["config_revision"] = json!(7);
+    settings["updated_at"] = json!("2026-10-12T00:00:00Z");
+    let actor = json!({"actor":"system","request_id":"sdk-input"});
+    let policy = json!({"enabled":false,"updateExisting":true});
+    let preview = json!({"prices":{},"skipped":["unknown-provider"],"sourceHash":"a".repeat(64)});
+    let catalog = json!({"defaults":{},"overrides":{},"synced":{},"synced_at":null,"sync_policy":policy,"source_hash":"a".repeat(64)});
+    let cases = [
+        ("load", json!(null), settings.clone()),
+        ("replace", json!([actor, command]), settings),
+        ("pricing", json!(null), catalog),
+        ("preview_pricing_sync", json!(null), preview.clone()),
+        ("sync_pricing", json!([actor, preview]), json!(null)),
+        (
+            "update_pricing",
+            json!([actor,{"provider":"openai","models":["gpt-5.4"],"change":{"Multiplier":[15000,{"components":["input","cacheRead"]}]}}]),
+            json!(null),
+        ),
+        (
+            "update_pricing_sync_policy",
+            json!([actor, policy]),
+            json!(null),
+        ),
+    ];
+    for (operation, input, output) in cases {
+        let name = format!("local.settings.v1.{operation}");
+        host.replies
+            .lock()
+            .unwrap()
+            .insert(name.clone(), output.clone());
+        let mut request = crate::support::request("services");
+        request.invocation = Some(invocation(&host));
+        request.body=serde_json::to_vec(&json!({"operation":"services","mode":"local","local_operation":operation,"input":input})).unwrap();
+        let response = f.manager.handle(&id, 1, request).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value, json!({"result":output}), "{operation}");
+        assert_eq!(
+            host.calls.lock().unwrap().last().unwrap(),
+            &(id.clone(), name, input)
+        );
+    }
+    assert_eq!(host.calls.lock().unwrap().len(), 7);
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn sdk_local_service_preview_rejects_missing_source_identity() {
+    let f = Fixture::new().await;
+    let id = f.manager.list().await.unwrap()[0].id.clone();
+    let host = HostServices::default();
+    host.replies.lock().unwrap().insert(
+        "local.settings.v1.preview_pricing_sync".into(),
+        json!({"prices":{},"skipped":[]}),
+    );
+    let mut request = crate::support::request("services");
+    request.invocation = Some(invocation(&host));
+    request.body=serde_json::to_vec(&json!({"operation":"services","mode":"local","local_operation":"preview_pricing_sync","input":null})).unwrap();
+    let response = f.manager.handle(&id, 1, request).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert!(value.get("error").is_some(), "{value}");
+    assert!(value.get("result").is_none());
     f.manager.shutdown().await;
 }

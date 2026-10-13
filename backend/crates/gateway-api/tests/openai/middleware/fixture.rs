@@ -196,7 +196,19 @@ impl PluginProcess for Plugin {
         if matches!(self.mode, Mode::WaitBeforeNext) {
             return futures::future::pending().await;
         }
-        if matches!(self.mode, Mode::Rewrite) {
+        if matches!(self.mode, Mode::Settings)
+            && input.is_array()
+            && input[1].get("request_interval_ms").is_some()
+        {
+            input[1]["request_interval_ms"] = json!(137);
+        }
+        if matches!(self.mode, Mode::ExpandInvalid) && input.is_array() {
+            input[1]["refresh_concurrency"] = json!(0);
+        }
+        if matches!(self.mode, Mode::Rewrite) && input.is_array() {
+            input[0]["actor"] = json!("system");
+            input[0]["request_id"] = json!("forged");
+        } else if matches!(self.mode, Mode::Rewrite) {
             input["actor"] = json!("system");
             input["request_id"] = json!("forged");
         }
@@ -214,7 +226,10 @@ impl PluginProcess for Plugin {
                 json!({"mutation":{"config_revision":2,"exists":true},"key":"fixture-masked-failure"}),
             );
         }
-        let result = next.run(input).await?;
+        let mut result = next.run(input).await?;
+        if matches!(self.mode, Mode::ResponseRewrite) && result.get("config_revision").is_some() {
+            result["rotation_strategy"] = json!("invalid-strategy");
+        }
         if matches!(self.mode, Mode::BadResponse) {
             return Err(
                 gateway_core::engine::middleware::service::Error::unavailable(

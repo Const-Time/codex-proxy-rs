@@ -322,7 +322,9 @@ impl SettingsService for DefaultSettingsService {
 }
 
 fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError> {
-    let valid = command.refresh_margin_seconds > 0
+    let valid = command.model_mappings.len() <= 512
+        && i64::try_from(command.refresh_margin_seconds).is_ok()
+        && command.refresh_margin_seconds > 0
         && command.refresh_concurrency > 0
         && command.max_concurrent_per_account > 0
         && command.usage_retention_days >= 31

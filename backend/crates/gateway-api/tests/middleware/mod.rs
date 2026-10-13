@@ -142,6 +142,379 @@ async fn host_services_and_http_children_consume_the_same_graph_budget() {
     f.manager.shutdown().await;
 }
 
+fn local_settings_input() -> serde_json::Value {
+    serde_json::json!({"subscription_auto_reset_enabled":false,"model_mappings":{"alias":"gpt-5.4"},"refresh_margin_seconds":1800,"refresh_concurrency":4,"max_concurrent_per_account":5,"request_interval_ms":25,"rotation_strategy":"round_robin","min_codex_desktop_version":null,"min_codex_cli_version":null,"usage_retention_days":32,"ops_event_retention_days":31,"audit_retention_days":91})
+}
+fn settings_http_input() -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in local_settings_input().as_object().unwrap() {
+        let mut words = name.split('_');
+        let mut key = words.next().unwrap().to_owned();
+        for word in words {
+            let mut chars = word.chars();
+            key.extend(chars.next().unwrap().to_uppercase());
+            key.extend(chars);
+        }
+        object.insert(key, value.clone());
+    }
+    object.into()
+}
+async fn local_call(
+    f: &Fixture,
+    cookie: &str,
+    operation: &str,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    host_service_reply(
+        host_service_request(f, cookie, &format!("local.settings.v1.{operation}"), input).await,
+    )
+    .await
+}
+fn untrusted_actor() -> serde_json::Value {
+    serde_json::json!({"actor":"system","request_id":"forged-request"})
+}
+#[tokio::test]
+async fn local_services_use_native_settings_subscription_and_scoped_pricing_facts() {
+    use serde_json::json;
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    let before = local_call(&f, &cookie, "load", json!(null)).await;
+    let updated = local_call(
+        &f,
+        &cookie,
+        "replace",
+        json!([untrusted_actor(), local_settings_input()]),
+    )
+    .await;
+    assert_eq!(updated["Ok"]["subscription_auto_reset_enabled"], false);
+    assert_eq!(
+        updated["Ok"]["config_revision"].as_u64().unwrap(),
+        before["Ok"]["config_revision"].as_u64().unwrap() + 1
+    );
+    assert_eq!(updated["Ok"]["model_mappings"]["alias"], "gpt-5.4");
+    assert!(
+        updated["Ok"]
+            .get("openai_guardian_reserved_concurrency")
+            .is_none()
+    );
+    let mut unchanged = local_settings_input();
+    unchanged["subscription_auto_reset_enabled"] = json!(null);
+    assert_eq!(
+        local_call(
+            &f,
+            &cookie,
+            "replace",
+            json!([untrusted_actor(), unchanged])
+        )
+        .await["Ok"]["subscription_auto_reset_enabled"],
+        false
+    );
+    let preview = local_call(&f, &cookie, "preview_pricing_sync", json!(null)).await["Ok"].clone();
+    assert_eq!(preview["sourceHash"], "a".repeat(64));
+    assert_eq!(
+        local_call(
+            &f,
+            &cookie,
+            "sync_pricing",
+            json!([untrusted_actor(), preview])
+        )
+        .await,
+        json!({"Ok":null})
+    );
+    assert_eq!(local_call(&f,&cookie,"update_pricing",json!([untrusted_actor(),{"provider":"openai","models":["gpt-5.4"],"change":{"Multiplier":[15000,{"components":["input","cacheRead"]}]}}])).await,json!({"Ok":null}));
+    assert_eq!(
+        local_call(
+            &f,
+            &cookie,
+            "update_pricing_sync_policy",
+            json!([untrusted_actor(),{"enabled":false,"updateExisting":true}])
+        )
+        .await,
+        json!({"Ok":null})
+    );
+    let pricing = local_call(&f, &cookie, "pricing", json!(null)).await;
+    assert_eq!(
+        pricing["Ok"]["sync_policy"],
+        json!({"enabled":false,"updateExisting":true})
+    );
+    assert_eq!(pricing["Ok"]["source_hash"], "a".repeat(64));
+    assert!(pricing["Ok"]["synced_at"].is_string());
+    assert_eq!(
+        pricing["Ok"]["overrides"]["openai"]["gpt-5.4"]["multiplierBps"],
+        15000
+    );
+    assert_eq!(
+        pricing["Ok"]["overrides"]["openai"]["gpt-5.4"]["multiplierScope"],
+        json!({"components":["input","cacheRead"]})
+    );
+    assert_eq!(
+        f.admin
+            .services
+            .settings()
+            .load()
+            .await
+            .unwrap()
+            .request_interval_ms,
+        25
+    );
+    {
+        let mutations = f.admin.settings.service_mutations.lock().unwrap();
+        assert_eq!(mutations.len(), 5);
+        for actor in mutations.iter() {
+            assert_eq!(
+                actor.actor,
+                gateway_admin::model::MutationActor::AdminSession {
+                    admin_user_id: "admin_1".into()
+                }
+            );
+            assert_ne!(actor.request_id, "forged-request");
+        }
+    }
+    assert!(f.plugin.service_seen.lock().unwrap().is_empty());
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn local_services_reject_wrong_contract_and_preserve_preview_source_validation() {
+    use serde_json::json;
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    let before = f.admin.services.settings().load().await.unwrap();
+    let mut unsupported = local_settings_input();
+    unsupported["openai_guardian_reserved_concurrency"] = json!(1);
+    let mut invalid = local_settings_input();
+    invalid["refresh_margin_seconds"] = json!(u64::MAX);
+    let mut models = local_settings_input();
+    models["model_mappings"] = json!({"bad\nmodel":"ok"});
+    for value in [unsupported, invalid, models] {
+        assert_eq!(
+            local_call(&f, &cookie, "replace", json!([untrusted_actor(), value])).await["Err"]["kind"],
+            "invalid"
+        );
+    }
+    let preview = local_call(&f, &cookie, "preview_pricing_sync", json!(null)).await["Ok"].clone();
+    let mut wrong_hash = preview.clone();
+    wrong_hash["sourceHash"] = json!("b".repeat(64));
+    let mut wrong_price = preview;
+    wrong_price["prices"]["openai"]["gpt-5.4"]["bands"]["standard"]["input"] = json!("0");
+    for value in [wrong_hash, wrong_price] {
+        assert_eq!(
+            local_call(
+                &f,
+                &cookie,
+                "sync_pricing",
+                json!([untrusted_actor(), value])
+            )
+            .await["Err"]["kind"],
+            "invalid"
+        );
+    }
+    for change in [
+        json!("Delete"),
+        json!({"Multiplier":15000}),
+        json!({"Multiplier":[15000,{"components":[]}]}),
+    ] {
+        assert_eq!(local_call(&f,&cookie,"update_pricing",json!([untrusted_actor(),{"provider":"openai","models":["gpt-5.4"],"change":change}])).await["Err"]["kind"],"invalid");
+    }
+    let old = host_service_reply(
+        host_service_request(
+            &f,
+            &cookie,
+            "settings.replace",
+            json!([untrusted_actor(), local_settings_input()]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(old["Err"]["kind"], "unsupported");
+    assert_eq!(f.admin.services.settings().load().await.unwrap(), before);
+    assert!(
+        f.admin
+            .settings
+            .service_mutations
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn local_service_http_endpoints_share_the_same_middleware_operations() {
+    use serde_json::json;
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    for (method, path, input) in [
+        ("GET", "/api/admin/settings", json!(null)),
+        ("POST", "/api/admin/settings/update", settings_http_input()),
+        ("GET", "/api/admin/settings/pricing", json!(null)),
+        (
+            "POST",
+            "/api/admin/settings/pricing/sync/preview",
+            json!(null),
+        ),
+        (
+            "POST",
+            "/api/admin/settings/pricing/sync/policy",
+            json!({"enabled":false,"updateExisting":false}),
+        ),
+        (
+            "POST",
+            "/api/admin/settings/pricing/update",
+            json!({"provider":"openai","models":["gpt-5.4"],"change":{"action":"replace","pricing":{"multiplierBps":12000,"multiplierScope":{"components":["output"]},"bands":{"standard":{"input":"2.5","output":"15","cacheRead":"0.25","cacheWrite":"0"}}}}}),
+        ),
+    ] {
+        let response = recovery_request(&f, method, path, &cookie, input).await;
+        assert_eq!(response.status(), 200, "{path}");
+        body(response).await;
+    }
+    let preview = f
+        .admin
+        .services
+        .settings()
+        .preview_pricing_sync()
+        .await
+        .unwrap();
+    let response = recovery_request(
+        &f,
+        "POST",
+        "/api/admin/settings/pricing/sync",
+        &cookie,
+        serde_json::to_value(preview).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    body(response).await;
+    let seen = f
+        .plugin
+        .service_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(ctx, _)| ctx.operation)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seen,
+        vec![
+            "local.settings.v1.load",
+            "local.settings.v1.replace",
+            "local.settings.v1.pricing",
+            "local.settings.v1.preview_pricing_sync",
+            "local.settings.v1.update_pricing_sync_policy",
+            "local.settings.v1.update_pricing",
+            "local.settings.v1.sync_pricing"
+        ]
+    );
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn local_service_command_rewrites_keep_domain_validation_and_cannot_change_actor() {
+    for mode in [Mode::Settings, Mode::ExpandInvalid, Mode::Rewrite] {
+        let succeeds = matches!(mode, Mode::Settings);
+        let (f, cookie) = service_fixture(mode).await;
+        let before = f.admin.services.settings().load().await.unwrap();
+        let response = recovery_request(
+            &f,
+            "POST",
+            "/api/admin/settings/update",
+            &cookie,
+            settings_http_input(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            if succeeds {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        body(response).await;
+        let after = f.admin.services.settings().load().await.unwrap();
+        if succeeds {
+            assert_eq!(after.request_interval_ms, 137);
+            assert_eq!(f.admin.settings.service_mutations.lock().unwrap().len(), 1);
+        } else {
+            assert_eq!(after, before);
+            assert!(
+                f.admin
+                    .settings
+                    .service_mutations
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        f.manager.shutdown().await;
+    }
+}
+#[tokio::test]
+async fn local_service_native_setting_write_survives_cancel_and_reports_uncertainty() {
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    let before = f.admin.services.settings().load().await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.admin.settings.service_gate.lock().unwrap() = Some(gate.clone());
+    let app = f.app.clone();
+    let input = settings_http_input();
+    let task = tokio::spawn(async move {
+        app.oneshot(
+            Request::post("/api/admin/settings/update")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(input.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f
+            .admin
+            .settings
+            .service_mutations
+            .lock()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    f.plugin.access.revoke();
+    let response = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(value["code"], 50202);
+    assert_eq!(f.admin.services.settings().load().await.unwrap(), before);
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f
+            .admin
+            .services
+            .settings()
+            .load()
+            .await
+            .unwrap()
+            .config_revision
+            == before.config_revision
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        f.admin
+            .services
+            .settings()
+            .load()
+            .await
+            .unwrap()
+            .request_interval_ms,
+        25
+    );
+    assert_eq!(f.admin.settings.service_mutations.lock().unwrap().len(), 1);
+    f.manager.shutdown().await;
+}
+
 async fn service_fixture(mode: Mode) -> (Fixture, String) {
     let f = Fixture::with_mounts(
         mode,
@@ -1105,5 +1478,26 @@ async fn http_revocation_interrupts_stalled_sse_and_releases_original_admission_
         assert_eq!(charges.len(), 1);
         assert_eq!(charges[0].amount_usd, gateway_core::metering::Decimal::ZERO);
     }
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_service_invalid_post_write_result_is_uncertain_and_does_not_undo_commit() {
+    let (f, cookie) = service_fixture(Mode::ResponseRewrite).await;
+    let response = recovery_request(
+        &f,
+        "POST",
+        "/api/admin/settings/update",
+        &cookie,
+        settings_http_input(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(value["code"], 50202);
+    let saved = f.admin.services.settings().load().await.unwrap();
+    assert_eq!(saved.request_interval_ms, 25);
+    assert_eq!(saved.rotation_strategy.as_str(), "round_robin");
+    assert_eq!(f.admin.settings.service_mutations.lock().unwrap().len(), 1);
     f.manager.shutdown().await;
 }

@@ -416,6 +416,8 @@ impl AuthStore for MemoryAuthStore {
 
 pub(super) struct MemorySettingsStore {
     pub(crate) key_mutations: Mutex<Vec<MutationContext>>,
+    pub(crate) service_mutations: Mutex<Vec<MutationContext>>,
+    pub(crate) service_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub(crate) key_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub(crate) key_failure: Mutex<Option<gateway_admin::ports::store::AdminStoreError>>,
     pricing: Mutex<gateway_admin::model::pricing::StoredPricing>,
@@ -443,6 +445,8 @@ impl MemorySettingsStore {
         Self {
             settings: Mutex::new(test_runtime_settings()),
             key_mutations: Mutex::default(),
+            service_mutations: Mutex::default(),
+            service_gate: Mutex::default(),
             key_gate: Mutex::default(),
             key_failure: Mutex::default(),
             pricing: Mutex::default(),
@@ -450,6 +454,13 @@ impl MemorySettingsStore {
         }
     }
 
+    async fn service_write(&self, context: &MutationContext) {
+        self.service_mutations.lock().unwrap().push(context.clone());
+        let gate = self.service_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+    }
     pub fn set_api_key(&self, value: &str) {
         *self.api_key.lock().expect("API key") = Some(AdminApiKey::new(value));
     }
@@ -463,8 +474,9 @@ impl SettingsStore for MemorySettingsStore {
     async fn sync_pricing(
         &self,
         command: gateway_admin::model::pricing::SyncPricing,
-        _: &MutationContext,
+        context: &MutationContext,
     ) -> AdminStoreResult<Option<gateway_admin::model::Revision>> {
+        self.service_write(context).await;
         let mut pricing = self.pricing.lock().expect("pricing");
         pricing.synced = command.preview.prices;
         pricing.source_hash = Some(command.preview.source_hash);
@@ -476,8 +488,9 @@ impl SettingsStore for MemorySettingsStore {
     async fn update_pricing_sync_policy(
         &self,
         policy: gateway_admin::model::pricing::PricingSyncPolicy,
-        _: &MutationContext,
+        context: &MutationContext,
     ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        self.service_write(context).await;
         self.pricing.lock().unwrap().sync_policy = policy;
         let mut settings = self.settings.lock().unwrap();
         settings.config_revision = next_revision(settings.config_revision);
@@ -486,9 +499,10 @@ impl SettingsStore for MemorySettingsStore {
     async fn update_pricing(
         &self,
         command: gateway_admin::model::pricing::UpdatePricing,
-        _: &MutationContext,
+        context: &MutationContext,
     ) -> AdminStoreResult<gateway_admin::model::Revision> {
         use gateway_admin::model::pricing::PricingChange;
+        self.service_write(context).await;
         let mut pricing = self.pricing.lock().expect("pricing");
         let models = pricing.overrides.entry(command.provider).or_default();
         for model in command.models {
@@ -527,8 +541,9 @@ impl SettingsStore for MemorySettingsStore {
     async fn replace_runtime_settings(
         &self,
         command: ReplaceRuntimeSettings,
-        _: &MutationContext,
+        context: &MutationContext,
     ) -> AdminStoreResult<RuntimeSettings> {
+        self.service_write(context).await;
         let mut settings = self.settings.lock().expect("settings");
         let updated = RuntimeSettings {
             config_revision: next_revision(settings.config_revision),
