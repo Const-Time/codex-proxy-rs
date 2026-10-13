@@ -135,6 +135,12 @@ pub(crate) enum Mode {
     ZeroTimeout,
 }
 pub(crate) struct Plugin {
+    pub(crate) service_seen: Mutex<
+        Vec<(
+            gateway_core::engine::middleware::service::Context,
+            serde_json::Value,
+        )>,
+    >,
     pub(crate) websocket_seen: Mutex<Vec<gateway_core::engine::middleware::websocket::Direction>>,
     pub(crate) access: PluginAccess,
     pub(crate) mode: Mode,
@@ -172,6 +178,53 @@ impl PluginRuntime for Runtime {
 }
 #[async_trait]
 impl PluginProcess for Plugin {
+    async fn service_middleware(
+        &self,
+        context: gateway_core::engine::middleware::service::Context,
+        mut input: serde_json::Value,
+        next: gateway_core::engine::middleware::service::Next,
+    ) -> Result<serde_json::Value, gateway_core::engine::middleware::service::Error> {
+        self.service_seen
+            .lock()
+            .unwrap()
+            .push((context, input.clone()));
+        if matches!(self.mode, Mode::ShortCircuit) {
+            return Ok(json!(false));
+        }
+        if matches!(self.mode, Mode::WaitBeforeNext) {
+            return futures::future::pending().await;
+        }
+        if matches!(self.mode, Mode::Rewrite) {
+            input["actor"] = json!("system");
+            input["request_id"] = json!("forged");
+        }
+        if matches!(self.mode, Mode::Head) {
+            let mut waiting = next.run(input);
+            assert!(futures::poll!(&mut waiting).is_pending());
+            tokio::spawn(waiting);
+            return Ok(
+                json!({"mutation":{"config_revision":2,"exists":true},"key":"fixture-premature-success"}),
+            );
+        }
+        if matches!(self.mode, Mode::InvalidModel) {
+            assert!(next.run(input).await.is_err());
+            return Ok(
+                json!({"mutation":{"config_revision":2,"exists":true},"key":"fixture-masked-failure"}),
+            );
+        }
+        let result = next.run(input).await?;
+        if matches!(self.mode, Mode::BadResponse) {
+            return Err(
+                gateway_core::engine::middleware::service::Error::unavailable(
+                    "fixture post-write failure",
+                ),
+            );
+        }
+        if matches!(self.mode, Mode::WaitAfterNext) {
+            return futures::future::pending().await;
+        }
+        Ok(result)
+    }
     async fn websocket_middleware(
         &self,
         context: gateway_core::engine::middleware::websocket::Context,
@@ -795,6 +848,7 @@ impl Provider for Effects {
     }
 }
 pub(crate) struct Fixture {
+    pub(crate) admin: crate::admin::AdminTestFixture,
     pub(crate) dispatcher: Arc<dyn gateway_core::engine::middleware::http::Dispatcher>,
     pub(crate) execution: Arc<dyn ExecutionService>,
     pub(crate) app: axum::Router,
@@ -856,6 +910,7 @@ impl Fixture {
         assets: Option<std::path::PathBuf>,
     ) -> Self {
         let plugin = Arc::new(Plugin {
+            service_seen: Mutex::new(vec![]),
             access: PluginAccess::default(),
             mode,
             seen: Mutex::new(vec![]),
@@ -959,7 +1014,7 @@ impl Fixture {
                 inner: execution.clone(),
                 effects: effects.clone(),
             }),
-            admin.services.with_plugins(manager.clone()),
+            admin.services.clone().with_plugins(manager.clone()),
             vec![],
             Arc::new(EmptyWorkerHealth),
             lifecycle.clone(),
@@ -969,6 +1024,7 @@ impl Fixture {
         let app = app.router();
         Self {
             dispatcher,
+            admin,
             execution,
             app,
             manager,

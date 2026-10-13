@@ -244,6 +244,10 @@ impl AdminServices {
         self.settings.as_ref()
     }
 
+    pub fn service_settings(&self) -> plugins::service::settings::Service {
+        plugins::service::settings::Service::new(self.settings.clone())
+    }
+
     #[must_use]
     pub fn system(&self) -> &dyn SystemService {
         self.system.as_ref()

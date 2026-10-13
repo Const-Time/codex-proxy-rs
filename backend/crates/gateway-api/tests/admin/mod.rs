@@ -415,6 +415,9 @@ impl AuthStore for MemoryAuthStore {
 }
 
 pub(super) struct MemorySettingsStore {
+    pub(crate) key_mutations: Mutex<Vec<MutationContext>>,
+    pub(crate) key_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(crate) key_failure: Mutex<Option<gateway_admin::ports::store::AdminStoreError>>,
     pricing: Mutex<gateway_admin::model::pricing::StoredPricing>,
     settings: Mutex<RuntimeSettings>,
     api_key: Arc<Mutex<Option<AdminApiKey>>>,
@@ -439,6 +442,9 @@ impl MemorySettingsStore {
     fn new(api_key: Arc<Mutex<Option<AdminApiKey>>>) -> Self {
         Self {
             settings: Mutex::new(test_runtime_settings()),
+            key_mutations: Mutex::default(),
+            key_gate: Mutex::default(),
+            key_failure: Mutex::default(),
             pricing: Mutex::default(),
             api_key,
         }
@@ -549,8 +555,16 @@ impl SettingsStore for MemorySettingsStore {
     async fn replace_admin_api_key(
         &self,
         key: AdminApiKey,
-        _: &MutationContext,
+        context: &MutationContext,
     ) -> AdminStoreResult<AdminApiKeyMutation> {
+        self.key_mutations.lock().unwrap().push(context.clone());
+        let gate = self.key_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        if let Some(error) = self.key_failure.lock().unwrap().take() {
+            return Err(error);
+        }
         *self.api_key.lock().expect("API key") = Some(key);
         let revision = self.settings.lock().expect("settings").config_revision;
         Ok(AdminApiKeyMutation {
@@ -561,8 +575,9 @@ impl SettingsStore for MemorySettingsStore {
 
     async fn delete_admin_api_key(
         &self,
-        _: &MutationContext,
+        context: &MutationContext,
     ) -> AdminStoreResult<AdminApiKeyMutation> {
+        self.key_mutations.lock().unwrap().push(context.clone());
         *self.api_key.lock().expect("API key") = None;
         let revision = self.settings.lock().expect("settings").config_revision;
         Ok(AdminApiKeyMutation {

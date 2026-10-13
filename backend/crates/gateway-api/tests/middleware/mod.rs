@@ -2,6 +2,407 @@ mod dispatcher;
 pub(crate) mod fixture;
 mod websocket;
 
+async fn service_fixture(mode: Mode) -> (Fixture, String) {
+    let f = Fixture::with_mounts(
+        mode,
+        vec![gateway_admin::model::plugins::PluginMiddlewareMount::Service],
+    )
+    .await;
+    f.admin.auth.insert_session("service-admin");
+    (f, "cpr_admin_session=service-admin".into())
+}
+#[tokio::test]
+async fn service_settings_api_preserves_auth_native_mutations_and_host_audit_identity() {
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    let path = "/api/admin/settings/admin-api-key";
+    for (cookie, status) in [
+        ("", StatusCode::UNAUTHORIZED),
+        (
+            "cpr_admin_session=middleware-ordinary",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = recovery_request(&f, "GET", path, cookie, serde_json::Value::Null).await;
+        assert_eq!(response.status(), status);
+        body(response).await;
+    }
+    assert!(f.plugin.service_seen.lock().unwrap().is_empty());
+    for (method, suffix) in [
+        ("GET", ""),
+        ("POST", "/regenerate"),
+        ("GET", ""),
+        ("POST", "/delete"),
+        ("GET", ""),
+    ] {
+        let response = recovery_request(
+            &f,
+            method,
+            &format!("{path}{suffix}"),
+            &cookie,
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+        if suffix == "/regenerate" {
+            assert!(value["data"]["key"].as_str().unwrap().starts_with("admin-"));
+        }
+    }
+    assert!(
+        !f.admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    {
+        let calls = f.plugin.service_seen.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(ctx, _)| ctx.operation)
+                .collect::<Vec<_>>(),
+            vec![
+                "settings.admin_api_key_exists",
+                "settings.regenerate_admin_api_key",
+                "settings.admin_api_key_exists",
+                "settings.delete_admin_api_key",
+                "settings.admin_api_key_exists"
+            ]
+        );
+        let mutations = f.admin.settings.key_mutations.lock().unwrap();
+        assert_eq!(mutations.len(), 2);
+        for ((context, input), mutation) in calls
+            .iter()
+            .filter(|(_, input)| !input.is_null())
+            .zip(mutations.iter())
+        {
+            assert!(context.parent_call_id.is_some());
+            assert_ne!(context.parent_call_id.as_ref().unwrap(), &context.call_id);
+            assert_eq!(input, &serde_json::to_value(mutation).unwrap());
+            assert_eq!(
+                mutation.actor,
+                gateway_admin::model::MutationActor::AdminSession {
+                    admin_user_id: "admin_1".into()
+                }
+            );
+            assert_eq!(context.request_id, mutation.request_id);
+        }
+    }
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn service_settings_rejects_forged_audit_inputs_before_native_mutation() {
+    let (f, cookie) = service_fixture(Mode::Rewrite).await;
+    for suffix in ["regenerate", "delete"] {
+        let response = recovery_request(
+            &f,
+            "POST",
+            &format!("/api/admin/settings/admin-api-key/{suffix}"),
+            &cookie,
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        body(response).await;
+    }
+    assert!(f.admin.settings.key_mutations.lock().unwrap().is_empty());
+    assert!(
+        !f.admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn service_settings_short_circuit_and_post_write_failure_have_distinct_effects() {
+    let (f, cookie) = service_fixture(Mode::ShortCircuit).await;
+    f.admin.settings.set_api_key("fixture-original-admin-key");
+    let response = recovery_request(
+        &f,
+        "GET",
+        "/api/admin/settings/admin-api-key",
+        &cookie,
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(value["data"]["exists"], false);
+    assert!(
+        f.admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    f.manager.shutdown().await;
+
+    let (f, cookie) = service_fixture(Mode::BadResponse).await;
+    let response = recovery_request(
+        &f,
+        "POST",
+        "/api/admin/settings/admin-api-key/regenerate",
+        &cookie,
+        serde_json::Value::Null,
+    )
+    .await;
+    let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(value["code"], 50202);
+    assert_eq!(f.admin.settings.key_mutations.lock().unwrap().len(), 1);
+    assert!(
+        f.admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn service_settings_revocation_after_native_write_keeps_committed_fact_and_recovery_reachable()
+ {
+    let (f, cookie) = service_fixture(Mode::WaitAfterNext).await;
+    let app = f.app.clone();
+    let task_cookie = cookie.clone();
+    let task = tokio::spawn(async move {
+        app.oneshot(
+            Request::post("/api/admin/settings/admin-api-key/regenerate")
+                .header("cookie", task_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !f
+            .admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    f.plugin.access.revoke();
+    let response = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(value["code"], 50202);
+    assert_eq!(f.admin.settings.key_mutations.lock().unwrap().len(), 1);
+    assert!(
+        f.admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    let recovery = recovery_request(
+        &f,
+        "GET",
+        "/api/admin/plugins",
+        &cookie,
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(recovery.status(), StatusCode::OK);
+    body(recovery).await;
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn service_settings_entered_transaction_survives_cancel_and_premature_plugin_success() {
+    for premature in [false, true] {
+        let (f, cookie) = service_fixture(if premature {
+            Mode::Head
+        } else {
+            Mode::MessageIdentity
+        })
+        .await;
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        *f.admin.settings.key_gate.lock().unwrap() = Some(gate.clone());
+        let app = f.app.clone();
+        let task = tokio::spawn(async move {
+            app.oneshot(
+                Request::post("/api/admin/settings/admin-api-key/regenerate")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while f.admin.settings.key_mutations.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !f.admin
+                .services
+                .settings()
+                .admin_api_key_exists()
+                .await
+                .unwrap()
+        );
+        if !premature {
+            f.plugin.access.revoke();
+        }
+        let response = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+        assert_eq!(value["code"], 50202);
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !f
+                .admin
+                .services
+                .settings()
+                .admin_api_key_exists()
+                .await
+                .unwrap()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(f.admin.settings.key_mutations.lock().unwrap().len(), 1);
+        f.manager.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn service_settings_original_store_failure_cannot_be_masked_as_success_by_plugin() {
+    use gateway_admin::ports::store::{AdminStoreError, AdminStoreErrorKind};
+    let (f, cookie) = service_fixture(Mode::InvalidModel).await;
+    *f.admin.settings.key_failure.lock().unwrap() = Some(AdminStoreError::new(
+        AdminStoreErrorKind::Conflict,
+        "settings",
+        "fixture conflict",
+    ));
+    let response = recovery_request(
+        &f,
+        "POST",
+        "/api/admin/settings/admin-api-key/regenerate",
+        &cookie,
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    body(response).await;
+    assert_eq!(f.admin.settings.key_mutations.lock().unwrap().len(), 1);
+    assert!(
+        !f.admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn service_settings_keeps_shared_graph_permit_until_cancelled_native_transaction_finishes() {
+    use gateway_admin::{
+        model::{AdminErrorKind, MutationActor, MutationContext},
+        plugins::service::Origin,
+        ports::plugins::PluginService,
+    };
+    let (f, _) = service_fixture(Mode::MessageIdentity).await;
+    let root = gateway_core::engine::nested::ExtensionCallScope::default();
+    let child = root.fork_http("host-service-parent".into()).unwrap();
+    let cancellation = gateway_core::lifecycle::CancellationToken::default();
+    let origin = Origin {
+        registry: f.manager.middleware_registry().unwrap(),
+        request_id: "service-audit".into(),
+        call_id: "http-parent".into(),
+        cancellation: cancellation.clone(),
+        deadline_at: Default::default(),
+        call_scope: child,
+    };
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    *f.admin.settings.key_gate.lock().unwrap() = Some(gate.clone());
+    let service = f.admin.services.service_settings();
+    let task = tokio::spawn(async move {
+        service
+            .regenerate_admin_api_key(
+                Some(origin),
+                MutationContext {
+                    actor: MutationActor::System,
+                    request_id: "service-audit".into(),
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.admin.settings.key_mutations.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let siblings = (0..15)
+        .map(|i| root.fork_http(format!("sibling-{i}")).unwrap())
+        .collect::<Vec<_>>();
+    assert!(root.fork_http("overflow".into()).is_err());
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.unwrap_err().kind(),
+        AdminErrorKind::UpstreamResultUnknown
+    );
+    // Recorded contexts themselves retain the graph permit; release the test
+    // observation so only the still-running native transaction owns it.
+    f.plugin.service_seen.lock().unwrap().clear();
+    assert!(root.fork_http("still-full".into()).is_err());
+    gate.notify_one();
+    let released = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(scope) = root.fork_http("released".into()) {
+                break scope;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        f.admin
+            .services
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    assert_eq!(f.admin.settings.key_mutations.lock().unwrap().len(), 1);
+    drop((siblings, released));
+    f.manager.shutdown().await;
+}
+
 #[tokio::test]
 async fn recovery_login_and_disable_survive_rejection_wait_and_fault_without_bypassing_admin_auth()
 {

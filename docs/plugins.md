@@ -28,7 +28,7 @@
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
-中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，业务服务目录及宿主主动调用仍待接入。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
+中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除已接入，其他业务服务及宿主主动调用继续实施。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
 
 绑定与实例共用 revision 和配置 CAS。候选升级准备失败仍使用旧代；无法确认配置是否提交时阻止继续使用旧绑定，重新保存确认后恢复。恢复失败的必需中间件保留作用范围内的门禁，进程退出也不自动跳过。启停、绑定和版本变更撤销旧调用计划，包含 RPC 已结束但正文尚未交付的响应。
 
@@ -56,7 +56,11 @@ HTTP 层可领取 API 提供的原始 WebSocket 升级能力，保留验证后�
 
 空计划直接使用原生输入输出，不做 JSON 往返。Admin 的类型化边界在调用原服务之前反序列化改写输入，在返回原调用者之前校验输出类型。原终端继续负责授权、字段校验和事务；中间件上下文不签发管理或模型身份。业务错误保留 kind/message/details，可通过 SDK 的类型化 Result 处理；RPC 拒绝保留原 PluginFault 详情及 ambiguous 发送事实，不把不确定结果伪装成未执行；非法 RPC 回复或意外二进制结果隔离当前进程代次。停用、换代、父取消及期限会撤销等待，旧计划不会自动切换到新进程。
 
-这仍是执行桥的验证：实际业务服务目录、`host.services.call` 及各入口的调用上下文尚待接入。上游设置操作包含本地不存在的配置，不能把本地设置冒充完整上游设置类型；具体操作应逐项标明兼容合同与本地版本。生产 middleware 启用限制继续保留。
+管理 HTTP 已接通 `settings.admin_api_key_exists`、`settings.regenerate_admin_api_key`、`settings.delete_admin_api_key` 三项实际服务，输入输出与对应上游 SDK 合同一致。调用沿用 HTTP 冻结发布和原调用图，使用管理审计边界签发的 request ID；服务入口在原管理员鉴权之后。原生终端拒绝改写 actor/request ID，生成与删除仍由原 SettingsService 持久化并发布配置。Key 明文只在显式生成结果中编码，不赋予领域 Key 通用序列化能力。
+
+服务写入开始后，原事务和发布不随插件等待者一起丢弃，也不自动重试；同一调用图的名额保留到原写入与配置发布结束，沿原副作用标记阻止祖先重放。插件随后失败、撤销，或在写入尚未完成时提前返回成功，管理 API 返回原 `502 / 50202` 不确定结果合同；原终端失败不能被插件伪装成成功。查询允许按 service 合同短路和改写结果，恢复入口仍可用。
+
+其他业务服务、`host.services.call` 及其他入口的调用上下文尚待接入。上游设置操作包含本地不存在的配置，不能把本地设置冒充完整上游设置类型；具体操作应逐项标明兼容合同与本地版本。生产 middleware 启用限制继续保留。
 
 ## 插件故障恢复
 
