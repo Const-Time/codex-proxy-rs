@@ -878,6 +878,15 @@ impl ProviderError {
     pub fn has_atomic_client_events(&self) -> bool {
         self.atomic_client_events.is_some()
     }
+
+    /// Borrow the original Provider failure batch before retry or delivery policy.
+    /// The existing error retains sole ownership; observers must not rewrite it.
+    #[must_use]
+    pub fn atomic_client_events(&self) -> &[ProviderEvent] {
+        self.atomic_client_events
+            .as_ref()
+            .map_or(&[], |events| events.0.as_slice())
+    }
 }
 
 impl Clone for ProviderError {

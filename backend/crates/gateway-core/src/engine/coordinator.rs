@@ -44,6 +44,7 @@ use futures_timer::Delay;
 
 /// Request 级协调器；不会创建或写入 `request_attempts`。
 pub struct AttemptCoordinator<S: ?Sized> {
+    observation: Option<super::observation::RequestObservationDispatch>,
     retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
@@ -86,9 +87,17 @@ where
             upstream_adapters: None,
             account_scheduler: None,
             execution_context: None,
+            observation: None,
         }
     }
 
+    pub(super) fn with_observation(
+        mut self,
+        observation: Option<super::observation::RequestObservationDispatch>,
+    ) -> Self {
+        self.observation = observation;
+        self
+    }
     pub fn with_retry_policy(
         mut self,
         policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
@@ -132,6 +141,7 @@ where
             upstream_adapters: self.upstream_adapters.clone(),
             account_scheduler: self.account_scheduler.clone(),
             execution_context: self.execution_context.clone(),
+            observation: self.observation.clone(),
         }
     }
 
@@ -262,6 +272,9 @@ where
             response_control: super::response_control::ResponseControl::default(),
             connection_retries: 0,
             observation: ResponseObservation::new(timing_started_at),
+            observer: self.observation.clone(),
+            observed_provider: None,
+            websocket_sequence: 0,
             budget_scope: request.budget_scope.clone(),
             budget_prior_attempts_usd: Decimal::ZERO,
             budget_attempt_already_counted: false,
@@ -388,6 +401,9 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     response_control: super::response_control::ResponseControl,
     connection_retries: u32,
     observation: ResponseObservation,
+    observer: Option<super::observation::RequestObservationDispatch>,
+    observed_provider: Option<super::observation::ObservedProvider>,
+    websocket_sequence: u64,
     budget_scope: Option<super::budget::ClientBudgetScope>,
     budget_prior_attempts_usd: Decimal,
     budget_attempt_already_counted: bool,
@@ -643,12 +659,23 @@ where
             .await;
         }
         self.client_status_code = Some(client_status_code);
+        if let Some(observer) = &self.observer {
+            observer.record_client_status(client_status_code);
+        }
         Ok(())
     }
 
     #[must_use]
     pub const fn is_finalized(&self) -> bool {
         matches!(self.finalization, Some(RequestFinalization::Complete))
+    }
+
+    pub(super) fn dispatch_observation(&mut self) {
+        if self.is_finalized()
+            && let Some(observer) = self.observer.take()
+        {
+            observer.finish();
+        }
     }
 
     #[must_use]
@@ -849,6 +876,7 @@ where
                     return Ok(PullOutcome::Event(event));
                 }
                 PollBoundary::Item(Some(Err(error))) => {
+                    self.observe_websocket_error(&error);
                     match self.handle_stream_error(error).await? {
                         StreamErrorOutcome::AttemptDiscarded => {
                             return Ok(PullOutcome::AttemptDiscarded);
@@ -879,6 +907,7 @@ where
         if let Some(observation) = event.response_observation().cloned() {
             self.observe_response(observation);
         }
+        self.observe_websocket_event(event);
         for fact in event.canonical_facts() {
             self.observation.observe_identity(fact);
         }
@@ -887,6 +916,44 @@ where
         }
         if event.wire_event().is_some() && !event.has_canonical_facts() {
             self.observe_wire_event().await;
+        }
+    }
+
+    fn observe_websocket_event(&mut self, event: &ProviderEvent) {
+        if let Some(observer) = &self.observer
+            && let Some(wire) = event.wire_event()
+            && let Some(current) = &self.current
+            && current
+                .response_observation
+                .as_ref()
+                .or(event.response_observation())
+                .map_or_else(
+                    || current.metadata.transport(),
+                    ProviderResponseObservation::transport,
+                )
+                .as_str()
+                == "websocket"
+            && let Some(sequence) = self.websocket_sequence.checked_add(1)
+        {
+            self.websocket_sequence = sequence;
+            observer.websocket_response(
+                super::observation::WebSocketResponseAttempt::new(
+                    current.metadata.provider().clone(),
+                    current.metadata.provider_account_id().clone(),
+                    current.index,
+                ),
+                sequence,
+                wire.clone(),
+                self.requested_model.as_ref(),
+            );
+        }
+    }
+
+    fn observe_websocket_error(&mut self, error: &ProviderError) {
+        // Called once at the original stream boundary, including batches later
+        // discarded by retries. Delivery and recovery retain the same batch.
+        for event in error.atomic_client_events() {
+            self.observe_websocket_event(event);
         }
     }
 
@@ -1013,6 +1080,7 @@ where
                         let _ = reply.send(Ok(Some(event)));
                     }
                     Some(Err(error)) => {
+                        self.observe_websocket_error(&error);
                         let visible = error.clone();
                         let invocation = self
                             .middleware_invocation
@@ -1561,6 +1629,7 @@ where
             .execution_context
             .as_ref()
             .and_then(|context| context.bind_account(metadata.provider_account_id()));
+        self.observed_provider = self.observer.as_ref().map(|_| (&metadata).into());
         self.current = Some(CurrentAttempt {
             stream,
             _account: account,
@@ -2523,6 +2592,13 @@ where
     }
 
     async fn persist_finalization(&mut self, finalization: ModelRequestFinalization) {
+        if let Some(observer) = &self.observer {
+            observer.record_finalization(
+                &finalization,
+                self.observed_provider.as_ref(),
+                self.requested_model.as_ref(),
+            );
+        }
         self.finalized_at = Some(finalization.completed_at);
         let mut persisted = self.request_persisted;
         // 首次合并写失败后不能以零 attempt 补行；建流前也只有确定未发送的请求可按零次收敛。

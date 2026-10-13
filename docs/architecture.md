@@ -554,6 +554,8 @@ Responses HTTP 的 request 适配先完成入口鉴权与解码，再运行冻�
 非空计划把原 ExecutionSession 包成尚未提交的 JSON/SSE 正文。JSON 信封保留全部原事件；SSE 保留每个 Core 原子批次边界。最外层验证整个改写批次后才提交，首批为空、非法 JSON/SSE 或终态缺失不能确认交付；单批最多 1024 帧及 8 MiB，JSON 总正文最多 8 MiB。提交和结算继续委托 Core，终态输出前完成原终结；插件改写失败、撤销或下游离开都通过原清理 owner 释放名额并保留已产生费用，不重放 Provider。此接入由真实 Core、路由与管理发布测试覆盖，仍不等于开放 middleware 安装启用。
 
 
+Core 的 RequestObserverPlan 由请求准备结果强持有冻结计划，原生子调用继承同一端口和真实插件祖先；不建立第二份发布索引。终态事实只从原 ModelRequestFinalization 投影，不携带原始错误、凭据或诊断正文；未知费用保留 unknown 和空金额。原 Provider 已建立的最后一次 attempt 提供账号和模型事实，后续选号失败不回退到候选或虚构账号。终态写入、费用结算和准入释放完成后只投递一次，读取等待取消后继续原会话清理，观察端口不增加业务取消源。实际上游 WebSocket 事件在中间件之前读取；原失败批次仅在 Provider 流边界观察一次，重试丢弃和终态重用均不重复派发。事件序号跨 attempt 连续，判断使用实际上游 transport，客户端协议不代替上游事实。计划必须同步提交有界后台工作，不在 Core 内等待插件 RPC；当前只有原生端口与执行生命周期已接入，Runtime 投递和 Admin 订阅仍待完成。
+
 Core 的 `AttemptMiddleware` 端口按根请求绑定，每次真实重试创建新调用。`next` 只接收操作正文；路由候选、账号范围、请求身份、期限和原会话状态保持冻结。插件不能获得可独立轮询的 ProviderStream：Core 先验证冷流元数据和账号归属并尝试登记，再通过受管 `AttemptSource` 逐条交付事件。每条原始事件先经过同一个 Core 观测与费用累计路径，插件输出只作为交付内容，不能覆盖费用、响应观测或原生续接状态。
 
 中间件等待和 Provider 准备 future 由会话持有；临时丢弃读取等待后会恢复原调用，不重复执行插件或选号。受管来源的读取 future 也能暂停后恢复。原来源尚未结束时，插件不能以提前 EOF 宣告成功；插件自身失败按宿主错误终结，不计作 Provider 健康失败或自动重试。上游原始错误仍由 Core 决定重试与原子失败交付，即使插件捕获错误后挂起，取消时也保留错误批次中的原始费用。此端口已通过 Core 集成测试，Responses HTTP、Images 和 standalone Search 的 SDK attempt 协议桥已连接此端口，生产 middleware 能力仍等待其余声明范围接入。

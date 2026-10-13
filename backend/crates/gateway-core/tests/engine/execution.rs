@@ -11,12 +11,12 @@ use gateway_core::engine::budget::{ClientBudgetCharge, ClientBudgetError, Client
 use gateway_core::error::GatewayError;
 
 #[derive(Default)]
-struct Admissions {
-    renewals: Arc<AtomicUsize>,
-    active: Arc<AtomicBool>,
-    limits: Mutex<Vec<RateLimits>>,
-    release_gate: Mutex<Option<oneshot::Receiver<()>>>,
-    releases: AtomicUsize,
+pub(super) struct Admissions {
+    pub(super) renewals: Arc<AtomicUsize>,
+    pub(super) active: Arc<AtomicBool>,
+    pub(super) limits: Mutex<Vec<RateLimits>>,
+    pub(super) release_gate: Mutex<Option<oneshot::Receiver<()>>>,
+    pub(super) releases: AtomicUsize,
 }
 
 impl ClientAdmissionPort for Admissions {
@@ -69,13 +69,13 @@ impl ClientAdmissionPort for Admissions {
 }
 
 #[derive(Default)]
-struct Budget {
-    reject: bool,
-    active: Arc<AtomicBool>,
-    charges: Mutex<Vec<ClientBudgetCharge>>,
-    settlement_gate: Mutex<Option<oneshot::Receiver<()>>>,
-    settlements: AtomicUsize,
-    fail_settlement: bool,
+pub(super) struct Budget {
+    pub(super) reject: bool,
+    pub(super) active: Arc<AtomicBool>,
+    pub(super) charges: Mutex<Vec<ClientBudgetCharge>>,
+    pub(super) settlement_gate: Mutex<Option<oneshot::Receiver<()>>>,
+    pub(super) settlements: AtomicUsize,
+    pub(super) fail_settlement: bool,
 }
 
 impl ClientBudgetPort for Budget {
@@ -136,7 +136,10 @@ fn service(admissions: Arc<Admissions>, budget: Arc<Budget>) -> DefaultExecution
     .with_budget(budget)
 }
 
-fn request(service: &DefaultExecutionService, transport: ClientTransport) -> StartExecution {
+pub(super) fn request(
+    service: &DefaultExecutionService,
+    transport: ClientTransport,
+) -> StartExecution {
     StartExecution {
         client: service.authenticate("sk_start_test").unwrap(),
         public_model: PublicModelId::new("gpt-start").unwrap(),
@@ -1316,11 +1319,11 @@ fn detached_early_failure_resumes_cancelled_store_write_and_settles_once_for_all
     });
 }
 
-struct ChargedProvider {
-    fail: bool,
+pub(super) struct ChargedProvider {
+    pub(super) fail: bool,
 }
 
-fn known_charge() -> Decimal {
+pub(super) fn known_charge() -> Decimal {
     "1.25".parse().unwrap()
 }
 
@@ -1396,7 +1399,7 @@ fn charged_service(
     }
 }
 
-async fn consume_charged_prefix(session: &mut dyn ExecutionSession) {
+pub(super) async fn consume_charged_prefix(session: &mut dyn ExecutionSession) {
     let first = session.next_event().await.unwrap().unwrap();
     assert_eq!(
         first.commit_requirement(),
@@ -1410,7 +1413,11 @@ async fn consume_charged_prefix(session: &mut dyn ExecutionSession) {
     );
 }
 
-fn assert_cleanup_completed(admissions: &Admissions, budget: &Budget, request_id: &ModelRequestId) {
+pub(super) fn assert_cleanup_completed(
+    admissions: &Admissions,
+    budget: &Budget,
+    request_id: &ModelRequestId,
+) {
     assert!(!admissions.active.load(Ordering::SeqCst));
     assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
     assert_eq!(budget.settlements.load(Ordering::SeqCst), 1);
@@ -2142,7 +2149,7 @@ fn execution_metadata_with_continuation() -> ExecutionRequestMetadata {
 }
 
 #[derive(Default)]
-struct RecordingClientApiKeyUsage {
+pub(super) struct RecordingClientApiKeyUsage {
     ids: Mutex<Vec<String>>,
 }
 
@@ -2162,18 +2169,18 @@ impl ClientApiKeyUsageSink for RecordingClientApiKeyUsage {
 }
 
 #[derive(Default)]
-struct TrackingExecutionStore {
-    touched: AtomicBool,
-    probe_failures: Mutex<Vec<String>>,
-    entry_rejections: Mutex<Vec<gateway_core::engine::EntryRejection>>,
-    requests: Mutex<Vec<NewModelRequest>>,
-    attempts: Mutex<Vec<AttemptRecord>>,
-    finalizations: Mutex<Vec<ModelRequestFinalization>>,
-    create_gate: Mutex<Option<oneshot::Receiver<()>>>,
-    finalize_gate: Mutex<Option<oneshot::Receiver<()>>>,
-    creates: AtomicUsize,
-    finalizes: AtomicUsize,
-    fail_probe_observation: AtomicBool,
+pub(super) struct TrackingExecutionStore {
+    pub(super) touched: AtomicBool,
+    pub(super) probe_failures: Mutex<Vec<String>>,
+    pub(super) entry_rejections: Mutex<Vec<gateway_core::engine::EntryRejection>>,
+    pub(super) requests: Mutex<Vec<NewModelRequest>>,
+    pub(super) attempts: Mutex<Vec<AttemptRecord>>,
+    pub(super) finalizations: Mutex<Vec<ModelRequestFinalization>>,
+    pub(super) create_gate: Mutex<Option<oneshot::Receiver<()>>>,
+    pub(super) finalize_gate: Mutex<Option<oneshot::Receiver<()>>>,
+    pub(super) creates: AtomicUsize,
+    pub(super) finalizes: AtomicUsize,
+    pub(super) fail_probe_observation: AtomicBool,
 }
 
 impl TrackingExecutionStore {
@@ -2364,7 +2371,7 @@ impl ClientAdmissionPort for UnusedAdmissions {
     }
 }
 
-struct UnusedContinuation;
+pub(super) struct UnusedContinuation;
 
 impl NativeContinuationPort for UnusedContinuation {
     fn resolve<'a>(
@@ -2464,11 +2471,15 @@ fn client_snapshot() -> RuntimeSnapshot {
     .expect("client snapshot")
 }
 
-fn start_snapshot() -> RuntimeSnapshot {
+pub(super) fn start_snapshot() -> RuntimeSnapshot {
     start_snapshot_with_policy(1, true, RateLimits::unlimited())
 }
 
-fn start_snapshot_with_policy(revision: u64, enabled: bool, limits: RateLimits) -> RuntimeSnapshot {
+pub(super) fn start_snapshot_with_policy(
+    revision: u64,
+    enabled: bool,
+    limits: RateLimits,
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
     start_snapshot_with_clients(
         revision,
@@ -2482,7 +2493,10 @@ fn start_snapshot_with_policy(revision: u64, enabled: bool, limits: RateLimits) 
     )
 }
 
-fn start_snapshot_with_clients(revision: u64, clients: Vec<ClientPolicy>) -> RuntimeSnapshot {
+pub(super) fn start_snapshot_with_clients(
+    revision: u64,
+    clients: Vec<ClientPolicy>,
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
     let capabilities =
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
@@ -3095,7 +3109,7 @@ use gateway_core::{
     engine::{execution::PreparedExecutionRequest, middleware::MiddlewareRequest},
 };
 
-fn prepare(
+pub(super) fn prepare(
     service: &DefaultExecutionService,
 ) -> gateway_core::engine::execution::PreparedRootExecution {
     service
@@ -3103,7 +3117,7 @@ fn prepare(
         .unwrap()
 }
 
-fn assert_failure<T>(result: Result<T, GatewayError>, kind: GatewayErrorKind) {
+pub(super) fn assert_failure<T>(result: Result<T, GatewayError>, kind: GatewayErrorKind) {
     match result {
         Err(error) => assert_eq!(error.kind(), kind),
         Ok(_) => panic!("nested preparation should fail with {kind:?}"),

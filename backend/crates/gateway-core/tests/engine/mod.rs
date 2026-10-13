@@ -4,6 +4,7 @@ mod continuation;
 mod coordinator;
 mod execution;
 mod middleware;
+mod observation;
 mod probe;
 mod provider;
 mod response_control;
