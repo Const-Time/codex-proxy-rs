@@ -5,8 +5,9 @@ use std::time::Duration;
 use crate::RpcError;
 use gateway_core::{
     error::{
-        ClientVisibleUpstreamError, OpaqueUpstreamValue, ProviderDiagnostic, ProviderError,
-        ProviderErrorKind, RawUpstreamError,
+        ClientVisibleUpstreamError, ContinuationFailure, ContinuationRecoveryDisposition,
+        OpaqueUpstreamValue, ProviderDiagnostic, ProviderError, ProviderErrorKind,
+        RawUpstreamError,
     },
     upstream::UpstreamSendState,
 };
@@ -115,4 +116,22 @@ pub(super) fn invalid(sent: UpstreamSendState) -> ProviderError {
         ProviderDiagnostic::new("Plugin upstream adapter returned an invalid event")
             .with_classification("plugin_protocol", "invalid_event"),
     )
+}
+
+pub(super) fn continuation_unavailable() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::ContinuationRecoveryRequired,
+        UpstreamSendState::NotSent,
+    )
+    .with_continuation_failure(ContinuationFailure::HistoryUnavailable)
+    .with_continuation_recovery_disposition(ContinuationRecoveryDisposition::ClientReplayRequired)
+    .with_continuation_unavailable_reason("plugin_session_unavailable")
+    .with_upstream_code(OpaqueUpstreamValue::new(
+        "previous_response_not_found".to_owned(),
+    ))
+    .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+        "Previous response is unavailable; retry with the full conversation input.",
+        Some("previous_response_not_found".into()),
+        Some("previous_response_id".into()),
+    ))
 }
