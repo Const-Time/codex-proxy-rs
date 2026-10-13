@@ -342,6 +342,7 @@ impl Drop for ExecutionLifetime {
 /// Only Core issues this authority. Wire facts and plugin-supplied IDs cannot construct it.
 #[derive(Clone)]
 pub struct NestedExecutionContext {
+    pub(crate) observer_plan: Option<Arc<dyn super::observation::RequestObserverPlan>>,
     pub(crate) service_factory: Option<Arc<dyn super::middleware::service::Factory>>,
     pub(crate) http_dispatcher: Option<Arc<dyn super::middleware::http::Dispatcher>>,
     pub(crate) lifetime: std::sync::Weak<ExecutionLifetime>,

@@ -159,6 +159,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    observer_plan: Option<Arc<dyn super::observation::RequestObserverPlan>>,
     service_factory: Option<Arc<dyn super::middleware::service::Factory>>,
     http_dispatcher: Option<Arc<dyn super::middleware::http::Dispatcher>>,
     retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
@@ -179,6 +180,16 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    /// Attach the plan from this request's frozen publication. Observer revocation
+    /// belongs to the observer; it must never cancel the business request.
+    pub fn with_observer_plan(
+        mut self,
+        plan: Arc<dyn super::observation::RequestObserverPlan>,
+    ) -> Self {
+        self.observer_plan = Some(plan);
+        self
+    }
+
     /// Bind the catalog from the same frozen publication as the request layers.
     /// Rebase the existing settings branch without replacing authorization or billing.
     pub fn with_model_catalog(
@@ -293,6 +304,7 @@ impl PreparedRootExecution {
     }
     pub fn nested_context(&self) -> super::nested::NestedExecutionContext {
         super::nested::NestedExecutionContext {
+            observer_plan: self.observer_plan.clone(),
             service_factory: self.service_factory.clone(),
             http_dispatcher: self.http_dispatcher.clone(),
             lifetime: Arc::downgrade(&self.lifetime),
@@ -318,6 +330,7 @@ impl PreparedRootExecution {
         parent: super::nested::NestedExecutionContext,
     ) -> Result<Self, GatewayError> {
         parent.validate()?;
+        self.observer_plan = parent.observer_plan.clone();
         self.service_factory = parent.service_factory.clone();
         self.http_dispatcher = parent.http_dispatcher.clone();
         self.lifetime.bind_parent(parent.lifetime.clone());
@@ -472,6 +485,7 @@ impl ExecutionTarget {
 }
 
 struct PendingStartExecution {
+    observation: Option<super::observation::RequestObservationDispatch>,
     prepared: PreparedRootExecution,
     target: ExecutionTarget,
     operation: Operation,
@@ -735,6 +749,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         self.start_prepared_with_target(PendingStartExecution {
+            observation: None,
             prepared: self.prepare_execution(client)?,
             target: ExecutionTarget::Model(public_model),
             operation,
@@ -754,6 +769,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         self.start_prepared_with_target(PendingStartExecution {
+            observation: None,
             prepared: self.prepare_execution(client)?,
             target: ExecutionTarget::ProviderEndpoint(provider),
             operation,
@@ -764,9 +780,44 @@ impl DefaultExecutionService {
 
     async fn start_prepared_with_target(
         &self,
-        request: PendingStartExecution,
+        mut request: PendingStartExecution,
     ) -> Result<StartedExecution, GatewayError> {
-        request.prepared.validate()?;
+        let observer = request.prepared.observer_plan.clone().map(|plan| {
+            super::observation::RequestObservationDispatch::new(
+                plan,
+                super::observation::FrozenRequestObservationContext {
+                    request_id: request.prepared.request_id.clone(),
+                    config_revision: request.prepared.client.snapshot.revision(),
+                    client_scope: super::observation::RequestObservationScope::new(
+                        request.prepared.client.policy.key_id().clone(),
+                        request
+                            .prepared
+                            .client
+                            .policy
+                            .account_scope()
+                            .routing_snapshot()
+                            .groups_snapshot()
+                            .iter()
+                            .map(|group| group.id().clone())
+                            .collect(),
+                    ),
+                    operation: request.operation.kind(),
+                    requested_model: match &request.target {
+                        ExecutionTarget::Model(model) => Some(model.clone()),
+                        ExecutionTarget::ProviderEndpoint(_) => None,
+                    },
+                    extension_scope: request.prepared.extension_scope.clone(),
+                },
+            )
+        });
+        let started = Instant::now();
+        if let Err(error) = request.prepared.validate() {
+            if let Some(observer) = &observer {
+                observer.finish_rejection(&error, started.elapsed());
+            }
+            return Err(error);
+        }
+        request.observation = observer.clone();
         let request_id = request.prepared.request_id.clone();
         let client_key_id = request.prepared.client.policy.key_id().clone();
         let metadata = request.metadata.clone();
@@ -784,7 +835,6 @@ impl DefaultExecutionService {
             .iter()
             .map(|group| group.id().as_str().to_owned())
             .collect();
-        let started = Instant::now();
         let result = self.start_authorized_target(request).await;
         if let Err(error) = &result {
             let observation = self
@@ -804,6 +854,9 @@ impl DefaultExecutionService {
             select_biased! {
                 result = observation => { if let Err(error) = result { tracing::warn!(%error, "entry rejection observation failed"); } },
                 _ = timeout => { tracing::warn!("entry rejection observation timed out"); },
+            }
+            if let Some(observer) = &observer {
+                observer.finish_rejection(error, started.elapsed());
             }
         }
         result
@@ -1054,6 +1107,7 @@ impl DefaultExecutionService {
     ) -> Result<StartedExecution, GatewayError> {
         request.prepared.validate()?;
         let PendingStartExecution {
+            observation: observer,
             prepared,
             target,
             operation,
@@ -1061,6 +1115,7 @@ impl DefaultExecutionService {
         } = request;
         let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            observer_plan: _,
             service_factory: _,
             http_dispatcher: _,
             retry_policy,
@@ -1217,6 +1272,7 @@ impl DefaultExecutionService {
             .with_attempt_middleware(attempt_middleware)
             .with_request_settings(request_settings)
             .with_execution_context(execution_context)
+            .with_observation(observer)
             .with_upstream_adapters(upstream_adapters)
             .with_account_scheduler(account_scheduler)
             .with_retry_policy(retry_policy)
@@ -1740,6 +1796,7 @@ impl ExecutionService for DefaultExecutionService {
         let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            observer_plan: None,
             service_factory: None,
             http_dispatcher: None,
             retry_policy: None,
@@ -1767,6 +1824,7 @@ impl ExecutionService for DefaultExecutionService {
     ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
         Box::pin(async move {
             self.start_prepared_with_target(PendingStartExecution {
+                observation: None,
                 prepared,
                 target: ExecutionTarget::Model(request.public_model),
                 operation: request.operation,
@@ -1784,6 +1842,7 @@ impl ExecutionService for DefaultExecutionService {
     ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
         Box::pin(async move {
             self.start_prepared_with_target(PendingStartExecution {
+                observation: None,
                 prepared,
                 target: ExecutionTarget::ProviderEndpoint(provider),
                 operation,
@@ -1896,6 +1955,7 @@ impl DefaultExecutionSession {
         if self.core.is_finalized() && self.admission.is_none() && self.cleanup.is_none() {
             self.core.release_nested_permit();
             self.lifetime.take();
+            self.core.dispatch_observation();
         }
     }
 

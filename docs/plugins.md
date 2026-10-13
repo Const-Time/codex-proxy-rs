@@ -30,6 +30,8 @@
 | 维护任务 | maintenance v1 的 `plugin.reconcile`，Core 已发布配置与已发布实例驱动，Host 监督周期、重试和关闭 |
 | 未开放的能力 | middleware、upstream_adapter、observer、command_line、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
+观察器仍未开放。Core 已建立请求冻结的只读终态和实际上游 WebSocket 事件端口；终态在原会话完成费用结算和准入释放后派发，原始 WebSocket 帧在中间件改写及重试丢弃前观察。Runtime 的有界 RPC 投递、订阅绑定和各阶段回调尚待接通，因此此端口不代表 observer 插件已可启用。
+
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
 中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层，以及原 Core 的 request/attempt、routing/scheduling/retry/upstream 阶段可主动调用这些业务；HTTP、独立 WebSocket、注册和认证阶段的主动调用也已接入；其他阶段继续实施。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。

@@ -11,7 +11,7 @@ pub mod execution;
 pub mod middleware;
 pub mod model_routing;
 pub mod nested;
-mod observation;
+pub mod observation;
 pub mod probe;
 pub mod provider;
 pub mod response_control;
