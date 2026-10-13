@@ -227,6 +227,7 @@ mod worker_models {
 }
 
 struct Worker {
+    adapter_provider: String,
     adapter_mode: String,
     adapter_url: String,
     adapter_transport: String,
@@ -245,7 +246,7 @@ impl PluginHandler for Worker {
                 assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Registration);
                 assert_eq!(call.params, json!({}));
                 assert!(call.payload.is_empty());
-                let mut declaration = json!({"id":"adapter","provider":"openai","base_url":self.adapter_url,"paths":[{"path":"responses","purpose":"inference"},{"path":"audit","purpose":"auxiliary"}],"authentication_kinds":["oauth"],"transport":self.adapter_transport,"protocol":"openai","models":["public-model"]});
+                let mut declaration = json!({"id":"adapter","provider":self.adapter_provider,"base_url":self.adapter_url,"paths":[{"path":"responses","purpose":"inference"},{"path":"audit","purpose":"auxiliary"}],"authentication_kinds":["oauth"],"transport":self.adapter_transport,"protocol":"openai","models":["public-model"]});
                 match self.adapter_mode.as_str() {
                     "id" => declaration["id"] = json!("invalid id"),
                     "provider" => declaration["provider"] = json!("foreign"),
@@ -497,6 +498,10 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        adapter_provider: session.handshake().configuration["adapter_provider"]
+            .as_str()
+            .unwrap_or("openai")
+            .into(),
         adapter_url: session.handshake().configuration["adapter_url"]
             .as_str()
             .unwrap_or("https://example.test/base/")
@@ -1442,6 +1447,9 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
     }
     let (metadata, body) = UpstreamAdapterRequest::decode(&call.payload).unwrap();
     let input: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    if let Some(expected) = input["expect_continuation"].as_bool() {
+        assert_eq!(metadata.continuation.is_some(), expected);
+    }
     assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Upstream);
     assert_eq!(
         metadata.account_id,

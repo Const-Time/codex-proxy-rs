@@ -1827,6 +1827,8 @@ dependencies = [
  "image",
  "jsonschema",
  "provider-openai",
+ "provider-xai",
+ "redis",
  "roxmltree",
  "secrecy",
  "semver",

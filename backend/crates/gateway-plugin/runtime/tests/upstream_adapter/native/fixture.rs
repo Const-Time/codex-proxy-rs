@@ -4,7 +4,12 @@ use chrono::Utc;
 use gateway_admin::model::plugins::*;
 use gateway_core::{
     account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy},
-    engine::{execution::*, provider::ProviderRegistry},
+    engine::{
+        continuation::PreviousResponseId,
+        execution::*,
+        provider::{Provider, ProviderRegistry},
+    },
+    error::GatewayError,
     metering::{ModelPriceOverride, PricingOverrides},
     operation::{GenerateRequest, Operation, OperationKind, ProtocolPayload},
     policy::{ClientApiKeyId, ClientPolicy, PlaintextClientApiKey, RateLimits},
@@ -34,6 +39,9 @@ pub(super) struct Fixture {
     pub server: Server,
     pub account: ProviderAccountId,
     pub forbidden: ProviderAccountId,
+    pub provider: &'static str,
+    native_model: &'static str,
+    pub continuation: Arc<gateway_store::redis::RedisNativeContinuationRepository>,
     _store: gateway_store::StoreBundle,
     _cache: tempfile::TempDir,
     database: Database,
@@ -97,8 +105,10 @@ fn snapshot(
     forbidden: &ProviderAccountId,
     revision: u64,
     enabled: bool,
+    provider_name: &str,
+    native_model: &str,
 ) -> RuntimeSnapshot {
-    let provider = ProviderKind::new("openai").unwrap();
+    let provider = ProviderKind::new(provider_name).unwrap();
     let group = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
     let other = AccountGroupId::new("grp_00000000000000000000000000000002").unwrap();
     let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
@@ -126,8 +136,10 @@ fn snapshot(
         "fast":{"input":"3","output":"4","cacheRead":"0","cacheWrite":"0"}
     }}))
     .unwrap();
-    let prices: PricingOverrides =
-        BTreeMap::from([("openai".into(), BTreeMap::from([("gpt-5.4".into(), price)]))]);
+    let prices: PricingOverrides = BTreeMap::from([(
+        provider_name.into(),
+        BTreeMap::from([(native_model.into(), price)]),
+    )]);
     RuntimeSnapshot::new(
         ConfigRevision::new(revision).unwrap(),
         AccountSelectionPolicy::new(
@@ -138,26 +150,46 @@ fn snapshot(
         vec![provider.clone()],
         vec![ProviderModel::new(
             provider,
-            UpstreamModelId::new("gpt-5.4").unwrap(),
+            UpstreamModelId::new(native_model).unwrap(),
             ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
                 .with_upstream_feature_validation(),
         )],
-        vec![ClientPolicy::new(
-            ClientApiKeyId::new("key_alice").unwrap(),
-            PlaintextClientApiKey::new("sk_native_fixture").unwrap(),
-            scope,
-            enabled,
-            RateLimits::unlimited(),
-        )],
+        vec![
+            ClientPolicy::new(
+                ClientApiKeyId::new("key_alice").unwrap(),
+                PlaintextClientApiKey::new("sk_native_fixture").unwrap(),
+                scope.clone(),
+                enabled,
+                RateLimits::unlimited(),
+            ),
+            ClientPolicy::new(
+                ClientApiKeyId::new("key_alice_other").unwrap(),
+                PlaintextClientApiKey::new("sk_native_other").unwrap(),
+                scope,
+                true,
+                RateLimits::unlimited(),
+            ),
+        ],
     )
     .unwrap()
     .with_account_directory(directory)
-    .with_model_mappings(BTreeMap::from([("public-model".into(), "gpt-5.4".into())]))
+    .with_model_mappings(BTreeMap::from([(
+        "public-model".into(),
+        native_model.into(),
+    )]))
     .with_pricing(Arc::new(prices))
 }
 
 impl Fixture {
     pub async fn new() -> Option<Self> {
+        Self::for_provider("openai").await
+    }
+    pub async fn for_provider(provider: &'static str) -> Option<Self> {
+        let native_model = match provider {
+            "openai" => "gpt-5.4",
+            "xai" => "grok-4.5",
+            _ => panic!("unsupported native Provider fixture"),
+        };
         let (database, database_url, redis_url) = Database::create().await?;
         let cache = tempfile::tempdir().unwrap();
         // Never let deployment environment variables redirect this test fixture.
@@ -186,6 +218,10 @@ impl Fixture {
             (&account, "fixture-provider-secret"),
             (&forbidden, "fixture-forbidden-secret"),
         ] {
+            if provider == "xai" {
+                super::xai::seed(&ports, id, access).await;
+                continue;
+            }
             let now = Utc::now();
             let input = CodexCredentialAdmin
                 .prepare_import(ImportCodexOAuthCredential {
@@ -212,20 +248,43 @@ impl Fixture {
             ports.accounts().create_account(input).await.unwrap();
         }
         let server = Server::new().await;
-        let mut provider_config = provider_openai::OpenAiConfig::default();
-        provider_config.api.base_url = server.url.clone();
-        provider_config.resolve_and_validate(cache.path()).unwrap();
-        let provider = provider_openai::initialize(provider_config, ports.clone())
-            .await
-            .unwrap();
+        let core_provider: Arc<dyn Provider> = if provider == "xai" {
+            super::xai::provider(&ports)
+        } else {
+            let mut provider_config = provider_openai::OpenAiConfig::default();
+            provider_config.api.base_url = server.url.clone();
+            provider_config.resolve_and_validate(cache.path()).unwrap();
+            provider_openai::initialize(provider_config, ports.clone())
+                .await
+                .unwrap()
+                .core_provider()
+        };
+        let connection =
+            redis::aio::ConnectionManager::new(redis::Client::open(redis_url).unwrap())
+                .await
+                .unwrap();
+        let continuation = Arc::new(
+            gateway_store::redis::RedisNativeContinuationRepository::new(
+                connection,
+                &format!("cpr-native-adapter-{suffix}"),
+            )
+            .unwrap(),
+        );
         let core = Arc::new(Core::default());
-        let snapshot = RuntimeSnapshotHandle::new(snapshot(&account, &forbidden, 1, true));
+        let snapshot = RuntimeSnapshotHandle::new(snapshot(
+            &account,
+            &forbidden,
+            1,
+            true,
+            provider,
+            native_model,
+        ));
         let execution = DefaultExecutionService::new(
             snapshot.clone(),
             core.clone(),
-            ProviderRegistry::new(vec![provider.core_provider()]).unwrap(),
+            ProviderRegistry::new(vec![core_provider]).unwrap(),
             core.clone(),
-            core.clone(),
+            continuation.clone(),
             core.clone(),
         )
         .with_budget(core.clone());
@@ -241,7 +300,7 @@ impl Fixture {
             .await
             .unwrap();
         let mut command = update(&artifact.sha256, 0, true);
-        command.configuration = json!({"adapter_url":server.url});
+        command.configuration = json!({"adapter_url":server.url,"adapter_provider":provider});
         command.upstream_adapter = Some(PluginUpstreamAdapterBinding {
             scope: PluginExecutionScope::All {},
         });
@@ -256,13 +315,26 @@ impl Fixture {
             server,
             account,
             forbidden,
+            provider,
+            native_model,
+            continuation,
             _store: store,
             _cache: cache,
             database,
         })
     }
     pub async fn start(&self, behavior: &str) -> StartedExecution {
-        let client = self.execution.authenticate("sk_native_fixture").unwrap();
+        self.start_with("sk_native_fixture", behavior, None)
+            .await
+            .unwrap()
+    }
+    pub async fn start_with(
+        &self,
+        key: &str,
+        behavior: &str,
+        previous: Option<&str>,
+    ) -> Result<StartedExecution, GatewayError> {
+        let client = self.execution.authenticate(key).unwrap();
         let prepared = self
             .execution
             .prepare_execution(client)
@@ -272,10 +344,11 @@ impl Fixture {
             public_model: PublicModelId::new("public-model").unwrap(),
             operation: Operation::Generate(GenerateRequest::from_protocol_payload(ProtocolPayload::json_object("openai",
                 serde_json::from_value(json!({"model":"public-model","input":"fixture prompt","service_tier":"default", "behavior":behavior,
-                    "fixture_account":self.account.as_str(),"fixture_credential_revision":1,"fixture_model":"gpt-5.4"})).unwrap()
+                    "fixture_account":self.account.as_str(),"fixture_credential_revision":1,"fixture_model":self.native_model,
+                    "previous_response_id":previous,"expect_continuation":previous.is_some()})).unwrap()
             ).unwrap())),
-            metadata: ExecutionRequestMetadata { protocol:"openai".into(), endpoint:"/v1/responses".into(), transport:ClientTransport::HttpJson, stream:false, client_ip:None, user_agent:None, previous_response_id:None },
-        }).await.unwrap()
+            metadata: ExecutionRequestMetadata { protocol:"openai".into(), endpoint:"/v1/responses".into(), transport:ClientTransport::HttpJson, stream:false, client_ip:None, user_agent:None, previous_response_id:previous.map(PreviousResponseId::new) },
+        }).await
     }
     pub async fn clean(&self, charges: usize) {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -294,8 +367,14 @@ impl Fixture {
         .expect("original Core settlement and admission release must finish");
     }
     pub fn revoke_key(&self) {
-        self.snapshot
-            .publish(snapshot(&self.account, &self.forbidden, 2, false));
+        self.snapshot.publish(snapshot(
+            &self.account,
+            &self.forbidden,
+            2,
+            false,
+            self.provider,
+            self.native_model,
+        ));
         assert!(self.execution.authenticate("sk_native_fixture").is_err());
     }
     pub async fn in_flight(&self) -> u32 {
@@ -304,7 +383,7 @@ impl Fixture {
             .leases()
             .load_state(
                 &ClientApiKeyId::new("key_alice").unwrap(),
-                &ProviderKind::new("openai").unwrap(),
+                &ProviderKind::new(self.provider).unwrap(),
                 &[self.account.clone(), self.forbidden.clone()],
             )
             .await
@@ -327,6 +406,41 @@ impl Fixture {
         drop(self.execution);
         drop(self.ports);
         drop(self._store);
+        drop(self.continuation);
         database.close().await;
+    }
+    pub async fn upgrade(&mut self) {
+        let artifact = self
+            .manager
+            .upload(upstream_archive("1.0.1"), &actor())
+            .await
+            .unwrap();
+        let mut command = update(&artifact.sha256, self.installed.revision, true);
+        command.configuration =
+            json!({"adapter_url":self.server.url,"adapter_provider":self.provider});
+        command.upstream_adapter = Some(PluginUpstreamAdapterBinding {
+            scope: PluginExecutionScope::All {},
+        });
+        self.installed = self
+            .manager
+            .update(Some(&self.installed.id), command, &actor())
+            .await
+            .unwrap();
+    }
+    pub async fn disable(&self) {
+        let mut command = update(
+            &self.installed.artifact.sha256,
+            self.installed.revision,
+            false,
+        );
+        command.configuration =
+            json!({"adapter_url":self.server.url,"adapter_provider":self.provider});
+        command.upstream_adapter = Some(PluginUpstreamAdapterBinding {
+            scope: PluginExecutionScope::All {},
+        });
+        self.manager
+            .update(Some(&self.installed.id), command, &actor())
+            .await
+            .unwrap();
     }
 }
