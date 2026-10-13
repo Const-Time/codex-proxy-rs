@@ -101,6 +101,7 @@ use crate::transport::{
 mod execution;
 mod failure;
 mod observation;
+mod upstream_adapter;
 mod workers;
 
 use execution::*;
@@ -406,6 +407,11 @@ impl Provider for CodexProvider {
                 UpstreamSendState::NotSent,
             ));
         };
+        if let Some(adapter) = context.upstream_adapter(candidate.provider(), upstream_model)? {
+            return self
+                .execute_upstream_adapter(generate, upstream_model.clone(), context, adapter)
+                .await;
+        }
         let previous_session = decode_openai_session_state(generate);
         let continuation_requested = generate.native_continuation_requested();
         let mut upstream_request = encode_generate_request(generate, upstream_model.as_str())

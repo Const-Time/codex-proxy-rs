@@ -161,6 +161,7 @@ pub enum ClientAuthenticationError {
 pub struct PreparedRootExecution {
     http_dispatcher: Option<Arc<dyn super::middleware::http::Dispatcher>>,
     retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
+    upstream_adapters: Option<Arc<dyn super::upstream_adapter::UpstreamAdapterPlan>>,
     account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     model_router: Option<Arc<dyn super::model_routing::ModelRouter>>,
     model_target: super::nested::ModelExecutionTarget,
@@ -212,6 +213,14 @@ impl PreparedRootExecution {
     pub fn with_retry_policy(mut self, policy: Arc<dyn super::retry_policy::RetryPolicy>) -> Self {
         self = self.with_revocation(policy.cancellation());
         self.retry_policy = Some(policy);
+        self
+    }
+    pub fn with_upstream_adapters(
+        mut self,
+        plan: Arc<dyn super::upstream_adapter::UpstreamAdapterPlan>,
+    ) -> Self {
+        self = self.with_revocation(plan.cancellation());
+        self.upstream_adapters = Some(plan);
         self
     }
     pub fn with_account_scheduler(
@@ -1044,6 +1053,7 @@ impl DefaultExecutionService {
         let PreparedRootExecution {
             http_dispatcher: _,
             retry_policy,
+            upstream_adapters,
             account_scheduler,
             model_router: _,
             model_target,
@@ -1196,6 +1206,7 @@ impl DefaultExecutionService {
             .with_attempt_middleware(attempt_middleware)
             .with_request_settings(request_settings)
             .with_execution_context(execution_context)
+            .with_upstream_adapters(upstream_adapters)
             .with_account_scheduler(account_scheduler)
             .with_retry_policy(retry_policy)
             .start(
@@ -1720,6 +1731,7 @@ impl ExecutionService for DefaultExecutionService {
         Ok(PreparedRootExecution {
             http_dispatcher: None,
             retry_policy: None,
+            upstream_adapters: None,
             account_scheduler: None,
             model_router: None,
             model_target: Default::default(),
