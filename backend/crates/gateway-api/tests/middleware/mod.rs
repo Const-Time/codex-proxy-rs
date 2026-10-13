@@ -2,6 +2,178 @@ mod dispatcher;
 pub(crate) mod fixture;
 mod websocket;
 
+#[tokio::test]
+async fn recovery_login_and_disable_survive_rejection_wait_and_fault_without_bypassing_admin_auth()
+{
+    use gateway_admin::ports::plugins::PluginService;
+    for (mode, revoked, pending) in [
+        (Mode::MessageIdentity, false, false),
+        (Mode::ShortCircuit, false, false),
+        (Mode::WaitBeforeNext, false, true),
+        (Mode::MessageIdentity, true, false),
+    ] {
+        let f = new(mode).await;
+        if revoked {
+            f.plugin.access.revoke();
+        }
+        let waiting = if pending {
+            let app = f.app.clone();
+            let task =
+                tokio::spawn(async move { app.oneshot(request("/v1/responses")).await.unwrap() });
+            entered(&f).await;
+            Some(task)
+        } else {
+            None
+        };
+        let login = recovery_request(
+            &f,
+            "POST",
+            "/api/admin/auth/login",
+            "",
+            serde_json::json!({"username":"admin@example.com", "password":"strong-admin-password"}),
+        )
+        .await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        body(login).await;
+        let input = serde_json::json!({"id":"fixture","revision":1,"name":"fixture","artifactSha256":"a".repeat(64),"enabled":false,"configuration":{},"secrets":{},"middleware":{"order":0,"mounts":["http"],"scope":{"kind":"all"}}});
+        for (cookie, expected) in [
+            ("", StatusCode::UNAUTHORIZED),
+            (
+                "cpr_admin_session=middleware-ordinary",
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let denied = recovery_request(
+                &f,
+                "POST",
+                "/api/admin/plugins/update",
+                cookie,
+                input.clone(),
+            )
+            .await;
+            assert_eq!(denied.status(), expected);
+            body(denied).await;
+            assert_eq!(f.manager.list().await.unwrap()[0].revision, 1);
+        }
+        let response = recovery_request(
+            &f,
+            "POST",
+            "/api/admin/plugins/update",
+            &cookie,
+            input.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+        assert_eq!(value["data"]["enabled"], false);
+        assert_eq!(value["data"]["revision"], 2);
+        let stale = recovery_request(&f, "POST", "/api/admin/plugins/update", &cookie, input).await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        body(stale).await;
+        if let Some(waiting) = waiting {
+            let response = tokio::time::timeout(Duration::from_secs(3), waiting)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            body(response).await;
+        }
+        assert!(
+            f.plugin
+                .http_seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(path, _)| !path.starts_with("/api/admin/"))
+        );
+        let response = f.request(false).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body(response).await;
+        f.settled().await;
+        assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+        f.manager.shutdown().await;
+    }
+}
+
+async fn recovery_request(
+    f: &Fixture,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    value: serde_json::Value,
+) -> axum::response::Response {
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        f.app.clone().oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(value.to_string()))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn recovery_assets_remain_available_but_similar_paths_and_plugin_execution_stay_gated() {
+    let root = std::env::temp_dir().join(format!("cpr-plugin-recovery-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(root.join("index.html"), "recovery-fixture-index").unwrap();
+    std::fs::write(root.join("assets/app.js"), "recovery-fixture-script").unwrap();
+    std::fs::write(root.join("favicon.svg"), "recovery-fixture-icon").unwrap();
+    let f = Fixture::with_assets(Mode::MessageIdentity, root.clone()).await;
+    f.plugin.access.revoke();
+    for (path, expected) in [
+        ("/", "recovery-fixture-index"),
+        ("/login", "recovery-fixture-index"),
+        ("/plugins?selected=fixture", "recovery-fixture-index"),
+        ("/assets/app.js", "recovery-fixture-script"),
+        ("/favicon.svg?v=1", "recovery-fixture-icon"),
+    ] {
+        let response = f
+            .app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(body(response).await, expected.as_bytes());
+    }
+    for path in [
+        "/v1/responses",
+        "/plugins-other",
+        "/assets-other",
+        "/api/admin/plugins-extra",
+        "/api/admin/plugins/resource",
+        "/api/admin/plugins/invoke",
+        "/api/admin/plugins/models/responses",
+    ] {
+        let response = f.app.clone().oneshot(request(path)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{path}");
+        body(response).await;
+    }
+    for path in ["/api/admin/plugins", "/api/admin/plugins/artifacts"] {
+        let response = recovery_request(&f, "GET", path, "", serde_json::json!({})).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        body(response).await;
+    }
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+    f.manager.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 use crate::openai::middleware::fixture::{Fixture, Mode};
 use axum::{
     body::Body,

@@ -33,6 +33,23 @@ pub use wire::{
     AdminPageData, AdminResponse, PageMeta, WireValidationError,
 };
 
+/// These host-owned routes must remain reachable to recover a broken HTTP plugin.
+/// Their handlers still perform the normal login, administrator and revision checks.
+/// Plugin execution/resource/model routes deliberately remain outside this set.
+pub(crate) fn is_recovery_route(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/admin/auth/login"
+            | "/api/admin/auth/status"
+            | "/api/admin/auth/logout"
+            | "/api/admin/plugins"
+            | "/api/admin/plugins/artifacts"
+            | "/api/admin/plugins/artifacts/remove"
+            | "/api/admin/plugins/update"
+            | "/api/admin/plugins/uninstall"
+    )
+}
+
 /// 构造完整且固定的 `/api/admin` 路由。
 pub fn router<S>() -> Router<S>
 where

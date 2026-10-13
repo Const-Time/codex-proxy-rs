@@ -29,7 +29,7 @@ use tower::ServiceExt;
 
 type AdminResult<T> = Result<T, AdminError>;
 struct Store {
-    records: Vec<PluginRecord>,
+    records: Mutex<Vec<PluginRecord>>,
 }
 fn artifact() -> PluginArtifact {
     PluginArtifact {
@@ -48,25 +48,36 @@ fn artifact() -> PluginArtifact {
 #[async_trait]
 impl PluginStore for Store {
     async fn list(&self) -> AdminResult<Vec<PluginRecord>> {
-        Ok(self.records.clone())
+        Ok(self.records.lock().unwrap().clone())
     }
     async fn artifact(&self, _: &str) -> AdminResult<PluginArtifact> {
         Ok(artifact())
     }
     async fn artifacts(&self) -> AdminResult<Vec<PluginArtifactInfo>> {
-        unreachable!()
+        Ok(vec![artifact().info])
     }
     async fn delete_artifact(&self, _: &str, _: &MutationContext) -> AdminResult<()> {
         unreachable!()
     }
     async fn artifact_info(&self, _: &str) -> AdminResult<PluginArtifactInfo> {
-        unreachable!()
+        Ok(artifact().info)
     }
     async fn put_artifact(&self, _: PluginArtifact, _: &MutationContext) -> AdminResult<()> {
         unreachable!()
     }
-    async fn save(&self, _: &PluginRecord, _: u64, _: &MutationContext) -> AdminResult<()> {
-        unreachable!()
+    async fn save(
+        &self,
+        record: &PluginRecord,
+        revision: u64,
+        _: &MutationContext,
+    ) -> AdminResult<()> {
+        let mut records = self.records.lock().unwrap();
+        let current = records.iter_mut().find(|row| row.id == record.id).unwrap();
+        if current.revision != revision {
+            return Err(AdminError::conflict("stale fixture revision"));
+        }
+        *current = record.clone();
+        Ok(())
     }
     async fn delete(&self, _: &str, _: u64, _: &MutationContext) -> AdminResult<()> {
         unreachable!()
@@ -812,16 +823,28 @@ impl Fixture {
         mounts: Vec<PluginMiddlewareMount>,
         features: &[gateway_core::operation::Feature],
     ) -> Self {
-        Self::with_policy(mode, mounts, features, false, false, false).await
+        Self::with_policy(mode, mounts, features, false, false, false, None).await
     }
     pub(crate) async fn with_router() -> Self {
-        Self::with_policy(Mode::Rewrite, vec![], &[], true, false, false).await
+        Self::with_policy(Mode::Rewrite, vec![], &[], true, false, false, None).await
     }
     pub(crate) async fn with_scheduler() -> Self {
-        Self::with_policy(Mode::Rewrite, vec![], &[], false, true, false).await
+        Self::with_policy(Mode::Rewrite, vec![], &[], false, true, false, None).await
     }
     pub(crate) async fn with_retry() -> Self {
-        Self::with_policy(Mode::Rewrite, vec![], &[], false, false, true).await
+        Self::with_policy(Mode::Rewrite, vec![], &[], false, false, true, None).await
+    }
+    pub(crate) async fn with_assets(mode: Mode, path: std::path::PathBuf) -> Self {
+        Self::with_policy(
+            mode,
+            vec![PluginMiddlewareMount::Http],
+            &[],
+            false,
+            false,
+            false,
+            Some(path),
+        )
+        .await
     }
     async fn with_policy(
         mode: Mode,
@@ -830,6 +853,7 @@ impl Fixture {
         routing: bool,
         scheduling: bool,
         retry: bool,
+        assets: Option<std::path::PathBuf>,
     ) -> Self {
         let plugin = Arc::new(Plugin {
             access: PluginAccess::default(),
@@ -876,7 +900,9 @@ impl Fixture {
             vec![]
         };
         let manager = Arc::new(PluginManager::new(
-            Arc::new(Store { records }),
+            Arc::new(Store {
+                records: Mutex::new(records),
+            }),
             Arc::new(Runtime(plugin.clone())),
         ));
         manager.restore().await.unwrap();
@@ -918,10 +944,13 @@ impl Fixture {
             .with_budget(effects.clone()),
         );
         let admin = crate::admin::AdminTestFixture::new().await;
+        admin
+            .auth
+            .insert_user_session("middleware-ordinary", "ordinary");
         let lifecycle = Arc::new(TestLifecycle::default());
         let app = gateway_api::initialize(
             gateway_api::ApiConfig {
-                asset_directory: std::env::temp_dir(),
+                asset_directory: assets.unwrap_or_else(std::env::temp_dir),
                 cors_allowed_origins: vec![],
                 request_timeout_seconds: None,
                 request_id_header: "x-request-id".into(),
