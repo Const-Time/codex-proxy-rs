@@ -200,10 +200,10 @@ impl Service {
         let result: Regenerated = mutation(
             origin,
             "settings.regenerate_admin_api_key",
-            context,
+            MutationInput::from(&context),
             |context| context,
             Ok,
-            move |context| {
+            move |_| {
                 Box::pin(async move {
                     let result = inner.regenerate_admin_api_key(&context).await?;
                     Ok(Regenerated {
@@ -228,10 +228,10 @@ impl Service {
         let result: Mutation = mutation(
             origin,
             "settings.delete_admin_api_key",
-            context,
+            MutationInput::from(&context),
             |context| context,
             Ok,
-            move |context| {
+            move |_| {
                 Box::pin(async move { inner.delete_admin_api_key(&context).await.map(Into::into) })
             },
         )
@@ -428,11 +428,11 @@ impl Command {
                 Self::Exists
             }
             "settings.regenerate_admin_api_key" => {
-                decode::<MutationContext>(input)?;
+                decode::<MutationInput>(input)?;
                 Self::Regenerate
             }
             "settings.delete_admin_api_key" => {
-                decode::<MutationContext>(input)?;
+                decode::<MutationInput>(input)?;
                 Self::Delete
             }
             "local.settings.v1.load" => {
@@ -475,6 +475,38 @@ fn encode<T: Serialize>(value: T) -> Result<serde_json::Value, AdminError> {
     serde_json::to_value(value).map_err(|_| AdminError::invalid("服务结果编码失败"))
 }
 
+// The common upstream DTO describes the host service invocation. The native
+// audit identity remains captured separately by the terminal, including plugin
+// instance/revision. Local v1 operations retain their explicit plugin actor.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MutationInput {
+    actor: MutationInputActor,
+    request_id: String,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum MutationInputActor {
+    AdminSession { admin_user_id: String },
+    AdminApiKey,
+    System,
+}
+impl From<&MutationContext> for MutationInput {
+    fn from(context: &MutationContext) -> Self {
+        use crate::model::MutationActor;
+        Self {
+            actor: match &context.actor {
+                MutationActor::AdminSession { admin_user_id } => MutationInputActor::AdminSession {
+                    admin_user_id: admin_user_id.clone(),
+                },
+                MutationActor::AdminApiKey => MutationInputActor::AdminApiKey,
+                MutationActor::Plugin { .. } | MutationActor::System => MutationInputActor::System,
+            },
+            request_id: context.request_id.clone(),
+        }
+    }
+}
+
 // Secret encoding is confined to this explicit operation; the domain key does
 // not gain general Serialize or Debug access.
 #[derive(Serialize, Deserialize)]
@@ -508,17 +540,18 @@ impl From<Mutation> for AdminApiKeyMutation {
     }
 }
 
-async fn mutation<I, O, R>(
+async fn mutation<I, O, R, C>(
     origin: Option<Origin>,
     operation: &'static str,
     input: I,
-    actor: fn(&I) -> &MutationContext,
+    actor: fn(&I) -> &C,
     finish: fn(O) -> Result<R, AdminError>,
     terminal: impl FnOnce(I) -> BoxFuture<'static, Result<O, AdminError>> + Send + 'static,
 ) -> Result<R, AdminError>
 where
     I: Serialize + DeserializeOwned + Send + 'static,
     O: Serialize + DeserializeOwned + Send + 'static,
+    C: Clone + PartialEq + Send + 'static,
 {
     let started = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));

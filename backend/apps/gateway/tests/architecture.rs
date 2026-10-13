@@ -395,7 +395,9 @@ fn integration_tests_mirror_production_module_tree() {
         let production = module_layouts(&member_root.join("src"), &["lib.rs", "main.rs"]);
         let tests = module_layouts(&tests_root, &test_crate_roots(member));
         for (module, test_layout) in tests {
-            if module == Path::new("support") {
+            // Shared fixture helpers have no production counterpart; their
+            // declarations are still checked by the conventional layout audit.
+            if module.starts_with("support") {
                 continue;
             }
 
@@ -437,6 +439,22 @@ fn test_crate_roots(member: &str) -> Vec<&'static str> {
         let manifest = fs::read_to_string(backend_root().join(member).join("Cargo.toml")).unwrap();
         assert!(manifest.contains(&format!("path = \"tests/{binary}\"")));
         roots.push(binary);
+    }
+    if member == "crates/gateway-plugin/runtime" {
+        // This independent Cargo package compiles the original git-pinned SDK,
+        // so its declared binary root cannot be a module of the local SDK tests.
+        let fixture = "services/upstream_sdk/fixture";
+        let manifest = fs::read_to_string(
+            backend_root()
+                .join(member)
+                .join("tests")
+                .join(fixture)
+                .join("Cargo.toml"),
+        )
+        .unwrap();
+        assert!(manifest.contains("[workspace]"));
+        assert!(manifest.contains("path = \"src/main.rs\""));
+        roots.push("services/upstream_sdk/fixture/src/main.rs");
     }
     roots
 }

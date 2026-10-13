@@ -125,4 +125,4 @@ RUST_MIN_STACK=16777216 RUSTDOCFLAGS='-D warnings' cargo +1.97.0 doc --manifest-
 [系统架构](../../../../docs/architecture.md)。Provider 固定为宿主内置的 OpenAI 与 xAI；插件实现只依赖公开 SDK 合同。
 单元测试与文档构建不代替目标平台上的安装、配置及实际能力验证
 
-宿主签发的服务操作者可以包含 `MutationActor::Plugin { instance_id, revision }`，它用于本地服务审计，不代表管理端登录或用户共享额度权限。服务请求中的操作者由宿主端口覆盖；插件不能通过提交该值取得权限。Runtime 全阶段主动 service 接线及旧 SDK 制品对新增操作者的兼容仍在验收。
+公共 `settings::MutationContext` 保留上游的管理员会话、管理 API Key 和 System 三类 DTO。插件主动调用在公共输入中投影为 System，真实实例、revision 和请求关联由原终端单独持有并用于数据库审计。显式 `local_settings_v1::MutationContext` 使用自己的 `MutationActor::Plugin { instance_id, revision }` 扩展；插件不能通过提交该值取得权限。固定 b37d7901 原 SDK 的独立进程已验证公共三项操作的真实 PostgreSQL 写入、类型化中间件、审计和改写拒绝；完整第三方制品仍须逐项验收。
