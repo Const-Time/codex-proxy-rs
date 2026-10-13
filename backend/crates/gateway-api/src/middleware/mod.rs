@@ -100,6 +100,28 @@ async fn handle(
 ) -> Response {
     let started = Instant::now();
     let inherited = request.extensions_mut().remove::<Origin>();
+    if is_recovery_request(&request) {
+        let response = dispatch(router, request, started, timeout).await;
+        // An internal request still owns its original graph permit until its body
+        // ends. Skipping plugin placement must not free that permit at headers.
+        return match inherited {
+            None => response,
+            Some(origin) => response.map(|body| {
+                Body::new(ResponseBody {
+                    body: Some(core::guard_body(
+                        body.map_err(|error| Box::new(error) as _).boxed_unsync(),
+                        origin.context.cancellation.clone(),
+                        origin.context.deadline_at,
+                    )),
+                    lifetime: Some(Arc::new(Lifetime {
+                        cancellation: origin.context.cancellation,
+                        _parent: Some(origin._lifetime),
+                        _call_scope: origin.context.call_scope,
+                    })),
+                })
+            }),
+        };
+    }
     let is_inherited = inherited.is_some();
     let (registry, context, parent, baseline) = if let Some(origin) = inherited {
         (
@@ -236,6 +258,13 @@ async fn handle(
         }
         Err(failure) => error(&failure),
     }
+}
+fn is_recovery_request(request: &Request<Body>) -> bool {
+    let path = request.uri().path();
+    crate::admin::is_recovery_route(path)
+        || (matches!(*request.method(), http::Method::GET | http::Method::HEAD)
+            && (matches!(path, "/" | "/login" | "/plugins" | "/favicon.svg")
+                || path.starts_with("/assets/")))
 }
 async fn dispatch(
     router: Router,

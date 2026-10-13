@@ -4,6 +4,44 @@ use gateway_core::engine::middleware::{MiddlewareError, http as core};
 use http_body_util::Full;
 
 #[tokio::test]
+async fn internal_recovery_calls_keep_normal_auth_graph_permits_and_response_cancellation() {
+    let f = Fixture::with_mounts(Mode::MessageIdentity, vec![PluginMiddlewareMount::Http]).await;
+    f.plugin.access.revoke();
+    let parent = f
+        .execution
+        .prepare_execution(f.execution.authenticate("sk_middleware").unwrap())
+        .unwrap();
+    let base = core::Context::from_execution(parent.nested_context());
+    let mut responses = Vec::new();
+    for _ in 0..16 {
+        let context = base.child("caller".into()).unwrap();
+        let cancellation = context.cancellation.clone();
+        let request = http::Request::builder()
+            .uri("/api/admin/plugins")
+            .body(core::empty_body())
+            .unwrap();
+        let response = f.dispatcher.dispatch(context, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        responses.push((response, cancellation));
+    }
+    assert!(
+        base.child("caller".into()).is_err(),
+        "buffered admin replies must retain active graph permits"
+    );
+    let (response, cancellation) = responses.pop().unwrap();
+    cancellation.cancel();
+    assert!(response.into_body().collect().await.is_err());
+    assert!(
+        base.child("caller".into()).is_ok(),
+        "cancelled response releases its permit"
+    );
+    drop(responses);
+    assert!(f.plugin.http_seen.lock().unwrap().is_empty());
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn dispatch_effects_veto_parent_replay_without_disabling_the_childs_safe_retry() {
     let f = Fixture::with_retry().await;
     let parent = f
