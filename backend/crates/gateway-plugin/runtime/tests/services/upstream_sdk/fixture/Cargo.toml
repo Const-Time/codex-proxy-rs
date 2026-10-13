@@ -1,0 +1,17 @@
+[package]
+name = "upstream-service-fixture"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "upstream-service-fixture"
+path = "src/main.rs"
+
+[dependencies]
+gateway-plugin-sdk = { git = "https://github.com/zyycn/codex-proxy-rs.git", rev = "b37d7901441e123cb9126a6f9af4ff3321548d24", features = ["io"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", default-features = false, features = ["io-std", "macros", "rt"] }

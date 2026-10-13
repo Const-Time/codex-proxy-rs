@@ -2,10 +2,30 @@
 //! These operations deliberately do not impersonate upstream settings contracts.
 use super::{
     Operation,
-    settings::{ModelPriceOverride, MultiplierScope, MutationContext, PricingOverrides},
+    settings::{ModelPriceOverride, MultiplierScope, PricingOverrides},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+/// Native audit identity for explicitly local operations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MutationActor {
+    AdminSession {
+        admin_user_id: String,
+    },
+    AdminApiKey,
+    Plugin {
+        instance_id: String,
+        revision: std::num::NonZeroU64,
+    },
+    System,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MutationContext {
+    pub actor: MutationActor,
+    pub request_id: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSettings {

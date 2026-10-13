@@ -1,6 +1,7 @@
 use super::super::{binding::CandidateRuntime, execution::Server, *};
-use super::environment::{Database, connection};
+use super::environment::connection;
 use crate::models::fixture::Core;
+use crate::support::database::Database;
 use chrono::Utc;
 use gateway_admin::model::plugins::*;
 use gateway_core::{

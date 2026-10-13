@@ -106,17 +106,14 @@ pub struct RegeneratedAdminApiKey {
     pub mutation: AdminApiKeyMutation,
     pub key: String,
 }
+/// Common upstream invocation metadata. Host-initiated plugin operations use
+/// System here; native persistence retains the separately bound plugin audit
+/// identity. Explicit local v1 operations expose their own extended actor type.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MutationActor {
-    AdminSession {
-        admin_user_id: String,
-    },
+    AdminSession { admin_user_id: String },
     AdminApiKey,
-    Plugin {
-        instance_id: String,
-        revision: NonZeroU64,
-    },
     System,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
