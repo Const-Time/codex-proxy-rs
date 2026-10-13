@@ -8,6 +8,7 @@ use std::time::Duration;
 use futures::channel::{mpsc, oneshot};
 use futures::executor::block_on;
 use futures::future::BoxFuture;
+use futures::{FutureExt as _, StreamExt as _};
 
 use gateway_core::account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy};
 use gateway_core::lifecycle::CancellationToken;
@@ -139,6 +140,63 @@ fn handle_should_keep_request_snapshot_frozen_across_publish() {
 
     assert_eq!(frozen.revision().get(), 1);
     assert_eq!(handle.revision().map(ConfigRevision::get), Some(2));
+}
+
+#[test]
+fn publications_follow_core_and_coalesce_without_resurrecting_suspended_lease() {
+    block_on(async {
+        let handle = RuntimeSnapshotHandle::new(empty_snapshot(1));
+        let source = handle.publications();
+        let mut a = source.subscribe();
+        let mut b = source.subscribe();
+        let initial = a.next().await.unwrap();
+        assert_eq!(initial.revision(), Some(revision(1)));
+        assert!(!initial.cancellation().is_cancelled());
+        let consumer = initial.cancellation();
+        consumer.cancel();
+        assert!(consumer.is_cancelled());
+        assert!(!initial.cancellation().is_cancelled());
+        assert_eq!(b.next().await.unwrap().revision(), Some(revision(1)));
+        assert!(a.next().now_or_never().is_none());
+        handle.publish(empty_snapshot(2));
+        handle.publish(empty_snapshot(3));
+        assert_eq!(a.next().await.unwrap().revision(), Some(revision(3)));
+        assert_eq!(b.next().await.unwrap().revision(), Some(revision(3)));
+        handle.suspend();
+        assert!(initial.cancellation().is_cancelled());
+        assert!(a.next().await.unwrap().revision().is_none());
+        handle.publish(empty_snapshot(3));
+        let recovered = b.next().await.unwrap();
+        assert_eq!(recovered.revision(), Some(revision(3)));
+        assert!(!recovered.cancellation().is_cancelled());
+        assert!(initial.cancellation().is_cancelled());
+        assert_eq!(a.next().await.unwrap().revision(), recovered.revision());
+        assert_eq!(
+            source.subscribe().next().await.unwrap().revision(),
+            recovered.revision()
+        );
+    });
+}
+
+#[test]
+fn waiting_publication_reader_is_woken_and_missing_snapshot_stays_unavailable() {
+    block_on(async {
+        let handle = RuntimeSnapshotHandle::default();
+        let mut stream = handle.publications().subscribe();
+        let initial = stream.next().await.unwrap();
+        assert!(initial.revision().is_none());
+        assert!(initial.cancellation().is_cancelled());
+        let mut waiting = Box::pin(stream.next());
+        assert!(futures::poll!(&mut waiting).is_pending());
+        handle.publish(empty_snapshot(1));
+        assert_eq!(waiting.await.unwrap().revision(), Some(revision(1)));
+        handle.publish(empty_snapshot(1));
+        assert_eq!(stream.next().await.unwrap().revision(), Some(revision(1)));
+        handle.suspend();
+        let suspended = stream.next().await.unwrap();
+        assert!(suspended.revision().is_none());
+        assert!(suspended.cancellation().is_cancelled());
+    });
 }
 
 #[test]

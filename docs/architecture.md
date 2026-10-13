@@ -410,7 +410,7 @@ Worker 由各 Bundle 贡献、由 Host 统一监督：
 
 - Store：过期请求恢复、历史保留和 PostgreSQL/Redis 观测队列；
 - Core：`runtime` owner 的 RuntimeSnapshot 周期对账和 Redis change 订阅；
-- Admin：S3/R2 备份、订阅/额度采样和价格同步 daemon；
+- Admin：S3/R2 备份、订阅/额度采样、价格同步和已发布插件实例维护 daemon；
 - Provider：credential refresh、quota/catalog 健康和官方版本/etag 检查。
 
 周期任务的 Redis lease 只保证单周期互斥，不构成多副本 leader 选举。备份 daemon 依赖单副本部署边界，
@@ -626,3 +626,5 @@ API 的 PluginModelExecution 复用现有 request/attempt 协议桥，将最终�
 重试裁决端口同样由 PreparedRootExecution 传入原 AttemptCoordinator。协调器先按发送、提交、续接、子调用副作用、路由与连接预算计算恢复路径，再投影安全失败事实和冻结作用范围；策略只能停止或允许该路径，不能选择新账号、缩短退避或扩大预算。端口故障和独立两秒等待上限到期委托原恢复；取消与总期限先于决定处理。成功咨询的代次撤销加入原请求取消链，返回后复查副作用、期限与连接预算。SDK retry_policy v1 的 retry RPC、Admin 实例绑定、Store 持久化恢复与管理配置已连接；按冻结范围和祖先排除依次咨询，Delegate/故障继续咨询，Stop/Retry 终止链路。整条链共享两秒等待预算，每个成功咨询的代次立即加入同一策略撤销源，因此前一插件在后续等待时失效也能取消请求。retry 阶段只开放实例私有状态，不签发原生模型或管理权限。
 
 等待裁决时，原 ResponseExecutionSession 持有失败、原子事件、账号持有及唯一调用 future；普通读取被丢弃只暂停它，再次读取不重复插件 RPC 或 Provider 准备。显式取消先还原当前 attempt 和已观察事件，再走原终态与费用清理。账号持有仍参与祖先账号事实，因此裁决期间的子调用须选择其他授权账号；子调用的新发送事实会使父恢复失效。准备阶段的跨 Provider 恢复也接受同一端口，诊断请求继续跳过插件策略。
+
+插件维护任务由 Admin 原实例发布 owner 贡献 Host daemon，实际进程 RPC、回调和资源关闭由 Runtime 负责。Core 提供只读的实际快照发布通知；它与 Store 的可丢失 commit 通知分开，消费者不能发布快照。原快照发布锁同时记录可用期，暂停立即撤销旧可用期，即使缓慢消费者合并通知也不能复活旧调用。维护任务只读取已发布的活动实例，候选准备及未确认 SQL 提交不能启动任务；旧批次取消并排空后才启动替代批次。取消不删除已提交的数据库业务事实，审计继续使用宿主绑定的真实插件代次。

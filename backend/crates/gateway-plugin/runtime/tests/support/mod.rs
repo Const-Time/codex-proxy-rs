@@ -186,7 +186,7 @@ pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false),
+        (false, false, false, false, false),
     )
 }
 pub fn authentication_archive(version: &str) -> Arc<[u8]> {
@@ -196,7 +196,7 @@ pub fn authentication_archive(version: &str) -> Arc<[u8]> {
         true,
         false,
         false,
-        (false, false, false, false),
+        (false, false, false, false, false),
     )
 }
 pub fn routing_archive(version: &str) -> Arc<[u8]> {
@@ -206,7 +206,7 @@ pub fn routing_archive(version: &str) -> Arc<[u8]> {
         false,
         true,
         false,
-        (false, false, false, false),
+        (false, false, false, false, false),
     )
 }
 pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
@@ -216,7 +216,7 @@ pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         true,
-        (false, false, false, false),
+        (false, false, false, false, false),
     )
 }
 pub fn retry_archive(version: &str) -> Arc<[u8]> {
@@ -226,7 +226,7 @@ pub fn retry_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (true, false, false, false),
+        (true, false, false, false, false),
     )
 }
 pub fn http_archive(version: &str) -> Arc<[u8]> {
@@ -236,7 +236,7 @@ pub fn http_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, true, false, false),
+        (false, true, false, false, false),
     )
 }
 pub fn catalog_archive(version: &str) -> Arc<[u8]> {
@@ -246,7 +246,7 @@ pub fn catalog_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, true, false),
+        (false, false, true, false, false),
     )
 }
 pub fn upstream_archive(version: &str) -> Arc<[u8]> {
@@ -256,7 +256,17 @@ pub fn upstream_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, true),
+        (false, false, false, true, false),
+    )
+}
+pub fn maintenance_archive(version: &str) -> Arc<[u8]> {
+    build_archive(
+        version,
+        false,
+        false,
+        false,
+        false,
+        (false, false, false, false, true),
     )
 }
 fn build_archive(
@@ -265,13 +275,17 @@ fn build_archive(
     authentication: bool,
     routing: bool,
     scheduling: bool,
-    modes: (bool, bool, bool, bool),
+    modes: (bool, bool, bool, bool, bool),
 ) -> Arc<[u8]> {
-    let (retry, http, catalog, upstream) = modes;
+    let (retry, http, catalog, upstream, maintenance) = modes;
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
     let page = b"<!doctype html><html><body>Plugin fixture</body></html>";
     let mut contributes =
         json!({"management":{"id":"local.fixture.management","version":1,"stages":["management"]}});
+    if maintenance {
+        contributes["maintenance"] =
+            json!({"id":"local.fixture.maintenance","version":1,"stages":["maintenance"]});
+    }
     if authentication {
         contributes["frontend_authentication"] =
             json!({"id":"local.fixture.auth","version":1,"stages":["authentication"]});

@@ -14,12 +14,12 @@
 | 管理请求 | method/path/query/contentType 与二进制正文；不转发浏览器 Cookie 或请求头；响应必须没有自定义头 |
 | 页面桥 | 上游 v2 桥的管理请求、Responses JSON/SSE 模型调用与高度调整；本地父页面代为鉴权，iframe 使用独立的 opaque origin |
 | 通用外部 HTTP | `host.http.do/do_stream/stream_read/stream_close`，宿主签发的调用范围内使用；沿原取消与资源清理链，不需要配置模型服务 |
-| 主动服务调用 | 管理及已有授权 service 层保留原操作者；HTTP、WebSocket、注册、认证及 request/attempt、routing/scheduling/retry/upstream 使用原上下文和实例 revision 调用设置服务 |
+| 主动服务调用 | 管理及已有授权 service 层保留原操作者；HTTP、WebSocket、注册、认证及 request/attempt、routing/scheduling/retry/upstream/maintenance 使用原上下文和实例 revision 调用设置服务 |
 | 私有状态 | `host.state.get/put/delete`，实例和命名空间隔离，版本比较交换、schema 和配额校验 |
-| 只读事实 | management 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`；不含密钥或凭据 |
+| 只读事实 | management、maintenance 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`；不含密钥或凭据 |
 | 页面推理 | 本人管理员会话显式选择自己的 Key，复用正常 Responses 的权限、路由、预算、倍率和结算 |
 | 原生模型 RPC | management 调用的本人 Key 列表、模型目录与普通/流式推理；HME1 事件批次、调用范围内的读取/关闭与原 Core 结算 |
-| 分组资源 | `host.groups.ensure` 幂等创建实例自有分组，`host.groups.change_members` 增量修改成员；使用真实管理请求的审计身份 |
+| 分组资源 | `host.groups.ensure` 幂等创建实例自有分组，`host.groups.change_members` 增量修改成员；使用真实管理请求或维护任务的插件审计身份 |
 | Key 资源 | `host.keys.ensure` 幂等创建本人 Key；只绑定一个本实例分组，预算参数校验当前共享额度，不返回密钥明文 |
 | 共享额度 | 本地扩展 `host.cpr.shared_budgets.v1.*`：显式用户＋分组查询、整组基础限额 CAS 更新、选定订阅幂等重置 |
 | 外部认证 | frontend_authentication v1；单一入口认证器，宿主将外部 principal 映射到现有 Key，沿用正常权限及共享计费 |
@@ -27,7 +27,8 @@
 | 账号调度 | scheduler v1 的 scheduling 阶段；首个匹配插件只从宿主合格候选选择账号，租约及资格检查保留在 Core/Provider |
 | 重试策略 | retry_policy v1 的 retry 阶段；可停止或继续宿主允许的恢复路径，整条策略链共享两秒等待预算 |
 | 模型目录 | model_catalog v1；注册内置 Provider 的模型别名，继承真实目标的能力、账号范围和定价 |
-| 未开放的能力 | middleware、upstream_adapter、observer、command_line、maintenance、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
+| 维护任务 | maintenance v1 的 `plugin.reconcile`，Core 已发布配置与已发布实例驱动，Host 监督周期、重试和关闭 |
+| 未开放的能力 | middleware、upstream_adapter、observer、command_line、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
@@ -377,3 +378,13 @@ Core 已提供 `RetryPolicy` 裁决端口：只投影安全失败事实、冻结
 `policy.retry_decision` 只传请求关联、尝试序号、Provider/模型、错误分类、状态码、发送状态、剩余路由预算与期限，以及宿主允许的动作；不传请求正文、凭据或上游错误正文。回复必须为一个决定字段且没有二进制载荷，额外字段或宿主不允许的 Retry 均视为故障。整条策略链共享两秒等待预算，每次 RPC 继续扣除已用时间，并受请求剩余期限约束。
 
 retry 阶段允许实例私有状态与通用外部 HTTP，仍禁止原生模型、管理事实、资源与额度操作。HTTP 的已发送或不确定发送效果进入原 Core 调用图，阻止自动恢复。每次成功咨询立即加入原请求的策略撤销源；在后续策略等待或恢复后的执行期间，前一代次崩溃、停用或换代都可撤销请求。该源同时保护 Core 已结算后的缓冲 JSON 交付，正常结算不会撤销成功输出。JSON/SSE/WS 与原生模型调用通过同一 PreparedRoot 绑定使用该策略。
+
+## 维护任务
+
+声明 maintenance v1 的已发布实例运行 plugin.reconcile：启用、配置发布后触发对账，空闲时每 30 秒运行一次，失败后等待 5 秒重试。每个实例串行执行；单次 RPC 最多 30 秒。故障实例不会阻塞其他实例，子任务异常由 Host 按 1～30 秒退避重启守护任务。
+
+准备候选、校验、未确认提交的版本不会启动维护。停用、换版、进程退出和宿主关闭会取消旧调用，排空后才启动新发布批次。Core 快照不可用时暂停维护；即使暂停和恢复通知被合并，旧可用期的授权仍立即撤销。Core 重复发布同一配置 revision 不触发额外对账，避免幂等资源查询发布相同快照造成紧密循环。
+
+维护调用可使用实例私有状态、通用外部 HTTP、只读事实、已接入的设置服务和实例自有分组回调。服务发布在原 RPC 开始前冻结，实际审计使用插件实例及 revision，取消、期限与调用结束清理贯穿回调。维护任务不取得管理员会话；创建本人 Key 和修改本地共享额度仍需要原管理授权。维护阶段原生模型回调尚未开放，不能借用其他管理请求或伪造父执行。
+
+固定上游 SDK 的维护调用与类型化服务中间件，以及实际数据库写入、插件审计和 Core 发布有独立验收；这不代表 workbench 原包或其全部回调已经兼容。

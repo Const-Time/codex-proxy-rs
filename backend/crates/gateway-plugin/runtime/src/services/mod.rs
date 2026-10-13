@@ -295,6 +295,7 @@ impl CallbackHandler for Callbacks {
                     | Stage::Scheduling
                     | Stage::Retry
                     | Stage::Upstream
+                    | Stage::Maintenance
             )
         {
             self.registry.call(context, params, payload)

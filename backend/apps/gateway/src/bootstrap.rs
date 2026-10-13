@@ -169,6 +169,11 @@ pub async fn run() -> Result<(), BootstrapError> {
     plan.extend(openai.take_worker_contributions());
     plan.extend(xai.take_worker_contributions());
     plan.extend(admin.take_worker_contributions());
+    plan.push(
+        plugins
+            .maintenance_worker(core.snapshot_publications())
+            .map_err(gateway_core::CoreError::from)?,
+    );
     host.start_workers(plan, store.worker_leader_lease())?;
     host.report_startup_ready("Workers");
     let result = host.serve(api.router()).await;

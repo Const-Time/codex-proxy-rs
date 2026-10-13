@@ -61,8 +61,8 @@ fn archive() -> Arc<[u8]> {
     let manifest = json!({
         "manifestVersion":2,"name":"upstream-service-fixture","displayName":"Upstream service fixture","publisher":"local","version":"1.0.0","description":"Unmodified upstream SDK contract","license":"Apache-2.0",
         "engines":{"codex-proxy-rs":">=3.11.0,<4.0.0"},"main":"bin/plugin","runtime":"trustedProcess",
-        "contributes":{"middleware":{"id":"local.upstream-service-fixture.middleware","version":4,"stages":["service"]}},
-        "configurationSchema":{"type":"object","properties":{"mutate":{"type":"boolean"},"observation":{"type":"string"},"rewrite":{"type":"string","enum":["actor","request"]}},"additionalProperties":false},"state":[],"resources":{},
+        "contributes":{"maintenance":{"id":"local.upstream-service-fixture.maintenance","version":1,"stages":["maintenance"]},"middleware":{"id":"local.upstream-service-fixture.middleware","version":4,"stages":["service"]}},
+        "configurationSchema":{"type":"object","properties":{"maintenance":{"type":"boolean"},"mutate":{"type":"boolean"},"observation":{"type":"string"},"rewrite":{"type":"string","enum":["actor","request"]}},"additionalProperties":false},"state":[],"resources":{},
         "package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},"files":{"bin/plugin":hex::encode(Sha256::digest(&executable))}}
     });
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
@@ -303,4 +303,121 @@ async fn original_sdk_middleware_identity_rewrite_is_rejected_before_real_store_
         drop(manager);
         environment.close().await;
     }
+}
+
+#[tokio::test]
+async fn original_sdk_maintenance_worker_writes_native_sql_through_typed_middleware() {
+    use gateway_core::{
+        lifecycle::CancellationToken,
+        task::{WorkerContribution, WorkerRunnable},
+    };
+    use std::time::Duration;
+    let Some(environment) = Environment::new().await else {
+        return;
+    };
+    let manager = manager(&environment).await;
+    let artifact = manager.upload(archive(), &actor()).await.unwrap();
+    let observation = environment.cache.path().join("maintenance-sdk-input.json");
+    let mut layer = update(&artifact.sha256, 0, true);
+    layer.secrets.clear();
+    layer.configuration = json!({"observation":observation});
+    layer.middleware = Some(PluginMiddlewareBinding {
+        order: 0,
+        mounts: vec![PluginMiddlewareMount::Service],
+        scope: PluginExecutionScope::All {},
+    });
+    manager.update(None, layer, &actor()).await.unwrap();
+    let mut command = update(&artifact.sha256, 0, true);
+    command.secrets.clear();
+    command.configuration = json!({"maintenance":true});
+    let installed = manager.update(None, command, &actor()).await.unwrap();
+    let before = environment
+        .admin
+        .services()
+        .settings()
+        .load()
+        .await
+        .unwrap()
+        .config_revision;
+    environment.published.lock().unwrap().clear();
+    assert!(!observation.exists());
+    let WorkerContribution::Registration(registration) = manager
+        .maintenance_worker(environment.core.snapshot_publications())
+        .unwrap()
+    else {
+        panic!("maintenance registration");
+    };
+    let WorkerRunnable::Daemon { task, .. } = registration.runnable else {
+        panic!("maintenance daemon");
+    };
+    let stop = CancellationToken::new();
+    let cancellation = stop.clone();
+    let worker = tokio::spawn(async move { task.run(cancellation).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let writes: i64 = sqlx::query_scalar(
+                "select count(*) from admin_audit_events where actor_kind='plugin'",
+            )
+            .fetch_one(&environment.pool)
+            .await
+            .unwrap();
+            if writes == 2 && environment.published.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let observed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(observation).unwrap()).unwrap();
+    assert_eq!(observed["actor"], "system");
+    assert!(observed["decode_error"].is_null());
+    assert_ne!(observed["request_id"], "forged-request");
+    assert_eq!(
+        environment
+            .admin
+            .services()
+            .settings()
+            .load()
+            .await
+            .unwrap()
+            .config_revision
+            .get(),
+        before.get() + 2
+    );
+    assert!(
+        !environment
+            .admin
+            .services()
+            .settings()
+            .admin_api_key_exists()
+            .await
+            .unwrap()
+    );
+    let rows = sqlx::query("select actor_ref,actor_admin_user_id,admin_request_id from admin_audit_events where actor_kind='plugin' order by created_at,id").fetch_all(&environment.pool).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(
+            row.get::<String, _>("actor_ref"),
+            format!("plugin:{}@1", installed.id)
+        );
+        assert!(
+            row.get::<Option<String>, _>("actor_admin_user_id")
+                .is_none()
+        );
+        assert_eq!(
+            row.get::<String, _>("admin_request_id"),
+            observed["request_id"].as_str().unwrap()
+        );
+    }
+    manager.shutdown().await;
+    drop(manager);
+    environment.close().await;
 }

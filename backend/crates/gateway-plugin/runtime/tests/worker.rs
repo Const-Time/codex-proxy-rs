@@ -720,6 +720,23 @@ impl PluginHandler for Worker {
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::WebSocket => worker_websocket(call).await,
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Service => worker_service(call).await,
             "middleware.handle" => worker_middleware::handle(call).await,
+            "plugin.reconcile" => {
+                use gateway_plugin_sdk::Stage;
+                assert_eq!(call.context.stage, Stage::Maintenance);
+                assert_eq!(call.params, json!({}));
+                assert!(call.payload.is_empty());
+                assert_eq!(call.context.request_id.as_deref(), Some(call.context.resource_scope_id.as_str()));
+                if self.adapter_mode == "maintenance-service" || self.adapter_mode == "maintenance-wait" {
+                    assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e|PluginFault::new(ErrorCode::Fault,e.message))?);
+                }
+                if self.adapter_mode == "maintenance-envelope" {return Ok(CallReply::unary(json!({"extra":true}), vec![]));}
+                if self.adapter_mode == "maintenance-payload" {return Ok(CallReply::unary(json!({}), vec![1]));}
+                let record=call.host.call("host.state.get",json!({"namespace":"counter","key":"reconcile"}),vec![]).await.map_err(|e|e.into_plugin_fault())?.result["record"].clone();
+                let count=record["value"].as_u64().unwrap_or(0)+1;
+                call.host.call("host.state.put",json!({"namespace":"counter","key":"reconcile","value":count,"expected_version":record["version"]}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                if self.adapter_mode == "maintenance-fault" {return Err(PluginFault::new(ErrorCode::Rejected,"private maintenance failure detail"));}
+                Ok(CallReply::unary(json!({}),vec![]))
+            },
             "plugin.register" if !self.fail=>{
                 if self.adapter_mode == "registration-service" {
                     assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|error| PluginFault::new(ErrorCode::Fault, error.message))?);
