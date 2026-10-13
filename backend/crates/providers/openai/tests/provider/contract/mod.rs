@@ -2,6 +2,7 @@ mod account_isolation;
 mod fast_mode;
 mod precommit;
 mod response_interrupt;
+mod upstream_adapter;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::num::NonZeroU32;

@@ -746,3 +746,16 @@ fn context_string(context: &Map<String, Value>, field: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
 }
+
+/// Host account affinity only; do not adapt the plugin-owned request body.
+pub(crate) fn adapter_request_identity(request: &GenerateRequest) -> Option<CodexResponsesRequest> {
+    let payload = request.protocol_payload();
+    if payload.protocol() != "openai" {
+        return None;
+    }
+    let mut identity = CodexResponsesRequest::from_body(payload.body().clone());
+    identity.explicit_prompt_cache_key = identity.prompt_cache_key().is_some();
+    extract_request_context(&mut identity);
+    apply_protocol_context(&mut identity, payload.context());
+    Some(identity)
+}

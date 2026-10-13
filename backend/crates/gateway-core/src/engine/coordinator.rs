@@ -47,6 +47,7 @@ pub struct AttemptCoordinator<S: ?Sized> {
     retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
+    upstream_adapters: Option<Arc<dyn super::upstream_adapter::UpstreamAdapterPlan>>,
     account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     execution_context: Option<super::nested::NestedExecutionContext>,
     engine: Arc<GatewayEngine<S>>,
@@ -82,6 +83,7 @@ where
             middleware: None,
             request_settings: None,
             retry_policy: None,
+            upstream_adapters: None,
             account_scheduler: None,
             execution_context: None,
         }
@@ -92,6 +94,13 @@ where
         policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     ) -> Self {
         self.retry_policy = policy;
+        self
+    }
+    pub fn with_upstream_adapters(
+        mut self,
+        plan: Option<Arc<dyn super::upstream_adapter::UpstreamAdapterPlan>>,
+    ) -> Self {
+        self.upstream_adapters = plan;
         self
     }
     pub fn with_account_scheduler(
@@ -120,6 +129,7 @@ where
             middleware,
             request_settings: self.request_settings.clone(),
             retry_policy: self.retry_policy.clone(),
+            upstream_adapters: self.upstream_adapters.clone(),
             account_scheduler: self.account_scheduler.clone(),
             execution_context: self.execution_context.clone(),
         }
@@ -223,6 +233,8 @@ where
         );
         let image_generation_requested = operation.image_generation_requested();
         let mut session = ResponseExecutionSession {
+            requested_model: request.requested_model.clone(),
+            client_transport: request.client_transport.clone(),
             recovery_lease: Some(self.engine.store().maintain_request(
                 &request_id,
                 deadline.at(),
@@ -232,6 +244,7 @@ where
             attempt_middleware: self.middleware.clone(),
             request_settings: self.request_settings.clone(),
             retry_policy: self.retry_policy.clone(),
+            upstream_adapters: self.upstream_adapters.clone(),
             account_scheduler: self.account_scheduler.clone(),
             execution_context: self.execution_context.clone(),
             middleware_response_head: None,
@@ -348,11 +361,14 @@ struct PendingAttemptRetry {
 /// API 只能提交下游 delivery 边界；账号重试、断流终结与
 /// `model_requests` 写回均留在本类型内。
 pub struct ResponseExecutionSession<S: ?Sized> {
+    requested_model: Option<crate::routing::PublicModelId>,
+    client_transport: String,
     retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     pending_recovery: Option<PendingRecovery>,
     recovery_lease: Option<Box<dyn super::ExecutionRecoveryLeaseGuard>>,
     attempt_middleware: Option<Arc<dyn AttemptMiddleware>>,
     request_settings: Option<crate::routing::RequestSettings>,
+    upstream_adapters: Option<Arc<dyn super::upstream_adapter::UpstreamAdapterPlan>>,
     account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     execution_context: Option<super::nested::NestedExecutionContext>,
     middleware_response_head: Option<AttemptResponseHead>,
@@ -1168,6 +1184,8 @@ where
                     self.request_id.clone(),
                     self.client_api_key_ref.clone(),
                 )
+                .with_request_metadata(self.requested_model.clone(), self.client_transport.clone())
+                .with_upstream_adapters(self.upstream_adapters.clone())
                 .with_account_scheduler(self.account_scheduler.clone())
                 .with_execution_context(self.execution_context.clone())
                 .with_request_settings(self.request_settings.clone())

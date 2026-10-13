@@ -4484,3 +4484,137 @@ fn contributed_catalog_revalidates_preparation_and_cannot_override_a_request_set
     assert!(service.prepare_execution(client).is_err());
     assert!(store.requested_models().is_empty());
 }
+
+mod upstream_adapter {
+    use super::*;
+    use gateway_core::engine::upstream_adapter::{UpstreamAdapter, UpstreamAdapterPlan};
+    use gateway_core::lifecycle::CancellationToken;
+
+    #[derive(Debug)]
+    struct Plan {
+        cancellation: CancellationToken,
+        observed: Mutex<Vec<(String, String, String)>>,
+    }
+    impl UpstreamAdapterPlan for Plan {
+        fn cancellation(&self) -> CancellationToken {
+            self.cancellation.clone()
+        }
+        fn select(
+            &self,
+            context: &AttemptContext,
+            provider: &ProviderKind,
+            model: &UpstreamModelId,
+        ) -> Result<Option<Arc<dyn UpstreamAdapter>>, ProviderError> {
+            self.observed.lock().unwrap().push((
+                context.request_id().as_str().to_owned(),
+                provider.as_str().to_owned(),
+                model.as_str().to_owned(),
+            ));
+            assert_eq!(context.client_api_key_ref().as_str(), "key_start_test");
+            assert_eq!(context.requested_model().unwrap().as_str(), "gpt-start");
+            assert_eq!(
+                context.client_transport(),
+                Some(ClientTransport::HttpSse.as_str())
+            );
+            assert!(context.nested_context().is_some());
+            Ok(None)
+        }
+    }
+    struct DelegatingProvider;
+    #[async_trait]
+    impl Provider for DelegatingProvider {
+        fn name(&self) -> &'static str {
+            "openai"
+        }
+        fn catalog_generation(&self) -> ProviderCatalogGeneration {
+            ProviderCatalogGeneration::default()
+        }
+        async fn query_model_capabilities(
+            &self,
+        ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+            Ok(vec![])
+        }
+        async fn execute(
+            &self,
+            request: ProviderRequest,
+            context: AttemptContext,
+        ) -> Result<ProviderStream, ProviderError> {
+            assert!(
+                context
+                    .upstream_adapter(
+                        request.candidate().provider(),
+                        request.candidate().upstream_model().unwrap()
+                    )?
+                    .is_none()
+            );
+            ChargedProvider { fail: false }
+                .execute(request, context)
+                .await
+        }
+    }
+    #[test]
+    fn upstream_adapter_plan_reaches_provider_and_preserves_root_settlement() {
+        block_on(async {
+            for cancel in [false, true] {
+                let admissions = Arc::new(Admissions::default());
+                let budget = Arc::new(Budget {
+                    active: admissions.active.clone(),
+                    ..Default::default()
+                });
+                let store = Arc::new(TrackingExecutionStore::default());
+                let service = DefaultExecutionService::new(
+                    RuntimeSnapshotHandle::new(start_snapshot()),
+                    store.clone(),
+                    ProviderRegistry::new([Arc::new(DelegatingProvider) as Arc<dyn Provider>])
+                        .unwrap(),
+                    admissions.clone(),
+                    Arc::new(UnusedContinuation),
+                    Arc::new(RecordingClientApiKeyUsage::default()),
+                )
+                .with_budget(budget.clone());
+                let plan = Arc::new(Plan {
+                    cancellation: CancellationToken::new(),
+                    observed: Mutex::new(vec![]),
+                });
+                let request = request(&service, ClientTransport::HttpSse);
+                let prepared = service
+                    .prepare_execution(request.client)
+                    .unwrap()
+                    .with_upstream_adapters(plan.clone());
+                let mut started = service
+                    .start_prepared(
+                        prepared,
+                        PreparedExecutionRequest {
+                            public_model: request.public_model,
+                            operation: request.operation,
+                            metadata: request.metadata,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                consume_charged_prefix(started.session.as_mut()).await;
+                assert_eq!(
+                    *plan.observed.lock().unwrap(),
+                    vec![(
+                        started.request_id.as_str().to_owned(),
+                        "openai".into(),
+                        "gpt-start".into()
+                    )]
+                );
+                if cancel {
+                    plan.cancellation.cancel();
+                }
+                while started
+                    .session
+                    .next_event()
+                    .await
+                    .is_ok_and(|event| event.is_some())
+                {}
+                started.session.detach_finalize().await;
+                assert_cleanup_completed(&admissions, &budget, &started.request_id);
+                assert_eq!(store.attempts.lock().unwrap().len(), 1);
+                assert_eq!(store.finalizations.lock().unwrap().len(), 1);
+            }
+        });
+    }
+}

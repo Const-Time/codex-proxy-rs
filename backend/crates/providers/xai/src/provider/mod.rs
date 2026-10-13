@@ -71,6 +71,7 @@ use crate::{GrokCatalogCapabilityEvidence, GrokCatalogModel};
 mod continuation;
 mod failure;
 mod stream;
+mod upstream_adapter;
 mod workers;
 
 use continuation::*;
@@ -214,6 +215,11 @@ impl GrokBuildProvider {
             return self.execute_compaction(generate, candidate, context).await;
         }
         let upstream_model = candidate_upstream_model(candidate)?;
+        if let Some(adapter) = context.upstream_adapter(candidate.provider(), upstream_model)? {
+            return self
+                .execute_upstream_adapter(generate, candidate, context, adapter)
+                .await;
+        }
         let previous_session = decode_xai_session_state(generate)?;
         let continuation_account = continuation_account(&context, previous_session.as_ref())?;
         let mut upstream_request = GrokResponsesRequest::encode(

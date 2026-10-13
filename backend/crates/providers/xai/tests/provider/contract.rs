@@ -3446,3 +3446,334 @@ async fn missing_catalog_feature_metadata_keeps_build_responses_routable() {
             .is_some()
     );
 }
+
+mod upstream_adapter {
+    use super::*;
+    use gateway_core::engine::provider::EventStream;
+    use gateway_core::engine::upstream_adapter::{
+        UpstreamAdapter, UpstreamAdapterInvocation, UpstreamAdapterPlan,
+    };
+    use gateway_core::error::ProviderError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Adapter {
+        calls: AtomicUsize,
+        invocation: Mutex<Option<UpstreamAdapterInvocation>>,
+    }
+    impl std::fmt::Debug for Adapter {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Adapter")
+        }
+    }
+    impl UpstreamAdapter for Adapter {
+        fn transport(&self) -> &str {
+            "http_json"
+        }
+        fn execute(self: Arc<Self>, invocation: UpstreamAdapterInvocation) -> EventStream {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.invocation.lock().unwrap() = Some(invocation);
+            Box::pin(futures::stream::once(async {
+                Err(ProviderError::new(
+                    ProviderErrorKind::Unavailable,
+                    UpstreamSendState::NotSent,
+                ))
+            }))
+        }
+    }
+    #[derive(Debug)]
+    struct Plan {
+        adapter: Arc<Adapter>,
+        cancellation: CancellationToken,
+        reject: bool,
+    }
+    impl UpstreamAdapterPlan for Plan {
+        fn cancellation(&self) -> CancellationToken {
+            self.cancellation.clone()
+        }
+        fn select(
+            &self,
+            _: &AttemptContext,
+            _: &ProviderKind,
+            _: &UpstreamModelId,
+        ) -> Result<Option<Arc<dyn UpstreamAdapter>>, ProviderError> {
+            if self.reject {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ExecutionPolicyRejected,
+                    UpstreamSendState::NotSent,
+                ));
+            }
+            Ok(Some(self.adapter.clone()))
+        }
+    }
+    fn custom_operation() -> Operation {
+        Operation::Generate(GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                "custom_adapter",
+                json!({"opaque": [1, 2], "model": "untrusted-model"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap(),
+        ))
+    }
+
+    fn adapter_context(
+        plan: Arc<Plan>,
+        required: Option<gateway_core::account::ProviderAccountId>,
+    ) -> AttemptContext {
+        AttemptContext::new(
+            gateway_core::engine::RequestAttemptContext::new(
+                ModelRequestId::new("req_adapter").unwrap(),
+                ClientApiKeyId::new("key_adapter").unwrap(),
+            )
+            .with_upstream_adapters(Some(plan)),
+            NonZeroU32::new(1).unwrap(),
+            gateway_core::lifecycle::Deadline::default(),
+            selection_policy(),
+            AccountAttemptContext::new(BTreeSet::new(), required, None),
+            None,
+            CancellationToken::new(),
+        )
+    }
+    #[tokio::test]
+    async fn upstream_adapter_uses_original_selector_and_credential_recovery() {
+        let selector = StubSelector::success();
+        let transport = StubInferenceTransport::success();
+        let recovery = StubRecovery::new(GrokCredentialRecoveryOutcome::Recovered);
+        let provider =
+            provider_with_recovery(selector.clone(), transport.clone(), recovery.clone()).await;
+        let adapter = Arc::new(Adapter::default());
+        let plan = Arc::new(Plan {
+            adapter: adapter.clone(),
+            cancellation: CancellationToken::new(),
+            reject: false,
+        });
+        let operation = custom_operation();
+        let mut output = provider
+            .execute(
+                provider_request_with_operation("xai", operation.clone()),
+                adapter_context(plan, None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(output.metadata().transport().as_str(), "http_json");
+        assert_eq!(
+            output.next().await.unwrap().unwrap_err().kind(),
+            ProviderErrorKind::Unavailable
+        );
+        let invocation = adapter.invocation.lock().unwrap().take().unwrap();
+        assert_eq!(invocation.operation, operation);
+        assert_eq!(invocation.account.account_id(), &account_id("provider"));
+        let headers = invocation.account.authorization().unwrap();
+        assert!(
+            headers.iter().any(
+                |h| h.name() == "authorization" && h.value().as_ref() == b"Bearer oauth-access"
+            )
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|h| h.name() == "x-grok-user-id" && h.value().as_ref() == b"verified-user")
+        );
+        assert!(!headers.iter().any(|h| h.name() == "cookie"));
+        let usage = gateway_core::metering::Usage {
+            input_tokens: Some(100),
+            output_tokens: Some(10),
+            ..Default::default()
+        };
+        assert!(invocation.account.calculate_cost(None, &usage).is_some());
+        assert!(
+            invocation
+                .account
+                .calculate_cost(None, &Default::default())
+                .is_none()
+        );
+        let not_sent = invocation
+            .account
+            .record_failure(ProviderError::new(
+                ProviderErrorKind::Unauthorized,
+                UpstreamSendState::NotSent,
+            ))
+            .await;
+        assert!(!not_sent.retries_same_account());
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 0);
+        let sent = invocation
+            .account
+            .record_failure(ProviderError::new(
+                ProviderErrorKind::Unauthorized,
+                UpstreamSendState::Sent,
+            ))
+            .await;
+        assert!(sent.retries_same_account());
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn upstream_adapter_revocation_and_required_account_are_enforced() {
+        let selector = StubSelector::success();
+        let transport = StubInferenceTransport::success();
+        let provider = provider(selector.clone(), transport.clone()).await;
+        let adapter = Arc::new(Adapter::default());
+        let cancellation = CancellationToken::new();
+        let plan = Arc::new(Plan {
+            adapter: adapter.clone(),
+            cancellation: cancellation.clone(),
+            reject: false,
+        });
+        let error = provider
+            .execute(
+                provider_request_with_operation("xai", custom_operation()),
+                adapter_context(plan.clone(), Some(account_id("other"))),
+            )
+            .await
+            .err()
+            .expect("rejected");
+        assert_eq!(error.kind(), ProviderErrorKind::Unavailable);
+        assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+        assert_eq!(
+            selector.required_accounts.lock().unwrap()[0],
+            Some(account_id("other"))
+        );
+        let mut output = provider
+            .execute(
+                provider_request_with_operation("xai", custom_operation()),
+                adapter_context(plan, None),
+            )
+            .await
+            .unwrap();
+        cancellation.cancel();
+        assert_eq!(
+            output.next().await.unwrap().unwrap_err().kind(),
+            ProviderErrorKind::Cancelled
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+
+    struct Lease(Arc<AtomicUsize>);
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    struct LeaseSelector(Arc<AtomicUsize>);
+    impl GrokSessionSelector for LeaseSelector {
+        fn select(&self, _: GrokSessionSelection) -> GrokSessionSelectorFuture<'_> {
+            Box::pin(async {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                SelectedGrokSession::new(
+                    account_id("provider"),
+                    CredentialRevision::new(1).unwrap(),
+                    SecretValue::new("oauth-access"),
+                    SecretValue::new("verified-user"),
+                    None,
+                    GrokSessionBinding::new("acct_provider").unwrap(),
+                    Lease(self.0.clone()),
+                )
+                .map_err(|_| GrokSessionSelectorError::InvalidSession)
+            })
+        }
+        fn record_failure<'a>(
+            &'a self,
+            _: &'a SelectedGrokSession,
+            _: GrokCredentialFailure,
+        ) -> GrokCredentialFeedbackFuture<'a> {
+            Box::pin(async {})
+        }
+    }
+    #[tokio::test]
+    async fn upstream_adapter_dropping_unpolled_stream_releases_original_account_lease() {
+        let leases = Arc::new(AtomicUsize::new(0));
+        let transport = StubInferenceTransport::success();
+        let provider = provider_with_catalog_transport(
+            Arc::new(LeaseSelector(leases.clone())),
+            transport.clone(),
+            StubRecovery::new(GrokCredentialRecoveryOutcome::Unavailable),
+            Arc::new(StaticCatalogTransport),
+        )
+        .await;
+        let adapter = Arc::new(Adapter::default());
+        let plan = Arc::new(Plan {
+            adapter: adapter.clone(),
+            cancellation: CancellationToken::new(),
+            reject: false,
+        });
+        let output = provider
+            .execute(
+                provider_request_with_operation("xai", custom_operation()),
+                adapter_context(plan, None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(leases.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+        drop(output);
+        assert_eq!(leases.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn upstream_adapter_keeps_core_continuation_account_recovery_authority() {
+        let selector = StubSelector::success();
+        let provider = provider(selector.clone(), StubInferenceTransport::success()).await;
+        let adapter = Arc::new(Adapter::default());
+        let plan = Arc::new(Plan {
+            adapter: adapter.clone(),
+            cancellation: CancellationToken::new(),
+            reject: false,
+        });
+        for attempt in [
+            ContinuationAttempt::Native,
+            ContinuationAttempt::ReplayOwner,
+            ContinuationAttempt::ReplayAny,
+        ] {
+            let pin = NativeContinuationPin::new(
+                PreviousResponseId::new("client-previous"),
+                PreviousResponseId::new("upstream-previous"),
+                ClientApiKeyId::new("key_adapter").unwrap(),
+                ProviderKind::new("xai").unwrap(),
+                account_id("other"),
+            );
+            let context = AttemptContext::new(
+                gateway_core::engine::RequestAttemptContext::new(
+                    ModelRequestId::new("req_adapter").unwrap(),
+                    ClientApiKeyId::new("key_adapter").unwrap(),
+                )
+                .with_upstream_adapters(Some(plan.clone())),
+                NonZeroU32::new(2).unwrap(),
+                gateway_core::lifecycle::Deadline::default(),
+                selection_policy(),
+                AccountAttemptContext::new(BTreeSet::new(), None, None),
+                Some(ContinuationBinding::Pinned(pin)),
+                CancellationToken::new(),
+            )
+            .with_continuation_attempt(attempt);
+            let result = provider
+                .execute(
+                    provider_request_with_operation("xai", custom_operation()),
+                    context,
+                )
+                .await;
+            if attempt == ContinuationAttempt::ReplayAny {
+                assert_eq!(
+                    result.unwrap().metadata().provider_account_id(),
+                    &account_id("provider")
+                );
+            } else {
+                assert_eq!(
+                    result.err().expect("old account unavailable").send_state(),
+                    UpstreamSendState::NotSent
+                );
+            }
+        }
+        assert_eq!(
+            *selector.required_accounts.lock().unwrap(),
+            vec![Some(account_id("other")), Some(account_id("other")), None]
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    }
+}

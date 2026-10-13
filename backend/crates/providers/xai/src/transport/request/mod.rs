@@ -41,6 +41,21 @@ pub struct GrokResponsesRequest {
 }
 
 impl GrokResponsesRequest {
+    /// Extract host affinity without converting the adapter-owned wire.
+    pub(crate) fn adapter_affinity(
+        request: &GenerateRequest,
+        model: &str,
+        key: &ClientApiKeyId,
+    ) -> Option<GrokSessionAffinityKey> {
+        if request.protocol_payload().protocol() != "openai" {
+            return None;
+        }
+        let body = request.protocol_payload().body();
+        let seed = explicit_session_seed(request, body);
+        resolve_session_identity(key.as_str(), model, seed.as_deref(), body)
+            .map(|(_, affinity)| affinity)
+    }
+
     /// 返回发送到 `/v1/responses` 的 JSON object。
     #[must_use]
     pub const fn body(&self) -> &Map<String, Value> {

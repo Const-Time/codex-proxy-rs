@@ -16,6 +16,7 @@ pub mod probe;
 pub mod provider;
 pub mod response_control;
 pub mod retry_policy;
+pub mod upstream_adapter;
 
 pub use coordinator::{AttemptCoordinator, ResponseExecutionSession};
 
@@ -322,6 +323,9 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context。
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
+    requested_model: Option<PublicModelId>,
+    client_transport: Option<Arc<str>>,
+    upstream_adapters: Option<Arc<dyn upstream_adapter::UpstreamAdapterPlan>>,
     account_scheduler: Option<account_scheduling::AccountScheduling>,
     execution_context: Option<nested::NestedExecutionContext>,
     settings: Option<crate::routing::RequestSettings>,
@@ -336,6 +340,24 @@ pub struct RequestAttemptContext {
 }
 
 impl RequestAttemptContext {
+    pub fn with_request_metadata(
+        mut self,
+        model: Option<PublicModelId>,
+        transport: impl Into<Arc<str>>,
+    ) -> Self {
+        self.requested_model = model;
+        self.client_transport = Some(transport.into());
+        self
+    }
+
+    pub fn with_upstream_adapters(
+        mut self,
+        plan: Option<Arc<dyn upstream_adapter::UpstreamAdapterPlan>>,
+    ) -> Self {
+        self.upstream_adapters = plan;
+        self
+    }
+
     pub(crate) fn with_account_scheduler(
         mut self,
         scheduler: Option<account_scheduling::AccountScheduling>,
@@ -381,6 +403,9 @@ impl RequestAttemptContext {
     #[must_use]
     pub fn new(request_id: ModelRequestId, client_api_key_ref: ClientApiKeyId) -> Self {
         Self {
+            requested_model: None,
+            client_transport: None,
+            upstream_adapters: None,
             account_scheduler: None,
             fast_mode: crate::account::FastMode::Default,
             settings: None,
@@ -447,6 +472,13 @@ pub struct AttemptContext {
 }
 
 impl AttemptContext {
+    pub fn requested_model(&self) -> Option<&PublicModelId> {
+        self.request.requested_model.as_ref()
+    }
+    pub fn client_transport(&self) -> Option<&str> {
+        self.request.client_transport.as_deref()
+    }
+
     pub fn nested_context(&self) -> Option<&nested::NestedExecutionContext> {
         self.request.execution_context.as_ref()
     }
@@ -482,6 +514,10 @@ impl AttemptContext {
         continuation: Option<ContinuationBinding>,
         cancellation: CancellationToken,
     ) -> Self {
+        let cancellation = match request.upstream_adapters.as_ref() {
+            Some(plan) => CancellationToken::linked([cancellation, plan.cancellation()]),
+            None => cancellation,
+        };
         let continuation_attempt = if continuation.is_some() {
             ContinuationAttempt::Native
         } else {
