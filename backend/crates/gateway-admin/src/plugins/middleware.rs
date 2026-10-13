@@ -162,6 +162,7 @@ impl Publication {
 
 /// A single publication snapshot, captured before request preparation. A version
 /// switch revokes it even if preparation has not yet entered the first layer.
+#[derive(Clone)]
 pub struct PluginMiddlewareRegistry(Publication, CancellationToken);
 impl PluginMiddlewareRegistry {
     pub fn freeze_http(

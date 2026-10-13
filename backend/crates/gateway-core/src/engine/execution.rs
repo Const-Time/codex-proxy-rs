@@ -431,6 +431,10 @@ pub trait ExecutionSession: Send {
 }
 
 pub trait ExecutionService: Send + Sync {
+    /// Runtime values before authentication carry no Key execution authority.
+    fn request_settings(&self) -> Option<crate::routing::RequestSettings> {
+        None
+    }
     /// Delegated plugin requests require live revocation support. Missing support fails closed at the caller.
     fn client_access(
         &self,
@@ -1412,6 +1416,12 @@ impl ExecutionStore for TransientExecutionStore {
 }
 
 impl ExecutionService for DefaultExecutionService {
+    fn request_settings(&self) -> Option<crate::routing::RequestSettings> {
+        self.snapshots
+            .acquire()
+            .ok()
+            .map(crate::routing::RequestSettings::new)
+    }
     fn client_access(
         &self,
         client: &AuthenticatedClient,

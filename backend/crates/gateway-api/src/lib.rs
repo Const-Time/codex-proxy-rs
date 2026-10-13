@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, Request};
 use axum::routing::get;
 use gateway_admin::AdminServices;
 use gateway_core::engine::execution::ExecutionService;
@@ -19,7 +19,6 @@ use serde::Deserialize;
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
-use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use url::Url;
 
@@ -30,6 +29,7 @@ use crate::openai::service::OpenAiService;
 
 pub mod admin;
 mod health;
+mod middleware;
 pub mod openai;
 
 /// API-owned HTTP 与静态资源配置。
@@ -129,7 +129,21 @@ pub fn initialize(
     config.validate().map_err(ApiError::Config)?;
     let request_id_header = HeaderName::from_str(&config.request_id_header)
         .map_err(|_| ApiError::Config(ApiConfigError::InvalidRequestIdHeader))?;
-    let openai = OpenAiService::new(execution, lifecycle).with_administration(admin.clone());
+    let settings = {
+        let execution = execution.clone();
+        Arc::new(move || execution.request_settings())
+    };
+    let plugins = {
+        let admin = admin.clone();
+        Arc::new(move || {
+            admin
+                .plugins()
+                .ok()
+                .and_then(|plugins| plugins.middleware_registry())
+        })
+    };
+    let openai =
+        OpenAiService::new(execution, lifecycle.clone()).with_administration(admin.clone());
     let state = ApiState {
         admin,
         openai,
@@ -165,12 +179,6 @@ pub fn initialize(
                 .allow_credentials(true),
         );
     }
-    if let Some(seconds) = config.request_timeout_seconds {
-        router = router.layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(seconds),
-        ));
-    }
     // Trace 必须在 SetRequestId 内侧，span 才能捕获本服务生成的 request_id；
     // 默认 DEBUG span 会被 info 日志过滤器丢弃，这里显式用 info_span。
     let trace_layer = TraceLayer::new_for_http().make_span_with({
@@ -201,10 +209,18 @@ pub fn initialize(
             state.clone(),
             admin::operations::audit_request::<ApiState>,
         ))
-        .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
-        .layer(trace_layer)
-        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
         .with_state(state);
+    let router = middleware::wrap(
+        router,
+        plugins,
+        config.request_timeout_seconds.map(Duration::from_secs),
+        request_id_header.clone(),
+        settings,
+        lifecycle,
+    )
+    .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
+    .layer(trace_layer)
+    .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid));
     Ok(ApiBundle { router })
 }
 
