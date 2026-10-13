@@ -10,13 +10,14 @@ use gateway_core::{
 use std::collections::BTreeSet;
 
 #[derive(Clone)]
-struct Entry {
+pub(super) struct Entry {
+    pub(super) upstream: Option<PluginUpstreamAdapterBinding>,
     catalog: bool,
     binding: Option<PluginMiddlewareBinding>,
     router: Option<PluginModelRouterBinding>,
     retry: Option<PluginRetryPolicyBinding>,
     scheduler: Option<PluginAccountSchedulerBinding>,
-    process: Option<Arc<dyn PluginProcess>>,
+    pub(super) process: Option<Arc<dyn PluginProcess>>,
 }
 struct SelectedMiddleware {
     processes: Vec<Arc<dyn PluginProcess>>,
@@ -24,9 +25,9 @@ struct SelectedMiddleware {
 }
 #[derive(Clone, Default)]
 pub(super) struct Publication {
-    entries: BTreeMap<String, Entry>,
-    blocked: BTreeSet<String>,
-    epoch: PluginAccess,
+    pub(super) entries: BTreeMap<String, Entry>,
+    pub(super) blocked: BTreeSet<String>,
+    pub(super) epoch: PluginAccess,
 }
 impl Publication {
     pub(super) fn snapshot(&self) -> PluginMiddlewareRegistry {
@@ -44,9 +45,11 @@ impl Publication {
         let catalog = catalog && record.enabled;
         let binding = record.middleware.as_ref().filter(|_| record.enabled);
         let router = record.model_router.as_ref().filter(|_| record.enabled);
+        let upstream = record.upstream_adapter.as_ref().filter(|_| record.enabled);
         let retry = record.retry_policy.as_ref().filter(|_| record.enabled);
         let scheduler = record.account_scheduler.as_ref().filter(|_| record.enabled);
-        if binding.is_some_and(|binding| binding.validate().is_err())
+        if upstream.is_some_and(|binding| binding.validate().is_err())
+            || binding.is_some_and(|binding| binding.validate().is_err())
             || router.is_some_and(|r| r.validate().is_err())
             || retry.is_some_and(|r| r.validate().is_err())
             || scheduler.is_some_and(|s| s.validate().is_err())
@@ -60,6 +63,7 @@ impl Publication {
             || router.is_some()
             || retry.is_some()
             || scheduler.is_some()
+            || upstream.is_some()
             || catalog
         {
             self.epoch.revoke();
@@ -70,11 +74,13 @@ impl Publication {
                 || router.is_some()
                 || scheduler.is_some()
                 || retry.is_some()
+                || upstream.is_some()
                 || catalog
             {
                 self.entries.insert(
                     record.id.clone(),
                     Entry {
+                        upstream: upstream.cloned(),
                         catalog,
                         binding: binding.cloned(),
                         router: router.cloned(),
@@ -226,7 +232,7 @@ impl Publication {
 /// A single publication snapshot, captured before request preparation. A version
 /// switch revokes it even if preparation has not yet entered the first layer.
 #[derive(Clone)]
-pub struct PluginMiddlewareRegistry(Publication, CancellationToken);
+pub struct PluginMiddlewareRegistry(pub(super) Publication, pub(super) CancellationToken);
 impl PluginMiddlewareRegistry {
     pub fn model_catalog(
         &self,

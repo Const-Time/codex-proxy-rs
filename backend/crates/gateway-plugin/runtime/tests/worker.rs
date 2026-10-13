@@ -264,6 +264,7 @@ impl PluginHandler for Worker {
                     "empty" => vec![],
                     "too-many" => (0..17).map(|i| { let mut d=declaration.clone();d["id"]=json!(format!("adapter-{i}"));d }).collect(),
                     "duplicate" => vec![declaration.clone(),declaration],
+                    "overlap" => {let mut second=declaration.clone();second["id"]=json!("second");vec![declaration,second]},
                     _ => vec![declaration],
                 };
                 let payload = if self.adapter_mode == "oversized" { vec![b' ';65537] } else {serde_json::to_vec(&json!({"adapters":adapters})).unwrap()};

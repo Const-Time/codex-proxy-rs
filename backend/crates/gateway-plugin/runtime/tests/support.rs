@@ -325,6 +325,7 @@ fn build_archive(
 }
 pub fn update(sha: &str, revision: u64, enabled: bool) -> PluginUpdate {
     PluginUpdate {
+        upstream_adapter: None,
         retry_policy: None,
         account_scheduler: None,
         model_router: None,

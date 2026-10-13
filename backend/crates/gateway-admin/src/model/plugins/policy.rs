@@ -62,3 +62,18 @@ impl PluginRetryPolicyBinding {
         Ok(())
     }
 }
+
+/// All registered adapters in this contribution share a host-owned request scope.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginUpstreamAdapterBinding {
+    pub scope: PluginExecutionScope,
+}
+impl PluginUpstreamAdapterBinding {
+    pub fn validate(&self) -> Result<(), super::super::AdminError> {
+        if !self.scope.is_valid() {
+            return Err(super::super::AdminError::invalid("上游适配器作用范围无效"));
+        }
+        Ok(())
+    }
+}

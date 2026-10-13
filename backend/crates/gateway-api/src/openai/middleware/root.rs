@@ -74,7 +74,8 @@ pub(super) fn bind(
         .with_revocation(attempts.cancellation())
         .with_model_router(registry.clone())
         .with_account_scheduler(registry.clone())
-        .with_retry_policy(registry.clone());
+        .with_retry_policy(registry.clone())
+        .with_upstream_adapters(registry.clone());
     let prepared = if has_attempts {
         let adapter = if context.operation == OperationKind::Generate {
             super::responses_attempt_middleware(registry.clone(), attempt_context)

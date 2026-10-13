@@ -77,3 +77,5 @@ export CPR_TEST_REDIS_URL='redis://:<password>@127.0.0.1:6379'
 0034 为原 model_requests 行保存子调用的父请求与发起插件历史关联。请求层插件可能在父行写入前启动子调用，因此历史关联不设置外键；不新增计费表或执行状态机。
 
 0035 在 plugin_instances 追加 model_router 绑定，保存策略顺序、冻结匹配范围及故障处理，与实例共用 revision 和恢复流程；不新增路由状态机或账本。
+
+0038 在 plugin_instances 追加 upstream_adapter 绑定，保存宿主的 Key/分组作用范围；沿用实例 revision、审计和完整备份恢复，不新增账号、权限或费用账本。

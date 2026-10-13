@@ -32,13 +32,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-struct Account {
+pub(super) struct Account {
     id: ProviderAccountId,
     revision: u64,
     failures: AtomicUsize,
 }
 impl Account {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             id: ProviderAccountId::new("acct_fixture").unwrap(),
             revision: 3,
@@ -126,7 +126,7 @@ impl Fixture {
             .into_stream(self.process.upstream_adapter("adapter").unwrap())
     }
 }
-fn invocation(
+pub(super) fn invocation(
     behavior: &str,
     account: Arc<Account>,
     state: Option<ProviderSessionState>,

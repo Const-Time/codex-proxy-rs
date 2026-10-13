@@ -201,6 +201,7 @@ async fn fixture() -> (PluginManager, Vec<Arc<Process>>) {
             }),
             model_router: None,
             account_scheduler: None,
+            upstream_adapter: None,
             retry_policy: None,
         });
         processes.push(Arc::new(Process {
