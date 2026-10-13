@@ -155,6 +155,7 @@ impl CallbackHandler for Callbacks {
                         | Stage::Routing
                         | Stage::Scheduling
                         | Stage::Retry
+                        | Stage::Upstream
                 )
             {
                 return Err(PluginFault::new(
@@ -174,12 +175,13 @@ impl CallbackHandler for Callbacks {
                     "policy callbacks cannot access management capabilities",
                 ));
             }
-            if matches!(context.stage, Stage::Authentication | Stage::Retry)
-                && !matches!(
-                    method.as_str(),
-                    "host.state.get" | "host.state.put" | "host.state.delete"
-                )
-            {
+            if matches!(
+                context.stage,
+                Stage::Authentication | Stage::Retry | Stage::Upstream
+            ) && !matches!(
+                method.as_str(),
+                "host.state.get" | "host.state.put" | "host.state.delete"
+            ) {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
                     "this policy stage only permits private state callbacks",

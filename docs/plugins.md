@@ -25,7 +25,7 @@
 | 账号调度 | scheduler v1 的 scheduling 阶段；首个匹配插件只从宿主合格候选选择账号，租约及资格检查保留在 Core/Provider |
 | 重试策略 | retry_policy v1 的 retry 阶段；可停止或继续宿主允许的恢复路径，整条策略链共享两秒等待预算 |
 | 模型目录 | model_catalog v1；注册内置 Provider 的模型别名，继承真实目标的能力、账号范围和定价 |
-| 未开放的能力 | middleware、upstream_adapter、observer、command_line、maintenance、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling 阶段的原生模型回调 |
+| 未开放的能力 | middleware、upstream_adapter、observer、command_line、maintenance、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
@@ -56,6 +56,8 @@ Host 已提供受管 HTTP/WebSocket 传输：DNS 固定、代理与 TLS 校验�
 Core 的不透明会话状态可携带宿主记录的插件实例、贡献、适配器、代次和进程身份；连接内续接保持 ConnectionLocal 范围。缺少适配器时，OpenAI/xAI 原生执行和 xAI 独立 compaction 拒绝解释插件私有状态，明确要求客户端重放。SDK 中间件能读取归属事实，但改写或丢弃其副本不能删除宿主状态；原有无扩展归属的 Provider 会话继续使用原序列化合同。
 
 Runtime 已接通真实 SDK 子进程的适配调用、受管 HTTP/流读取和 WebSocket 回调。每个调用的网络资源绑定原请求、attempt、选定账号及凭据版本；停止调用立即回收正文资源。凭据由 Host 连接注入，插件请求载荷不包含宿主凭据。HTTP 流按需读取，单次读取最多 64 KiB；WebSocket 允许读取等待期间发送消息，SDK 取消等待后继续同一次读取。发送状态只采用 Host 观测，在途发送取消按不确定处理，插件自报状态不能降低宿主水位。
+
+upstream 阶段的私有状态、普通/流式模型调用，以及 `host.http.dispatch` 和正文资源回调已绑定同一在途调用。模型与内部 HTTP 使用原 Core 父调用、冻结的权限/配置和共享调用图，不从插件传入的 ID 构造权限；子模型避开发起祖先插件及父调用占用的账号，各次真实执行由原账本分别结算。内部 HTTP 使用父请求冻结的分派入口；其效果和已发生的子模型效果禁止父请求透明重放。终态、取消、撤权和停用统一回收模型流与 HTTP 资源，未读取的子模型流保持冷执行。私有状态继续校验当前实例、revision、命名空间、schema 和 CAS；本阶段不持有管理请求的操作者权限。这里尚不包括通用外部 `host.http.do` 或 upstream 的主动 service 调用；这些回调与其余能力继续接入，生产适配器门禁保留。
 
 事件解析验证协议、事实序列和响应身份，拒绝插件伪造宿主事实。费用经原选定账号的定价端口计算，采用实际返回档位。成功终态必须等 RPC 正常结束后才交付；尾部故障保留已解析计量事实，但不会交付成功终态。当前支持 JSON、原始 JSON 和 SSE 事件，原始 HTTP body 事件仍待接通。
 
