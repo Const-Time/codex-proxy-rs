@@ -66,6 +66,7 @@ impl ClientBudgetPort for Budget {
         &self,
         _: ClientApiKeyId,
         _: Option<gateway_core::routing::AccountGroupId>,
+        _: Option<String>,
     ) -> BoxFuture<'_, Result<gateway_core::engine::budget::ClientBudgetScope, GatewayError>> {
         Box::pin(async {
             assert!(self.active.load(Ordering::SeqCst));
@@ -76,6 +77,7 @@ impl ClientBudgetPort for Budget {
                 )
             } else {
                 Ok(gateway_core::engine::budget::ClientBudgetScope {
+                    billing: Default::default(),
                     user_id: "user-1".into(),
                     group_id: gateway_core::routing::AccountGroupId::new(
                         "grp_00000000000000000000000000000001",
@@ -399,7 +401,7 @@ fn cancellation_and_pre_send_failure_settle_zero_and_release_concurrency_for_all
     assert!(
         charges
             .iter()
-            .all(|charge| charge.amount_usd == gateway_core::metering::Decimal::ZERO)
+            .all(|charge| charge.amount_usd() == gateway_core::metering::Decimal::ZERO)
     );
 }
 
@@ -485,7 +487,7 @@ fn assert_zero_cleanup_completed(
     assert_eq!(charges.len(), 1);
     assert_eq!(charges[0].request_id, *request_id);
     assert_eq!(charges[0].key_id.as_str(), "key_start_test");
-    assert_eq!(charges[0].amount_usd, Decimal::ZERO);
+    assert_eq!(charges[0].amount_usd(), Decimal::ZERO);
     assert_eq!(
         charges[0].completed_at,
         store.finalizations.lock().unwrap()[0].completed_at,
@@ -605,7 +607,7 @@ fn detached_early_failure_resumes_cancelled_store_write_and_settles_once_for_all
                 {
                     let charges = budget.charges.lock().unwrap();
                     assert_eq!(charges.len(), 1);
-                    assert_eq!(charges[0].amount_usd, Decimal::ZERO);
+                    assert_eq!(charges[0].amount_usd(), Decimal::ZERO);
                 }
                 assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
                 assert!(admissions.active.load(Ordering::SeqCst));
@@ -722,7 +724,7 @@ fn assert_cleanup_completed(admissions: &Admissions, budget: &Budget, request_id
     assert_eq!(charges.len(), 1);
     assert_eq!(charges[0].request_id, *request_id);
     assert_eq!(charges[0].key_id.as_str(), "key_start_test");
-    assert_eq!(charges[0].amount_usd, known_charge());
+    assert_eq!(charges[0].amount_usd(), known_charge());
 }
 
 #[test]

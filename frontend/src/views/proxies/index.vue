@@ -154,29 +154,28 @@ onMounted(() => void query.execute())
       description="管理账号代理，检测出口和各平台连接质量"
     />
     <BaseCard class="cp-mobile-auto-height cp-mobile-table-host mt-5 flex h-[calc(100dvh-136px)] min-h-125 flex-col">
-      <template #header>
-        <div class="flex w-full flex-col gap-3 sm:flex-row sm:items-center">
-          <BaseInput v-model="search" class="sm:w-80" aria-label="搜索代理" placeholder="搜索代理名称...">
-            <template #prefix>
-              <Search class="size-4.5 text-cp-text-tertiary" />
-            </template>
-          </BaseInput>
-          <div class="flex shrink-0 items-center justify-end gap-2 sm:ml-auto">
-            <BaseIconButton label="刷新代理列表" :loading="loading" @click="query.execute()">
-              <RefreshCw class="size-4" />
-            </BaseIconButton>
-            <BaseButton variant="primary" @click="openForm()">
-              <template #icon>
-                <Plus class="size-4" />
-              </template>
-              新增代理
-            </BaseButton>
-          </div>
-        </div>
-      </template>
       <template #body>
         <div class="flex h-full min-h-0 flex-col">
           <BaseTable table-id="proxies" class="min-h-0 flex-1" :columns="columns" :rows="proxies" :loading="loading" :empty-text="search.trim() ? '没有找到匹配的代理，请尝试其他名称' : '暂无代理，请点击新增代理添加'">
+            <template #toolbar-actions>
+              <BaseIconButton label="刷新代理列表" :loading="loading" @click="query.execute()">
+                <RefreshCw class="size-4" />
+              </BaseIconButton>
+              <BaseButton variant="primary" @click="openForm()">
+                <template #icon>
+                  <Plus class="size-4" />
+                </template>
+                新增代理
+              </BaseButton>
+            </template>
+
+            <template #toolbar>
+              <BaseInput v-model="search" class="sm:w-80" aria-label="搜索代理" placeholder="搜索代理名称...">
+                <template #prefix>
+                  <Search class="size-4.5 text-cp-text-tertiary" />
+                </template>
+              </BaseInput>
+            </template>
             <template #identity="{ row }">
               <div class="grid min-w-0 gap-1">
                 <strong class="truncate text-cp text-cp-text" :title="row.name">{{ row.name }}</strong>

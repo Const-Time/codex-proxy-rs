@@ -870,10 +870,14 @@ Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`
 返回模型仅代表上游声明，不证明模型真实性。迁移 `0021` 仅回填历史 OpenAI 记录中已保存的合法
 `upstreamReportedModel`，其余旧记录保持空值。
 
-OpenAI 的 `serviceTier` 只接受上游响应生命周期事件确认的实际 `response.service_tier`；请求里的
-期望档位只保留在 request summary，不能冒充响应事实。计费展示把 `priority`/`fast` 映射为 `Fast`，
-`flex` 映射为 `Flex`，缺失或 `default` 映射为 `Default`；未知非空值原样展示。Fast 优先使用模型的
-priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex 为 `0.50x`，Default 为 `1.00x`。
+OpenAI Responses 的 `serviceTier` 与本地费用估算统一采用 Provider 最终发给上游的请求
+`service_tier`，响应回显不覆盖或回填该值。例如发送 `priority`、响应返回 `default` 或 `auto` 时，
+仍按 Priority 价格估算并显示 `Fast`。未发送档位时，`serviceTier` 保持缺失，费用按标准档估算。
+计费展示把 `priority`/`fast` 映射为 `Fast`，`flex` 映射为 `Flex`，缺失或 `default`/`standard`
+映射为 `Standard`。各档位与长上下文区间使用已登记价格；请求 `auto`、未知档位或缺少对应价格时
+不估算，不用固定倍数兜底。系统模型定价倍率、分组分项倍率在档位选价后沿现有冻结规则应用。
+上游返回档位独立保留为诊断事实，原始响应不改写。这里的 Fast 表示发送档位，不证明上游实际加速，
+本地费用估算不能替代官方账单。新口径仅作用于新请求，不回填历史档位或重算已存储费用。
 
 ## 11. 版本、更新与重启
 
@@ -964,3 +968,7 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 并发/频率错误保留 HTTP 429，并通过 `user_concurrency_limited`、`user_rate_limited`、
 `client_key_concurrency_limited`、`client_key_rate_limited` 区分原因。未进入上游执行的准入拒绝标记为 `not_sent`，页面显示“未调用上游”。
 升级仅从旧入口事件的结构化消息恢复已保存的请求/Key ID 和可确认归属；缺失的模型、IP、具体限流类别不猜测。
+
+### 请求档位与上游档位
+
+Usage 列表和详情（含个人视图）返回 `requestedServiceTier` 与 `upstreamServiceTier` 两个可空字段，分别表示最终出站请求档位与上游响应回显。新请求的 `serviceTier` 和本地计费使用出站档位；请求 `priority` 不会改写独立的上游 `default`/`auto` 事实，也不代表已确认加速。历史记录保持原有 `serviceTier` 与冻结计费明细；没有请求或响应档位事实时对应字段返回 null。

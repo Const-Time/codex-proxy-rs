@@ -2222,7 +2222,7 @@ fn discarded_attempt_cost_never_leaks_into_retry_result() {
     assert_eq!(state.finalizations[0].cost_source, CostSource::Unavailable);
     assert_eq!(state.finalizations[0].cost_ticks, None);
     assert_eq!(
-        session.budget_charge().amount_usd.scaled(),
+        session.budget_charge().amount_usd().scaled(),
         999,
         "missing final usage cannot erase a charged retry"
     );
@@ -2293,7 +2293,7 @@ fn key_budget_accumulates_only_observed_retry_costs() {
         block_on(session.collect_uncommitted()).unwrap();
         block_on(session.commit_downstream(Some(200))).unwrap();
         let charge = session.budget_charge();
-        assert_eq!(charge.amount_usd.scaled(), expected);
+        assert_eq!(charge.amount_usd().scaled(), expected);
         assert_eq!(
             session.budget_charge().completed_at,
             charge.completed_at,
@@ -2353,7 +2353,7 @@ fn key_budget_settles_post_send_failures_from_observed_cost_without_replaying() 
                 }
                 assert!(session.is_finalized());
                 assert_eq!(
-                    session.budget_charge().amount_usd.scaled(),
+                    session.budget_charge().amount_usd().scaled(),
                     cost.unwrap_or(0),
                     "send={send_state:?}, committed={committed}, cost={cost:?}"
                 );
@@ -2941,7 +2941,7 @@ fn empty_selection_after_atomic_failure_should_deliver_the_last_upstream_wire() 
 
     assert_eq!(provider.contexts.lock().expect("contexts lock").len(), 2);
     assert_eq!(
-        session.budget_charge().amount_usd.scaled(),
+        session.budget_charge().amount_usd().scaled(),
         500,
         "restoring a discarded failure must not charge its usage twice"
     );
@@ -3082,7 +3082,7 @@ fn ambiguous_send_state_stops_retry() {
     let finalization = &state.finalizations[0];
     assert_eq!(finalization.outcome, ExecutionOutcome::Failed);
     assert_eq!(finalization.send_state, UpstreamSendState::Ambiguous);
-    assert_eq!(session.budget_charge().amount_usd.scaled(), 0);
+    assert_eq!(session.budget_charge().amount_usd().scaled(), 0);
     assert_eq!(finalization.attempt_count, 1);
     assert!(!finalization.committed);
     assert!(finalization.latency_ms.is_some());
@@ -3835,7 +3835,7 @@ fn cancellation_before_pending_delivery_commit_reaches_terminal_state() {
     assert_eq!(state.commits, 0);
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Cancelled);
     assert!(!state.finalizations[0].committed);
-    assert_eq!(session.budget_charge().amount_usd.scaled(), 0);
+    assert_eq!(session.budget_charge().amount_usd().scaled(), 0);
 }
 
 #[test]
@@ -3884,7 +3884,7 @@ fn no_eligible_account_before_stream_records_failure_without_fabricating_an_atte
     assert_eq!(finalization.upstream_transport, None);
     assert_eq!(finalization.total_tokens, None);
     assert_eq!(finalization.cost_ticks, None);
-    assert_eq!(session.budget_charge().amount_usd.scaled(), 0);
+    assert_eq!(session.budget_charge().amount_usd().scaled(), 0);
     let trace: Value =
         serde_json::from_str(finalization.diagnostic_trace_json.as_deref().unwrap()).unwrap();
     let events = trace["events"].as_array().unwrap();
@@ -3973,7 +3973,7 @@ fn preparation_failures_preserve_the_error_when_observation_writes_fail() {
         block_on(session.cancel_and_finalize()).unwrap();
         assert!(block_on(session.next_event()).unwrap().is_none());
         assert_eq!(session.budget_charge().completed_at, charge.completed_at);
-        assert_eq!(charge.amount_usd.scaled(), 0);
+        assert_eq!(charge.amount_usd().scaled(), 0);
         assert_eq!(provider.contexts.lock().unwrap().len(), 1);
         let state = store.state.lock().unwrap();
         assert!(state.attempts.is_empty());
@@ -4374,7 +4374,7 @@ fn charged_terminal_write_resumes_without_replacing_success_failure_or_send_fact
                 }
                 assert!(!session.is_finalized());
                 let charge = session.budget_charge();
-                assert_eq!(charge.amount_usd.scaled(), 25);
+                assert_eq!(charge.amount_usd().scaled(), 25);
                 release
                     .send(())
                     .expect("the original finalization still owns its gate");
@@ -4384,7 +4384,7 @@ fn charged_terminal_write_resumes_without_replacing_success_failure_or_send_fact
                     assert!(session.next_event().await.unwrap().is_none());
                 }
                 assert!(session.is_finalized());
-                assert_eq!(session.budget_charge().amount_usd, charge.amount_usd);
+                assert_eq!(session.budget_charge().amount_usd(), charge.amount_usd());
                 assert_eq!(session.budget_charge().completed_at, charge.completed_at);
                 assert_eq!(provider.contexts.lock().unwrap().len(), 1);
                 let state = store.state.lock().unwrap();

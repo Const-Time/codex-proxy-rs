@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use gateway_core::{
     engine::budget::{
-        ClientBudgetCharge, ClientBudgetError, ClientBudgetLimits, ClientBudgetPort,
-        ClientBudgetScope, ClientBudgetStatus,
+        ClientBudgetBilling, ClientBudgetCharge, ClientBudgetError, ClientBudgetLimits,
+        ClientBudgetPort, ClientBudgetScope, ClientBudgetStatus,
     },
     error::{GatewayError, GatewayErrorKind},
     metering::Decimal,
@@ -33,6 +33,7 @@ impl PgClientBudgetStore {
         &self,
         key_id: ClientApiKeyId,
         expected_group: Option<AccountGroupId>,
+        requested_model: Option<String>,
     ) -> Result<ClientBudgetScope, GatewayError> {
         let group = expected_group.ok_or_else(|| {
             GatewayError::new(
@@ -41,7 +42,7 @@ impl PgClientBudgetStore {
             )
         })?;
         // Recheck live grants, enabled state, and the routing snapshot at admission.
-        let row = sqlx::query("select k.owner_user_id, user_group_quota_limit(g.daily_limit_usd, k.owner_user_id, g.id)::text as daily_limit_usd, user_group_quota_limit(g.weekly_limit_usd, k.owner_user_id, g.id)::text as weekly_limit_usd
+        let row = sqlx::query("select k.owner_user_id, g.model_multipliers, user_group_quota_limit(g.daily_limit_usd, k.owner_user_id, g.id)::text as daily_limit_usd, user_group_quota_limit(g.weekly_limit_usd, k.owner_user_id, g.id)::text as weekly_limit_usd
             from client_api_keys k join users u on u.id = k.owner_user_id and u.enabled
             join client_api_key_groups kg on kg.client_api_key_id = k.id
             join account_groups g on g.id = kg.account_group_id and g.enabled
@@ -49,16 +50,47 @@ impl PgClientBudgetStore {
             and ((u.role = 'admin' and not u.group_grants_configured) or exists(select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id))")
             .bind(key_id.as_str()).bind(group.as_str()).fetch_optional(&self.pool).await.map_err(|_| unavailable())?
             .ok_or_else(|| GatewayError::new(GatewayErrorKind::PolicyDenied, "user, key or group access is disabled or changed"))?;
+        let rules = row
+            .try_get::<sqlx::types::Json<
+                BTreeMap<String, gateway_admin::model::account_groups::GroupModelMultiplier>,
+            >, _>("model_multipliers")
+            .map_err(|_| unavailable())?
+            .0;
+        let billing = requested_model
+            .as_ref()
+            .and_then(|model| rules.get(model))
+            .map(|rule| {
+                Ok(ClientBudgetBilling {
+                    multiplier: rule.multiplier().parse().map_err(|_| unavailable())?,
+                    scope: match rule {
+                        gateway_admin::model::account_groups::GroupModelMultiplier::All(_) => {
+                            Default::default()
+                        }
+                        gateway_admin::model::account_groups::GroupModelMultiplier::Scoped {
+                            scope,
+                            ..
+                        } => scope.clone(),
+                    },
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
         let scope = ClientBudgetScope {
             user_id: row.get("owner_user_id"),
             group_id: group,
+            billing,
         };
         let retries = self
             .retry
             .lock()
             .map_err(|_| unavailable())?
             .values()
-            .filter(|charge| charge.scope.as_ref() == Some(&scope))
+            .filter(|charge| {
+                charge
+                    .scope
+                    .as_ref()
+                    .is_some_and(|s| s.user_id == scope.user_id && s.group_id == scope.group_id)
+            })
             .cloned()
             .collect::<Vec<_>>();
         for charge in retries {
@@ -126,10 +158,25 @@ impl PgClientBudgetStore {
         advance_windows(&mut tx, scope, Utc::now())
             .await
             .map_err(|_| ClientBudgetError)?;
-        let billed_amount = sqlx::query_scalar::<_, String>("insert into user_group_charge_events(request_id, user_id, account_group_id, client_api_key_ref, amount_usd, completed_at)
-            values ($1, $2, $3, $4, $5::text::numeric, $6) on conflict(request_id) do nothing returning amount_usd::text")
+        // Billing is independent of the lossy/asynchronous observation writer. Each
+        // attempt uses its own frozen breakdown (including failed/retried attempts).
+        let costs = charge
+            .costs
+            .iter()
+            .filter_map(|cost| {
+                let total = cost.total().filter(|m| m.currency().as_str() == "USD")?;
+                Some(serde_json::json!({"raw": total.amount().canonical(),
+                "snapshot": cost.breakdown().map(super::pricing::encode_billing_snapshot)}))
+            })
+            .collect::<Vec<_>>();
+        let billed_amount = sqlx::query_scalar::<_, String>("insert into user_group_charge_events(request_id, user_id, account_group_id, client_api_key_ref, amount_usd, completed_at, raw_amount_usd, billing_multiplier, billing_multiplier_scope)
+            values ($1, $2, $3, $4,
+                least(9999999999.9999999999, coalesce((select sum(scoped_billed_cost((c->>'raw')::numeric, $7::text::numeric, $8, c->'snapshot')) from jsonb_array_elements($9) c), 0)),
+                $6, $5::text::numeric, $7::text::numeric, $8)
+            on conflict(request_id) do nothing returning amount_usd::text")
             .bind(charge.request_id.as_str()).bind(&scope.user_id).bind(scope.group_id.as_str()).bind(charge.key_id.as_str())
-            .bind(charge.amount_usd.canonical()).bind(DateTime::<Utc>::from(charge.completed_at))
+            .bind(charge.amount_usd().canonical()).bind(DateTime::<Utc>::from(charge.completed_at))
+            .bind(scope.billing.multiplier.canonical()).bind(sqlx::types::Json(&scope.billing.scope)).bind(sqlx::types::Json(costs))
             .fetch_optional(&mut *tx).await.map_err(|_| ClientBudgetError)?;
         if let Some(billed_amount) = billed_amount {
             sqlx::query("update user_group_budget_windows set
@@ -148,8 +195,12 @@ impl ClientBudgetPort for PgClientBudgetStore {
         &self,
         key_id: ClientApiKeyId,
         expected_group: Option<AccountGroupId>,
+        requested_model: Option<String>,
     ) -> BoxFuture<'_, Result<ClientBudgetScope, GatewayError>> {
-        Box::pin(async move { self.admit_inner(key_id, expected_group).await })
+        Box::pin(async move {
+            self.admit_inner(key_id, expected_group, requested_model)
+                .await
+        })
     }
     fn settle(&self, charge: ClientBudgetCharge) -> BoxFuture<'_, Result<(), ClientBudgetError>> {
         Box::pin(async move {

@@ -3,6 +3,7 @@ import type { UsageDisplayRecord } from '../utils/records'
 
 import { computed } from 'vue'
 import { usageBilling, usageBillingText } from '../utils/records'
+import { serviceTierLabel } from '../utils/serviceTier'
 import UsageDetailPopover from './UsageDetailPopover.vue'
 
 const props = defineProps<{
@@ -16,7 +17,9 @@ const billingItems = computed(() => {
     return []
 
   return [
-    { label: '服务档位', value: value.serviceTierDisplay, tone: 'info' },
+    { label: '请求档位', value: serviceTierLabel(props.record.requestedServiceTier), tone: 'info' },
+    { label: '上游返回档位', value: serviceTierLabel(props.record.upstreamServiceTier), tone: 'info' },
+    { label: '计价档位', value: value.serviceTierDisplay, tone: 'info' },
     { label: '原始费用', value: value.originalAmountDisplay, tone: 'info' },
     { label: '分组模型倍率', value: value.groupMultiplierDisplay, tone: 'info' },
     { label: '服务档位倍率', value: value.multiplierDisplay, tone: 'info' },
@@ -83,7 +86,7 @@ function itemValueClass(tone?: string, accent?: boolean) {
         </div>
       </div>
       <p class="max-w-64 text-cp-xs leading-relaxed text-cp-text-tertiary">
-        原始费用包含服务档位倍率。总费用 = 原始费用 × 分组模型倍率，按请求发生时的倍率计费。
+        新请求按最终发给上游的档位估算费用，响应回显不改变计价档位；历史费用不重算。分组倍率仅作用于选中的费用项，未选项保持原价，规则在请求准入时固定。请求 Fast 不代表上游实际加速。
       </p>
     </UsageDetailPopover>
   </div>

@@ -247,7 +247,8 @@ async fn administrator_can_scope_own_keys_without_losing_management_or_session()
         gateway_store::postgres::PgClientBudgetStore::new(db.pool.clone())
             .admit(
                 ClientApiKeyId::new("admin-own").unwrap(),
-                Some(AccountGroupId::new(GROUP).unwrap())
+                Some(AccountGroupId::new(GROUP).unwrap()),
+                None,
             )
             .await
             .is_err()

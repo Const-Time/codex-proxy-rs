@@ -294,6 +294,8 @@ fn retain_personal_fields(value: &mut serde_json::Value) {
         "upstreamModel",
         "upstreamResponseModel",
         "serviceTier",
+        "requestedServiceTier",
+        "upstreamServiceTier",
         "statusCode",
         "clientTransport",
         "imageGenerationRequested",

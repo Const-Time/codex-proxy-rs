@@ -302,6 +302,8 @@ pub(crate) fn usage_list_record_view(record: domain::UsageListRecord) -> UsageLi
         .clone()
         .or_else(|| record.requested_model_id.clone());
     UsageListRecordView {
+        requested_service_tier: record.requested_service_tier,
+        upstream_service_tier: record.upstream_service_tier,
         turn_state: record.turn_state,
         turn_state_source: record.turn_state_source,
         user_id: record.user_id,
@@ -395,6 +397,14 @@ pub(crate) fn usage_record_view(record: domain::UsageRecord) -> UsageRecordView 
         .or_else(|| record.requested_model_id.clone());
     let metadata = provider_metadata_fields(record.provider_metadata_json.as_deref());
     UsageRecordView {
+        requested_service_tier: metadata
+            .get("requestedServiceTier")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        upstream_service_tier: metadata
+            .get("upstreamServiceTier")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         id: record.id.clone(),
         request_id: record.id,
         client_api_key_id: Some(record.client_api_key_ref),

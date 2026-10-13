@@ -5832,8 +5832,159 @@ async fn completed_response_persists_session_affinity_before_stream_consumer_sto
     drop(stream);
 
     assert_eq!(affinity.binding_count(), 1);
-    assert_eq!(observed_service_tier.as_deref(), Some("default"));
+    assert_eq!(observed_service_tier.as_deref(), Some("priority"));
     assert_eq!(upstream_service_tier.as_deref(), Some("default"));
+}
+
+#[tokio::test]
+async fn responses_should_observe_and_bill_the_outbound_service_tier_on_both_transports() {
+    for use_websocket in [false, true] {
+        for (requested, reported, expected_cost) in [
+            (Some("priority"), Some("default"), Some(6_875_000)),
+            (Some("priority"), Some("auto"), Some(6_875_000)),
+            (Some("priority"), None, Some(6_875_000)),
+            (Some("default"), Some("priority"), Some(3_437_500)),
+            (None, Some("priority"), Some(3_437_500)),
+            (None, None, Some(3_437_500)),
+            (Some("auto"), Some("default"), None),
+            (Some("future"), Some("priority"), None),
+        ] {
+            let store = Arc::new(MemoryAccountStore::default());
+            create_account(&store, "acct_provider_contract").await;
+            let mut created =
+                json!({"type":"response.created","response":{"id":"resp_tier","model":"gpt-5.4"}});
+            let mut completed = json!({
+                "type":"response.completed",
+                "response":{
+                    "id":"resp_tier","model":"gpt-5.4","status":"completed","output":[],
+                    "usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":25,"cache_write_tokens":0},"total_tokens":110}
+                }
+            });
+            if let Some(reported) = reported {
+                created["response"]["service_tier"] = json!("auto");
+                completed["response"]["service_tier"] = json!(reported);
+            }
+            let response_frames = format!(
+                "event: response.created\ndata: {created}\n\nevent: response.completed\ndata: {completed}\n\n"
+            );
+            let (base_url, http_server, websocket_server) = if use_websocket {
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+                let base_url = format!("http://{}", listener.local_addr().expect("address"));
+                let server = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.expect("accept WebSocket");
+                    let mut websocket = accept_codex_test_websocket(socket).await;
+                    let request = websocket.next().await.expect("request").expect("frame");
+                    let request: Value = serde_json::from_str(request.to_text().expect("text"))
+                        .expect("request JSON");
+                    for event in [created, completed] {
+                        websocket
+                            .send(Message::Text(event.to_string().into()))
+                            .await
+                            .expect("response");
+                    }
+                    request
+                });
+                (base_url, None, Some(server))
+            } else {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/codex/responses"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_raw(response_frames.clone(), "text/event-stream"),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                (server.uri(), Some(server), None)
+            };
+            let mut body = Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("hello")),
+            ]);
+            if let Some(requested) = requested {
+                body.insert("service_tier".to_owned(), json!(requested));
+            }
+            let payload = ProtocolPayload::json_object("openai", body)
+                .expect("payload")
+                .with_context(Map::from_iter([(
+                    "use_websocket".to_owned(),
+                    json!(use_websocket),
+                )]));
+            let mut stream = provider_with_base_url(&store, base_url)
+                .execute(
+                    planned_request(
+                        "openai",
+                        Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                    ),
+                    context("req_service_tier", CancellationToken::new()),
+                )
+                .await
+                .expect("provider stream");
+            let mut observations = Vec::new();
+            let mut costs = Vec::new();
+            let mut raw_response = Vec::new();
+            while let Some(event) = stream.next().await {
+                let event = event.expect("provider event");
+                if let Some(observation) = event.response_observation() {
+                    observations.push(observation.clone());
+                }
+                for fact in event.canonical_facts() {
+                    if let GatewayEvent::CalculatedCost(cost) = fact {
+                        costs.push(cost.total().amount().scaled());
+                    }
+                }
+                if let Some(frame) = event.wire_event().and_then(|wire| wire.raw_sse_frame()) {
+                    raw_response.extend_from_slice(frame);
+                }
+            }
+            let outbound = if let Some(server) = http_server {
+                server.verify().await;
+                let requests = server.received_requests().await.expect("upstream requests");
+                captured_request_body(&requests[0])
+            } else {
+                websocket_server
+                    .expect("WebSocket server")
+                    .await
+                    .expect("server task")
+            };
+            assert_eq!(
+                outbound.get("service_tier").and_then(Value::as_str),
+                requested
+            );
+            assert!(!observations.is_empty());
+            for observation in &observations {
+                assert_eq!(
+                    observation.service_tier(),
+                    requested,
+                    "WebSocket={use_websocket}"
+                );
+            }
+            let metadata: Value = serde_json::from_str(
+                observations
+                    .last()
+                    .expect("final observation")
+                    .provider_metadata()
+                    .expect("metadata")
+                    .as_json(),
+            )
+            .expect("metadata JSON");
+            assert_eq!(
+                metadata.get("requestedServiceTier").and_then(Value::as_str),
+                requested
+            );
+            assert_eq!(
+                metadata.get("upstreamServiceTier").and_then(Value::as_str),
+                reported
+            );
+            assert_eq!(
+                costs,
+                expected_cost.into_iter().collect::<Vec<_>>(),
+                "WebSocket={use_websocket}, requested={requested:?}, reported={reported:?}"
+            );
+            assert_eq!(raw_response, response_frames.as_bytes());
+        }
+    }
 }
 
 #[tokio::test]

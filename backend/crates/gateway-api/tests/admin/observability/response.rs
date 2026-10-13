@@ -560,6 +560,8 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
             let item = &value["data"];
             assert_eq!(item["requestedModel"], "coding");
             assert_eq!(item["upstreamModel"], "upstream-model");
+            assert_eq!(item["requestedServiceTier"], "priority");
+            assert_eq!(item["upstreamServiceTier"], "default");
             assert_eq!(
                 item.get("upstreamResponseModel"),
                 Some(&serde_json::json!(response_model))
@@ -816,7 +818,10 @@ fn usage_record_with_account(
         websocket_pool: None,
         upstream_response_model: None,
         service_tier: None,
-        provider_metadata_json: None,
+        provider_metadata_json: Some(
+            serde_json::json!({"requestedServiceTier":"priority", "upstreamServiceTier":"default"})
+                .to_string(),
+        ),
         attempt_count: 1,
         upstream_send_state: "sent".to_owned(),
         downstream_committed_at: Some(started_at),
@@ -927,6 +932,8 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .lock()
         .expect("usage records")
         .push(UsageListRecord {
+            requested_service_tier: Some("priority".into()),
+            upstream_service_tier: Some("default".into()),
             turn_state: Some("gAAAA-test-turn-state".to_owned()),
             turn_state_source: Some("request".to_owned()),
             user_id: Some("user_history".into()),
@@ -1041,6 +1048,8 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
     let personal: serde_json::Value = serde_json::from_slice(&personal_bytes).unwrap();
     let item = &personal["data"]["items"][0];
     assert_eq!(item["requestedModel"], "grok-4.5");
+    assert_eq!(item["requestedServiceTier"], "priority");
+    assert_eq!(item["upstreamServiceTier"], "default");
     assert_eq!(item["upstreamModel"], "grok-4.5");
     assert_eq!(item["upstreamResponseModel"], "grok-4.6-build");
     assert_eq!(item["tokenDetails"]["imageInputTokens"], 31);

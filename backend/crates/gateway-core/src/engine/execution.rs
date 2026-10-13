@@ -584,9 +584,26 @@ impl DefaultExecutionService {
         } else {
             None
         };
+        let observation = plan
+            .candidates()
+            .first()
+            .map_or_else(Default::default, |candidate| {
+                self.providers.request_observation(
+                    candidate.provider(),
+                    &operation,
+                    client.policy.key_id(),
+                )
+            });
+        let requested_model = target.into_public_model().or(observation.requested_model);
         let budget_scope = if let Some(budget) = &self.budget {
             match budget
-                .admit(client.policy.key_id().clone(), expected_group)
+                .admit(
+                    client.policy.key_id().clone(),
+                    expected_group,
+                    requested_model
+                        .as_ref()
+                        .map(|model| model.as_str().to_owned()),
+                )
                 .await
             {
                 Ok(scope) => Some(scope),
@@ -598,16 +615,6 @@ impl DefaultExecutionService {
         } else {
             None
         };
-        let observation = plan
-            .candidates()
-            .first()
-            .map_or_else(Default::default, |candidate| {
-                self.providers.request_observation(
-                    candidate.provider(),
-                    &operation,
-                    client.policy.key_id(),
-                )
-            });
         let new_request = NewModelRequest {
             budget_scope: budget_scope.clone(),
             id: request_id.clone(),
@@ -619,7 +626,7 @@ impl DefaultExecutionService {
             operation: operation.kind(),
             endpoint: metadata.endpoint,
             client_transport: metadata.transport.as_str().to_owned(),
-            requested_model: target.into_public_model().or(observation.requested_model),
+            requested_model,
             client_ip: metadata.client_ip,
             user_agent: metadata.user_agent,
             reasoning_effort: observation.reasoning_effort,
@@ -654,7 +661,7 @@ impl DefaultExecutionService {
                             scope: budget_scope.clone(),
                             key_id: client.policy.key_id().clone(),
                             request_id: request_id.clone(),
-                            amount_usd: crate::metering::Decimal::ZERO,
+                            costs: Vec::new(),
                             completed_at: SystemTime::now(),
                         },
                     )

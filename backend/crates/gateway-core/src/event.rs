@@ -521,7 +521,7 @@ impl fmt::Debug for ProviderResponseHeader {
     }
 }
 
-/// Core 消费的实际上游响应事实。
+/// Core 消费的 Provider 执行观测，不会原样进入客户端响应。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderResponseObservation {
     transport: UpstreamTransport,
@@ -577,7 +577,7 @@ impl ProviderResponseObservation {
         self
     }
 
-    /// 附加 Provider 在响应中确认的服务档位。
+    /// 附加 Provider 确定的统计档位，Core 不重新解释其来源。
     ///
     /// # Errors
     ///
@@ -592,7 +592,7 @@ impl ProviderResponseObservation {
         Ok(self)
     }
 
-    /// 附加合法服务档位；不适合持久化的上游观测值会被忽略。
+    /// 附加 Provider 确定的统计档位；不适合持久化的值会被忽略。
     #[must_use]
     pub fn with_service_tier_if_valid(mut self, service_tier: impl Into<String>) -> Self {
         let service_tier = service_tier.into();

@@ -394,8 +394,11 @@ credential 与 quota 是两组独立事实：credential refresh 不等于 quota 
 可恢复观测并累计指标，但不允许改变客户端响应。Usage 详情中的 attempt 因此是 best-effort，并通过
 `attemptsComplete: false` 明示不完整性。
 
-只有完整交付客户端的成功响应进入 Token、延迟和成本聚合。实际 `service_tier` 只接受上游响应事件确认，
-不能用请求期望值替代。
+只有完整交付客户端的成功响应进入 Token、延迟和成本聚合。OpenAI Responses 的统计档位与本地费用
+估算统一使用 Provider 最终发给上游的请求 `service_tier`，不由响应回显覆盖；未发送档位时保持缺失，
+费用按标准档估算。使用记录单独展示 `requestedServiceTier`（最终出站请求档位）和
+`upstreamServiceTier`（上游返回档位）。返回档位只作诊断，不改写客户端响应；请求 Fast 或上游回显
+均不能单独证明实际加速。分项倍率继续作用于 Provider 选定档位的费用拆分，不重算历史账本。
 
 Worker 由各 Bundle 贡献、由 Host 统一监督：
 
@@ -478,9 +481,9 @@ docker compose -f deploy/compose.yaml config --quiet
 
 用户统一存于 users；原管理员迁移为 admin，后台新建身份固定为 user。Redis 会话保存用户 ID 与 auth_version，每次鉴权回读 enabled/version。AdminAuth 负责全局管理，UserAuth 只接受个人会话；部署级 API Key 不可代用户访问密钥。
 
-client_api_keys.owner_user_id 不可由 API 修改。创建/变更在事务内重新校验所有权和 user_account_groups 授权，唯一索引限制一个 Key 一个组。快照排除禁用用户、未授权或未绑定启用组的 Key。请求准入再次检查实时用户/组权限，返回冻结的 ClientBudgetScope；model_requests.user_id 独立于可删除的密钥外键保存。
+client_api_keys.owner_user_id 不可由 API 修改。创建/变更在事务内重新校验所有权和 user_account_groups 授权，唯一索引限制一个 Key 一个组。快照排除禁用用户、未授权或未绑定启用组的 Key。请求准入再次检查实时用户/组权限，返回冻结用户/分组归属以及请求模型计费规则的 ClientBudgetScope；model_requests.user_id 独立于可删除的密钥外键保存。
 
-account_groups 配置日/周 USD 限额；user_group_budget_windows 按 (user_id, account_group_id) 维护窗口，user_group_charge_events 按 request_id 幂等结算。删除/改绑 Key 不改变计费归属和已用金额。使用记录查询在 SQL 层按可信用户 ID 限定，个人响应采用字段允许清单，避免新增诊断字段自动暴露。
+account_groups 配置日/周 USD 限额；user_group_budget_windows 按 (user_id, account_group_id) 维护窗口，user_group_charge_events 按 request_id 幂等结算。Core 将每次尝试的已知费用和冻结明细直接交给结算端口；Store 使用准入时固定的倍率和作用项计算账本，不能读取异步 model_requests 投影作为扣费依据。请求投影也携带同一份准入规则，日志延迟、丢失或之后修改分组设置均不改变本次规则。删除/改绑 Key 不改变计费归属和已用金额。使用记录查询在 SQL 层按可信用户 ID 限定，个人响应采用字段允许清单，避免新增诊断字段自动暴露。
 
 密钥仍以明文持久化，以支持本人再次读取；“管理员不能查看”由应用权限保证，不隔离数据库、备份或部署主机的操作者。后台备份仍属于部署管理权限。
 

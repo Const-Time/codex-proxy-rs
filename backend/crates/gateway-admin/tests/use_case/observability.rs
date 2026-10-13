@@ -974,6 +974,8 @@ fn total_record(
     now: DateTime<Utc>,
 ) -> UsageListRecord {
     UsageListRecord {
+        requested_service_tier: None,
+        upstream_service_tier: None,
         turn_state: None,
         turn_state_source: None,
         user_id: None,

@@ -30,7 +30,7 @@ use crate::event::{
     GatewayEvent, ProviderEvent, ProviderResponseHeader, ProviderResponseObservation,
 };
 use crate::lifecycle::CancellationToken;
-use crate::metering::Decimal;
+use crate::metering::CostEstimate;
 use crate::operation::{Operation, ProviderSessionState};
 use crate::routing::RoutingPlan;
 use futures::future::{BoxFuture, Fuse};
@@ -171,7 +171,7 @@ where
             connection_retries: 0,
             observation: ResponseObservation::new(timing_started_at),
             budget_scope: request.budget_scope.clone(),
-            budget_prior_attempts_usd: Decimal::ZERO,
+            budget_prior_costs: Vec::new(),
             budget_attempt_already_counted: false,
             trace,
             deadline,
@@ -269,7 +269,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     connection_retries: u32,
     observation: ResponseObservation,
     budget_scope: Option<super::budget::ClientBudgetScope>,
-    budget_prior_attempts_usd: Decimal,
+    budget_prior_costs: Vec<CostEstimate>,
     budget_attempt_already_counted: bool,
     trace: TraceContext,
     deadline: SystemTime,
@@ -509,32 +509,17 @@ where
 
     #[must_use]
     pub fn budget_charge(&self) -> super::budget::ClientBudgetCharge {
-        // 超出数据库可表示范围时保留最大金额，避免溢出后误记为零。
-        let amount_usd = self
-            .budget_prior_attempts_usd
-            .checked_add(self.budget_attempt_usd())
-            .unwrap_or(Decimal::MAX);
+        let mut costs = self.budget_prior_costs.clone();
+        if !self.budget_attempt_already_counted {
+            costs.push(self.observation.cost.clone());
+        }
         super::budget::ClientBudgetCharge {
             scope: self.budget_scope.clone(),
             key_id: self.client_api_key_ref.clone(),
             request_id: self.request_id.clone(),
-            amount_usd,
+            costs,
             completed_at: self.finalized_at.unwrap_or_else(SystemTime::now),
         }
-    }
-
-    fn budget_attempt_usd(&self) -> Decimal {
-        if self.budget_attempt_already_counted {
-            return Decimal::ZERO;
-        }
-        // Key 只累计已取得的 USD 费用；缺少费用的请求按零结算。
-        // 发送状态仍用于判断重放是否安全并保留在诊断中，不能据此推断存在欠费。
-        self.observation
-            .cost
-            .total()
-            .filter(|money| money.currency().as_str() == "USD")
-            .map(crate::metering::Money::amount)
-            .unwrap_or(Decimal::ZERO)
     }
 
     /// 返回截至当前已完成的实际上游调用结果。
@@ -1478,10 +1463,9 @@ where
 
     fn reset_uncommitted_observations(&mut self) {
         // 响应观测按尝试隔离；被丢弃尝试中已取得的费用仍计入 Key。
-        self.budget_prior_attempts_usd = self
-            .budget_prior_attempts_usd
-            .checked_add(self.budget_attempt_usd())
-            .unwrap_or(Decimal::MAX);
+        if !self.budget_attempt_already_counted {
+            self.budget_prior_costs.push(self.observation.cost.clone());
+        }
         self.budget_attempt_already_counted = false;
         self.observation.reset_for_attempt();
         self.upstream_complete = false;

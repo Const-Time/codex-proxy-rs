@@ -500,6 +500,8 @@ pub(crate) fn admin_usage_list_record(
     };
     let billing = restore_billing_snapshot(billing, record.billing_snapshot_json.as_ref());
     Ok(admin_observability::UsageListRecord {
+        requested_service_tier: record.requested_service_tier,
+        upstream_service_tier: record.upstream_service_tier,
         turn_state: record.turn_state,
         turn_state_source: record.turn_state_source,
         user_id: record.user_id,
@@ -862,6 +864,8 @@ pub(crate) fn usage_list_record_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<UsageListRecord> {
     Ok(UsageListRecord {
+        requested_service_tier: get(row, "requested_service_tier")?,
+        upstream_service_tier: get(row, "upstream_service_tier")?,
         turn_state: get(row, "turn_state")?,
         turn_state_source: get(row, "turn_state_source")?,
         user_id: get(row, "user_id")?,
