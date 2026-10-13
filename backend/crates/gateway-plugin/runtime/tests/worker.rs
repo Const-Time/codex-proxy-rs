@@ -289,6 +289,7 @@ impl PluginHandler for Worker {
                 };
                 Ok(CallReply::unary(decision,vec![]))
             },
+            "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Http => worker_http::handle(call).await,
             "middleware.handle" => worker_middleware::handle(call).await,
             "plugin.register" if !self.fail=>Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![])),
             "frontend_auth.identifier"=>Ok(CallReply::unary(json!({"identifier":"fixture-auth"}),vec![])),
@@ -722,5 +723,229 @@ mod worker_middleware {
             })?;
         }
         response.encode()
+    }
+}
+mod worker_http {
+    use gateway_plugin_sdk::call::middleware::{MiddlewareHeader, NEXT_METHOD, http as wire};
+    use gateway_plugin_sdk::{
+        ErrorCode, PluginFault,
+        client::{
+            CallReply, HttpBody, HttpCall, HttpFrame, HttpResponse, PluginCall, ResponseStream,
+        },
+    };
+    use serde_json::json;
+    static PREVIOUS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    pub async fn handle(call: PluginCall) -> Result<CallReply, PluginFault> {
+        let original = call.params["request"].clone();
+        let mut call = HttpCall::try_from(call)?;
+        assert!(
+            call.context.account_id.is_none()
+                && call.context.attempt_id.is_none()
+                && call.context.credential_revision.is_none()
+        );
+        assert_eq!(call.call_id, "host-call");
+        let mode = call
+            .request
+            .headers
+            .iter()
+            .find(|h| h.name == "x-fixture-mode")
+            .map(|h| String::from_utf8(h.value.clone()).unwrap())
+            .unwrap_or_else(|| "pass".into());
+        if mode == "deny" {
+            return Err(PluginFault::new(ErrorCode::Rejected, "fixture denied"));
+        }
+        if mode == "no-authority" {
+            for method in [
+                "host.model.execute",
+                "host.models.list",
+                "host.data.accounts.list",
+                "host.groups.ensure",
+            ] {
+                let error = call
+                    .host
+                    .call(method, json!({}), vec![])
+                    .await
+                    .err()
+                    .unwrap()
+                    .into_plugin_fault();
+                assert_eq!(error.code, ErrorCode::PermissionDenied);
+            }
+            return HttpResponse::new(200, HttpBody::from_bytes(b"denied".to_vec())).into_reply();
+        }
+        if mode == "leak" {
+            *PREVIOUS.lock().unwrap() = original["body"]["handle"].as_str().map(str::to_owned);
+            return HttpResponse::new(200, HttpBody::empty()).into_reply();
+        }
+        if mode == "stale" {
+            let handle = PREVIOUS.lock().unwrap().clone().unwrap();
+            let error = call
+                .host
+                .call(
+                    wire::BODY_READ_METHOD,
+                    json!({"handle":handle,"maximum_bytes":64}),
+                    vec![],
+                )
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault();
+            assert_eq!(error.code, ErrorCode::Conflict);
+            return HttpResponse::new(200, HttpBody::from_bytes(b"isolated".to_vec())).into_reply();
+        }
+        if mode == "capacity" {
+            let mut handles = vec![];
+            loop {
+                match call
+                    .host
+                    .call(wire::BODY_CREATE_METHOD, json!({}), vec![])
+                    .await
+                {
+                    Ok(reply) => {
+                        let handle = reply.result["handle"].as_str().unwrap().to_owned();
+                        call.host
+                            .call(
+                                wire::BODY_WRITE_METHOD,
+                                json!({"handle":handle,"eof":true,"trailers":null}),
+                                vec![],
+                            )
+                            .await
+                            .map_err(|e| e.into_plugin_fault())?;
+                        handles.push(handle);
+                        assert!(handles.len() < 64);
+                    }
+                    Err(error) => {
+                        assert_eq!(error.into_plugin_fault().code, ErrorCode::Capacity);
+                        break;
+                    }
+                }
+            }
+            assert_eq!(handles.len(), 31);
+            for handle in handles {
+                call.host
+                    .call(wire::BODY_CLOSE_METHOD, json!({"handle":handle}), vec![])
+                    .await
+                    .map_err(|e| e.into_plugin_fault())?;
+            }
+            return HttpResponse::new(200, HttpBody::from_bytes(b"bounded".to_vec())).into_reply();
+        }
+        if mode == "invalid-chunks" || mode == "forged-response" {
+            return Ok(CallReply::stream(
+                json!({"status":200,"version":"HTTP/1.1","headers":[],"body":{"kind":if mode=="invalid-chunks" {"stream"}else{"empty"}},"response":if mode=="forged-response" {json!("another-scope")}else{json!(null)},"session":false}),
+                vec![],
+                ResponseStream::from_chunks(if mode == "invalid-chunks" {
+                    vec![vec![2, 1, 2]]
+                } else {
+                    vec![]
+                }),
+            ));
+        }
+        if matches!(
+            mode.as_str(),
+            "upgrade"
+                | "changed-upgrade"
+                | "discard-upgrade"
+                | "upgrade-error"
+                | "upgrade-send-error"
+        ) {
+            let mut response = call
+                .upgrade(vec!["fixture".into()], |mut socket| async move {
+                    if let Some(message) = socket.receive().await? {
+                        socket.sender.send(message).await?;
+                    }
+                    Ok(())
+                })
+                .await?;
+            if mode == "discard-upgrade" {
+                drop(response);
+                return HttpResponse::new(403, HttpBody::empty()).into_reply();
+            }
+            if mode == "changed-upgrade" {
+                response.status = 403;
+            }
+            return response.into_reply();
+        }
+        if mode == "bad-next" {
+            let mut invalid = original.clone();
+            invalid["method"] = json!("bad\rmethod");
+            let error = call
+                .host
+                .call(NEXT_METHOD, invalid, vec![])
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault();
+            assert_eq!(error.code, ErrorCode::InvalidInput);
+        }
+        if mode == "settings-forged" {
+            call.request.settings = json!({"fake_baseline":true});
+        }
+        if mode == "prefix" {
+            let reply = call
+                .host
+                .call(
+                    wire::BODY_READ_METHOD,
+                    json!({"handle":original["body"]["handle"],"maximum_bytes":3}),
+                    vec![],
+                )
+                .await
+                .map_err(|error| error.into_plugin_fault())?;
+            assert_eq!(reply.payload, b"abc");
+        }
+        if mode == "swallow-body-error" {
+            let error = call.request.body.read().await.err().unwrap();
+            assert_eq!(error.code, ErrorCode::Fault);
+            assert_eq!(error.message, "HTTP body read failed");
+            return HttpResponse::new(200, HttpBody::from_bytes(b"swallowed".to_vec()))
+                .into_reply();
+        }
+        if mode == "swallow-next-error" {
+            let error = call.next.run(call.request).await.err().unwrap();
+            assert_eq!(error.code, ErrorCode::Rejected);
+            assert_eq!(error.message, "HTTP middleware terminal failed");
+            return HttpResponse::new(200, HttpBody::from_bytes(b"swallowed".to_vec()))
+                .into_reply();
+        }
+        if mode == "read-wait" {
+            let _ = call.request.body.read().await?;
+        }
+        call.request.uri = "/after?raw=%2F".into();
+        call.request.headers.push(MiddlewareHeader {
+            name: "x-chain".into(),
+            value: b"plugin".to_vec(),
+        });
+        if matches!(mode.as_str(), "map" | "pipe-short") {
+            call.request.body = call.request.body.map_frames(|frame| {
+                Ok(Some(match frame {
+                    HttpFrame::Data(bytes) => HttpFrame::Data(bytes.to_ascii_uppercase()),
+                    other => other,
+                }))
+            });
+        }
+        let mut response = call.next.run(call.request).await?;
+        if mode == "double" {
+            let mut second = original;
+            second["body"] = json!({"kind":"empty"});
+            let error = call
+                .host
+                .call(NEXT_METHOD, second, vec![])
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault();
+            assert_eq!(error.code, ErrorCode::Conflict);
+        }
+        response.headers.push(MiddlewareHeader {
+            name: "x-return".into(),
+            value: b"plugin".to_vec(),
+        });
+        if matches!(mode.as_str(), "map" | "stream-wait") {
+            response.body = response.body.map_frames(|frame| {
+                Ok(Some(match frame {
+                    HttpFrame::Data(bytes) => HttpFrame::Data(bytes.to_ascii_uppercase()),
+                    other => other,
+                }))
+            });
+        }
+        response.into_reply()
     }
 }

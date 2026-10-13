@@ -1,4 +1,5 @@
 mod capabilities;
+mod http;
 pub(crate) mod plan;
 mod settings;
 use bytes::Bytes;
