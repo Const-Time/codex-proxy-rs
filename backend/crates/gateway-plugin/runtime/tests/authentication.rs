@@ -233,3 +233,33 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     ));
     restored.shutdown().await;
 }
+
+#[tokio::test]
+async fn authentication_generic_http_does_not_grant_model_or_management_authority() {
+    let server = crate::outbound::Server::new().await;
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Arc::new(PluginEngine::new(
+        cache.path().into(),
+        "3.11.2".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store, runtime);
+    let artifact = manager
+        .upload(authentication_archive("1.0.0"), &actor())
+        .await
+        .unwrap();
+    let mut command = update(&artifact.sha256, 0, true);
+    command.frontend_authentication = Some(binding(PluginAuthenticationPolicy::Reject));
+    command.configuration = serde_json::json!({"adapter_url":format!("{}/binary",server.url)});
+    manager.update(None, command, &actor()).await.unwrap();
+    assert!(matches!(
+        manager
+            .authenticate("Bearer external-http".into())
+            .await
+            .unwrap(),
+        PluginAuthenticationDecision::Authenticated { .. }
+    ));
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    manager.shutdown().await;
+}

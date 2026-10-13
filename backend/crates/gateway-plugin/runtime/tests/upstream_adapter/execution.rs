@@ -38,6 +38,7 @@ pub(super) struct Account {
     id: ProviderAccountId,
     revision: u64,
     failures: AtomicUsize,
+    proxy: Option<OutboundProxy>,
 }
 impl Account {
     pub(super) fn new() -> Arc<Self> {
@@ -45,6 +46,7 @@ impl Account {
             id: ProviderAccountId::new("acct_fixture").unwrap(),
             revision: 3,
             failures: AtomicUsize::new(0),
+            proxy: None,
         })
     }
 }
@@ -59,7 +61,7 @@ impl UpstreamAccountConnection for Account {
         "oauth"
     }
     fn outbound_proxy(&self) -> Option<&OutboundProxy> {
-        None
+        self.proxy.as_ref()
     }
     fn authorization(&self) -> Result<Vec<MiddlewareHeader>, ProviderError> {
         Ok(vec![MiddlewareHeader::new(
@@ -546,4 +548,57 @@ fn check_websocket_authorization(
         "Bearer fixture-provider-secret"
     );
     Ok(response)
+}
+
+#[tokio::test]
+async fn upstream_generic_http_inherits_selected_proxy_without_account_authentication() {
+    for (mode, omit_auth) in [
+        ("callback-external-unary", true),
+        ("callback-external-stream", false),
+    ] {
+        let proxy = Server::new().await;
+        let f = Fixture::new("http://fixture.invalid/", "http_sse").await;
+        let account = Arc::new(Account {
+            id: ProviderAccountId::new("acct_fixture").unwrap(),
+            revision: 3,
+            failures: AtomicUsize::new(0),
+            proxy: Some(OutboundProxy::parse(&proxy.url).unwrap()),
+        });
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/external", target.local_addr().unwrap());
+        let mut input = invocation(mode, account.clone(), None, CancellationToken::new());
+        input.operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                "openai",
+                json!({"behavior":mode,"input":"fixture","external_url":url,"omit_auth":omit_auth})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap(),
+        ));
+        let mut stream = input.into_stream(f.process.upstream_adapter("adapter").unwrap());
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        {
+            let requests = proxy.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with(&format!("POST {url} HTTP/1.1")));
+            if omit_auth {
+                assert!(!requests[0].to_ascii_lowercase().contains("authorization:"));
+            } else {
+                assert!(requests[0].contains("authorization: Bearer plugin-explicit"));
+            }
+            assert!(!requests[0].contains("fixture-provider-secret"));
+        }
+        assert_eq!(account.failures.load(Ordering::SeqCst), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), target.accept())
+                .await
+                .is_err(),
+            "must not connect directly"
+        );
+        f.stop().await;
+    }
 }

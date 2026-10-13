@@ -46,6 +46,7 @@ struct Entry {
     invocation: Invocation,
 }
 pub struct MiddlewareCallbacks {
+    outbound: Option<Arc<crate::outbound::Registry>>,
     models: Option<Arc<crate::models::Models>>,
     inner: Arc<dyn CallbackHandler>,
     calls: Mutex<BTreeMap<String, Entry>>,
@@ -64,6 +65,7 @@ impl MiddlewareCallbacks {
         self: &Arc<Self>,
         context: &CallContext,
         invocation: Arc<super::service::Invocation>,
+        graph: gateway_core::engine::nested::ExtensionCallScope,
     ) -> Result<Binding, MiddlewareError> {
         let mut calls = self
             .calls
@@ -72,6 +74,7 @@ impl MiddlewareCallbacks {
         if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
+        self.bind_outbound(context, invocation.cancellation.clone(), Some(graph))?;
         let invocation = Invocation::Service(invocation);
         calls.insert(
             context.resource_scope_id.clone(),
@@ -107,6 +110,7 @@ impl MiddlewareCallbacks {
         if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
+        self.bind_outbound(context, invocation.cancellation.clone(), None)?;
         let invocation = Invocation::WebSocket(invocation);
         calls.insert(
             context.resource_scope_id.clone(),
@@ -123,6 +127,7 @@ impl MiddlewareCallbacks {
     }
     pub fn new(inner: Arc<dyn CallbackHandler>) -> Arc<Self> {
         Arc::new(Self {
+            outbound: None,
             models: None,
             inner,
             calls: Mutex::new(BTreeMap::new()),
@@ -136,6 +141,28 @@ impl MiddlewareCallbacks {
             .expect("callbacks must be composed before publication")
             .models = models;
         self
+    }
+    pub(crate) fn with_outbound(
+        mut self: Arc<Self>,
+        outbound: Arc<crate::outbound::Registry>,
+    ) -> Arc<Self> {
+        Arc::get_mut(&mut self)
+            .expect("callbacks must be composed before publication")
+            .outbound = Some(outbound);
+        self
+    }
+    fn bind_outbound(
+        &self,
+        context: &CallContext,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+        effects: Option<gateway_core::engine::nested::ExtensionCallScope>,
+    ) -> Result<(), MiddlewareError> {
+        if let Some(outbound) = &self.outbound {
+            outbound
+                .bind(context, cancellation, effects)
+                .map_err(|_| MiddlewareError::Fault)?;
+        }
+        Ok(())
     }
     /// The caller freezes the generation and the Core terminal before entering.
     /// This primitive does not enable a manifest capability or publish a binding.
@@ -169,6 +196,11 @@ impl MiddlewareCallbacks {
         if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
+        self.bind_outbound(
+            context,
+            invocation.cancellation.clone(),
+            Some(invocation.context.call_scope.clone()),
+        )?;
         let invocation = Invocation::Http(invocation);
         calls.insert(
             context.resource_scope_id.clone(),
@@ -195,21 +227,30 @@ impl MiddlewareCallbacks {
         if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
-        if let Some(models) = &self.models {
-            let parent = invocation
-                .nested_context()
-                .map_err(|_| MiddlewareError::Fault)?;
+        let parent = invocation
+            .nested_context()
+            .map_err(|_| MiddlewareError::Fault)?;
+        self.bind_outbound(
+            context,
+            invocation.cancellation.clone(),
+            parent.as_ref().map(|p| p.scope().clone()),
+        )?;
+        if let (Some(models), Some(parent)) = (&self.models, parent) {
             // A wire CallContext cannot construct or substitute Core authority.
-            if let Some(parent) = parent {
-                models
-                    .bind(
-                        context,
-                        Some(parent),
-                        None,
-                        invocation.cancellation.clone(),
-                        None,
-                    )
-                    .map_err(|_| MiddlewareError::Fault)?;
+            if models
+                .bind(
+                    context,
+                    Some(parent),
+                    None,
+                    invocation.cancellation.clone(),
+                    None,
+                )
+                .is_err()
+            {
+                if let Some(outbound) = &self.outbound {
+                    outbound.finish(context);
+                }
+                return Err(MiddlewareError::Fault);
             }
         }
         calls.insert(
@@ -244,6 +285,9 @@ impl Drop for Binding {
             && let Some(entry) = calls.remove(&self.scope)
         {
             entry.invocation.close();
+            if let Some(outbound) = &self.callbacks.outbound {
+                outbound.finish(&entry.context);
+            }
             if matches!(entry.invocation, Invocation::Execution(_))
                 && let Some(models) = &self.callbacks.models
             {
@@ -278,7 +322,9 @@ impl CallbackHandler for MiddlewareCallbacks {
         payload: Vec<u8>,
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
         let model_method = crate::models::is_method(&method)
-            || (method.starts_with("host.http.") && context.stage != Stage::Http);
+            || (method.starts_with("host.http.")
+                && !crate::outbound::is_method(&method)
+                && context.stage != Stage::Http);
         let service_method = method == gateway_plugin_sdk::call::services::CALL_METHOD
             && context.stage == Stage::Service;
         if model_method && !matches!(context.stage, Stage::Request | Stage::Attempt) {

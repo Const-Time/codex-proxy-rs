@@ -99,11 +99,11 @@ impl Execution {
         let cancellation = self.cancellation.clone();
         let chunk = tokio::select! {
             biased;
-            () = cancellation.cancelled() => return Err(ProviderError::new(ProviderErrorKind::Cancelled, active.managed.send_state.get())),
-            result = active.stream.next() => result.map_err(|error| rpc_error(error, active.managed.send_state.get()))?,
+            () = cancellation.cancelled() => return Err(ProviderError::new(ProviderErrorKind::Cancelled, active.managed.http.send_state.get())),
+            result = active.stream.next() => result.map_err(|error| rpc_error(error, active.managed.http.send_state.get()))?,
         }.ok_or_else(|| {
             self.adapter.session.invalid_response(Stage::Upstream);
-            invalid(active.managed.send_state.get())
+            invalid(active.managed.http.send_state.get())
         })?;
         let mut decoded = self
             .decoder
@@ -112,7 +112,7 @@ impl Execution {
                 &self.adapter.registered.declaration.protocol,
                 self.adapter.registered.declaration.transport.as_str(),
                 self.invocation.account.as_ref(),
-                active.managed.send_state.get(),
+                active.managed.http.send_state.get(),
             )
             .map_err(|error| match error {
                 EventDecodeError::Invalid(error) => {
@@ -126,14 +126,14 @@ impl Execution {
             let terminal = async {
                 let tail = tokio::select! {
                     biased;
-                    () = cancellation.cancelled() => return Err(ProviderError::new(ProviderErrorKind::Cancelled, active.managed.send_state.get())),
-                    result = active.stream.next() => result.map_err(|error| rpc_error(error, active.managed.send_state.get()))?,
+                    () = cancellation.cancelled() => return Err(ProviderError::new(ProviderErrorKind::Cancelled, active.managed.http.send_state.get())),
+                    result = active.stream.next() => result.map_err(|error| rpc_error(error, active.managed.http.send_state.get()))?,
                 };
                 if tail.is_some() {
                     self.adapter.session.invalid_response(Stage::Upstream);
-                    return Err(invalid(active.managed.send_state.get()));
+                    return Err(invalid(active.managed.http.send_state.get()));
                 }
-                self.decoder.finish(active.managed.send_state.get())?;
+                self.decoder.finish(active.managed.http.send_state.get())?;
                 attach_continuation(&self.adapter, &self.invocation, active, &mut decoded).await
             }.await;
             if let Err(error) = terminal {
@@ -309,12 +309,12 @@ impl Execution {
         })?;
         let stream = tokio::select! {
             biased;
-            () = self.cancellation.cancelled() => return Err(ProviderError::new(ProviderErrorKind::Cancelled, managed.send_state.get())),
-            result = self.adapter.session.call_stream(EXECUTE_METHOD, context.clone(), serde_json::json!({}), payload) => result.map_err(|error| rpc_error(error, managed.send_state.get()))?,
+            () = self.cancellation.cancelled() => return Err(ProviderError::new(ProviderErrorKind::Cancelled, managed.http.send_state.get())),
+            result = self.adapter.session.call_stream(EXECUTE_METHOD, context.clone(), serde_json::json!({}), payload) => result.map_err(|error| rpc_error(error, managed.http.send_state.get()))?,
         };
         if stream.initial.result != serde_json::json!({}) || !stream.initial.payload.is_empty() {
             self.adapter.session.invalid_response(Stage::Upstream);
-            return Err(super::failure::invalid(managed.send_state.get()));
+            return Err(super::failure::invalid(managed.http.send_state.get()));
         }
         Ok(ActiveCall {
             context,
@@ -378,7 +378,7 @@ async fn attach_continuation(
     active: &ActiveCall,
     decoded: &mut DecodedEvent,
 ) -> Result<(), ProviderError> {
-    let invalid = || invalid(active.managed.send_state.get());
+    let invalid = || invalid(active.managed.http.send_state.get());
     let Some(continuation) = decoded.continuation.take() else {
         if invocation
             .operation
@@ -409,7 +409,7 @@ async fn attach_continuation(
                 .managed
                 .retain_connection()
                 .await
-                .map_err(|error| fault_error(error, active.managed.send_state.get()))?,
+                .map_err(|error| fault_error(error, active.managed.http.send_state.get()))?,
         )
     } else {
         None

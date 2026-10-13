@@ -101,7 +101,7 @@ pub(super) async fn invoke(
     });
     call.request_id = Some(context.request_id.clone());
     let _binding = callbacks
-        .bind_service(&call, invocation)
+        .bind_service(&call, invocation, context.call_scope.clone())
         .map_err(|_| core::Error::unavailable("服务调用上下文不可用"))?;
     let request = wire::Call {
         operation: context.operation.into(),

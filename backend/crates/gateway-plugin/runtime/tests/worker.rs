@@ -226,11 +226,208 @@ mod worker_models {
     }
 }
 
+mod worker_outbound {
+    use gateway_plugin_sdk::{ErrorCode, PluginFault, call::host::HttpRequest, client::HostClient};
+    use serde_json::{Value, json};
+    pub(super) async fn run(host: &HostClient, input: &Value) -> Result<Value, PluginFault> {
+        let mode = input["mode"].as_str().unwrap_or("unary");
+        let url = input["url"]
+            .as_str()
+            .unwrap_or("http://fixture.invalid/external");
+        let mut headers = vec![("x-explicit".into(), "plugin-value".into())];
+        if input["omit_auth"] != true {
+            headers.push(("authorization".into(), "Bearer plugin-explicit".into()));
+        }
+        let request = HttpRequest {
+            method: "POST".into(),
+            url: url.into(),
+            headers,
+        };
+        let body = input["body"]
+            .as_str()
+            .map_or_else(|| vec![0, 255, 1, 0], |s| s.as_bytes().to_vec());
+        if mode == "raw" {
+            return match host
+                .call(
+                    input["method"].as_str().unwrap(),
+                    input["params"].clone(),
+                    vec![],
+                )
+                .await
+            {
+                Ok(reply) => Ok(json!({"result":reply.result,"bytes":reply.payload})),
+                Err(error) => Ok(json!({"error":error.into_plugin_fault()})),
+            };
+        }
+        if mode == "open" || mode == "capacity" || mode == "handles" || mode == "concurrent" {
+            let mut handles = vec![];
+            for _ in 0..if mode == "capacity" { 16 } else { 1 } {
+                let reply = host
+                    .call(
+                        "host.http.do_stream",
+                        serde_json::to_value(&request).unwrap(),
+                        body.clone(),
+                    )
+                    .await
+                    .map_err(|e| e.into_plugin_fault())?;
+                handles.push(reply.result["stream"].as_str().unwrap().to_owned());
+            }
+            let first = handles[0].clone();
+            if mode == "open" {
+                return Ok(json!({"stream":first}));
+            }
+            if mode == "concurrent" {
+                let (reader_host, first) = (host.clone(), first.clone());
+                let read = tokio::spawn(async move {
+                    reader_host
+                        .call(
+                            "host.http.stream_read",
+                            json!({"stream":first,"maximum_bytes":3}),
+                            vec![],
+                        )
+                        .await
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                let fault = host
+                    .call(
+                        "host.http.stream_read",
+                        json!({"stream":handles[0],"maximum_bytes":3}),
+                        vec![],
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .into_plugin_fault();
+                assert_eq!(fault.code, ErrorCode::Conflict);
+                host.call(
+                    "host.http.stream_close",
+                    json!({"stream":handles[0]}),
+                    vec![],
+                )
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+                let result = read.await.unwrap().err().unwrap().into_plugin_fault();
+                assert_eq!(result.code, ErrorCode::PermissionDenied);
+                return Ok(json!({"checked":true}));
+            }
+            if mode == "capacity" {
+                let fault = host
+                    .call(
+                        "host.http.do_stream",
+                        serde_json::to_value(&request).unwrap(),
+                        body.clone(),
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .into_plugin_fault();
+                assert_eq!(fault.code, ErrorCode::Capacity);
+                assert_eq!(fault.send_state, gateway_plugin_sdk::SendState::Sent);
+            } else {
+                for maximum in [0, 65537] {
+                    let fault = host
+                        .call(
+                            "host.http.stream_read",
+                            json!({"stream":first,"maximum_bytes":maximum}),
+                            vec![],
+                        )
+                        .await
+                        .err()
+                        .unwrap()
+                        .into_plugin_fault();
+                    assert_eq!(fault.code, ErrorCode::InvalidInput);
+                }
+                let fault = host
+                    .call(
+                        "host.http.stream_read",
+                        json!({"stream":"unowned","maximum_bytes":3}),
+                        vec![],
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .into_plugin_fault();
+                assert_eq!(fault.code, ErrorCode::PermissionDenied);
+            }
+            host.call("host.http.stream_close", json!({"stream":first}), vec![])
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            let fault = host
+                .call(
+                    "host.http.stream_read",
+                    json!({"stream":first,"maximum_bytes":3}),
+                    vec![],
+                )
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault();
+            assert_eq!(fault.code, ErrorCode::PermissionDenied);
+            // Closing a handle frees capacity before the next dispatch.
+            if mode == "capacity" {
+                host.call(
+                    "host.http.do_stream",
+                    serde_json::to_value(&request).unwrap(),
+                    body,
+                )
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            }
+            return Ok(json!({"checked":true}));
+        }
+        if mode == "unary" || mode == "large" {
+            return match host
+                .call("host.http.do", serde_json::to_value(request).unwrap(), body)
+                .await
+            {
+                Ok(reply) => Ok(json!({"status":reply.result["status"],"bytes":reply.payload})),
+                Err(error) => Ok(json!({"error":error.into_plugin_fault()})),
+            };
+        }
+        let mut response = host.http(request, body).await?;
+        let status = response.status;
+        if mode == "resume" {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), response.body.read())
+                    .await
+                    .is_err()
+            );
+        }
+        if mode == "close" {
+            response.body.close().await?;
+            response.body.close().await?;
+            assert!(response.body.read().await?.is_none());
+            return Ok(json!({"closed":true}));
+        }
+        let bytes = response.body.collect(9 * 1024 * 1024).await?;
+        Ok(json!({"status":status,"bytes":bytes}))
+    }
+}
+
 mod upstream_callbacks {
     use gateway_plugin_sdk::{ErrorCode, PluginFault, client::HostClient};
     use serde_json::json;
 
-    pub(super) async fn run(host: &HostClient, mode: &str) -> Result<(), PluginFault> {
+    pub(super) async fn run(
+        host: &HostClient,
+        mode: &str,
+        input: &serde_json::Value,
+    ) -> Result<(), PluginFault> {
+        if mode.starts_with("callback-external") {
+            let result=super::worker_outbound::run(host,&json!({"url":input["external_url"],"body":"fixture-external","omit_auth":input["omit_auth"],"mode":if mode=="callback-external-unary" {"unary"} else {"stream"}})).await?;
+            assert_eq!(result["status"], 200);
+            assert_eq!(
+                result["bytes"],
+                serde_json::to_value(b"fixture-response".to_vec()).unwrap()
+            );
+            if mode.ends_with("fault") {
+                return Err(PluginFault::new(
+                    ErrorCode::Fault,
+                    "external effect before inference",
+                ));
+            }
+            return Ok(());
+        }
         if mode == "callback-model-abandon" {
             let request = gateway_plugin_sdk::call::host::ModelExecuteRequest {
                 client_key_id: None,
@@ -418,6 +615,10 @@ impl PluginHandler for Worker {
                 }
                 let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":"retry_calls"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
                 call.host.call("host.state.put",json!({"namespace":"counter","key":"retry_calls","value":existing.result["record"]["value"].as_u64().unwrap_or(0)+1,"expected_version":existing.result["record"]["version"].as_u64()}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                if self.retry == "external" {
+                    let result=worker_outbound::run(&call.host,&json!({"url":self.adapter_url,"mode":"stream"})).await?;
+                    assert_eq!(result["bytes"],json!([0,255,1,0]));
+                }
                 let decision=match self.retry.as_str() {
                     "stop"=>json!({"decision":"stop"}),
                     "retry"=>json!({"decision":"retry"}),
@@ -505,7 +706,16 @@ impl PluginHandler for Worker {
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::WebSocket => worker_websocket(call).await,
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Service => worker_service(call).await,
             "middleware.handle" => worker_middleware::handle(call).await,
-            "plugin.register" if !self.fail=>Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![])),
+            "plugin.register" if !self.fail=>{
+                if self.adapter_mode == "registration-external" {
+                    let result=worker_outbound::run(&call.host,&json!({"url":self.adapter_url,"mode":"stream"})).await?;
+                    assert_eq!(result["bytes"],json!([0,255,1,0]));
+                    assert_eq!(call.context.stage,gateway_plugin_sdk::Stage::Registration);
+                    let fault=call.host.call("host.state.put",json!({"namespace":"counter","key":"register","value":1,"expected_version":null}),vec![]).await.err().unwrap().into_plugin_fault();
+                    assert_eq!(fault.code,ErrorCode::PermissionDenied);
+                }
+                Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![]))
+            },
             "frontend_auth.identifier"=>Ok(CallReply::unary(json!({"identifier":"fixture-auth"}),vec![])),
             "frontend_auth.authenticate"=>{
                 let input:gateway_plugin_sdk::call::frontend_authentication::FrontendAuthenticationRequest=serde_json::from_slice(&call.payload).unwrap();
@@ -517,6 +727,15 @@ impl PluginHandler for Worker {
                     "Bearer external-forged"=>json!({"outcome":"authenticated","principal":"alice","client_key_id":"forged"}),
                     "Bearer external-fault"=>return Err(PluginFault::new(ErrorCode::Fault,"sensitive credential detail")),
                     "Bearer external-crash"=>std::process::exit(2),
+                    "Bearer external-http"=>{
+                        let result=worker_outbound::run(&call.host,&json!({"url":self.adapter_url,"mode":"stream"})).await?;
+                        assert_eq!(result["bytes"],json!([0,255,1,0]));
+                        for method in [gateway_plugin_sdk::call::data::ACCOUNTS_LIST,"host.model.execute",gateway_plugin_sdk::call::resources::GROUP_ENSURE] {
+                            let fault=call.host.call(method,json!({}),vec![]).await.err().unwrap().into_plugin_fault();
+                            assert_eq!(fault.code,ErrorCode::PermissionDenied);
+                        }
+                        json!({"outcome":"authenticated","principal":"alice"})
+                    },
                     "Bearer external-state"=>{
                         call.host.call("host.state.put",json!({"namespace":"counter","key":"auth","value":1,"expected_version":null}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
                         assert!(call.host.call("host.data.keys.get",json!({}),b"{}".to_vec()).await.is_err());
@@ -538,6 +757,10 @@ impl PluginHandler for Worker {
                     let count=existing.result["record"]["value"].as_u64().unwrap_or(0)+1;
                     call.host.call("host.state.put",json!({"namespace":"counter","key":"value","value":count,"expected_version":expected}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
                     json!({"count":count})
+                } else if input["operation"]=="external" {
+                    match worker_outbound::run(&call.host,&input).await {
+                        Ok(value)=>value,Err(error)=>json!({"error":error})
+                    }
                 } else if input["operation"]=="unsupported" {
                     match call.host.call("host.keys.reset_budget",json!({"client_key_id":"must-not-reset","period":"all"}),vec![]).await {
                         Ok(_) => json!({"unexpected":true}), Err(error)=>json!({"code":error.into_plugin_fault().code})
@@ -1578,7 +1801,7 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
     assert!(!String::from_utf8_lossy(&call.payload).contains("fixture-provider-secret"));
     let mode = input["behavior"].as_str().unwrap_or("http");
     if mode.starts_with("callback-") {
-        upstream_callbacks::run(&call.host, mode).await?;
+        upstream_callbacks::run(&call.host, mode, &input).await?;
     }
     let callback_error = |_| PluginFault::new(ErrorCode::Fault, "managed callback failed");
     if mode.starts_with("websocket") {

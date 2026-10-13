@@ -379,3 +379,37 @@ async fn sdk_retry_excludes_initiating_plugin_without_changing_native_child_reco
     assert_eq!(f.core.charges.lock().unwrap()[0].amount_usd.scaled(), 246);
     f.manager.shutdown().await;
 }
+
+#[tokio::test]
+async fn retry_generic_http_effect_vetoes_original_core_recovery_without_model_authority() {
+    let f = Fixture::with_accounts(&["acct_allowed", "acct_alternative"]).await;
+    let server = crate::outbound::Server::new().await;
+    let artifact = f
+        .manager
+        .upload(retry_archive("1.0.0"), &actor())
+        .await
+        .unwrap();
+    let mut command = update(&artifact.sha256, 0, true);
+    command.configuration =
+        json!({"retry":"external","adapter_url":format!("{}/binary",server.url)});
+    command.retry_policy = Some(PluginRetryPolicyBinding {
+        order: 0,
+        scope: PluginExecutionScope::All {},
+    });
+    let view = f.manager.update(None, command, &actor()).await.unwrap();
+    let result = f
+        .call(json!({"key":"key_alice","failure":"retry-once"}))
+        .await;
+    assert!(
+        result.get("error").is_some(),
+        "HTTP effects forbid recovery: {result}"
+    );
+    f.clean(1).await;
+    assert_eq!(f.core.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(state(&f, &view.id, "retry_calls").await, 1);
+    assert_eq!(state(&f, &view.id, "retry_allowed").await, 1);
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    assert_eq!(f.core.charges.lock().unwrap()[0].amount_usd.scaled(), 123);
+    assert_eq!(f.core.finalizations.lock().unwrap().len(), 1);
+    f.manager.shutdown().await;
+}

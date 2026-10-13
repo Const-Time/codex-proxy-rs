@@ -97,9 +97,10 @@ async fn start(
     if let Some(dispatcher) = dispatcher {
         prepared = prepared.with_http_dispatcher(dispatcher);
     }
+    let external_url = f.store.records.lock().unwrap()[&f.id].configuration["adapter_url"].clone();
     f.execution.start_prepared(prepared, PreparedExecutionRequest {
         public_model: PublicModelId::new("gpt-native").unwrap(),
-        operation: Operation::Generate(GenerateRequest::from_protocol_payload(ProtocolPayload::json_object("openai", serde_json::from_value(json!({"model":"gpt-native","input":"fixture","behavior":mode,"fixture_account":"acct_allowed","fixture_model":"gpt-native"})).unwrap()).unwrap())),
+        operation: Operation::Generate(GenerateRequest::from_protocol_payload(ProtocolPayload::json_object("openai", serde_json::from_value(json!({"model":"gpt-native","input":"fixture","behavior":mode,"fixture_account":"acct_allowed","fixture_model":"gpt-native","external_url":external_url})).unwrap()).unwrap())),
         metadata: ExecutionRequestMetadata { protocol:"openai".into(), endpoint:"/v1/responses".into(), transport:ClientTransport::HttpJson, stream:false, client_ip:None, user_agent:None, previous_response_id:None },
     }).await.unwrap()
 }
@@ -452,4 +453,34 @@ async fn upstream_callback_effects_veto_parent_replay_even_before_provider_send(
         }
         f.manager.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn upstream_generic_http_effect_uses_original_core_replay_and_settlement_owner() {
+    let (f, server) = fixture().await;
+    let mut started = start(&f, "callback-external-fault", None).await;
+    assert!(started.session.collect_uncommitted().await.is_err());
+    started.session.detach_finalize().await;
+    f.clean(1).await;
+    {
+        let rows = f.core.finalizations.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, ExecutionOutcome::Failed);
+        assert_eq!(
+            rows[0].attempt_count, 1,
+            "original policy allows two attempts"
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            f.core
+                .charges
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.amount_usd.scaled())
+                .sum::<u128>(),
+            0
+        );
+    }
+    f.manager.shutdown().await;
 }

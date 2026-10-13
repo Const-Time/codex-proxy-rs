@@ -16,6 +16,7 @@ pub const MAXIMUM_POLICY_WAIT: Duration = Duration::from_secs(2);
 #[derive(Clone, Debug)]
 pub struct RetryInput {
     pub(crate) request_id: ModelRequestId,
+    pub(crate) call_scope: super::nested::ExtensionCallScope,
     pub(crate) client_key_id: ClientApiKeyId,
     pub(crate) account_group_ids: Vec<AccountGroupId>,
     pub(crate) excluded_instances: BTreeSet<String>,
@@ -31,6 +32,9 @@ pub struct RetryInput {
     pub(crate) cancellation: CancellationToken,
 }
 impl RetryInput {
+    pub fn call_scope(&self) -> &super::nested::ExtensionCallScope {
+        &self.call_scope
+    }
     pub fn request_id(&self) -> &ModelRequestId {
         &self.request_id
     }

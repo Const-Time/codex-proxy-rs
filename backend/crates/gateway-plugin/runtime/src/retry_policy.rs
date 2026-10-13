@@ -9,6 +9,7 @@ use std::{sync::Arc, time::Duration};
 
 pub(crate) async fn invoke(
     session: &Arc<RpcSession>,
+    outbound: Arc<crate::outbound::Registry>,
     input: RetryInput,
     timeout: Duration,
 ) -> Result<RetryDecision, RetryPolicyFault> {
@@ -48,6 +49,14 @@ pub(crate) async fn invoke(
     let mut context = session.context(Stage::Retry, timeout);
     context.request_id = Some(request.request_id.clone());
     context.attempt_id = Some(format!("{}:{}", request.request_id, request.attempt_index));
+    outbound
+        .bind(
+            &context,
+            input.cancellation(),
+            Some(input.call_scope().clone()),
+        )
+        .map_err(|_| RetryPolicyFault)?;
+    let _network = outbound.guard(&context);
     let reply = session
         .call(
             "policy.retry_decision",
