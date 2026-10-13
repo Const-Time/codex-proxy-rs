@@ -326,6 +326,7 @@ impl PluginHandler for Worker {
             },
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Http => worker_http::handle(call).await,
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::WebSocket => worker_websocket(call).await,
+            "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Service => worker_service(call).await,
             "middleware.handle" => worker_middleware::handle(call).await,
             "plugin.register" if !self.fail=>Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![])),
             "frontend_auth.identifier"=>Ok(CallReply::unary(json!({"identifier":"fixture-auth"}),vec![])),
@@ -1096,6 +1097,106 @@ mod worker_http {
         }
         response.into_reply()
     }
+}
+
+async fn worker_service(
+    call: gateway_plugin_sdk::client::PluginCall,
+) -> Result<CallReply, PluginFault> {
+    use gateway_plugin_sdk::call::{
+        middleware::NEXT_METHOD,
+        services::{self as wire, settings::ApiKeyExists},
+    };
+    use gateway_plugin_sdk::client::{
+        MiddlewareInput, MiddlewareOutput, ServiceCall, ServiceResponse,
+    };
+    let host = call.host.clone();
+    let instance = call.context.instance_id.clone();
+    let mut input = call.params["input"].clone();
+    let call = ServiceCall::decode(call)?;
+    assert_eq!(call.call_id, "service-fixture-call");
+    assert_eq!(
+        call.parent_call_id.as_deref(),
+        Some("service-fixture-parent")
+    );
+    let mode = call.request_id.clone();
+    if mode == "reject" {
+        let mut fault = PluginFault::new(ErrorCode::Rejected, "fixture service rejection");
+        fault.send_state = gateway_plugin_sdk::SendState::Ambiguous;
+        fault.details = Some(json!({"fixture":"original"}));
+        return Err(fault);
+    }
+    if mode == "typed" {
+        let call = call.into_typed::<ApiKeyExists>()?;
+        let result = call.next.run(()).await;
+        return ServiceResponse::from_result::<ApiKeyExists>(result)?.encode();
+    }
+    if mode == "bad-reply" {
+        return Ok(CallReply::unary(json!({"unknown":true}), vec![]));
+    }
+    if mode == "binary-reply" {
+        return Ok(CallReply::unary(json!({"Ok":false}), vec![1]));
+    }
+    if mode == "short" {
+        return Ok(CallReply::unary(json!({"Ok":false}), vec![]));
+    }
+    if mode == "bad-output" {
+        return Ok(CallReply::unary(json!({"Ok":"wrong-type"}), vec![]));
+    }
+    if mode == "forward" {
+        return call.forward().await?.encode();
+    }
+    if mode == "bad-input" {
+        input = json!({"value":"wrong-type","steps":[]});
+    }
+    if mode == "rewrite" {
+        input["value"] = json!(input["value"].as_u64().unwrap() + 1);
+        input["steps"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(format!("{instance}:in")));
+    }
+    if mode == "double" {
+        assert!(
+            host.call(NEXT_METHOD, input.clone(), vec![1])
+                .await
+                .is_err()
+        );
+    }
+    if mode == "no-authority" {
+        assert!(
+            host.call("host.keys.list", json!({}), vec![])
+                .await
+                .is_err()
+        );
+        assert!(
+            host.call("host.http.dispatch", json!({}), vec![])
+                .await
+                .is_err()
+        );
+    }
+    let reply = host
+        .call(NEXT_METHOD, input, vec![])
+        .await
+        .map_err(|e| e.into_plugin_fault())?;
+    if mode == "double" {
+        assert!(host.call(NEXT_METHOD, json!(null), vec![]).await.is_err());
+    }
+    if mode == "wait" {
+        return futures::future::pending().await;
+    }
+    let mut result: wire::Response = serde_json::from_value(reply.result).unwrap();
+    if mode == "rewrite" {
+        let output = result.as_mut().unwrap();
+        output["value"] = json!(output["value"].as_u64().unwrap() + 100);
+        output["steps"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(format!("{instance}:out")));
+    }
+    Ok(CallReply::unary(
+        serde_json::to_value(result).unwrap(),
+        vec![],
+    ))
 }
 
 async fn worker_websocket(

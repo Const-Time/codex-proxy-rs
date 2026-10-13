@@ -165,6 +165,21 @@ impl Publication {
 #[derive(Clone)]
 pub struct PluginMiddlewareRegistry(Publication, CancellationToken);
 impl PluginMiddlewareRegistry {
+    pub fn freeze_service(
+        &self,
+        context: &gateway_core::engine::middleware::service::Context,
+    ) -> Result<super::service::PluginServiceMiddlewarePlan, AdminError> {
+        let SelectedMiddleware { processes, tokens } =
+            self.0
+                .select(context.call_scope.excluded_instances(), |binding| {
+                    binding.mounts.contains(&PluginMiddlewareMount::Service)
+                        && matches!(binding.scope, PluginExecutionScope::All {})
+                })?;
+        Ok(super::service::PluginServiceMiddlewarePlan::new(
+            processes,
+            CancellationToken::linked(std::iter::once(context.cancellation.clone()).chain(tokens)),
+        ))
+    }
     pub fn freeze_websocket(
         &self,
         excluded: &BTreeSet<String>,
