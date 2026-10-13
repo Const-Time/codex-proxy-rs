@@ -1,3 +1,5 @@
+mod roots;
+mod transport;
 use crate::{models::fixture::Fixture, support::*};
 use gateway_admin::{model::plugins::*, ports::plugins::PluginService};
 use gateway_core::{

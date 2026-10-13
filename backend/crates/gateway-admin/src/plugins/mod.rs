@@ -257,6 +257,7 @@ impl PluginService for PluginManager {
     async fn authenticate(
         &self,
         authorization: String,
+        origin: Option<gateway_core::engine::middleware::service::Origin>,
     ) -> Result<PluginAuthenticationDecision, AdminError> {
         let (entry, epoch) = {
             let state = self
@@ -278,7 +279,7 @@ impl PluginService for PluginManager {
         if access.is_revoked() {
             return Err(AdminError::unavailable("认证器已失效"));
         }
-        let result = process.authenticate(authorization).await?;
+        let result = process.authenticate(authorization, origin).await?;
         if access.is_revoked() {
             return Err(AdminError::unavailable("认证器已失效"));
         }

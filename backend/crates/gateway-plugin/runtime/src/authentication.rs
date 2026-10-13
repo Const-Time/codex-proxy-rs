@@ -32,7 +32,9 @@ pub(crate) async fn register(session: &Arc<RpcSession>) -> Result<(), AdminError
 }
 pub(crate) async fn authenticate(
     session: &Arc<RpcSession>,
+    services: Arc<crate::services::Registry>,
     authorization: String,
+    origin: Option<gateway_core::engine::middleware::service::Origin>,
 ) -> Result<PluginAuthenticationResult, AdminError> {
     if authorization.is_empty()
         || authorization.len() > 8192
@@ -41,15 +43,30 @@ pub(crate) async fn authenticate(
         return Err(AdminError::invalid("认证信封无效"));
     }
     let input = FrontendAuthenticationRequest { authorization };
-    let reply = session
-        .call(
-            "frontend_auth.authenticate",
-            session.context(Stage::Authentication, Duration::from_secs(5)),
-            json!({}),
-            serde_json::to_vec(&input).map_err(|_| AdminError::internal("认证编码失败"))?,
-        )
-        .await
-        .map_err(|_| AdminError::unavailable("认证器暂不可用"))?;
+    let mut context = session.context(Stage::Authentication, Duration::from_secs(5));
+    let origin = match origin {
+        Some(origin) => origin,
+        None => services
+            .root_origin(&context)
+            .map_err(|_| AdminError::unavailable("认证服务端口不可用"))?,
+    };
+    context.request_id = Some(origin.context.request_id.clone());
+    let cancellation = origin.context.cancellation.clone();
+    let deadline = origin.context.deadline_at;
+    let _services = services
+        .bind_origin(&context, origin)
+        .map_err(|_| AdminError::unavailable("认证服务范围不可用"))?;
+    let call = session.call(
+        "frontend_auth.authenticate",
+        context,
+        json!({}),
+        serde_json::to_vec(&input).map_err(|_| AdminError::internal("认证编码失败"))?,
+    );
+    let reply = tokio::select! {biased;
+        ()=cancellation.cancelled()=>return Err(AdminError::unavailable("认证调用已取消")),
+        ()=deadline.wait()=>return Err(AdminError::unavailable("认证调用已到期")),
+        reply=call=>reply.map_err(|_| AdminError::unavailable("认证器暂不可用"))?,
+    };
     if reply.result != json!({}) || reply.payload.len() > 4096 {
         return Err(AdminError::unavailable("认证器响应无效"));
     }

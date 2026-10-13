@@ -28,7 +28,7 @@ async fn authentication_commit_uncertainty_never_reopens_builtin_access() {
         create.frontend_authentication = Some(binding(PluginAuthenticationPolicy::Reject));
         let installed = manager.update(None, create, &actor()).await.unwrap();
         let PluginAuthenticationDecision::Authenticated { access: old, .. } = manager
-            .authenticate("Bearer external-alice".into())
+            .authenticate("Bearer external-alice".into(), None)
             .await
             .unwrap()
         else {
@@ -43,7 +43,7 @@ async fn authentication_commit_uncertainty_never_reopens_builtin_access() {
             assert!(!old.is_revoked());
             assert!(matches!(
                 manager
-                    .authenticate("Bearer sk_local".into())
+                    .authenticate("Bearer sk_local".into(), None)
                     .await
                     .unwrap(),
                 PluginAuthenticationDecision::Rejected
@@ -53,7 +53,7 @@ async fn authentication_commit_uncertainty_never_reopens_builtin_access() {
             assert!(old.is_revoked());
             assert!(matches!(
                 manager
-                    .authenticate("Bearer sk_local".into())
+                    .authenticate("Bearer sk_local".into(), None)
                     .await
                     .unwrap(),
                 PluginAuthenticationDecision::Builtin { .. }
@@ -63,13 +63,13 @@ async fn authentication_commit_uncertainty_never_reopens_builtin_access() {
             assert!(old.is_revoked());
             assert!(
                 manager
-                    .authenticate("Bearer sk_local".into())
+                    .authenticate("Bearer sk_local".into(), None)
                     .await
                     .is_err()
             );
             assert!(
                 manager
-                    .authenticate("Bearer external-alice".into())
+                    .authenticate("Bearer external-alice".into(), None)
                     .await
                     .is_err()
             );
@@ -82,7 +82,7 @@ async fn authentication_commit_uncertainty_never_reopens_builtin_access() {
                 .unwrap();
             assert!(matches!(
                 manager
-                    .authenticate("Bearer external-alice".into())
+                    .authenticate("Bearer external-alice".into(), None)
                     .await
                     .unwrap(),
                 PluginAuthenticationDecision::Authenticated { .. }
@@ -103,7 +103,7 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     ));
     let manager = PluginManager::new(store.clone(), engine.clone());
     let PluginAuthenticationDecision::Builtin { access: before } = manager
-        .authenticate("Bearer sk_local".into())
+        .authenticate("Bearer sk_local".into(), None)
         .await
         .unwrap()
     else {
@@ -119,7 +119,7 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     let installed = manager.update(None, command, &actor()).await.unwrap();
     assert!(before.is_revoked());
     let PluginAuthenticationDecision::Authenticated { key, access } = manager
-        .authenticate("Bearer external-alice".into())
+        .authenticate("Bearer external-alice".into(), None)
         .await
         .unwrap()
     else {
@@ -128,22 +128,22 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     assert_eq!(key.as_str(), "key_alice");
     assert!(matches!(
         manager
-            .authenticate("Bearer external-state".into())
+            .authenticate("Bearer external-state".into(), None)
             .await
             .unwrap(),
         PluginAuthenticationDecision::Authenticated { .. }
     ));
     for header in ["Bearer external-unknown", "Bearer external-rejected"] {
         assert!(matches!(
-            manager.authenticate(header.into()).await.unwrap(),
+            manager.authenticate(header.into(), None).await.unwrap(),
             PluginAuthenticationDecision::Rejected
         ));
     }
     for header in ["Bearer external-forged", "Bearer external-fault"] {
-        assert!(manager.authenticate(header.into()).await.is_err());
+        assert!(manager.authenticate(header.into(), None).await.is_err());
     }
     let PluginAuthenticationDecision::Builtin { access: fallback } = manager
-        .authenticate("Bearer sk_local".into())
+        .authenticate("Bearer sk_local".into(), None)
         .await
         .unwrap()
     else {
@@ -173,7 +173,7 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     assert!(fallback.is_revoked());
     assert!(matches!(
         manager
-            .authenticate("Bearer sk_local".into())
+            .authenticate("Bearer sk_local".into(), None)
             .await
             .unwrap(),
         PluginAuthenticationDecision::Rejected
@@ -181,7 +181,7 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     let PluginAuthenticationDecision::Authenticated {
         access: current, ..
     } = manager
-        .authenticate("Bearer external-alice".into())
+        .authenticate("Bearer external-alice".into(), None)
         .await
         .unwrap()
     else {
@@ -189,14 +189,14 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     };
     assert!(
         manager
-            .authenticate("Bearer external-crash".into())
+            .authenticate("Bearer external-crash".into(), None)
             .await
             .is_err()
     );
     assert!(current.is_revoked());
     assert!(
         manager
-            .authenticate("Bearer sk_local".into())
+            .authenticate("Bearer sk_local".into(), None)
             .await
             .is_err(),
         "crash must not delegate"
@@ -213,7 +213,7 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
     restored.restore().await.unwrap();
     assert!(
         restored
-            .authenticate("Bearer sk_local".into())
+            .authenticate("Bearer sk_local".into(), None)
             .await
             .is_err(),
         "failed startup must retain the authentication gate"
@@ -226,7 +226,7 @@ async fn authentication_obeys_host_mapping_delegation_lifecycle_and_failed_upgra
         .unwrap();
     assert!(matches!(
         restored
-            .authenticate("Bearer sk_local".into())
+            .authenticate("Bearer sk_local".into(), None)
             .await
             .unwrap(),
         PluginAuthenticationDecision::Builtin { .. }
@@ -255,7 +255,7 @@ async fn authentication_generic_http_does_not_grant_model_or_management_authorit
     manager.update(None, command, &actor()).await.unwrap();
     assert!(matches!(
         manager
-            .authenticate("Bearer external-http".into())
+            .authenticate("Bearer external-http".into(), None)
             .await
             .unwrap(),
         PluginAuthenticationDecision::Authenticated { .. }

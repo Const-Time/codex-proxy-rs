@@ -79,6 +79,7 @@ impl Fixture {
 }
 fn context(mode: &str, sender: Arc<Sender>) -> core::Context {
     core::Context {
+        origin: None,
         connection_id: "ws-fixture".into(),
         direction: core::Direction::Incoming,
         headers: vec![MiddlewareHeader::new(

@@ -27,6 +27,7 @@ impl PluginService for Plugins {
     async fn authenticate(
         &self,
         authorization: String,
+        _origin: Option<gateway_core::engine::middleware::service::Origin>,
     ) -> Result<PluginAuthenticationDecision, AdminError> {
         if self.0.is_revoked() || authorization == "Bearer plugin-error" {
             return Err(AdminError::unavailable("private plugin error"));

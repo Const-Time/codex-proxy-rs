@@ -721,6 +721,11 @@ impl PluginHandler for Worker {
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Service => worker_service(call).await,
             "middleware.handle" => worker_middleware::handle(call).await,
             "plugin.register" if !self.fail=>{
+                if self.adapter_mode == "registration-service" {
+                    assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|error| PluginFault::new(ErrorCode::Fault, error.message))?);
+                    denied_service_stage_privileges(&call.host).await?;
+                    assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|error| PluginFault::new(ErrorCode::Fault, error.message))?);
+                }
                 if self.adapter_mode == "registration-external" {
                     let result=worker_outbound::run(&call.host,&json!({"url":self.adapter_url,"mode":"stream"})).await?;
                     assert_eq!(result["bytes"],json!([0,255,1,0]));
@@ -735,6 +740,11 @@ impl PluginHandler for Worker {
                 let input:gateway_plugin_sdk::call::frontend_authentication::FrontendAuthenticationRequest=serde_json::from_slice(&call.payload).unwrap();
                 assert_eq!(call.context.stage,gateway_plugin_sdk::Stage::Authentication);
                 let value=match input.authorization.as_str() {
+                    "Bearer external-service"=>{
+                        assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|error| PluginFault::new(ErrorCode::Fault, error.message))?);
+                        denied_service_stage_privileges(&call.host).await?;
+                        json!({"outcome":"authenticated","principal":"alice"})
+                    },
                     "Bearer external-alice"=>json!({"outcome":"authenticated","principal":"alice"}),
                     "Bearer external-unknown"=>json!({"outcome":"authenticated","principal":"unknown"}),
                     "Bearer external-rejected"=>json!({"outcome":"rejected"}),
@@ -1267,7 +1277,7 @@ mod worker_http {
                 && call.context.attempt_id.is_none()
                 && call.context.credential_revision.is_none()
         );
-        assert_eq!(call.call_id, "host-call");
+        assert!(!call.call_id.is_empty());
         let mode = call
             .request
             .headers
@@ -1275,6 +1285,21 @@ mod worker_http {
             .find(|h| h.name == "x-fixture-mode")
             .map(|h| String::from_utf8(h.value.clone()).unwrap())
             .unwrap_or_else(|| "pass".into());
+        if mode != "service-probe" {
+            assert_eq!(call.call_id, "host-call");
+        }
+        if mode == "service-probe" {
+            let exists = call
+                .host
+                .service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(())
+                .await
+                .map_err(|error| PluginFault::new(ErrorCode::Fault, error.message))?;
+            return HttpResponse::new(
+                200,
+                HttpBody::from_bytes(serde_json::to_vec(&json!({"exists":exists})).unwrap()),
+            )
+            .into_reply();
+        }
         if mode == "deny" {
             return Err(PluginFault::new(ErrorCode::Rejected, "fixture denied"));
         }
@@ -1705,6 +1730,17 @@ async fn worker_websocket(
         .find(|h| h.name == "x-fixture-mode")
         .map(|h| String::from_utf8(h.value.clone()).unwrap())
         .unwrap_or_default();
+    if mode == "service-probe" {
+        let exists = call
+            .host
+            .service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(())
+            .await
+            .map_err(|error| PluginFault::new(ErrorCode::Fault, error.message))?;
+        call.message = WebSocketMessage::new(
+            WebSocketKind::Binary,
+            serde_json::to_vec(&json!({"exists":exists})).unwrap(),
+        );
+    }
     if mode == "wait" {
         return futures::future::pending().await;
     }
@@ -1983,4 +2019,23 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
         vec![],
         ResponseStream::from_chunks(chunks),
     ))
+}
+
+async fn denied_service_stage_privileges(
+    host: &gateway_plugin_sdk::client::HostClient,
+) -> Result<(), PluginFault> {
+    for method in [
+        gateway_plugin_sdk::call::data::ACCOUNTS_LIST,
+        "host.model.execute",
+        gateway_plugin_sdk::call::resources::GROUP_ENSURE,
+    ] {
+        let fault = host
+            .call(method, json!({}), vec![])
+            .await
+            .err()
+            .unwrap()
+            .into_plugin_fault();
+        assert_eq!(fault.code, ErrorCode::PermissionDenied);
+    }
+    Ok(())
 }

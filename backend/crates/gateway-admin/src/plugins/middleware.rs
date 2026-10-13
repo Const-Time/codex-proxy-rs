@@ -284,6 +284,7 @@ impl PluginMiddlewareRegistry {
         Ok(super::websocket::PluginWebSocketMiddlewarePlan::new(
             processes,
             cancellation,
+            self.service_factory(),
         ))
     }
     pub fn freeze_http(

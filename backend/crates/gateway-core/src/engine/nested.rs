@@ -88,6 +88,21 @@ impl Default for ExtensionCallScope {
     }
 }
 impl ExtensionCallScope {
+    /// Independent transport events start a fresh graph. Borrowed model/HTTP
+    /// graphs keep every parent permit, ancestor and cumulative budget.
+    pub(crate) fn transport_root(ancestors: BTreeSet<String>) -> Self {
+        Self {
+            ancestors: Arc::new(ancestors),
+            ..Self::default()
+        }
+    }
+    pub(crate) fn transport_event(&self) -> Self {
+        if self.permit.is_none() && self.parent_request_id.is_none() && self.ancestors.is_empty() {
+            Self::default()
+        } else {
+            self.clone()
+        }
+    }
     /// HTTP callbacks use the same bounded graph as model callbacks. This scope
     /// describes placement and effects only; it does not authenticate a client.
     pub fn fork_http(&self, instance: String) -> Result<Self, GatewayError> {

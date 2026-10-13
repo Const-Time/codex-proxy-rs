@@ -69,6 +69,17 @@ impl Session {
         self.plan
             .run(
                 ws::Context {
+                    origin: Some(gateway_core::engine::middleware::service::Origin {
+                        context: self
+                            .context
+                            .transport_event()
+                            .service_context()
+                            .map_err(|_| MiddlewareError::Fault)?,
+                        factory: match &self.context.model_parent {
+                            Some(parent) => parent.service_factory(),
+                            None => self.plan.service_factory(),
+                        },
+                    }),
                     connection_id: self.connection_id.clone(),
                     direction,
                     headers: self.headers.clone(),
@@ -101,7 +112,8 @@ impl Transport {
         plan: gateway_admin::plugins::websocket::PluginWebSocketMiddlewarePlan,
     ) -> Self {
         use ws::{Sender as _, Session as _};
-        context.cancellation = plan.cancellation();
+        context.cancellation =
+            CancellationToken::linked([context.cancellation, plan.cancellation()]);
         let session = open(socket, context, connection_id, headers, plan, None);
         let incoming = futures::stream::try_unfold(session.clone(), |session| async move {
             session

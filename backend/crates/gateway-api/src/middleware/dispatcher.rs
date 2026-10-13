@@ -15,6 +15,22 @@ pub(super) struct RouterDispatcher {
 }
 
 impl core::Dispatcher for RouterDispatcher {
+    fn service_factory(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::engine::middleware::service::Factory>> {
+        if let Some(parent) = self
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.context.model_parent.as_ref())
+        {
+            return parent.service_factory();
+        }
+        self.origin
+            .as_ref()
+            .map(|origin| &origin.registry)
+            .or(self.registry.as_ref())
+            .and_then(|registry| registry.service_factory())
+    }
     fn request_settings(&self) -> Option<RequestSettings> {
         self.origin
             .as_ref()

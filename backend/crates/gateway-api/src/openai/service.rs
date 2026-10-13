@@ -52,8 +52,22 @@ impl OpenAiService {
     ) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
         use gateway_admin::model::plugins::PluginAuthenticationDecision;
         if let Some(plugins) = self.administration.as_ref().and_then(|a| a.plugins().ok()) {
+            let origin = crate::middleware::current()
+                .map(|origin| {
+                    origin.context.service_context().map(|context| {
+                        gateway_core::engine::middleware::service::Origin {
+                            context,
+                            factory: match &origin.context.model_parent {
+                                Some(parent) => parent.service_factory(),
+                                None => origin.registry.service_factory(),
+                            },
+                        }
+                    })
+                })
+                .transpose()
+                .map_err(|_| ClientApiKeyAuthError::RuntimeUnavailable)?;
             let decision = plugins
-                .authenticate(authorization.to_owned())
+                .authenticate(authorization.to_owned(), origin)
                 .await
                 .map_err(|_| ClientApiKeyAuthError::RuntimeUnavailable)?;
             let client = match decision {

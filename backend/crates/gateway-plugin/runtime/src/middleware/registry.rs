@@ -110,6 +110,7 @@ impl MiddlewareCallbacks {
         self: &Arc<Self>,
         context: &CallContext,
         invocation: Arc<super::websocket::Invocation>,
+        mut origin: gateway_core::engine::middleware::service::Origin,
     ) -> Result<Binding, MiddlewareError> {
         let mut calls = self
             .calls
@@ -118,12 +119,24 @@ impl MiddlewareCallbacks {
         if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
-        self.bind_outbound(context, invocation.cancellation.clone(), None)?;
+        origin.context.cancellation = gateway_core::lifecycle::CancellationToken::linked([
+            origin.context.cancellation,
+            invocation.cancellation.clone(),
+            invocation.closed.clone(),
+        ]);
+        let graph = origin.context.call_scope.clone();
+        let service_binding = self
+            .services
+            .as_ref()
+            .map(|services| services.bind_origin(context, origin))
+            .transpose()
+            .map_err(|_| MiddlewareError::Fault)?;
+        self.bind_outbound(context, invocation.cancellation.clone(), Some(graph))?;
         let invocation = Invocation::WebSocket(invocation);
         calls.insert(
             context.resource_scope_id.clone(),
             Entry {
-                _services: None,
+                _services: service_binding,
                 context: context.clone(),
                 invocation: invocation.clone(),
             },
@@ -215,6 +228,31 @@ impl MiddlewareCallbacks {
         if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
+        let service_binding = if let Some(services) = &self.services {
+            let mut origin = invocation
+                .context
+                .service_context()
+                .map_err(|_| MiddlewareError::Fault)?;
+            origin.cancellation = gateway_core::lifecycle::CancellationToken::linked([
+                origin.cancellation,
+                invocation.cancellation.clone(),
+                invocation.callbacks_closed.clone(),
+            ]);
+            let factory = match &invocation.context.model_parent {
+                Some(parent) => parent.service_factory(),
+                None => invocation
+                    .dispatcher
+                    .as_ref()
+                    .and_then(|dispatcher| dispatcher.service_factory()),
+            };
+            Some(
+                services
+                    .bind(context, factory, origin)
+                    .map_err(|_| MiddlewareError::Fault)?,
+            )
+        } else {
+            None
+        };
         self.bind_outbound(
             context,
             invocation.cancellation.clone(),
@@ -224,7 +262,7 @@ impl MiddlewareCallbacks {
         calls.insert(
             context.resource_scope_id.clone(),
             Entry {
-                _services: None,
+                _services: service_binding,
                 context: context.clone(),
                 invocation: invocation.clone(),
             },
