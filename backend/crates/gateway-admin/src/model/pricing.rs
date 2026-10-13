@@ -3,7 +3,8 @@
 use gateway_core::metering::{ModelPriceOverride, PricingOverrides};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PricingCatalog {
     pub defaults: PricingOverrides,
     pub overrides: PricingOverrides,
@@ -54,14 +55,16 @@ pub struct SyncPricing {
     pub automatic: Option<PricingSyncPolicy>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PricingChange {
     Replace(ModelPriceOverride),
     Multiplier(u32, gateway_core::metering::MultiplierScope),
     Reset,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePricing {
     pub provider: String,
     pub models: Vec<String>,

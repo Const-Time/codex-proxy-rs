@@ -28,7 +28,7 @@
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
-中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除已接入，管理和已授权 service 层的主动服务调用已接通这三项业务，其他业务服务及阶段继续实施。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
+中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层可以主动调用这些业务，其他阶段继续实施。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
 
 绑定与实例共用 revision 和配置 CAS。候选升级准备失败仍使用旧代；无法确认配置是否提交时阻止继续使用旧绑定，重新保存确认后恢复。恢复失败的必需中间件保留作用范围内的门禁，进程退出也不自动跳过。启停、绑定和版本变更撤销旧调用计划，包含 RPC 已结束但正文尚未交付的响应。
 
@@ -60,11 +60,23 @@ HTTP 层可领取 API 提供的原始 WebSocket 升级能力，保留验证后�
 
 服务写入开始后，原事务和发布不随插件等待者一起丢弃，也不自动重试；同一调用图的名额保留到原写入与配置发布结束，沿原副作用标记阻止祖先重放。插件随后失败、撤销，或在写入尚未完成时提前返回成功，管理 API 返回原 `502 / 50202` 不确定结果合同；原终端失败不能被插件伪装成成功。查询允许按 service 合同短路和改写结果，恢复入口仍可用。
 
-管理调用和已有授权的 service 层可以使用原 SDK `host.service<Operation>(input)`，通过 `host.services.call` 主动调用这三项服务。管理入口仍要求管理员鉴权；服务端口、冻结发布、请求关联、调用图及取消信号由宿主绑定，不从插件 JSON 反序列化。请求里的 SDK MutationContext 会在边界被替换为真实管理操作者和审计 request ID，再进入 service 中间件；后续层不能修改这些身份字段。未绑定授权的调用、意外二进制正文和多余字段被拒绝，未知操作返回 unsupported。
+管理调用和已有授权的 service 层可以使用原 SDK `host.service<Operation>(input)`，通过 `host.services.call` 主动调用这些服务。管理入口仍要求管理员鉴权；服务端口、冻结发布、请求关联、调用图及取消信号由宿主绑定，不从插件 JSON 反序列化。请求里的 SDK MutationContext 会在边界被替换为真实管理操作者和审计 request ID，再进入 service 中间件；后续层不能修改这些身份字段。未绑定授权的调用、意外二进制正文和多余字段被拒绝，未知操作返回 unsupported。
 
 服务子调用排除发起实例及全部祖先，与模型和 HTTP 子调用共用原 Core 的深度、活跃名额和总次数限制。管理 RPC 的模型及 HTTP 回调也继承原入口调用图和冻结 HTTP 端口，不创建第二个预算或读取后来替换的全局端口。RPC 结束、父请求取消、停用和换代撤销旧端口；等待中的服务回调取消时保留 ambiguous 结果，不自动重试。原生写入仍按前述规则持有图名额至事务和发布完成。
 
-其他业务服务，以及 HTTP、request/attempt、策略等其他阶段的服务授权尚待逐项接入；不会在认证前凭空签发管理员身份。上游设置操作包含本地不存在的配置，不能把本地设置冒充完整上游设置类型；具体操作应逐项标明兼容合同与本地版本。生产 middleware 启用限制继续保留。
+本地运行设置和定价使用 SDK `call::services::local_settings_v1`，操作前缀为 `local.settings.v1.`。管理页对应接口也经过这些服务层，HTTP 响应格式保持原合同。下列写操作的输入均以 `(MutationContext, command)` 传递，宿主绑定真实审计身份；模型映射、版本、价格与源预览仍由原 Admin/Store 用例校验和发布。
+
+| SDK 操作 | 方法后缀 | 本地合同 |
+| --- | --- | --- |
+| `Load` / `Replace` | `load` / `replace` | 保留 `subscription_auto_reset_enabled`；读取含正整数 config_revision，替换沿用本地最后写入语义，无上游 expected_revision CAS 承诺；订阅开关为 null/省略时保留原值 |
+| `Pricing` | `pricing` | 返回 defaults、overrides、synced、synced_at、sync_policy、source_hash |
+| `PreviewPricingSync` / `Sync` | `preview_pricing_sync` / `sync_pricing` | 预览含 sourceHash；确认时重新获取来源并比较完整预览，来源或价格变化则拒绝，不能丢弃来源校验 |
+| `Update` | `update_pricing` | 支持 Replace、Multiplier(bps, scope)、Reset；scope 保留费用分项，不提供上游 Delete 语义 |
+| `UpdateSyncPolicy` | `update_pricing_sync_policy` | 修改原自动同步策略 enabled/updateExisting；不另建后台任务或定价状态 |
+
+服务结果在交付前完成类型和领域转换；写入后插件破坏响应或中途取消，返回原不确定结果合同，不能把提交事实变成一次可安全重试的失败。自动定价刷新仍由原后台 owner 执行，不因页面读取或插件加载而触发。
+
+上游 `settings.load/replace` 等完整设置接口仍明确返回 unsupported：本地没有 Guardian、预热和客户端画像等字段，不填造默认值，也不把本地类型放到同名上游接口。管理员 API Key 的三个公共操作继续使用原上游合同。HTTP、request/attempt、策略等其他阶段的服务授权尚待逐项接入，不会在认证前凭空签发管理员身份。生产 middleware 启用限制继续保留。
 
 ## 插件故障恢复
 

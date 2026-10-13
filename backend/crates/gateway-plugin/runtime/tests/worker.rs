@@ -407,7 +407,19 @@ impl PluginHandler for Worker {
                         Err(error)=>json!({"error":error.into_plugin_fault()})
                     }
                 } else if input["operation"]=="services" {
-                    if input["mode"]=="raw" {
+                    if input["mode"]=="local" {
+                        use gateway_plugin_sdk::call::services::local_settings_v1 as local;
+                        match input["local_operation"].as_str().unwrap() {
+                            "load"=>typed_service::<local::Load>(&call.host,input["input"].clone()).await,
+                            "replace"=>typed_service::<local::Replace>(&call.host,input["input"].clone()).await,
+                            "pricing"=>typed_service::<local::Pricing>(&call.host,input["input"].clone()).await,
+                            "preview_pricing_sync"=>typed_service::<local::PreviewPricingSync>(&call.host,input["input"].clone()).await,
+                            "sync_pricing"=>typed_service::<local::Sync>(&call.host,input["input"].clone()).await,
+                            "update_pricing"=>typed_service::<local::Update>(&call.host,input["input"].clone()).await,
+                            "update_pricing_sync_policy"=>typed_service::<local::UpdateSyncPolicy>(&call.host,input["input"].clone()).await,
+                            _=>panic!("unknown fixture service"),
+                        }
+                    } else if input["mode"]=="raw" {
                         match call.host.call(gateway_plugin_sdk::call::services::CALL_METHOD,input["request"].clone(),if input["binary"]==true {vec![1]}else{vec![]}).await {
                             Ok(reply)=>json!({"result":reply.result}),Err(error)=>json!({"fault":error.into_plugin_fault()}),
                         }
@@ -1315,4 +1327,15 @@ async fn worker_websocket(
         return Option::<WebSocketMessage>::None.encode();
     }
     result?.encode()
+}
+
+async fn typed_service<O: gateway_plugin_sdk::call::services::Operation>(
+    host: &gateway_plugin_sdk::client::HostClient,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    let input = serde_json::from_value::<O::Input>(input).unwrap();
+    match host.service::<O>(input).await {
+        Ok(value) => json!({"result":value}),
+        Err(error) => json!({"error":error}),
+    }
 }

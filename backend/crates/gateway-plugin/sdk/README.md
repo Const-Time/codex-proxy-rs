@@ -103,12 +103,14 @@ sequenceDiagram
 
 ## 本地验证
 
-设置服务的 SDK 类型和操作由宿主领域类型及[操作声明](../../gateway-admin/src/public_service/settings.rs)生成，SDK 构建不依赖宿主源码。
-修改宿主合同后，在仓库根目录更新生成文件；Admin 合同测试会检查生成结果是否同步：
+`call::services::settings` 保留固定上游快照的服务类型；这不代表本地宿主已实现全部操作。可用范围见[插件说明](../../../../docs/plugins.md)。本地的管理员 API Key 三项操作沿用该合同。
+
+本地运行设置和定价使用 `call::services::local_settings_v1` 及 `local.settings.v1.*` 操作名。它保留订阅自动重置、价格来源哈希、自动同步策略和费用分项；`Replace` 沿用本地最后写入语义，不声明上游的 revision CAS。不要将本地值反序列化为上游完整 RuntimeSettings，也不要向其填造缺失字段。
+
+SDK 构建不依赖宿主源码。本分支没有上游的服务代码生成器；修改本地合同须同步 Admin 的[服务边界](../../gateway-admin/src/plugins/service/settings.rs)、[本地设置 wire](../../gateway-admin/src/plugins/service/local.rs)和 SDK 类型，并运行真实 SDK 子进程及 API 服务回归：
 
 ```bash
-CPR_UPDATE_SERVICE_CONTRACT=1 RUST_MIN_STACK=16777216 cargo +1.97.0 test --manifest-path backend/Cargo.toml -p gateway-admin --test main sdk_settings_contract_matches_host_declarations --locked
-cargo +1.97.0 fmt --all --manifest-path backend/Cargo.toml
+RUST_MIN_STACK=16777216 cargo +1.97.0 test --manifest-path backend/Cargo.toml -p gateway-plugin-runtime -p gateway-api --test main --all-features --locked service
 ```
 
 SDK 自身的验证命令：

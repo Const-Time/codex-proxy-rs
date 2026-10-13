@@ -313,7 +313,7 @@ enum PricingChangeRequest {
 }
 
 async fn pricing<S>(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     State(state): State<S>,
 ) -> Result<impl IntoResponse, AdminError>
 where
@@ -321,8 +321,11 @@ where
 {
     let pricing = state
         .admin_services()
-        .settings()
-        .pricing()
+        .service_settings()
+        .pricing(crate::middleware::service_origin(
+            state.admin_services(),
+            &auth.context().mutation_context(),
+        ))
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -336,7 +339,7 @@ where
 }
 
 async fn preview_pricing_sync<S>(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     State(state): State<S>,
 ) -> Result<impl IntoResponse, AdminError>
 where
@@ -344,8 +347,11 @@ where
 {
     let preview = state
         .admin_services()
-        .settings()
-        .preview_pricing_sync()
+        .service_settings()
+        .preview_pricing_sync(crate::middleware::service_origin(
+            state.admin_services(),
+            &auth.context().mutation_context(),
+        ))
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -364,8 +370,15 @@ where
 {
     state
         .admin_services()
-        .settings()
-        .update_pricing_sync_policy(&auth.context().mutation_context(), policy)
+        .service_settings()
+        .update_pricing_sync_policy(
+            crate::middleware::service_origin(
+                state.admin_services(),
+                &auth.context().mutation_context(),
+            ),
+            auth.context().mutation_context(),
+            policy,
+        )
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -384,8 +397,15 @@ where
 {
     state
         .admin_services()
-        .settings()
-        .sync_pricing(&auth.context().mutation_context(), preview)
+        .service_settings()
+        .sync_pricing(
+            crate::middleware::service_origin(
+                state.admin_services(),
+                &auth.context().mutation_context(),
+            ),
+            auth.context().mutation_context(),
+            preview,
+        )
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -413,9 +433,13 @@ where
     };
     state
         .admin_services()
-        .settings()
+        .service_settings()
         .update_pricing(
-            &auth.context().mutation_context(),
+            crate::middleware::service_origin(
+                state.admin_services(),
+                &auth.context().mutation_context(),
+            ),
+            auth.context().mutation_context(),
             UpdatePricing {
                 provider: request.provider,
                 models: request.models,
@@ -431,7 +455,7 @@ where
 }
 
 async fn settings<S>(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     State(state): State<S>,
 ) -> Result<impl IntoResponse, AdminError>
 where
@@ -439,8 +463,11 @@ where
 {
     let result = state
         .admin_services()
-        .settings()
-        .load()
+        .service_settings()
+        .load(crate::middleware::service_origin(
+            state.admin_services(),
+            &auth.context().mutation_context(),
+        ))
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -460,8 +487,15 @@ where
     let command = request.into_command().map_err(map_wire_error)?;
     let result = state
         .admin_services()
-        .settings()
-        .replace(&auth.context().mutation_context(), command)
+        .service_settings()
+        .replace(
+            crate::middleware::service_origin(
+                state.admin_services(),
+                &auth.context().mutation_context(),
+            ),
+            auth.context().mutation_context(),
+            command,
+        )
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(

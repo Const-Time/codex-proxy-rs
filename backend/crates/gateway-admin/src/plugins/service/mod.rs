@@ -1,4 +1,5 @@
 //! The service terminal retains domain validation and the authenticated caller.
+mod local;
 pub mod settings;
 use crate::ports::plugins::PluginProcess;
 use futures::future::BoxFuture;
