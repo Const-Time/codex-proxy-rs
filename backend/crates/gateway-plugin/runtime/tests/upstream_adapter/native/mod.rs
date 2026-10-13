@@ -1,4 +1,6 @@
+mod continuation;
 mod fixture;
+mod xai;
 use fixture::Fixture;
 use gateway_core::{engine::ExecutionOutcome, upstream::UpstreamSendState};
 use std::{sync::atomic::Ordering, time::Duration};

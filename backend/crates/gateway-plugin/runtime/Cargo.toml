@@ -41,6 +41,8 @@ uuid = { version = "1.23.3", features = ["v4"] }
 chrono = "0.4.45"
 gateway-store = { path = "../../gateway-store" }
 provider-openai = { path = "../../providers/openai" }
+provider-xai = { path = "../../providers/xai" }
+redis = { version = "1.3.0", default-features = false, features = ["tokio-comp", "connection-manager"] }
 secrecy = "0.10.3"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
