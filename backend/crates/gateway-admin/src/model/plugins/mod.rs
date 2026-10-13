@@ -318,3 +318,14 @@ pub enum PluginAuthenticationDecision {
     },
     Rejected,
 }
+
+/// Registration facts for overlap checks and binding; no credentials or executable config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginUpstreamAdapterDeclaration {
+    pub id: String,
+    pub provider: String,
+    pub protocol: String,
+    pub transport: String,
+    pub models: Vec<String>,
+    pub authentication_kinds: Vec<String>,
+}

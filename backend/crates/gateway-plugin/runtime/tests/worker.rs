@@ -227,6 +227,7 @@ mod worker_models {
 }
 
 struct Worker {
+    adapter_mode: String,
     catalog_mode: String,
     contributes: serde_json::Value,
     fail: bool,
@@ -237,6 +238,34 @@ impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "upstream_adapter.register" => {
+                assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Registration);
+                assert_eq!(call.params, json!({}));
+                assert!(call.payload.is_empty());
+                let mut declaration = json!({"id":"adapter","provider":"openai","base_url":"https://example.test/base/","paths":[{"path":"responses","purpose":"inference"},{"path":"audit","purpose":"auxiliary"}],"authentication_kinds":["oauth"],"transport":"http_sse","protocol":"openai","models":["public-model"]});
+                match self.adapter_mode.as_str() {
+                    "id" => declaration["id"] = json!("invalid id"),
+                    "provider" => declaration["provider"] = json!("foreign"),
+                    "base" => declaration["base_url"] = json!("https://user:private-fixture@example.test/base/"),
+                    "path" => declaration["paths"][0]["path"] = json!("../responses"),
+                    "path-purpose" => declaration["paths"][0]["purpose"] = json!("auxiliary"),
+                    "auth" => declaration["authentication_kinds"] = json!([]),
+                    "auth-id" => declaration["authentication_kinds"] = json!(["token invalid"]),
+                    "protocol" => declaration["protocol"] = json!("custom"),
+                    "transport" => declaration["transport"] = json!("tcp"),
+                    "models" => declaration["models"] = json!(["repeat","repeat"]),
+                    "unknown" => declaration["unexpected"] = json!(true),
+                    _ => {}
+                }
+                let adapters = match self.adapter_mode.as_str() {
+                    "empty" => vec![],
+                    "too-many" => (0..17).map(|i| { let mut d=declaration.clone();d["id"]=json!(format!("adapter-{i}"));d }).collect(),
+                    "duplicate" => vec![declaration.clone(),declaration],
+                    _ => vec![declaration],
+                };
+                let payload = if self.adapter_mode == "oversized" { vec![b' ';65537] } else {serde_json::to_vec(&json!({"adapters":adapters})).unwrap()};
+                Ok(CallReply::unary(if self.adapter_mode == "envelope" {json!({"extra":true})} else {json!({})}, payload))
+            }
             "model_catalog.register"=>{
                 use gateway_plugin_sdk::call::catalog::{ModelCatalogRegistration,ModelAlias};
                 assert_eq!(call.context.stage,gateway_plugin_sdk::Stage::Registration);
@@ -464,6 +493,10 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        adapter_mode: session.handshake().configuration["adapter_mode"]
+            .as_str()
+            .unwrap_or("valid")
+            .into(),
         catalog_mode: session.handshake().configuration["catalog_mode"]
             .as_str()
             .unwrap_or("valid")

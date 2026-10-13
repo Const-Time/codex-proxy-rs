@@ -1,6 +1,7 @@
 mod client_distribution;
 mod config;
 mod logging;
+mod outbound;
 mod pricing;
 mod process;
 mod proxy_probe;

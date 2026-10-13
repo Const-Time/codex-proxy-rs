@@ -415,6 +415,7 @@ impl PluginRuntime for PluginEngine {
         if !reply.payload.is_empty() || registration.contributes != manifest.contributes {
             return Err(AdminError::invalid("插件注册结果与清单不符"));
         }
+        let upstream_adapters = crate::upstream_adapter::register(&session, &manifest).await?;
         let model_aliases = crate::catalog::register(&session, &record.id).await?;
         let authentication = session
             .capability_version(Capability::FrontendAuthentication)
@@ -482,6 +483,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            upstream_adapters,
             model_aliases,
             models,
             middleware,
@@ -496,6 +498,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    upstream_adapters: Vec<crate::upstream_adapter::RegisteredAdapter>,
     model_aliases: Vec<gateway_core::routing::ContributedModelAlias>,
     models: Option<Arc<crate::models::Models>>,
     middleware: Arc<crate::middleware::MiddlewareCallbacks>,
@@ -509,6 +512,13 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    fn upstream_adapters(&self) -> Vec<PluginUpstreamAdapterDeclaration> {
+        self.upstream_adapters
+            .iter()
+            .map(crate::upstream_adapter::RegisteredAdapter::facts)
+            .collect()
+    }
+
     fn model_aliases(&self) -> Vec<gateway_core::routing::ContributedModelAlias> {
         self.model_aliases.clone()
     }

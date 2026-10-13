@@ -2,6 +2,7 @@ mod data;
 mod installation;
 mod resources;
 mod support;
+mod upstream_adapter;
 
 mod quota;
 
