@@ -304,7 +304,7 @@ fn build_archive(
     }
     let manifest = json!({"manifestVersion":2,"name":"fixture","displayName":"Fixture","publisher":"local","version":version,"description":"Lifecycle fixture","license":"MIT",
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,
-        "configurationSchema":{"type":"object","properties":{"adapter_provider":{"type":"string"},"adapter_mode":{"type":"string"},"adapter_url":{"type":"string"},"adapter_transport":{"type":"string"},"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
+        "configurationSchema":{"type":"object","properties":{"adapter_models":{"type":"array","items":{"type":"string"}},"adapter_provider":{"type":"string"},"adapter_mode":{"type":"string"},"adapter_url":{"type":"string"},"adapter_transport":{"type":"string"},"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
         "state":[{"namespace":"counter","schemaVersion":1,"schema":{"type":"integer"},"maximumRecords":10,"maximumBytes":1024,"maximumValueBytes":128}],
         "resources":{"index.html":"text/html"},"package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},
         "files":{"bin/plugin":hex::encode(Sha256::digest(&executable)),"index.html":hex::encode(Sha256::digest(page))}}});

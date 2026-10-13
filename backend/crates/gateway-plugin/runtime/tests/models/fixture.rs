@@ -271,6 +271,10 @@ impl Provider for Core {
                 .push(generate.protocol_payload().body().clone().into());
         }
         assert_eq!(context.client_api_key_ref().as_str(), "key_alice");
+        let adapter = match request.candidate().upstream_model() {
+            Some(model) => context.upstream_adapter(request.candidate().provider(), model)?,
+            None => None,
+        };
         let preferred = context.required_account().cloned().or_else(|| {
             [
                 "acct_allowed",
@@ -389,7 +393,12 @@ impl Provider for Core {
                 request.candidate().provider().clone(),
                 model.clone(),
                 account,
-                UpstreamTransport::new("http").unwrap(),
+                UpstreamTransport::new(
+                    adapter
+                        .as_ref()
+                        .map_or("http", |adapter| adapter.transport()),
+                )
+                .unwrap(),
             ),
             None => ProviderCallMetadata::for_provider_endpoint(
                 request.candidate().provider().clone(),
@@ -498,7 +507,17 @@ impl Provider for Core {
             .with_replay_safe());
         }
         let polled = self.polled.clone();
-        let stream: EventStream = if mode == "stall"
+        let stream: EventStream = if let Some(adapter) = adapter {
+            gateway_core::engine::upstream_adapter::UpstreamAdapterInvocation {
+                operation: request.operation().clone(),
+                context: context.clone(),
+                metadata: metadata.clone(),
+                account: Arc::new(crate::upstream_adapter::callbacks::Connection(
+                    lease_account.clone(),
+                )),
+            }
+            .into_stream(adapter)
+        } else if mode == "stall"
             || (mode == "retry-stall" && metadata.provider_account_id().as_str() != "acct_allowed")
         {
             Box::pin(
@@ -652,6 +671,14 @@ pub fn snapshot(revision: u64, enabled: bool) -> RuntimeSnapshot {
     snapshot_with_accounts(revision, enabled, &["acct_allowed"])
 }
 fn snapshot_with_accounts(revision: u64, enabled: bool, accounts: &[&str]) -> RuntimeSnapshot {
+    snapshot_with_attempts(revision, enabled, accounts, 1)
+}
+pub fn snapshot_with_attempts(
+    revision: u64,
+    enabled: bool,
+    accounts: &[&str],
+    attempts: u32,
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").unwrap();
     let mut providers = vec![provider.clone()];
     if accounts.contains(&"acct_fallback") {
@@ -683,7 +710,7 @@ fn snapshot_with_accounts(revision: u64, enabled: bool, accounts: &[&str]) -> Ru
         ConfigRevision::new(revision).unwrap(),
         AccountSelectionPolicy::new(
             RotationStrategy::Smart,
-            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(attempts).unwrap(),
             Duration::ZERO,
         ),
         providers.clone(),

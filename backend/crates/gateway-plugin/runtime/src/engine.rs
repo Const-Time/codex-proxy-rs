@@ -389,6 +389,7 @@ impl PluginRuntime for PluginEngine {
         let upstream_callbacks = crate::upstream_adapter::callbacks::Callbacks::new(
             middleware.clone(),
             self.outbound.clone(),
+            models.clone(),
         );
         let session = Arc::new(
             RpcSession::start_supervised(

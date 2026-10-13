@@ -226,7 +226,115 @@ mod worker_models {
     }
 }
 
+mod upstream_callbacks {
+    use gateway_plugin_sdk::{ErrorCode, PluginFault, client::HostClient};
+    use serde_json::json;
+
+    pub(super) async fn run(host: &HostClient, mode: &str) -> Result<(), PluginFault> {
+        if mode == "callback-model-abandon" {
+            let request = gateway_plugin_sdk::call::host::ModelExecuteRequest {
+                client_key_id: None,
+                model: "gpt-native".into(),
+                protocol: "openai".into(),
+                operation: gateway_plugin_sdk::call::host::ModelOperation::Generate,
+                provider: None,
+                account_id: None,
+                previous_response_id: None,
+            };
+            host.call(
+                "host.model.execute_stream",
+                serde_json::to_value(request).unwrap(),
+                serde_json::to_vec(&json!({"model":"gpt-native","input":"unread child"})).unwrap(),
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+            return Ok(());
+        }
+        if mode == "callback-state" {
+            let params = json!({"namespace":"counter","key":"upstream"});
+            let reply = host
+                .call("host.state.get", params.clone(), vec![])
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            assert!(reply.result["record"].is_null());
+            let reply = host
+            .call(
+                "host.state.put",
+                json!({"namespace":"counter","key":"upstream","expected_version":null,"value":42}),
+                vec![],
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+            let version = reply.result["version"].as_u64().unwrap();
+            let conflict = host.call("host.state.put", json!({"namespace":"counter","key":"upstream","expected_version":null,"value":43}), vec![]).await.err().unwrap().into_plugin_fault();
+            assert_eq!(conflict.code, ErrorCode::Conflict);
+            let reply = host
+                .call("host.state.get", params, vec![])
+                .await
+                .map_err(|e| e.into_plugin_fault())?;
+            assert_eq!(reply.result["record"]["value"], 42);
+            host.call(
+                "host.state.delete",
+                json!({"namespace":"counter","key":"upstream","expected_version":version}),
+                vec![],
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+            for method in [
+                gateway_plugin_sdk::call::data::ACCOUNTS_LIST,
+                gateway_plugin_sdk::call::shared_budgets::RESET,
+                gateway_plugin_sdk::call::resources::GROUP_ENSURE,
+            ] {
+                let fault = host
+                    .call(method, json!({}), vec![])
+                    .await
+                    .err()
+                    .unwrap()
+                    .into_plugin_fault();
+                assert_eq!(fault.code, ErrorCode::PermissionDenied);
+            }
+            let fault = host.call("host.state.put", json!({"namespace":"counter","key":"invalid","expected_version":null,"value":"wrong-schema"}), vec![]).await.err().unwrap().into_plugin_fault();
+            assert_eq!(fault.code, ErrorCode::InvalidInput);
+            return Ok(());
+        }
+        if mode.starts_with("callback-http") {
+            let result = super::worker_models::handle(host, &json!({"mode":"http"})).await;
+            assert_eq!(result["bytes"], json!([0, 255, 1, 0]), "{result}");
+        } else {
+            let mut input =
+                json!({"mode":if mode == "callback-model-stream" {"stream"} else {"unary"}});
+            if mode == "callback-model-cancel" {
+                input["provider_mode"] = json!("stall");
+            }
+            if mode == "callback-model-deny" {
+                input["account"] = json!("acct_allowed");
+                let result = super::worker_models::handle(host, &input).await;
+                assert!(
+                    result.get("error").is_some(),
+                    "a child must not acquire its parent's account lease: {result}"
+                );
+                input["account"] = serde_json::Value::Null;
+                input["key"] = json!("key_disabled");
+                let result = super::worker_models::handle(host, &input).await;
+                assert_eq!(result["error"]["code"], "permission_denied", "{result}");
+                return Ok(());
+            }
+            let result = super::worker_models::handle(host, &input).await;
+            assert!(result.get("error").is_none(), "{result}");
+            assert!(result["events"].as_u64().unwrap() > 0);
+        }
+        if mode.ends_with("-fault") {
+            return Err(PluginFault::new(
+                ErrorCode::Fault,
+                "fixture fault after callback effects",
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct Worker {
+    adapter_models: serde_json::Value,
     adapter_provider: String,
     adapter_mode: String,
     adapter_url: String,
@@ -247,6 +355,9 @@ impl PluginHandler for Worker {
                 assert_eq!(call.params, json!({}));
                 assert!(call.payload.is_empty());
                 let mut declaration = json!({"id":"adapter","provider":self.adapter_provider,"base_url":self.adapter_url,"paths":[{"path":"responses","purpose":"inference"},{"path":"audit","purpose":"auxiliary"}],"authentication_kinds":["oauth"],"transport":self.adapter_transport,"protocol":"openai","models":["public-model"]});
+                if !self.adapter_models.is_null() {
+                    declaration["models"] = self.adapter_models.clone();
+                }
                 match self.adapter_mode.as_str() {
                     "id" => declaration["id"] = json!("invalid id"),
                     "provider" => declaration["provider"] = json!("foreign"),
@@ -498,6 +609,7 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        adapter_models: session.handshake().configuration["adapter_models"].clone(),
         adapter_provider: session.handshake().configuration["adapter_provider"]
             .as_str()
             .unwrap_or("openai")
@@ -1465,6 +1577,9 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
     );
     assert!(!String::from_utf8_lossy(&call.payload).contains("fixture-provider-secret"));
     let mode = input["behavior"].as_str().unwrap_or("http");
+    if mode.starts_with("callback-") {
+        upstream_callbacks::run(&call.host, mode).await?;
+    }
     let callback_error = |_| PluginFault::new(ErrorCode::Fault, "managed callback failed");
     if mode.starts_with("websocket") {
         let connection = match call
@@ -1493,7 +1608,7 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
                 .await?;
         }
         assert_eq!(connection.read().await?.unwrap().1, b"fixture-pong");
-    } else if mode != "synthetic" && mode != "invalid" {
+    } else if mode != "synthetic" && mode != "invalid" && !mode.starts_with("callback-") {
         let method = if mode == "http-stream" {
             "host.upstream.http.do_stream"
         } else {

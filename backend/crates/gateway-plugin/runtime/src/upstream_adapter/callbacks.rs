@@ -2,7 +2,10 @@
 use super::{failure::invalid, network::ManagedCall};
 use crate::{CallbackHandler, RpcReply};
 use futures::future::BoxFuture;
-use gateway_core::{error::ProviderError, upstream::UpstreamSendState};
+use gateway_core::{
+    engine::nested::NestedExecutionContext, error::ProviderError, lifecycle::CancellationToken,
+    upstream::UpstreamSendState,
+};
 use gateway_host::outbound::{HttpClient, HttpError};
 use gateway_plugin_sdk::{CallContext, ErrorCode, PluginFault, Stage};
 use std::{
@@ -13,6 +16,7 @@ use std::{
 pub(crate) type SharedClient = Arc<OnceLock<Result<HttpClient, HttpError>>>;
 pub(crate) struct Callbacks {
     inner: Arc<dyn CallbackHandler>,
+    models: Option<Arc<crate::models::Models>>,
     pub(super) client: SharedClient,
     calls: Mutex<BTreeMap<String, (CallContext, Arc<ManagedCall>)>>,
 }
@@ -26,9 +30,14 @@ impl Drop for Binding {
     }
 }
 impl Callbacks {
-    pub(crate) fn new(inner: Arc<dyn CallbackHandler>, client: SharedClient) -> Arc<Self> {
+    pub(crate) fn new(
+        inner: Arc<dyn CallbackHandler>,
+        client: SharedClient,
+        models: Option<Arc<crate::models::Models>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             inner,
+            models,
             client,
             calls: Mutex::default(),
         })
@@ -37,6 +46,7 @@ impl Callbacks {
         self: &Arc<Self>,
         context: &CallContext,
         call: Arc<ManagedCall>,
+        parent: Option<NestedExecutionContext>,
     ) -> Result<Binding, ProviderError> {
         let mut calls = self
             .calls
@@ -47,6 +57,17 @@ impl Callbacks {
             || calls.contains_key(&context.resource_scope_id)
         {
             return Err(invalid(UpstreamSendState::NotSent));
+        }
+        if let (Some(models), Some(parent)) = (&self.models, parent) {
+            models
+                .bind(
+                    context,
+                    Some(parent),
+                    None,
+                    CancellationToken::linked([call.cancellation.clone(), call.closed.clone()]),
+                    None,
+                )
+                .map_err(|error| super::failure::fault_error(error, UpstreamSendState::NotSent))?;
         }
         calls.insert(context.resource_scope_id.clone(), (context.clone(), call));
         Ok(Binding {
@@ -59,6 +80,9 @@ impl CallbackHandler for Callbacks {
     fn begin(&self, context: &CallContext) {
         self.inner.begin(context);
     }
+    fn streaming(&self, context: &CallContext) {
+        self.inner.streaming(context);
+    }
     fn finish(&self, context: &CallContext) {
         if let Some((_, call)) = self
             .calls
@@ -67,6 +91,9 @@ impl CallbackHandler for Callbacks {
             .remove(&context.resource_scope_id)
         {
             call.finish();
+        }
+        if let Some(models) = &self.models {
+            models.finish(context);
         }
         self.inner.finish(context);
     }
@@ -77,7 +104,7 @@ impl CallbackHandler for Callbacks {
         params: serde_json::Value,
         payload: Vec<u8>,
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
-        if !method.starts_with("host.upstream.") {
+        if context.stage != Stage::Upstream && !method.starts_with("host.upstream.") {
             return self.inner.call(context, method, params, payload);
         }
         let call = self
@@ -86,18 +113,16 @@ impl CallbackHandler for Callbacks {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&context.resource_scope_id)
             .filter(|(expected, _)| {
-                context.stage == Stage::Upstream
-                    && expected.resource_stream == context.resource_stream
-                    && expected.instance_id == context.instance_id
-                    && expected.generation == context.generation
-                    && expected.incarnation == context.incarnation
-                    && expected.request_id == context.request_id
-                    && expected.attempt_id == context.attempt_id
-                    && expected.account_id == context.account_id
-                    && expected.credential_revision == context.credential_revision
+                // RPC assigns these fields; all authority comes from the original call.
+                let mut expected = expected.clone();
+                expected.call_id = context.call_id;
+                expected.resource_stream = context.resource_stream;
+                expected == context
             })
             .map(|(_, call)| call.clone());
         let client = self.client.clone();
+        let models = self.models.clone();
+        let inner = self.inner.clone();
         Box::pin(async move {
             let call = call.ok_or_else(|| {
                 PluginFault::new(
@@ -105,6 +130,26 @@ impl CallbackHandler for Callbacks {
                     "upstream call is no longer active",
                 )
             })?;
+            if !method.starts_with("host.upstream.") {
+                let callback =
+                    if crate::models::is_method(&method) || method.starts_with("host.http.") {
+                        models
+                            .ok_or_else(|| {
+                                PluginFault::new(
+                                    ErrorCode::Unsupported,
+                                    "host model service is not configured",
+                                )
+                            })?
+                            .call(context, method, params, payload)
+                    } else {
+                        inner.call(context, method, params, payload)
+                    };
+                return tokio::select! {biased;
+                    ()=call.closed.cancelled()=>Err(call.fault(ErrorCode::Cancelled,"upstream callback scope ended")),
+                    ()=call.cancellation.cancelled()=>Err(call.fault(ErrorCode::Cancelled,"upstream invocation cancelled")),
+                    result=callback=>result,
+                };
+            }
             let client = client.get_or_init(HttpClient::new).as_ref().map_err(|_| {
                 PluginFault::new(ErrorCode::Fault, "managed network initialization failed")
             })?;

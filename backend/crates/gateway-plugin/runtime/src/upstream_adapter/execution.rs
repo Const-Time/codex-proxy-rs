@@ -238,7 +238,11 @@ impl Execution {
                 fault_error(error, UpstreamSendState::NotSent)
             }
         })?;
-        let scope = self.adapter.callbacks.bind(&context, managed.clone())?;
+        let scope = self.adapter.callbacks.bind(
+            &context,
+            managed.clone(),
+            invocation.context.nested_context().cloned(),
+        )?;
         let headers = crate::model_routing::headers(protocol.context())
             .map_err(|_| invalid())?
             .into_iter()
