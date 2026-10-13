@@ -1,4 +1,4 @@
-mod environment;
+pub(crate) mod environment;
 use crate::support::{actor, update};
 use environment::Environment;
 use gateway_admin::{model::plugins::*, plugins::PluginManager, ports::plugins::PluginService};

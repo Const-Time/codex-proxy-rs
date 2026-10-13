@@ -30,7 +30,13 @@ export interface PluginModelRouterBinding { order: number, scope: PluginMiddlewa
 export interface PluginAccountSchedulerBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
 export interface PluginUpstreamAdapterBinding { scope: PluginMiddlewareBinding['scope'] }
 export interface PluginRetryPolicyBinding { order: number, scope: PluginMiddlewareBinding['scope'] }
+export interface PluginObserverBinding {
+  order: number
+  requestCompleted: PluginMiddlewareBinding['scope'] | null
+  websocketResponse: PluginMiddlewareBinding['scope'] | null
+}
 export interface PluginInstance {
+  observer: PluginObserverBinding | null
   upstreamAdapter: PluginUpstreamAdapterBinding | null
   retryPolicy: PluginRetryPolicyBinding | null
   accountScheduler: PluginAccountSchedulerBinding | null
@@ -49,6 +55,7 @@ export interface PluginInstance {
   resources: PluginManagementResource[]
 }
 export interface PluginUpdate {
+  observer: PluginObserverBinding | null
   upstreamAdapter: PluginUpstreamAdapterBinding | null
   retryPolicy: PluginRetryPolicyBinding | null
   accountScheduler: PluginAccountSchedulerBinding | null

@@ -37,6 +37,7 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
         .await
         .unwrap();
     let mut first = PluginRecord {
+        observer: None,
         upstream_adapter: None,
         retry_policy: None,
         account_scheduler: None,
@@ -239,6 +240,15 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         "local.fixture"
     );
     let mut record = PluginRecord {
+        observer: Some(PluginObserverBinding {
+            order: -4,
+            request_completed: Some(PluginExecutionScope::Keys {
+                ids: vec!["key_observed".into()],
+            }),
+            websocket_response: Some(PluginExecutionScope::Groups {
+                ids: vec!["grp_00000000000000000000000000000001".into()],
+            }),
+        }),
         upstream_adapter: Some(PluginUpstreamAdapterBinding {
             scope: PluginExecutionScope::Keys {
                 ids: vec!["key_adapter".into()],
@@ -281,6 +291,35 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
     };
     store.save(&record, 0, &actor).await.unwrap();
     assert!(store.list().await.unwrap()[0].upstream_adapter == record.upstream_adapter);
+    assert!(store.list().await.unwrap()[0].observer == record.observer);
+    for invalid in [
+        PluginObserverBinding {
+            order: 10001,
+            request_completed: Some(PluginExecutionScope::All {}),
+            websocket_response: None,
+        },
+        PluginObserverBinding {
+            order: 0,
+            request_completed: None,
+            websocket_response: None,
+        },
+        PluginObserverBinding {
+            order: 0,
+            request_completed: None,
+            websocket_response: Some(PluginExecutionScope::Keys { ids: vec![] }),
+        },
+    ] {
+        let mut invalid_record = record.clone();
+        invalid_record.revision += 1;
+        invalid_record.observer = Some(invalid);
+        assert!(
+            store
+                .save(&invalid_record, record.revision, &actor)
+                .await
+                .is_err()
+        );
+        assert!(store.list().await.unwrap()[0] == record);
+    }
     let mut invalid_adapter = record.clone();
     invalid_adapter.revision += 1;
     invalid_adapter.upstream_adapter = Some(PluginUpstreamAdapterBinding {

@@ -101,6 +101,7 @@ impl PluginStore for Store {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
+    Observation,
     Catalog,
     WebSocketRewrite,
     WebSocketDrop,
@@ -136,6 +137,9 @@ pub(crate) enum Mode {
     ZeroTimeout,
 }
 pub(crate) struct Plugin {
+    pub(crate) observed: Mutex<Vec<gateway_core::engine::observation::RequestObservation>>,
+    pub(crate) observed_websocket:
+        Mutex<Vec<gateway_core::engine::observation::WebSocketResponseObservation>>,
     pub(crate) service_ports:
         Mutex<Vec<Arc<dyn gateway_core::engine::middleware::service::Dispatcher>>>,
     pub(crate) service_seen: Mutex<
@@ -157,6 +161,20 @@ pub(crate) struct Plugin {
 struct Runtime(Arc<Plugin>);
 #[async_trait]
 impl PluginRuntime for Runtime {
+    fn observer_plan(
+        &self,
+        targets: Vec<PluginObserverTarget>,
+        _services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> AdminResult<Option<Arc<dyn gateway_core::engine::observation::RequestObserverPlan>>> {
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(Observer {
+            plugin: self.0.clone(),
+            cancellation,
+        })))
+    }
     fn contributes_model_catalog(&self, _: &PluginArtifact) -> AdminResult<bool> {
         Ok(matches!(self.0.mode, Mode::Catalog))
     }
@@ -182,8 +200,33 @@ impl PluginRuntime for Runtime {
         Ok(self.0.clone())
     }
 }
+struct Observer {
+    plugin: Arc<Plugin>,
+    cancellation: gateway_core::lifecycle::CancellationToken,
+}
+impl gateway_core::engine::observation::RequestObserverPlan for Observer {
+    fn dispatch(&self, fact: gateway_core::engine::observation::RequestObservation) {
+        if !self.cancellation.is_cancelled() {
+            self.plugin.observed.lock().unwrap().push(fact);
+        }
+    }
+    fn dispatch_websocket_response(
+        &self,
+        fact: gateway_core::engine::observation::WebSocketResponseObservation,
+    ) {
+        if !self.cancellation.is_cancelled() {
+            self.plugin.observed_websocket.lock().unwrap().push(fact);
+        }
+    }
+}
 #[async_trait]
 impl PluginProcess for Plugin {
+    fn observer_identity(&self) -> Option<PluginObserverIdentity> {
+        matches!(self.mode, Mode::Observation).then(|| PluginObserverIdentity {
+            plugin_id: "fixture".into(),
+            instance_id: "fixture".into(),
+        })
+    }
     fn model_aliases(&self) -> Vec<gateway_core::routing::ContributedModelAlias> {
         if !matches!(self.mode, Mode::Catalog) {
             return vec![];
@@ -1030,6 +1073,8 @@ impl Fixture {
         assets: Option<std::path::PathBuf>,
     ) -> Self {
         let plugin = Arc::new(Plugin {
+            observed: Mutex::default(),
+            observed_websocket: Mutex::default(),
             service_ports: Mutex::default(),
             service_seen: Mutex::new(vec![]),
             access: PluginAccess::default(),
@@ -1046,9 +1091,14 @@ impl Fixture {
             || routing
             || scheduling
             || retry
-            || matches!(mode, Mode::Catalog)
+            || matches!(mode, Mode::Catalog | Mode::Observation)
         {
             vec![PluginRecord {
+                observer: matches!(mode, Mode::Observation).then(|| PluginObserverBinding {
+                    order: 0,
+                    request_completed: Some(PluginExecutionScope::All {}),
+                    websocket_response: Some(PluginExecutionScope::All {}),
+                }),
                 upstream_adapter: None,
                 retry_policy: retry.then_some(PluginRetryPolicyBinding {
                     order: 0,

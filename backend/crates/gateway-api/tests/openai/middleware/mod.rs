@@ -4,6 +4,7 @@ mod delivery;
 pub(crate) mod fixture;
 mod raw;
 mod request;
+mod root;
 mod websocket;
 
 use bytes::Bytes;

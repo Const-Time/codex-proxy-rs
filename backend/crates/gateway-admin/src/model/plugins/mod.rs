@@ -25,6 +25,7 @@ pub struct PluginArtifact {
 }
 #[derive(Clone, PartialEq)]
 pub struct PluginRecord {
+    pub observer: Option<PluginObserverBinding>,
     pub upstream_adapter: Option<PluginUpstreamAdapterBinding>,
     pub retry_policy: Option<PluginRetryPolicyBinding>,
     pub account_scheduler: Option<PluginAccountSchedulerBinding>,
@@ -42,6 +43,7 @@ pub struct PluginRecord {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginUpdate {
+    pub observer: Option<PluginObserverBinding>,
     pub upstream_adapter: Option<PluginUpstreamAdapterBinding>,
     pub retry_policy: Option<PluginRetryPolicyBinding>,
     pub account_scheduler: Option<PluginAccountSchedulerBinding>,
@@ -69,6 +71,7 @@ pub struct PluginPage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
+    pub observer: Option<PluginObserverBinding>,
     pub upstream_adapter: Option<PluginUpstreamAdapterBinding>,
     pub retry_policy: Option<PluginRetryPolicyBinding>,
     pub account_scheduler: Option<PluginAccountSchedulerBinding>,

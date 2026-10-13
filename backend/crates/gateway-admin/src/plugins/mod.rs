@@ -120,15 +120,21 @@ impl PluginManager {
                 Ok(process)
             }
             .await;
-            self.middleware
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publish(&record, restored.as_ref().ok().cloned(), catalog);
+            if let Ok(process) = &restored {
+                process.activate();
+            }
+            {
+                let mut publication = self
+                    .middleware
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                publication.publish(&record, restored.as_ref().ok().cloned(), catalog);
+                publication.rebuild_observers(self.runtime.as_ref(), self.services.clone());
+            }
             if record.frontend_authentication.is_some() {
                 self.publish_authentication(&record, restored.as_ref().ok().cloned());
             }
             if let Ok(process) = restored {
-                process.activate();
                 self.active
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -222,6 +228,7 @@ impl PluginManager {
                 )
         };
         Ok(PluginView {
+            observer: record.observer,
             upstream_adapter: record.upstream_adapter,
             retry_policy: record.retry_policy,
             account_scheduler: record.account_scheduler,
@@ -392,6 +399,9 @@ impl PluginService for PluginManager {
                 secrets.remove(&key);
             }
         }
+        if let Some(binding) = &update.observer {
+            binding.validate()?;
+        }
         if let Some(binding) = &update.middleware {
             binding.validate()?;
         }
@@ -419,6 +429,7 @@ impl PluginService for PluginManager {
             return Err(AdminError::conflict("只能启用一个入口认证器"));
         }
         let record = PluginRecord {
+            observer: update.observer,
             upstream_adapter: update.upstream_adapter,
             retry_policy: update.retry_policy,
             account_scheduler: update.account_scheduler,
@@ -484,6 +495,15 @@ impl PluginService for PluginManager {
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .block(&record.id);
+                    } else if record.observer.is_some()
+                        || previous.is_some_and(|r| r.observer.is_some())
+                    {
+                        let mut publication = self
+                            .middleware
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        publication.remove(&record.id);
+                        publication.rebuild_observers(self.runtime.as_ref(), self.services.clone());
                     }
                     if record.frontend_authentication.is_some()
                         || previous.is_some_and(|r| r.frontend_authentication.is_some())
@@ -536,10 +556,14 @@ impl PluginService for PluginManager {
                 candidate.activate();
                 active.insert(record.id.clone(), (record.revision, candidate));
             }
-            self.middleware
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publish(&record, auth_candidate.clone(), catalog);
+            {
+                let mut publication = self
+                    .middleware
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                publication.publish(&record, auth_candidate.clone(), catalog);
+                publication.rebuild_observers(self.runtime.as_ref(), self.services.clone());
+            }
             self.publish_authentication(&record, auth_candidate);
             old
         };
@@ -565,10 +589,14 @@ impl PluginService for PluginManager {
                 return Err(error);
             }
         }
-        self.middleware
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(id);
+        {
+            let mut publication = self
+                .middleware
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            publication.remove(id);
+            publication.rebuild_observers(self.runtime.as_ref(), self.services.clone());
+        }
         let old = self
             .active
             .write()
