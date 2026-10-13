@@ -3,6 +3,7 @@
 pub mod client_distribution;
 pub mod config;
 mod logging;
+pub mod outbound;
 pub mod pricing;
 pub mod process;
 pub mod proxy_probe;

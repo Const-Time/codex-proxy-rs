@@ -34,6 +34,10 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    fn upstream_adapters(&self) -> Vec<PluginUpstreamAdapterDeclaration> {
+        Vec::new()
+    }
+
     /// Registration facts only; the original Core snapshot must validate the complete set.
     fn model_aliases(&self) -> Vec<gateway_core::routing::ContributedModelAlias> {
         Vec::new()
