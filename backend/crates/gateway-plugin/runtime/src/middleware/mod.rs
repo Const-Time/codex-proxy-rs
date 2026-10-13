@@ -4,7 +4,7 @@ mod body;
 mod execution;
 pub(crate) mod facts;
 mod headers;
-mod http;
+pub(crate) mod http;
 mod registry;
 mod websocket;
 pub use registry::MiddlewareCallbacks;

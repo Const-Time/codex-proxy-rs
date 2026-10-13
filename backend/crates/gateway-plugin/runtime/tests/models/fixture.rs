@@ -719,6 +719,7 @@ fn snapshot_with_accounts(revision: u64, enabled: bool, accounts: &[&str]) -> Ru
     .with_account_directory(directory)
 }
 pub struct Fixture {
+    pub http: Arc<gateway_plugin_runtime::HttpDispatcher>,
     pub core: Arc<Core>,
     pub store: Arc<MemoryStore>,
     pub execution: Arc<DefaultExecutionService>,
@@ -757,12 +758,14 @@ impl Fixture {
         );
         let store = Arc::new(MemoryStore::default());
         let cache = tempfile::tempdir().unwrap();
+        let http = Arc::new(gateway_plugin_runtime::HttpDispatcher::default());
         let manager = Arc::new_cyclic(|plugins| {
             let engine = PluginEngine::new(
                 cache.path().into(),
                 "3.11.2".parse().unwrap(),
                 store.clone(),
             )
+            .with_http(http.clone())
             .with_models(
                 Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
                     execution.clone(),
@@ -791,6 +794,7 @@ impl Fixture {
         }
         let installed = manager.update(None, command, &actor()).await.unwrap();
         Self {
+            http,
             store,
             core,
             execution,

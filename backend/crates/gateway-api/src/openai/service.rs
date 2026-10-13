@@ -153,16 +153,15 @@ impl OpenAiService {
     ) -> Result<PreparedRootExecution, GatewayError> {
         let origin = crate::middleware::current();
         let mut prepared = match &origin {
-            Some(origin) => self.execution.prepare_http_execution(
-                client,
-                origin.context.call_scope.clone(),
-                origin.context.cancellation.clone(),
-            )?,
+            Some(origin) => self
+                .execution
+                .prepare_http_execution(client, origin.context.clone())?,
             None => self.execution.prepare_execution(client)?,
         };
         if let Some(origin) = origin {
+            prepared = prepared.with_http_dispatcher(origin.dispatcher.clone());
             if let Some(settings) = origin.settings {
-                if settings.execution_values().is_some() {
+                if settings.execution_values().is_some() && origin.context.model_parent.is_none() {
                     return Err(GatewayError::new(
                         GatewayErrorKind::InvalidRequest,
                         "HTTP settings cannot replace Key execution authority",

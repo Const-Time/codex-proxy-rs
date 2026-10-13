@@ -182,7 +182,9 @@ impl CallbackHandler for Callbacks {
                     "this policy stage only permits private state callbacks",
                 ));
             }
-            if crate::models::is_method(&method) {
+            if crate::models::is_method(&method)
+                || (context.stage == Stage::Management && method.starts_with("host.http."))
+            {
                 let models = models.ok_or_else(|| {
                     PluginFault::new(
                         ErrorCode::Unsupported,

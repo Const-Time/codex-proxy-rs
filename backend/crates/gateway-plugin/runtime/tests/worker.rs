@@ -19,6 +19,41 @@ mod worker_models {
         input: &Value,
     ) -> Result<Value, gateway_plugin_sdk::PluginFault> {
         let mode = input["mode"].as_str().unwrap_or("unary");
+        if mode == "http" {
+            if input["model_first"] == true {
+                Box::pin(handle_inner(
+                    host,
+                    &json!({"mode":"unary", "key":"key_alice"}),
+                ))
+                .await?;
+            }
+            use gateway_plugin_sdk::call::middleware::{MiddlewareHeader, http::Version};
+            use gateway_plugin_sdk::client::{HttpBody, HttpFrame, HttpRequest};
+            let mut data = vec![];
+            for _ in 0..input["count"].as_u64().unwrap_or(1) {
+                let mut response = host
+                    .dispatch_http(HttpRequest {
+                        settings: Value::Null,
+                        method: "POST".into(),
+                        uri: input["uri"].as_str().unwrap_or("/internal/raw").into(),
+                        version: Version::Http11,
+                        headers: vec![MiddlewareHeader {
+                            name: "x-explicit".into(),
+                            value: b"plugin-value".to_vec(),
+                        }],
+                        timeout_ms: None,
+                        body: HttpBody::from_bytes(vec![0, 255, 1, 0]),
+                    })
+                    .await?;
+                while let Some(frame) = response.body.read().await? {
+                    if let HttpFrame::Data(bytes) = frame {
+                        data.extend(bytes);
+                    }
+                }
+                response.body.close().await?;
+            }
+            return Ok(json!({"bytes": data}));
+        }
         if mode == "raw" {
             let payload = input
                 .get("body")
@@ -802,6 +837,7 @@ mod worker_http {
                 Err(error) => error,
             };
             assert_eq!(error.code, ErrorCode::Fault);
+            assert_eq!(error.send_state, gateway_plugin_sdk::SendState::Ambiguous);
             return HttpResponse::new(200, HttpBody::from_bytes(b"caught child error".to_vec()))
                 .into_reply();
         }

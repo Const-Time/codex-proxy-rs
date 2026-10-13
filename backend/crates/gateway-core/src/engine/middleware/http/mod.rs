@@ -21,23 +21,71 @@ pub type Request = http::Request<Body>;
 pub type Response = http::Response<Body>;
 pub type Next = crate::middleware::Next<Request, Response, MiddlewareError>;
 
-/// Pre-authentication scope contains no Key or administrative principal. IDs and
-/// ancestry describe invocation placement; the terminal still authenticates normally.
+/// Transport entry has no model parent. Native callbacks may carry host-issued
+/// ancestry, but the terminal still authenticates its own Key or administrative principal.
 #[derive(Clone, Debug)]
 pub struct Context {
     pub request_id: String,
     pub call_id: String,
     pub parent_call_id: Option<String>,
     pub call_scope: crate::engine::nested::ExtensionCallScope,
+    /// Host-issued model authority; never reconstructed from plugin wire metadata.
+    pub model_parent: Option<crate::engine::nested::NestedExecutionContext>,
     pub cancellation: CancellationToken,
     pub deadline_at: Deadline,
 }
 
 impl Context {
+    pub fn from_execution(parent: crate::engine::nested::NestedExecutionContext) -> Self {
+        Self {
+            request_id: parent.request_id().as_str().to_owned(),
+            call_id: uuid::Uuid::now_v7().to_string(),
+            parent_call_id: None,
+            call_scope: parent.scope().clone(),
+            cancellation: parent.cancellation(),
+            deadline_at: parent.deadline(),
+            model_parent: Some(parent),
+        }
+    }
+    pub fn validate(&self) -> Result<(), crate::error::GatewayError> {
+        use crate::error::{GatewayError, GatewayErrorKind};
+        if self.cancellation.is_cancelled() {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Cancelled,
+                "HTTP call cancelled",
+            ));
+        }
+        if self.deadline_at.is_elapsed() {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Timeout,
+                "HTTP call deadline elapsed",
+            ));
+        }
+        if let Some(parent) = &self.model_parent {
+            parent.validate()?;
+            if !self.call_scope.is_http_child()
+                || !self.call_scope.is_descendant_of(parent.scope())
+                || self.call_scope.parent_request_id() != Some(parent.request_id())
+            {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::InvalidRequest,
+                    "HTTP model ancestry does not match its host scope",
+                ));
+            }
+        }
+        Ok(())
+    }
     /// The host issues ancestry and IDs; plugin wire values cannot substitute them.
     pub fn child(&self, instance: String) -> Result<Self, crate::error::GatewayError> {
         Ok(Self {
-            call_scope: self.call_scope.fork_http(instance)?,
+            call_scope: match &self.model_parent {
+                Some(parent) => {
+                    parent.validate()?;
+                    self.call_scope
+                        .fork_http_from(Some(parent.request_id().clone()), instance)?
+                }
+                None => self.call_scope.fork_http(instance)?,
+            },
             call_id: uuid::Uuid::now_v7().to_string(),
             parent_call_id: Some(self.call_id.clone()),
             cancellation: CancellationToken::linked([self.cancellation.clone()]),

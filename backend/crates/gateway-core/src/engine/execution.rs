@@ -142,6 +142,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    http_dispatcher: Option<Arc<dyn super::middleware::http::Dispatcher>>,
     retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     account_scheduler: Option<super::account_scheduling::AccountScheduling>,
     model_router: Option<Arc<dyn super::model_routing::ModelRouter>>,
@@ -159,6 +160,13 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    pub fn with_http_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn super::middleware::http::Dispatcher>,
+    ) -> Self {
+        self.http_dispatcher = Some(dispatcher);
+        self
+    }
     pub fn with_retry_policy(mut self, policy: Arc<dyn super::retry_policy::RetryPolicy>) -> Self {
         self = self.with_revocation(policy.cancellation());
         self.retry_policy = Some(policy);
@@ -226,6 +234,7 @@ impl PreparedRootExecution {
     }
     pub fn nested_context(&self) -> super::nested::NestedExecutionContext {
         super::nested::NestedExecutionContext {
+            http_dispatcher: self.http_dispatcher.clone(),
             lifetime: Arc::downgrade(&self.lifetime),
             client: self.client.clone(),
             settings: self.settings.clone(),
@@ -242,6 +251,28 @@ impl PreparedRootExecution {
     }
     pub fn settings(&self) -> &crate::routing::RequestSettings {
         &self.settings
+    }
+
+    fn with_parent(
+        mut self,
+        parent: super::nested::NestedExecutionContext,
+    ) -> Result<Self, GatewayError> {
+        parent.validate()?;
+        self.http_dispatcher = parent.http_dispatcher.clone();
+        self.lifetime.bind_parent(parent.lifetime.clone());
+        self.parent_deadline = parent.deadline;
+        self.cancellation = CancellationToken::linked([self.cancellation, parent.cancellation]);
+        let settings = parent
+            .settings
+            .rebase(self.client.snapshot.clone())
+            .map_err(|_| {
+                GatewayError::new(
+                    GatewayErrorKind::InvalidRequest,
+                    "nested settings cannot be rebased",
+                )
+            })?
+            .with_execution(&self.client.policy, None);
+        self.with_settings(settings)
     }
 
     /// Apply a request branch without accepting another request's authorization or snapshot.
@@ -499,14 +530,17 @@ pub trait ExecutionService: Send + Sync {
     fn prepare_http_execution(
         &self,
         client: AuthenticatedClient,
-        call_scope: super::nested::ExtensionCallScope,
-        cancellation: CancellationToken,
+        context: super::middleware::http::Context,
     ) -> Result<PreparedRootExecution, GatewayError> {
+        context.validate()?;
         let mut prepared = self.prepare_execution(client)?;
-        prepared.extension_scope = call_scope;
+        prepared.extension_scope = context.call_scope;
         // The HTTP response/session owns this permit through its transport EOF.
         // Model cleanup must not release an idle HTTP call's budget early.
-        prepared = prepared.with_revocation(cancellation);
+        prepared = prepared.with_revocation(context.cancellation);
+        if let Some(parent) = context.model_parent {
+            prepared = prepared.with_parent(parent)?;
+        }
         prepared.validate()?;
         Ok(prepared)
     }
@@ -537,25 +571,11 @@ pub trait ExecutionService: Send + Sync {
         parent.validate()?;
         let client = selected_client.unwrap_or_else(|| parent.client.clone());
         let mut prepared = self.prepare_execution(client)?;
-        prepared.lifetime.bind_parent(parent.lifetime.clone());
         prepared.extension_scope = parent
             .scope
-            .fork(parent.request_id, initiating_plugin_instance_id)?;
+            .fork(parent.request_id.clone(), initiating_plugin_instance_id)?;
         prepared.lifetime.bind_scope(&prepared.extension_scope);
-        prepared.parent_deadline = parent.deadline;
-        prepared.cancellation =
-            CancellationToken::linked([prepared.cancellation, parent.cancellation]);
-        let settings = parent
-            .settings
-            .rebase(prepared.client.snapshot.clone())
-            .map_err(|_| {
-                GatewayError::new(
-                    GatewayErrorKind::InvalidRequest,
-                    "nested settings cannot be rebased",
-                )
-            })?
-            .with_execution(&prepared.client.policy, None);
-        prepared.with_settings(settings)
+        prepared.with_parent(parent)
     }
     fn start_prepared(
         &self,
@@ -980,6 +1000,7 @@ impl DefaultExecutionService {
         } = request;
         let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            http_dispatcher: _,
             retry_policy,
             account_scheduler,
             model_router: _,
@@ -1636,6 +1657,7 @@ impl ExecutionService for DefaultExecutionService {
         let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            http_dispatcher: None,
             retry_policy: None,
             account_scheduler: None,
             model_router: None,

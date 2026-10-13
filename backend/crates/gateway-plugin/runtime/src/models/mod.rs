@@ -51,6 +51,7 @@ impl ModelServices {
     }
 }
 struct Scope {
+    http: Arc<crate::middleware::http::Invocation>,
     context: CallContext,
     owner: Option<String>,
     parent: Option<NestedExecutionContext>,
@@ -67,6 +68,7 @@ impl Drop for Scope {
 impl Scope {
     fn close(&self) {
         self.cancellation.cancel();
+        self.http.close_callbacks();
         for stream in self
             .streams
             .lock()
@@ -87,13 +89,19 @@ impl Scope {
     }
 }
 pub(crate) struct Models {
+    http: Option<Arc<crate::HttpDispatcher>>,
     services: Arc<ModelServices>,
     cancellation: CancellationToken,
     scopes: Mutex<BTreeMap<String, Arc<Scope>>>,
 }
 impl Models {
-    pub(crate) fn new(services: Arc<ModelServices>, cancellation: CancellationToken) -> Arc<Self> {
+    pub(crate) fn new(
+        services: Arc<ModelServices>,
+        cancellation: CancellationToken,
+        http: Option<Arc<crate::HttpDispatcher>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            http,
             services,
             cancellation,
             scopes: Mutex::default(),
@@ -124,13 +132,38 @@ impl Models {
                 .as_ref()
                 .map_or_else(CancellationToken::new, NestedExecutionContext::cancellation),
         ]);
+        let graph = parent
+            .as_ref()
+            .map_or_else(ExtensionCallScope::default, |parent| parent.scope().clone());
+        let http = crate::middleware::http::Invocation::standalone(
+            context.instance_id.clone(),
+            gateway_core::engine::middleware::http::Context {
+                request_id: context
+                    .request_id
+                    .clone()
+                    .unwrap_or_else(|| context.resource_scope_id.clone()),
+                call_id: context.resource_scope_id.clone(),
+                parent_call_id: None,
+                call_scope: graph.clone(),
+                model_parent: parent.clone(),
+                cancellation: cancellation.clone(),
+                deadline_at: parent
+                    .as_ref()
+                    .map_or_else(Default::default, NestedExecutionContext::deadline),
+            },
+            parent
+                .as_ref()
+                .and_then(NestedExecutionContext::http_dispatcher)
+                .or_else(|| self.http.as_ref().and_then(|http| http.get())),
+        );
         scopes.insert(
             context.resource_scope_id.clone(),
             Arc::new(Scope {
+                http,
                 context: context.clone(),
                 owner,
                 parent,
-                graph: ExtensionCallScope::default(),
+                graph,
                 cancellation,
                 permits: Arc::new(tokio::sync::Semaphore::new(16)),
                 streams: Mutex::default(),
@@ -178,7 +211,20 @@ impl Models {
                 )
             })?;
             scope.validate()?;
-            let reply = call(services, &scope, &method, params, payload).await?;
+            let reply = if method.starts_with("host.http.") {
+                tokio::select! {biased;
+                    () = scope.cancellation.cancelled() => {
+                        let mut fault = PluginFault::new(ErrorCode::Cancelled, "HTTP callback scope cancelled");
+                        if method == gateway_plugin_sdk::call::middleware::http::DISPATCH_METHOD {
+                            fault.send_state = SendState::Ambiguous;
+                        }
+                        return Err(fault);
+                    },
+                    result = scope.http.clone().call(method.clone(), params, payload, MAXIMUM_BYTES) => result?,
+                }
+            } else {
+                call(services, &scope, &method, params, payload).await?
+            };
             scope.validate().map_err(|mut fault| {
                 if matches!(
                     method.as_str(),
@@ -186,6 +232,7 @@ impl Models {
                         | "host.model.execute_stream"
                         | "host.model.stream_read"
                         | "host.model.stream_close"
+                        | gateway_plugin_sdk::call::middleware::http::DISPATCH_METHOD
                 ) {
                     // The operation already returned. Revocation cannot prove
                     // that this execution was NotSent or roll back its effects.
@@ -212,7 +259,7 @@ fn encode(value: impl serde::Serialize) -> Result<RpcReply, PluginFault> {
         payload: vec![],
     })
 }
-fn gateway_fault(error: GatewayError) -> PluginFault {
+pub(crate) fn gateway_fault(error: GatewayError) -> PluginFault {
     let code = match error.kind() {
         GatewayErrorKind::InvalidRequest | GatewayErrorKind::ModelNotFound => {
             ErrorCode::InvalidInput

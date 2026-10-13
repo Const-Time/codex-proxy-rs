@@ -91,9 +91,32 @@ impl ExtensionCallScope {
     /// HTTP callbacks use the same bounded graph as model callbacks. This scope
     /// describes placement and effects only; it does not authenticate a client.
     pub fn fork_http(&self, instance: String) -> Result<Self, GatewayError> {
-        let mut scope = self.fork_call(self.parent_request_id.clone(), instance)?;
+        self.fork_http_from(self.parent_request_id.clone(), instance)
+    }
+    pub(crate) fn fork_http_from(
+        &self,
+        parent: Option<ModelRequestId>,
+        instance: String,
+    ) -> Result<Self, GatewayError> {
+        let mut scope = self.fork_call(parent, instance)?;
         scope.permit_lifetime = PermitLifetime::Http;
         Ok(scope)
+    }
+    pub fn is_http_child(&self) -> bool {
+        matches!(self.permit_lifetime, PermitLifetime::Http)
+            && self
+                .permit
+                .as_ref()
+                .is_some_and(|permit| !permit.released.load(Ordering::Acquire))
+    }
+    pub(crate) fn is_descendant_of(&self, parent: &Self) -> bool {
+        Arc::ptr_eq(&self.graph, &parent.graph)
+            && self.ancestors.len() > parent.ancestors.len()
+            && parent.ancestors.is_subset(&self.ancestors)
+            && self
+                .ancestor_effects
+                .get(parent.ancestor_effects.len())
+                .is_some_and(|effects| Arc::ptr_eq(effects, &parent.effects))
     }
     pub fn is_direct_child_of(&self, parent: &Self) -> bool {
         Arc::ptr_eq(&self.graph, &parent.graph)
@@ -192,7 +215,8 @@ impl ExtensionCallScope {
     pub(crate) fn has_descendant_effects(&self) -> bool {
         self.effects.load(Ordering::Acquire)
     }
-    pub(crate) fn observe_upstream_effect(&self) {
+    /// Child dispatch/send effects veto ancestor replay, not this child's own retries.
+    pub fn observe_upstream_effect(&self) {
         for effect in self.ancestor_effects.iter() {
             effect.store(true, Ordering::Release);
         }
@@ -303,6 +327,7 @@ impl Drop for ExecutionLifetime {
 /// Only Core issues this authority. Wire facts and plugin-supplied IDs cannot construct it.
 #[derive(Clone)]
 pub struct NestedExecutionContext {
+    pub(crate) http_dispatcher: Option<Arc<dyn super::middleware::http::Dispatcher>>,
     pub(crate) lifetime: std::sync::Weak<ExecutionLifetime>,
     pub(crate) client: AuthenticatedClient,
     pub(crate) settings: RequestSettings,
@@ -323,6 +348,9 @@ impl std::fmt::Debug for NestedExecutionContext {
     }
 }
 impl NestedExecutionContext {
+    pub fn http_dispatcher(&self) -> Option<Arc<dyn super::middleware::http::Dispatcher>> {
+        self.http_dispatcher.clone()
+    }
     pub(crate) fn bind_account(
         &self,
         account: &crate::account::ProviderAccountId,
