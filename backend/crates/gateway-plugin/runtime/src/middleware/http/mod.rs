@@ -65,6 +65,36 @@ pub(super) fn resolve_settings(
 }
 
 impl Invocation {
+    pub(crate) fn standalone(
+        instance_id: String,
+        context: core::Context,
+        dispatcher: Option<Arc<dyn core::Dispatcher>>,
+    ) -> Arc<Self> {
+        let settings = context
+            .model_parent
+            .as_ref()
+            .map(|parent| parent.settings().clone())
+            .or_else(|| {
+                dispatcher
+                    .as_ref()
+                    .and_then(|dispatcher| dispatcher.request_settings())
+            });
+        Arc::new(Self {
+            instance_id,
+            state: Mutex::new(State {
+                settings,
+                request: None,
+                next: None,
+            }),
+            resources: Arc::default(),
+            session: Mutex::new(None),
+            cancellation: context.cancellation.clone(),
+            context,
+            dispatcher,
+            downstream_error: Mutex::new(None),
+            callbacks_closed: Default::default(),
+        })
+    }
     pub(crate) fn new(
         request: core::Request,
         next: core::Next,
@@ -198,7 +228,7 @@ impl Invocation {
             .clone()
     }
 
-    pub(super) fn call(
+    pub(crate) fn call(
         self: Arc<Self>,
         method: String,
         params: serde_json::Value,
@@ -373,7 +403,7 @@ pub(super) fn fault(error: &MiddlewareError) -> PluginFault {
     )
 }
 impl Invocation {
-    pub(super) fn close_callbacks(&self) {
+    pub(crate) fn close_callbacks(&self) {
         self.callbacks_closed.cancel();
     }
 }

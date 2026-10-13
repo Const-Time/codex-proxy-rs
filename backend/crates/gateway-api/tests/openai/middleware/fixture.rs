@@ -736,6 +736,8 @@ impl Provider for Effects {
     }
 }
 pub(crate) struct Fixture {
+    pub(crate) dispatcher: Arc<dyn gateway_core::engine::middleware::http::Dispatcher>,
+    pub(crate) execution: Arc<dyn ExecutionService>,
     pub(crate) app: axum::Router,
     pub(crate) manager: Arc<PluginManager>,
     pub(crate) plugin: Arc<Plugin>,
@@ -876,7 +878,7 @@ impl Fixture {
                 request_id_header: "x-request-id".into(),
             },
             Arc::new(PostStartExecution {
-                inner: execution,
+                inner: execution.clone(),
                 effects: effects.clone(),
             }),
             admin.services.with_plugins(manager.clone()),
@@ -884,9 +886,12 @@ impl Fixture {
             Arc::new(EmptyWorkerHealth),
             lifecycle.clone(),
         )
-        .unwrap()
-        .router();
+        .unwrap();
+        let dispatcher = app.dispatcher();
+        let app = app.router();
         Self {
+            dispatcher,
+            execution,
             app,
             manager,
             plugin,

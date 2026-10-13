@@ -3265,6 +3265,98 @@ fn nested_preparation_is_lazy_inherits_settings_and_bounds_its_deadline() {
 }
 
 #[test]
+fn http_children_adopt_model_ancestry_and_keep_transport_permits_after_preparation_is_dropped() {
+    use gateway_core::engine::middleware::http::Context;
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let parent = prepare(&service);
+    let mut values = parent.settings().execution_values().unwrap();
+    values.fast_mode = FastMode::Disabled;
+    values.timeout_ms = Some(60_000);
+    let settings = parent
+        .settings()
+        .replace_execution(&values, "parent-settings")
+        .unwrap();
+    let parent = parent.with_settings(settings).unwrap();
+    let root = Context::from_execution(parent.nested_context());
+    let mut held = vec![];
+    for _ in 0..16 {
+        let context = root.child("http-plugin".into()).unwrap();
+        let child = service
+            .prepare_http_execution(
+                service.authenticate("sk_start_test").unwrap(),
+                context.clone(),
+            )
+            .unwrap();
+        assert_eq!(child.settings().execution_values().unwrap(), values);
+        assert_eq!(child.deadline_at(), parent.deadline_at());
+        assert_eq!(
+            child.nested_context().scope().parent_request_id(),
+            Some(parent.request_id())
+        );
+        assert_eq!(
+            child
+                .nested_context()
+                .scope()
+                .initiating_plugin_instance_id(),
+            Some("http-plugin")
+        );
+        drop(child);
+        held.push(context);
+    }
+    assert!(root.child("http-plugin".into()).is_err());
+    held.pop();
+    let child = root.child("http-plugin".into()).unwrap();
+    let grandchild = child.child("another-http-plugin".into());
+    assert!(
+        grandchild.is_err(),
+        "all sixteen shared graph slots remain held"
+    );
+    held.pop();
+    let grandchild = child.child("another-http-plugin".into()).unwrap();
+    let adopted = service
+        .prepare_http_execution(service.authenticate("sk_start_test").unwrap(), grandchild)
+        .unwrap();
+    assert_eq!(
+        adopted.nested_context().scope().parent_request_id(),
+        Some(parent.request_id())
+    );
+    assert_eq!(
+        adopted.nested_context().scope().excluded_instances().len(),
+        2
+    );
+    parent.cancellation().cancel();
+    assert!(adopted.cancellation().is_cancelled());
+    assert_failure(
+        service.prepare_http_execution(service.authenticate("sk_start_test").unwrap(), child),
+        GatewayErrorKind::Cancelled,
+    );
+}
+
+#[test]
+fn http_model_parent_must_match_the_reserved_graph_and_cannot_outlive_execution() {
+    use gateway_core::engine::middleware::http::Context;
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let first = prepare(&service);
+    let second = prepare(&service);
+    let context = Context::from_execution(first.nested_context())
+        .child("plugin-http".into())
+        .unwrap();
+    let forged = Context {
+        model_parent: Some(second.nested_context()),
+        ..context.clone()
+    };
+    assert_failure(
+        service.prepare_http_execution(service.authenticate("sk_start_test").unwrap(), forged),
+        GatewayErrorKind::InvalidRequest,
+    );
+    drop(first);
+    assert_failure(
+        service.prepare_http_execution(service.authenticate("sk_start_test").unwrap(), context),
+        GatewayErrorKind::Cancelled,
+    );
+}
+
+#[test]
 fn choosing_another_key_resets_execution_overrides_but_keeps_runtime_sources() {
     let provider = ProviderKind::new("openai").unwrap();
     let first = start_snapshot().client_policies().next().unwrap().clone();
@@ -3303,27 +3395,39 @@ fn choosing_another_key_resets_execution_overrides_but_keeps_runtime_sources() {
         .unwrap();
     let parent = parent.with_settings(settings).unwrap();
     let other = service.authenticate("sk_other").unwrap();
-    let child = service
+    let http_child = service
+        .prepare_http_execution(
+            other.clone(),
+            gateway_core::engine::middleware::http::Context::from_execution(
+                parent.nested_context(),
+            )
+            .child("plugin-a".into())
+            .unwrap(),
+        )
+        .unwrap();
+    let native_child = service
         .prepare_nested(parent.nested_context(), "plugin-a".into(), Some(other))
         .unwrap();
-    let actual = child.settings().execution_values().unwrap();
-    assert_eq!(actual.fast_mode, FastMode::Default);
-    assert_eq!(actual.client_limits, second.limits());
-    assert_eq!(actual.timeout_ms, None);
-    assert_eq!(
-        serde_json::to_value(&actual.runtime).unwrap()["max_concurrent_per_account"],
-        5
-    );
-    assert_eq!(
-        child.settings().inspect()["overrides"]["max_concurrent_per_account"]["instance_id"],
-        "plugin-a"
-    );
-    assert_eq!(
-        child.settings().inspect()["execution"]["fast_mode"],
-        serde_json::Value::Null
-    );
-    assert_eq!(child.deadline_at(), parent.deadline_at());
-    assert_eq!(child.client().policy().key_id(), second.key_id());
+    for child in [http_child, native_child] {
+        let actual = child.settings().execution_values().unwrap();
+        assert_eq!(actual.fast_mode, FastMode::Default);
+        assert_eq!(actual.client_limits, second.limits());
+        assert_eq!(actual.timeout_ms, None);
+        assert_eq!(
+            serde_json::to_value(&actual.runtime).unwrap()["max_concurrent_per_account"],
+            5
+        );
+        assert_eq!(
+            child.settings().inspect()["overrides"]["max_concurrent_per_account"]["instance_id"],
+            "plugin-a"
+        );
+        assert_eq!(
+            child.settings().inspect()["execution"]["fast_mode"],
+            serde_json::Value::Null
+        );
+        assert_eq!(child.deadline_at(), parent.deadline_at());
+        assert_eq!(child.client().policy().key_id(), second.key_id());
+    }
 }
 
 #[test]
@@ -3832,8 +3936,15 @@ fn http_dispatch_effects_in_the_adopted_scope_prevent_replaying_the_parent_model
             let prepared = service
                 .prepare_http_execution(
                     input.client,
-                    scope,
-                    gateway_core::lifecycle::CancellationToken::default(),
+                    gateway_core::engine::middleware::http::Context {
+                        request_id: "ingress".into(),
+                        call_id: "call".into(),
+                        parent_call_id: None,
+                        call_scope: scope,
+                        model_parent: None,
+                        cancellation: Default::default(),
+                        deadline_at: Default::default(),
+                    },
                 )
                 .unwrap();
             let mut started = service

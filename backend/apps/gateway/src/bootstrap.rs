@@ -102,6 +102,7 @@ pub async fn run() -> Result<(), BootstrapError> {
     )
     .await?;
     host.report_startup_ready("Admin");
+    let http = Arc::new(gateway_plugin_runtime::HttpDispatcher::default());
     let plugins = Arc::new_cyclic(
         |plugins: &std::sync::Weak<gateway_admin::plugins::PluginManager>| {
             gateway_admin::plugins::PluginManager::new(
@@ -112,6 +113,7 @@ pub async fn run() -> Result<(), BootstrapError> {
                         plugin_version,
                         store.plugin_store(),
                     )
+                    .with_http(http.clone())
                     .with_data(admin.services().plugin_data())
                     .with_resources(admin.services().plugin_resources())
                     .with_quota(admin.services().plugin_quota())
@@ -144,6 +146,8 @@ pub async fn run() -> Result<(), BootstrapError> {
         host.connection_lifecycle(),
     )?;
     host.report_startup_ready("API");
+    let dispatcher = api.dispatcher();
+    http.attach(&dispatcher);
 
     let mut plan = store.take_worker_contributions();
     plan.extend(core.take_worker_contributions());

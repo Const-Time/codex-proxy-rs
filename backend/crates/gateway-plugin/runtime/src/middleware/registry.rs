@@ -191,15 +191,8 @@ impl CallbackHandler for MiddlewareCallbacks {
         params: serde_json::Value,
         payload: Vec<u8>,
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
-        let model_method = crate::models::is_method(&method);
-        if method.starts_with("host.http.") && context.stage != Stage::Http {
-            return Box::pin(async {
-                Err(PluginFault::new(
-                    ErrorCode::Unsupported,
-                    "host HTTP dispatch is not connected for this stage",
-                ))
-            });
-        }
+        let model_method = crate::models::is_method(&method)
+            || (method.starts_with("host.http.") && context.stage != Stage::Http);
         if model_method && !matches!(context.stage, Stage::Request | Stage::Attempt) {
             return self.inner.call(context, method, params, payload);
         }
@@ -245,10 +238,19 @@ impl CallbackHandler for MiddlewareCallbacks {
                         "HTTP scope has no model execution authority",
                     ));
                 }
+                let dispatching =
+                    method == gateway_plugin_sdk::call::middleware::http::DISPATCH_METHOD;
+                let cancelled = |code, message| {
+                    let mut fault = PluginFault::new(code, message);
+                    if dispatching {
+                        fault.send_state = gateway_plugin_sdk::SendState::Ambiguous;
+                    }
+                    fault
+                };
                 return tokio::select! {
                     biased;
-                    ()=invocation.cancellation.cancelled()=>Err(PluginFault::new(ErrorCode::Cancelled,"HTTP invocation cancelled")),
-                    ()=invocation.callbacks_closed.cancelled()=>Err(PluginFault::new(ErrorCode::PermissionDenied,"HTTP callback scope ended")),
+                    ()=invocation.cancellation.cancelled()=>Err(cancelled(ErrorCode::Cancelled,"HTTP invocation cancelled")),
+                    ()=invocation.callbacks_closed.cancelled()=>Err(cancelled(ErrorCode::PermissionDenied,"HTTP callback scope ended")),
                     result=invocation.clone().call(method,params,payload,8*1024*1024)=>result,
                 };
             }

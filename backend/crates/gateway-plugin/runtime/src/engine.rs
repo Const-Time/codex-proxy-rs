@@ -20,7 +20,34 @@ use std::{
     time::Duration,
 };
 
+/// Composition supplies the API port after initialization. Weak ownership prevents
+/// the router, plugin manager and process callbacks from retaining each other.
+#[derive(Default)]
+pub struct HttpDispatcher(
+    std::sync::Mutex<
+        Option<std::sync::Weak<dyn gateway_core::engine::middleware::http::Dispatcher>>,
+    >,
+);
+impl HttpDispatcher {
+    pub fn attach(&self, dispatcher: &Arc<dyn gateway_core::engine::middleware::http::Dispatcher>) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(dispatcher));
+    }
+    pub(crate) fn get(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::engine::middleware::http::Dispatcher>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+    }
+}
+
 pub struct PluginEngine {
+    http: Option<Arc<HttpDispatcher>>,
     models: Option<Arc<crate::models::ModelServices>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
     resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
@@ -34,6 +61,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            http: None,
             models: None,
             quota: None,
             resources: None,
@@ -44,6 +72,10 @@ impl PluginEngine {
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
             data: None,
         }
+    }
+    pub fn with_http(mut self, http: Arc<HttpDispatcher>) -> Self {
+        self.http = Some(http);
+        self
     }
     pub fn with_models(
         mut self,
@@ -318,10 +350,9 @@ impl PluginRuntime for PluginEngine {
         let access = PluginAccess::default();
         let failed_access = access.clone();
         let ended_access = access.clone();
-        let models = self
-            .models
-            .clone()
-            .map(|services| crate::models::Models::new(services, access.cancellation()));
+        let models = self.models.clone().map(|services| {
+            crate::models::Models::new(services, access.cancellation(), self.http.clone())
+        });
         let callbacks = Arc::new(
             crate::callbacks::Callbacks::new(
                 self.store.clone(),

@@ -228,6 +228,7 @@ fn context() -> http::Context {
         call_id: "root".into(),
         parent_call_id: None,
         call_scope: Default::default(),
+        model_parent: None,
         cancellation: CancellationToken::new(),
         deadline_at: Deadline::default(),
     }

@@ -12,7 +12,7 @@ mod resources;
 mod retry_policy;
 mod rpc;
 mod stream;
-pub use engine::PluginEngine;
+pub use engine::{HttpDispatcher, PluginEngine};
 pub use package::{PackageError, PackageLimits, PreparedPackage, ValidatedPackage};
 pub use rpc::{CallbackHandler, RpcError, RpcLimits, RpcReply, RpcSession};
 pub use stream::RpcStream;

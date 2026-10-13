@@ -6,6 +6,7 @@ fn call_context() -> core::Context {
         call_id: "http-root".into(),
         parent_call_id: None,
         call_scope: Default::default(),
+        model_parent: None,
         cancellation: Default::default(),
         deadline_at: Deadline::default(),
     }

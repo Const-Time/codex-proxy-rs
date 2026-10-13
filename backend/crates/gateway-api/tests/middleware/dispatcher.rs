@@ -3,6 +3,111 @@ use crate::openai::middleware::fixture::Plugin;
 use gateway_core::engine::middleware::{MiddlewareError, http as core};
 use http_body_util::Full;
 
+#[tokio::test]
+async fn dispatch_effects_veto_parent_replay_without_disabling_the_childs_safe_retry() {
+    let f = Fixture::with_retry().await;
+    let parent = f
+        .execution
+        .prepare_execution(f.execution.authenticate("sk_middleware").unwrap())
+        .unwrap();
+    let context = core::Context::from_execution(parent.nested_context())
+        .child("fixture".into())
+        .unwrap();
+    let response = f
+        .dispatcher
+        .dispatch(context, child(Mode::HttpDispatchModel, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    f.settled().await;
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_parent_http_dispatch_keeps_settings_deadline_and_skips_its_ancestors() {
+    let f = Fixture::with_mounts(
+        Mode::Rewrite,
+        vec![
+            PluginMiddlewareMount::Http,
+            PluginMiddlewareMount::Request,
+            PluginMiddlewareMount::Attempt,
+        ],
+    )
+    .await;
+    let parent = f
+        .execution
+        .prepare_execution(f.execution.authenticate("sk_middleware").unwrap())
+        .unwrap();
+    let mut values = parent.settings().execution_values().unwrap();
+    values.fast_mode = gateway_core::account::FastMode::Disabled;
+    values.timeout_ms = Some(60_000);
+    let settings = parent
+        .settings()
+        .replace_execution(&values, "native-http-parent")
+        .unwrap();
+    let parent = parent.with_settings(settings).unwrap();
+    let context = core::Context::from_execution(parent.nested_context())
+        .child("fixture".into())
+        .unwrap();
+    let response = f
+        .dispatcher
+        .dispatch(context, child(Mode::HttpDispatchModel, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    f.settled().await;
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+    assert!(f.plugin.http_seen.lock().unwrap().is_empty());
+    assert!(f.plugin.seen.lock().unwrap().is_empty());
+    assert_eq!(
+        f.effects.requests.lock().unwrap()[0].3,
+        parent.deadline_at()
+    );
+    assert_eq!(
+        f.effects.settings.lock().unwrap()[0]
+            .execution_values()
+            .unwrap()
+            .fast_mode,
+        values.fast_mode
+    );
+    assert!(
+        !parent.cancellation().is_cancelled(),
+        "ending the child transport must not cancel its parent"
+    );
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_http_port_rejects_unreserved_or_expired_parent_without_authentication_or_execution()
+{
+    let f = Fixture::with_mounts(Mode::Rewrite, vec![]).await;
+    let parent = f
+        .execution
+        .prepare_execution(f.execution.authenticate("sk_middleware").unwrap())
+        .unwrap();
+    let root = core::Context::from_execution(parent.nested_context());
+    assert!(
+        f.dispatcher
+            .dispatch(root.clone(), child(Mode::HttpDispatchModel, None))
+            .await
+            .is_err()
+    );
+    let context = root.child("fixture".into()).unwrap();
+    drop(parent);
+    assert!(
+        f.dispatcher
+            .dispatch(context, child(Mode::HttpDispatchModel, None))
+            .await
+            .is_err()
+    );
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+    f.manager.shutdown().await;
+}
+
 pub(super) async fn handle(
     plugin: &Plugin,
     context: core::Context,

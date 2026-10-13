@@ -108,9 +108,14 @@ pub enum ApiConfigError {
 /// 完成组装的唯一 API router。
 pub struct ApiBundle {
     router: Router,
+    dispatcher: Arc<dyn gateway_core::engine::middleware::http::Dispatcher>,
 }
 
 impl ApiBundle {
+    /// The composition root owns this strong reference; plugin processes retain only Weak.
+    pub fn dispatcher(&self) -> Arc<dyn gateway_core::engine::middleware::http::Dispatcher> {
+        self.dispatcher.clone()
+    }
     pub fn router(self) -> Router {
         self.router
     }
@@ -210,18 +215,19 @@ pub fn initialize(
             admin::operations::audit_request::<ApiState>,
         ))
         .with_state(state);
-    let router = middleware::wrap(
+    let (router, dispatcher) = middleware::wrap(
         router,
         plugins,
         config.request_timeout_seconds.map(Duration::from_secs),
         request_id_header.clone(),
         settings,
         lifecycle,
-    )
-    .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
-    .layer(trace_layer)
-    .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid));
-    Ok(ApiBundle { router })
+    );
+    let router = router
+        .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
+        .layer(trace_layer)
+        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid));
+    Ok(ApiBundle { router, dispatcher })
 }
 
 /// API 初始化失败的脱敏分类。

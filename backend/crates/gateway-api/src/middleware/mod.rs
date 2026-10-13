@@ -31,6 +31,7 @@ tokio::task_local! {static CURRENT: Origin;}
 
 #[derive(Clone)]
 pub(crate) struct Origin {
+    pub(crate) dispatcher: Arc<dyn core::Dispatcher>,
     pub(crate) context: core::Context,
     pub(crate) registry: PluginMiddlewareRegistry,
     pub(crate) settings: Option<RequestSettings>,
@@ -58,23 +59,35 @@ pub(crate) fn wrap(
     request_id_header: HeaderName,
     settings: SettingsSource,
     lifecycle: Arc<dyn ConnectionLifecycle>,
-) -> Router {
+) -> (Router, Arc<dyn core::Dispatcher>) {
+    let dispatcher = Arc::new(dispatcher::RouterDispatcher {
+        registry: None,
+        router: router.clone(),
+        plugins: plugins.clone(),
+        timeout,
+        header: request_id_header.clone(),
+        settings: settings.clone(),
+        lifecycle: lifecycle.clone(),
+        origin: None,
+    });
     // A route layer runs after matching; a fallback service permits URI rematching.
-    Router::new().fallback_service(tower::service_fn(move |request: Request<Body>| {
-        let router = router.clone();
-        let plugins = plugins.clone();
-        let settings = settings.clone();
-        let lifecycle = lifecycle.clone();
-        let header = request_id_header.clone();
-        async move {
-            Ok::<_, Infallible>(
-                handle(
-                    router, request, plugins, timeout, header, settings, lifecycle,
+    let router =
+        Router::new().fallback_service(tower::service_fn(move |request: Request<Body>| {
+            let router = router.clone();
+            let plugins = plugins.clone();
+            let settings = settings.clone();
+            let lifecycle = lifecycle.clone();
+            let header = request_id_header.clone();
+            async move {
+                Ok::<_, Infallible>(
+                    handle(
+                        router, request, plugins, timeout, header, settings, lifecycle,
+                    )
+                    .await,
                 )
-                .await,
-            )
-        }
-    }))
+            }
+        }));
+    (router, dispatcher)
 }
 async fn handle(
     router: Router,
@@ -108,6 +121,7 @@ async fn handle(
             call_id: uuid::Uuid::now_v7().to_string(),
             parent_call_id: None,
             call_scope: Default::default(),
+            model_parent: None,
             cancellation: CancellationToken::linked([lifecycle.cancellation()]),
             deadline_at: Deadline::from_timeout(SystemTime::now(), None)
                 .expect("unbounded deadline"),
@@ -118,9 +132,6 @@ async fn handle(
         Ok(plan) => plan,
         Err(_) => return error(&MiddlewareError::Fault),
     };
-    if plan.is_empty() && !is_inherited {
-        return dispatch(router, request, started, timeout).await;
-    }
     let context = core::Context {
         cancellation: plan.cancellation(),
         ..context
@@ -146,6 +157,16 @@ async fn handle(
             lifecycle: lifecycle.clone(),
         }) as Arc<dyn core::upgrade::WebSocketUpgrade>);
     let origin = Origin {
+        dispatcher: Arc::new(dispatcher::RouterDispatcher {
+            registry: Some(registry.clone()),
+            router: router.clone(),
+            plugins: plugins.clone(),
+            timeout,
+            header: header.clone(),
+            settings: settings.clone(),
+            lifecycle: lifecycle.clone(),
+            origin: None,
+        }),
         context: context.clone(),
         registry,
         settings: configuration.runtime,
@@ -154,13 +175,14 @@ async fn handle(
     request
         .extensions_mut()
         .insert(Arc::new(dispatcher::RouterDispatcher {
+            registry: None,
             router: router.clone(),
             plugins,
             timeout,
             header,
             settings,
             lifecycle,
-            origin: origin.clone(),
+            origin: Some(origin.clone()),
         }) as Arc<dyn core::Dispatcher>);
     let request = request.map(|body| body.map_err(|error| Box::new(error) as _).boxed_unsync());
     let next = compose(vec![], move |request: core::Request| {

@@ -126,6 +126,7 @@ fn context() -> core::Context {
         call_id: "host-call".into(),
         parent_call_id: None,
         call_scope: Default::default(),
+        model_parent: None,
         cancellation: Default::default(),
         deadline_at: Deadline::from_timeout(SystemTime::now(), None).unwrap(),
     }

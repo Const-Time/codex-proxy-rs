@@ -26,9 +26,10 @@ impl Invocation {
             request.timeout_ms,
             &self.instance_id,
         )?;
-        let context = self.context.child(self.instance_id.clone()).map_err(|_| {
-            PluginFault::new(ErrorCode::Capacity, "host HTTP call graph limit reached")
-        })?;
+        let context = self
+            .context
+            .child(self.instance_id.clone())
+            .map_err(crate::models::gateway_fault)?;
         let http_version = version(request.version);
         let body = self.resources.body(request.body, payload).await?;
         let mut request = core::Request::new(body);
@@ -41,7 +42,12 @@ impl Invocation {
         let response = dispatcher
             .dispatch(context, request)
             .await
-            .map_err(|error| fault(&error))?;
+            .map_err(|error| {
+                let mut fault = fault(&error);
+                // Router handlers may have committed effects before failing or losing the receiver.
+                fault.send_state = gateway_plugin_sdk::SendState::Ambiguous;
+                fault
+            })?;
         self.resources.dispatched_response(response)
     }
 }
