@@ -207,6 +207,15 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
 }
 #[async_trait]
 impl PluginRuntime for PluginEngine {
+    fn observer_plan(
+        &self,
+        targets: Vec<gateway_admin::ports::plugins::PluginObserverTarget>,
+        services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<Option<Arc<dyn gateway_core::engine::observation::RequestObserverPlan>>, AdminError>
+    {
+        crate::observation::Plan::compile(targets, services, cancellation)
+    }
     fn contributes_model_catalog(&self, artifact: &PluginArtifact) -> Result<bool, AdminError> {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
@@ -574,6 +583,42 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    fn observer_identity(&self) -> Option<gateway_admin::ports::plugins::PluginObserverIdentity> {
+        if !self.active.load(Ordering::Acquire)
+            || self.status() != "ready"
+            || self.access.is_revoked()
+            || self.session.capability_version(Capability::Observer) != Some(1)
+            || !self
+                .session
+                .capability_supports_stage(Capability::Observer, Stage::Observation)
+        {
+            return None;
+        }
+        Some(gateway_admin::ports::plugins::PluginObserverIdentity {
+            plugin_id: self.package.package().manifest().plugin_id().ok()?,
+            instance_id: self.services.caller().instance_id().into(),
+        })
+    }
+    async fn observe(
+        &self,
+        observation: gateway_admin::ports::plugins::PluginObservation,
+        services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<(), AdminError> {
+        if self.observer_identity().is_none() {
+            return Err(AdminError::unavailable("插件观察代次不可用"));
+        }
+        crate::observation::invoke(
+            &self.session,
+            &self.services,
+            &self.outbound,
+            &self.calls,
+            observation,
+            services,
+            cancellation,
+        )
+        .await
+    }
     fn supports_maintenance(&self) -> bool {
         self.session.capability_version(Capability::Maintenance) == Some(1)
     }

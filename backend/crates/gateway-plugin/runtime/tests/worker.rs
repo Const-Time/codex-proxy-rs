@@ -720,6 +720,35 @@ impl PluginHandler for Worker {
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::WebSocket => worker_websocket(call).await,
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Service => worker_service(call).await,
             "middleware.handle" => worker_middleware::handle(call).await,
+            "observer.observe" => {
+                use gateway_plugin_sdk::{Stage, call::observation::Event};
+                assert_eq!(call.context.stage, Stage::Observation);
+                assert!(call.context.timeout_ms <= 2000);
+                let event: Event = serde_json::from_value(call.params.clone()).unwrap();
+                assert_eq!(call.context.request_id.as_deref(), Some(event.request_id()));
+                let event_id = match &event {
+                    Event::RequestCompleted(e) => { assert!(call.payload.is_empty()); &e.event_id },
+                    Event::WebSocketResponse(e) => { assert_eq!(e.payload_included, !call.payload.is_empty()); &e.event_id },
+                };
+                let denied_model = call.host.call("host.keys.list",json!({}),vec![]).await.is_err();
+                assert!(denied_model); // A completed request is not an administrative session.
+                let record = call.host.call("host.state.get",json!({"namespace":"observations","key":event_id}),vec![]).await.map_err(|e|e.into_plugin_fault())?.result["record"].clone();
+                call.host.call("host.state.put",json!({"namespace":"observations","key":event_id,"expected_version":record["version"],"value":{
+                    "event":call.params,"payload":(call.payload.len() <= 4096).then(|| String::from_utf8_lossy(&call.payload)),"payload_len":call.payload.len(),"timeout_ms":call.context.timeout_ms,"count":record["value"]["count"].as_u64().unwrap_or(0)+1
+                }}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                if self.adapter_mode == "observer-service" || self.adapter_mode == "observer-wait" || self.adapter_mode == "observer-denied" {
+                    let result = call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await;
+                    if self.adapter_mode == "observer-denied" { assert!(result.is_err()); }
+                    else { assert!(result.map_err(|e|PluginFault::new(ErrorCode::Fault,e.message))?); }
+                }
+                match self.adapter_mode.as_str() {
+                    "observer-null" => Ok(CallReply::unary(serde_json::Value::Null, vec![])),
+                    "observer-envelope" => Ok(CallReply::unary(json!({"extra":true}),vec![])),
+                    "observer-payload" => Ok(CallReply::unary(json!({}),vec![1])),
+                    "observer-fault" => Err(PluginFault::new(ErrorCode::Rejected,"private observer error detail")),
+                    _ => Ok(CallReply::unary(json!({}),vec![])),
+                }
+            },
             "plugin.reconcile" => {
                 use gateway_plugin_sdk::Stage;
                 assert_eq!(call.context.stage, Stage::Maintenance);
