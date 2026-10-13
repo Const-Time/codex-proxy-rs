@@ -18,3 +18,5 @@ mod catalog;
 
 mod outbound;
 mod services;
+
+mod observation;

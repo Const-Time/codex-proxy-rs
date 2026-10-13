@@ -4,6 +4,26 @@ use async_trait::async_trait;
 use std::sync::Arc;
 type Result<T> = std::result::Result<T, AdminError>;
 
+/// Host-selected subscribers; scopes belong to the frozen Admin publication.
+pub struct PluginObserverTarget {
+    pub process: Arc<dyn PluginProcess>,
+    pub order: i32,
+    pub request_completed: Option<PluginExecutionScope>,
+    pub websocket_response: Option<PluginExecutionScope>,
+}
+pub struct PluginObserverIdentity {
+    pub plugin_id: String,
+    pub instance_id: String,
+}
+/// Runtime projects native facts into the SDK envelope before bounded queuing.
+/// Neither this envelope nor its request ID grants a model or Admin identity.
+pub struct PluginObservation {
+    pub request_id: String,
+    pub metadata: serde_json::Value,
+    pub payload: Arc<[u8]>,
+    pub call_scope: gateway_core::engine::nested::ExtensionCallScope,
+}
+
 #[async_trait]
 pub trait PluginStore: Send + Sync {
     async fn artifacts(&self) -> Result<Vec<PluginArtifactInfo>>;
@@ -34,6 +54,17 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    fn observer_identity(&self) -> Option<PluginObserverIdentity> {
+        None
+    }
+    async fn observe(
+        &self,
+        _observation: PluginObservation,
+        _services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+        _cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<()> {
+        Err(AdminError::unavailable("插件观察能力不可用"))
+    }
     fn supports_maintenance(&self) -> bool {
         false
     }
@@ -150,6 +181,14 @@ pub trait PluginProcess: Send + Sync {
 }
 #[async_trait]
 pub trait PluginRuntime: Send + Sync {
+    fn observer_plan(
+        &self,
+        _targets: Vec<PluginObserverTarget>,
+        _services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+        _cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<Option<Arc<dyn gateway_core::engine::observation::RequestObserverPlan>>> {
+        Err(AdminError::unavailable("插件观察执行入口未接入"))
+    }
     /// Manifest interpretation stays with the package/protocol owner.
     fn contributes_model_catalog(&self, _artifact: &PluginArtifact) -> Result<bool> {
         Ok(false)

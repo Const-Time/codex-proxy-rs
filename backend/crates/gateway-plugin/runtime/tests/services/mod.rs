@@ -20,18 +20,18 @@ use std::{
 };
 
 #[derive(Clone)]
-struct Fact {
-    instance: String,
-    revision: u64,
-    context: core::Context,
+pub(crate) struct Fact {
+    pub(crate) instance: String,
+    pub(crate) revision: u64,
+    pub(crate) context: core::Context,
 }
 #[derive(Default)]
-struct Probe {
-    facts: Mutex<Vec<Fact>>,
-    wait: AtomicBool,
-    reject: AtomicBool,
-    entered: tokio::sync::Notify,
-    dropped: Arc<AtomicBool>,
+pub(crate) struct Probe {
+    pub(crate) facts: Mutex<Vec<Fact>>,
+    pub(crate) wait: AtomicBool,
+    pub(crate) reject: AtomicBool,
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) dropped: Arc<AtomicBool>,
 }
 struct Factory(Arc<Probe>);
 impl core::Factory for Factory {
@@ -95,7 +95,7 @@ impl core::Dispatcher for Port {
         })
     }
 }
-fn factory(probe: &Arc<Probe>) -> Arc<dyn core::Factory> {
+pub(crate) fn factory(probe: &Arc<Probe>) -> Arc<dyn core::Factory> {
     Arc::new(Factory(probe.clone()))
 }
 fn parent(f: &Fixture, probe: &Arc<Probe>) -> PreparedRootExecution {

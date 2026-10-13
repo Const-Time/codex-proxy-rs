@@ -167,6 +167,7 @@ impl CallbackHandler for Callbacks {
                     context.stage,
                     Stage::Management
                         | Stage::Maintenance
+                        | Stage::Observation
                         | Stage::Authentication
                         | Stage::Routing
                         | Stage::Scheduling
@@ -179,14 +180,14 @@ impl CallbackHandler for Callbacks {
                     "plugin generation is not active",
                 ));
             }
-            if context.stage == Stage::Maintenance
+            if matches!(context.stage, Stage::Maintenance | Stage::Observation)
                 && calls
                     .caller(&context.resource_scope_id)
                     .is_none_or(|caller| caller.cancellation.is_cancelled())
             {
                 return Err(PluginFault::new(
                     ErrorCode::Cancelled,
-                    "maintenance scope ended",
+                    "background invocation scope ended",
                 ));
             }
             if matches!(context.stage, Stage::Routing | Stage::Scheduling)
