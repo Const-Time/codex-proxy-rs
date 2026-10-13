@@ -2,6 +2,146 @@ mod dispatcher;
 pub(crate) mod fixture;
 mod websocket;
 
+async fn host_service_request(
+    f: &Fixture,
+    cookie: &str,
+    operation: &str,
+    input: serde_json::Value,
+) -> axum::response::Response {
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::STANDARD.encode(
+        serde_json::to_vec(&serde_json::json!({"operation":operation,"input":input})).unwrap(),
+    );
+    recovery_request(f,"POST","/api/admin/plugins/invoke",cookie,serde_json::json!({"id":"fixture","revision":1,"method":"POST","path":"echo","contentType":"application/json","body":payload})).await
+}
+async fn host_service_reply(response: axum::response::Response) -> serde_json::Value {
+    use base64::Engine;
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(envelope["data"]["body"].as_str().unwrap())
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+#[tokio::test]
+async fn host_services_from_management_use_actual_admin_actor_and_exclude_the_calling_plugin() {
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    let input = serde_json::json!({"actor":{"admin_session":{"admin_user_id":"forged-user"}},"request_id":"forged-request"});
+    for (cookie, status) in [
+        ("", StatusCode::UNAUTHORIZED),
+        (
+            "cpr_admin_session=middleware-ordinary",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = host_service_request(
+            &f,
+            cookie,
+            "settings.regenerate_admin_api_key",
+            input.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        body(response).await;
+    }
+    assert!(f.plugin.service_ports.lock().unwrap().is_empty());
+    let generated = host_service_reply(
+        host_service_request(&f, &cookie, "settings.regenerate_admin_api_key", input).await,
+    )
+    .await;
+    assert!(
+        generated["Ok"]["key"]
+            .as_str()
+            .unwrap()
+            .starts_with("admin-")
+    );
+    let exists = host_service_reply(
+        host_service_request(
+            &f,
+            &cookie,
+            "settings.admin_api_key_exists",
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(exists, serde_json::json!({"Ok":true}));
+    let deleted = host_service_reply(
+        host_service_request(
+            &f,
+            &cookie,
+            "settings.delete_admin_api_key",
+            serde_json::json!({"actor":"system","request_id":"untrusted"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(deleted["Ok"]["exists"], false);
+    {
+        let mutations = f.admin.settings.key_mutations.lock().unwrap();
+        assert_eq!(mutations.len(), 2);
+        for mutation in mutations.iter() {
+            assert_eq!(
+                mutation.actor,
+                gateway_admin::model::MutationActor::AdminSession {
+                    admin_user_id: "admin_1".into()
+                }
+            );
+            assert_ne!(mutation.request_id, "forged-request");
+            assert_ne!(mutation.request_id, "untrusted");
+        }
+    }
+    assert!(
+        f.plugin.service_seen.lock().unwrap().is_empty(),
+        "calling instance must be excluded from its service child"
+    );
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn host_services_validate_catalog_input_and_cannot_reuse_a_completed_http_scope() {
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    for (operation, input, kind) in [
+        ("settings.load", serde_json::Value::Null, "unsupported"),
+        (
+            "settings.admin_api_key_exists",
+            serde_json::json!({}),
+            "invalid",
+        ),
+        (
+            "settings.delete_admin_api_key",
+            serde_json::json!({"actor":"system","request_id":"x","extra":1}),
+            "invalid",
+        ),
+    ] {
+        let value =
+            host_service_reply(host_service_request(&f, &cookie, operation, input).await).await;
+        assert_eq!(value["Err"]["kind"], kind);
+    }
+    assert!(f.admin.settings.key_mutations.lock().unwrap().is_empty());
+    let port = f.plugin.service_ports.lock().unwrap()[0].clone();
+    let error = port
+        .call(
+            "fixture".into(),
+            "settings.regenerate_admin_api_key".into(),
+            serde_json::json!({"actor":"system","request_id":"x"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, "unavailable");
+    assert!(f.admin.settings.key_mutations.lock().unwrap().is_empty());
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn host_services_and_http_children_consume_the_same_graph_budget() {
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    let value = host_service_reply(
+        host_service_request(&f, &cookie, "budget", serde_json::Value::Null).await,
+    )
+    .await;
+    assert_eq!(value, serde_json::json!({"shared":true}));
+    f.manager.shutdown().await;
+}
+
 async fn service_fixture(mode: Mode) -> (Fixture, String) {
     let f = Fixture::with_mounts(
         mode,
@@ -334,6 +474,7 @@ async fn service_settings_keeps_shared_graph_permit_until_cancelled_native_trans
     let child = root.fork_http("host-service-parent".into()).unwrap();
     let cancellation = gateway_core::lifecycle::CancellationToken::default();
     let origin = Origin {
+        dispatcher: None,
         registry: f.manager.middleware_registry().unwrap(),
         request_id: "service-audit".into(),
         call_id: "http-parent".into(),

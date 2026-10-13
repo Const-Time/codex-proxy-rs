@@ -481,7 +481,8 @@ where
         .admin_services()
         .service_settings()
         .admin_api_key_exists(crate::middleware::service_origin(
-            &auth.context().request_id,
+            state.admin_services(),
+            &auth.context().mutation_context(),
         ))
         .await
         .map_err(map_service_error)?;
@@ -502,7 +503,10 @@ where
         .admin_services()
         .service_settings()
         .regenerate_admin_api_key(
-            crate::middleware::service_origin(&auth.context().request_id),
+            crate::middleware::service_origin(
+                state.admin_services(),
+                &auth.context().mutation_context(),
+            ),
             auth.context().mutation_context(),
         )
         .await
@@ -526,7 +530,10 @@ where
         .admin_services()
         .service_settings()
         .delete_admin_api_key(
-            crate::middleware::service_origin(&auth.context().request_id),
+            crate::middleware::service_origin(
+                state.admin_services(),
+                &auth.context().mutation_context(),
+            ),
             auth.context().mutation_context(),
         )
         .await

@@ -19,6 +19,7 @@ pub struct Origin {
     pub cancellation: CancellationToken,
     pub deadline_at: gateway_core::lifecycle::Deadline,
     pub call_scope: gateway_core::engine::nested::ExtensionCallScope,
+    pub dispatcher: Option<Arc<dyn core::Dispatcher>>,
 }
 
 async fn invoke<I, O>(
@@ -34,7 +35,7 @@ where
     let Some(origin) = origin else {
         return terminal(input).await;
     };
-    let context = core::Context {
+    let mut context = core::Context {
         operation,
         request_id: origin.request_id,
         call_id: uuid::Uuid::now_v7().to_string(),
@@ -42,7 +43,11 @@ where
         cancellation: origin.cancellation,
         deadline_at: origin.deadline_at,
         call_scope: origin.call_scope,
+        dispatcher: None,
     };
+    context.dispatcher = origin
+        .dispatcher
+        .map(|dispatcher| dispatcher.scoped(&context));
     origin
         .registry
         .freeze_service(&context)?

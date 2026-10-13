@@ -79,6 +79,7 @@ impl Fixture {
 }
 fn ctx(mode: &str) -> core::Context {
     core::Context {
+        dispatcher: None,
         operation: "settings.admin_api_key_exists",
         request_id: mode.into(),
         call_id: "service-fixture-call".into(),
@@ -95,6 +96,170 @@ fn terminal(calls: Arc<AtomicUsize>) -> core::Next {
             Ok(value)
         })
     })
+}
+
+#[derive(Clone, Default)]
+struct HostServices {
+    contexts: Arc<std::sync::Mutex<Vec<core::Context>>>,
+    calls: Arc<std::sync::Mutex<Vec<(String, String, serde_json::Value)>>>,
+    wait: Arc<std::sync::atomic::AtomicBool>,
+    entered: Arc<tokio::sync::Notify>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+struct WaitingCall(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for WaitingCall {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+impl core::Dispatcher for HostServices {
+    fn scoped(&self, context: &core::Context) -> Arc<dyn core::Dispatcher> {
+        let mut observed = context.clone();
+        observed.dispatcher = None;
+        self.contexts.lock().unwrap().push(observed);
+        Arc::new(self.clone())
+    }
+    fn call(
+        &self,
+        instance: String,
+        operation: String,
+        input: serde_json::Value,
+    ) -> futures::future::BoxFuture<'static, Result<serde_json::Value, core::Error>> {
+        let host = self.clone();
+        Box::pin(async move {
+            host.calls
+                .lock()
+                .unwrap()
+                .push((instance, operation, input));
+            if host.wait.load(Ordering::SeqCst) {
+                let _waiting = WaitingCall(host.dropped.clone());
+                host.entered.notify_one();
+                return futures::future::pending().await;
+            }
+            Ok(json!(true))
+        })
+    }
+}
+fn invocation(host: &HostServices) -> PluginInvocationContext {
+    PluginInvocationContext {
+        context: gateway_core::engine::middleware::http::Context {
+            request_id: "http-source".into(),
+            call_id: "host-http-parent".into(),
+            parent_call_id: None,
+            call_scope: Default::default(),
+            model_parent: None,
+            cancellation: Default::default(),
+            deadline_at: Default::default(),
+        },
+        http: None,
+        services: Some(Arc::new(host.clone())),
+    }
+}
+#[tokio::test]
+async fn sdk_host_service_management_calls_keep_host_context_and_release_each_rpc_scope() {
+    let f = Fixture::new().await;
+    let id = f.manager.list().await.unwrap()[0].id.clone();
+    let host = HostServices::default();
+    for _ in 0..35 {
+        let mut request = crate::support::request("services");
+        request.invocation = Some(invocation(&host));
+        let response = f.manager.handle(&id, 1, request).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+            json!({"exists":true})
+        );
+    }
+    let contexts = host.contexts.lock().unwrap().clone();
+    assert_eq!(contexts.len(), 35);
+    for context in contexts {
+        assert_eq!(context.request_id, "plugin-test");
+        assert_eq!(context.parent_call_id.as_deref(), Some("host-http-parent"));
+        assert!(context.cancellation.is_cancelled());
+    }
+    let calls = host.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 35);
+    for (instance, operation, input) in calls {
+        assert_eq!(instance, id);
+        assert_eq!(operation, "settings.admin_api_key_exists");
+        assert_eq!(input, json!(null));
+    }
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn sdk_host_service_requires_host_authority_and_validates_binary_and_unknown_fields() {
+    let f = Fixture::new().await;
+    let id = f.manager.list().await.unwrap()[0].id.clone();
+    let host = HostServices::default();
+    for (bound, binary, extra) in [
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        let mut request = crate::support::request("services");
+        if bound {
+            request.invocation = Some(invocation(&host));
+        }
+        let mut call = json!({"operation":"settings.admin_api_key_exists","input":null});
+        if extra {
+            call["actor"] = json!("system");
+        }
+        request.body = serde_json::to_vec(
+            &json!({"operation":"services","mode":"raw","request":call,"binary":binary}),
+        )
+        .unwrap();
+        let response = f.manager.handle(&id, 1, request).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(
+            value["fault"]["code"],
+            if bound {
+                "invalid_input"
+            } else {
+                "permission_denied"
+            }
+        );
+    }
+    assert!(host.calls.lock().unwrap().is_empty());
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn sdk_host_service_in_service_stage_uses_its_bound_dispatcher_without_consuming_next() {
+    let f = Fixture::new().await;
+    let host = HostServices::default();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut context = ctx("host-service");
+    context.dispatcher = Some(Arc::new(host.clone()));
+    assert_eq!(
+        f.plan(&context)
+            .run(context, json!(null), terminal(calls.clone()))
+            .await
+            .unwrap(),
+        json!(true)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(host.calls.lock().unwrap().len(), 1);
+    assert!(host.contexts.lock().unwrap()[0].cancellation.is_cancelled());
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn sdk_host_service_wait_is_closed_when_management_caller_is_dropped() {
+    let f = Fixture::new().await;
+    let id = f.manager.list().await.unwrap()[0].id.clone();
+    let host = HostServices::default();
+    host.wait.store(true, Ordering::SeqCst);
+    let mut request = crate::support::request("services");
+    request.invocation = Some(invocation(&host));
+    let mut call = Box::pin(f.manager.handle(&id, 1, request));
+    tokio::time::timeout(Duration::from_secs(3),async {tokio::select! {result=&mut call=>panic!("service must wait: {}",result.is_ok()),()=host.entered.notified()=>{}}}).await.unwrap();
+    drop(call);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !host.dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(host.contexts.lock().unwrap()[0].cancellation.is_cancelled());
+    f.manager.shutdown().await;
 }
 #[tokio::test]
 async fn service_rpc_fault_keeps_original_rejection_details_and_ambiguous_send_fact() {

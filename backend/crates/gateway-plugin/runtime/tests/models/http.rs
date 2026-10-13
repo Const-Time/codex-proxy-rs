@@ -3,6 +3,83 @@ use gateway_core::engine::middleware::http as core;
 use http_body_util::BodyExt;
 use std::sync::{Arc, atomic::AtomicUsize};
 
+struct GraphServices(gateway_core::engine::nested::ExtensionCallScope);
+impl gateway_core::engine::middleware::service::Dispatcher for GraphServices {
+    fn scoped(
+        &self,
+        context: &gateway_core::engine::middleware::service::Context,
+    ) -> Arc<dyn gateway_core::engine::middleware::service::Dispatcher> {
+        Arc::new(Self(context.call_scope.clone()))
+    }
+    fn call(
+        &self,
+        instance: String,
+        _: String,
+        _: serde_json::Value,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<serde_json::Value, gateway_core::engine::middleware::service::Error>,
+    > {
+        let scope = self.0.clone();
+        Box::pin(async move {
+            let _permit = scope.fork_http(instance).map_err(|_| {
+                gateway_core::engine::middleware::service::Error {
+                    kind: "capacity".into(),
+                    message: "shared graph capacity".into(),
+                    details: None,
+                }
+            })?;
+            Ok(json!(true))
+        })
+    }
+}
+#[tokio::test]
+async fn management_model_http_and_service_callbacks_inherit_one_host_graph_and_frozen_http_port() {
+    let f = Fixture::new().await;
+    let global_calls = Arc::new(AtomicUsize::new(0));
+    let bound_calls = Arc::new(AtomicUsize::new(0));
+    let global: Arc<dyn core::Dispatcher> = Arc::new(Echo {
+        calls: global_calls.clone(),
+        parent: None,
+        pending: false,
+    });
+    f.http.attach(&global);
+    let frozen: Arc<dyn core::Dispatcher> = Arc::new(Echo {
+        calls: bound_calls.clone(),
+        parent: None,
+        pending: false,
+    });
+    let scope = gateway_core::engine::nested::ExtensionCallScope::default();
+    let mut request = crate::support::request("models");
+    request.actor.actor = gateway_admin::model::MutationActor::AdminSession {
+        admin_user_id: "alice".into(),
+    };
+    request.body =
+        serde_json::to_vec(&json!({"operation":"models","mode":"service-budget"})).unwrap();
+    request.invocation = Some(gateway_admin::model::plugins::PluginInvocationContext {
+        context: core::Context {
+            request_id: "host-request".into(),
+            call_id: "host-http".into(),
+            parent_call_id: None,
+            call_scope: scope.clone(),
+            model_parent: None,
+            cancellation: Default::default(),
+            deadline_at: Default::default(),
+        },
+        http: Some(frozen),
+        services: Some(Arc::new(GraphServices(Default::default()))),
+    });
+    let response = f.manager.handle(&f.id, 1, request).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(value, json!({"completed":62,"kind":"capacity"}));
+    assert_eq!(bound_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(global_calls.load(Ordering::SeqCst), 0);
+    assert!(scope.fork_http("exhausted".into()).is_err());
+    f.clean(1).await;
+    assert_eq!(f.core.starts.load(Ordering::SeqCst), 1);
+    f.manager.shutdown().await;
+}
+
 struct Echo {
     calls: Arc<AtomicUsize>,
     parent: Option<gateway_core::engine::ModelRequestId>,

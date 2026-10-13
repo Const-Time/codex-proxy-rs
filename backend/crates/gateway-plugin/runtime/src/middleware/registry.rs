@@ -202,7 +202,13 @@ impl MiddlewareCallbacks {
             // A wire CallContext cannot construct or substitute Core authority.
             if let Some(parent) = parent {
                 models
-                    .bind(context, Some(parent), None, invocation.cancellation.clone())
+                    .bind(
+                        context,
+                        Some(parent),
+                        None,
+                        invocation.cancellation.clone(),
+                        None,
+                    )
                     .map_err(|_| MiddlewareError::Fault)?;
             }
         }
@@ -273,10 +279,13 @@ impl CallbackHandler for MiddlewareCallbacks {
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
         let model_method = crate::models::is_method(&method)
             || (method.starts_with("host.http.") && context.stage != Stage::Http);
+        let service_method = method == gateway_plugin_sdk::call::services::CALL_METHOD
+            && context.stage == Stage::Service;
         if model_method && !matches!(context.stage, Stage::Request | Stage::Attempt) {
             return self.inner.call(context, method, params, payload);
         }
         if !model_method
+            && !service_method
             && !super::http::is_method(&method)
             && !matches!(
                 method.as_str(),
@@ -319,8 +328,8 @@ impl CallbackHandler for MiddlewareCallbacks {
             })?;
             if let Invocation::Service(invocation) = invocation {
                 return tokio::select! {biased;
-                    ()=invocation.cancellation.cancelled()=>Err(PluginFault::new(ErrorCode::Cancelled,"service invocation cancelled")),
-                    ()=invocation.closed.cancelled()=>Err(PluginFault::new(ErrorCode::PermissionDenied,"service callback scope ended")),
+                    ()=invocation.cancellation.cancelled()=>Err(if service_method {super::service_cancelled()}else{PluginFault::new(ErrorCode::Cancelled,"service invocation cancelled")}),
+                    ()=invocation.closed.cancelled()=>Err(if service_method {super::service_cancelled()}else{PluginFault::new(ErrorCode::PermissionDenied,"service callback scope ended")}),
                     result=invocation.clone().call(method,params,payload)=>result,
                 };
             }

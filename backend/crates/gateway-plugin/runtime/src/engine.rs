@@ -739,15 +739,19 @@ impl PluginProcess for LivePlugin {
             headers: vec![],
         })
         .map_err(|_| AdminError::invalid("插件请求无效"))?;
-        let context = self.session.context(
+        let mut context = self.session.context(
             Stage::Management,
             self.session
                 .maximum_call_timeout()
                 .min(Duration::from_secs(30)),
         );
-        let _caller = self
-            .calls
-            .enter(context.resource_scope_id.clone(), request.actor);
+        context.request_id = Some(request.actor.request_id.clone());
+        let _caller = self.calls.enter(
+            context.resource_scope_id.clone(),
+            request.actor,
+            request.invocation,
+            self.access.cancellation(),
+        );
         let reply = self
             .session
             .call("management.handle", context, params, request.body)

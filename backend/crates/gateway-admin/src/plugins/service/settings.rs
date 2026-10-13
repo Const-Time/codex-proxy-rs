@@ -19,6 +19,19 @@ pub struct Service {
     inner: Arc<dyn SettingsService>,
 }
 impl Service {
+    /// The caller is supplied by an authenticated host boundary, never by RPC input.
+    pub fn dispatcher(
+        &self,
+        mut origin: Origin,
+        actor: MutationContext,
+    ) -> Arc<dyn gateway_core::engine::middleware::service::Dispatcher> {
+        origin.dispatcher = None;
+        Arc::new(Dispatcher {
+            inner: self.inner.clone(),
+            origin,
+            actor,
+        })
+    }
     pub(crate) fn new(inner: Arc<dyn SettingsService>) -> Self {
         Self { inner }
     }
@@ -71,6 +84,120 @@ impl Service {
         )
         .await?;
         Ok(result.into())
+    }
+}
+
+#[derive(Clone)]
+struct Dispatcher {
+    inner: Arc<dyn SettingsService>,
+    origin: Origin,
+    actor: MutationContext,
+}
+impl gateway_core::engine::middleware::service::Dispatcher for Dispatcher {
+    fn scoped(
+        &self,
+        context: &gateway_core::engine::middleware::service::Context,
+    ) -> Arc<dyn gateway_core::engine::middleware::service::Dispatcher> {
+        Arc::new(Self {
+            inner: self.inner.clone(),
+            actor: self.actor.clone(),
+            origin: Origin {
+                registry: self.origin.registry.clone(),
+                request_id: context.request_id.clone(),
+                call_id: context.call_id.clone(),
+                cancellation: gateway_core::lifecycle::CancellationToken::linked([
+                    self.origin.cancellation.clone(),
+                    context.cancellation.clone(),
+                ]),
+                deadline_at: self
+                    .origin
+                    .deadline_at
+                    .at()
+                    .map_or(context.deadline_at, |at| context.deadline_at.cap(at)),
+                call_scope: context.call_scope.clone(),
+                dispatcher: None,
+            },
+        })
+    }
+    fn call(
+        &self,
+        instance: String,
+        operation: String,
+        input: serde_json::Value,
+    ) -> BoxFuture<
+        'static,
+        Result<serde_json::Value, gateway_core::engine::middleware::service::Error>,
+    > {
+        let host = self.clone();
+        Box::pin(async move {
+            use gateway_core::engine::middleware::service::Error;
+            if host.origin.cancellation.is_cancelled() || host.origin.deadline_at.is_elapsed() {
+                return Err(Error::unavailable("服务调用已结束"));
+            }
+            let mutation = match operation.as_str() {
+                "settings.admin_api_key_exists" => {
+                    serde_json::from_value::<()>(input)
+                        .map_err(|_| Error::invalid("服务输入类型无效"))?;
+                    false
+                }
+                "settings.regenerate_admin_api_key" | "settings.delete_admin_api_key" => {
+                    // SDK audit fields are not authority. Canonicalize them at
+                    // this boundary before any service middleware sees input.
+                    serde_json::from_value::<MutationContext>(input)
+                        .map_err(|_| Error::invalid("服务输入类型无效"))?;
+                    true
+                }
+                _ => {
+                    return Err(Error {
+                        kind: "unsupported".into(),
+                        message: "服务操作尚未接入".into(),
+                        details: None,
+                    });
+                }
+            };
+            let mut origin = host.origin.clone();
+            origin.call_scope = origin.call_scope.fork_http(instance).map_err(|error| {
+                use gateway_core::error::GatewayErrorKind;
+                Error {
+                    kind: match error.kind() {
+                        GatewayErrorKind::RateLimited => "rate_limited",
+                        GatewayErrorKind::Unsupported => "unsupported",
+                        GatewayErrorKind::InvalidRequest => "invalid",
+                        _ => "unavailable",
+                    }
+                    .into(),
+                    message: error.safe_message().into(),
+                    details: None,
+                }
+            })?;
+            origin.dispatcher = Some(Arc::new(host.clone()));
+            let service = Service::new(host.inner);
+            let result = if !mutation {
+                service
+                    .admin_api_key_exists(Some(origin))
+                    .await
+                    .map(serde_json::Value::Bool)
+            } else if operation == "settings.regenerate_admin_api_key" {
+                service
+                    .regenerate_admin_api_key(Some(origin), host.actor)
+                    .await
+                    .map(|result| {
+                        serde_json::to_value(Regenerated {
+                            mutation: result.mutation.into(),
+                            key: result.key.expose_for_response().into(),
+                        })
+                        .expect("service result")
+                    })
+            } else {
+                service
+                    .delete_admin_api_key(Some(origin), host.actor)
+                    .await
+                    .map(|result| {
+                        serde_json::to_value(Mutation::from(result)).expect("service result")
+                    })
+            };
+            result.map_err(super::encode_error)
+        })
     }
 }
 

@@ -135,6 +135,8 @@ pub(crate) enum Mode {
     ZeroTimeout,
 }
 pub(crate) struct Plugin {
+    pub(crate) service_ports:
+        Mutex<Vec<Arc<dyn gateway_core::engine::middleware::service::Dispatcher>>>,
     pub(crate) service_seen: Mutex<
         Vec<(
             gateway_core::engine::middleware::service::Context,
@@ -323,7 +325,10 @@ impl PluginProcess for Plugin {
     fn revoke(&self) {
         self.access.revoke();
     }
-    async fn stop(&self) {}
+    async fn stop(&self) {
+        self.service_seen.lock().unwrap().clear();
+        self.service_ports.lock().unwrap().clear();
+    }
     async fn route_model(
         &self,
         input: gateway_core::engine::model_routing::ModelRouteInput,
@@ -346,8 +351,57 @@ impl PluginProcess for Plugin {
     async fn resource(&self, _: &str) -> AdminResult<PluginHttpResponse> {
         unreachable!()
     }
-    async fn handle(&self, _: PluginHttpRequest) -> AdminResult<PluginHttpResponse> {
-        unreachable!()
+    async fn handle(&self, request: PluginHttpRequest) -> AdminResult<PluginHttpResponse> {
+        let input: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let invocation = request.invocation.expect("host invocation");
+        let dispatcher = invocation.services.expect("bound service authority");
+        self.service_ports.lock().unwrap().push(dispatcher.clone());
+        if input["operation"] == "budget" {
+            let held = (0..15)
+                .map(|i| invocation.context.child(format!("sibling-{i}")).unwrap())
+                .collect::<Vec<_>>();
+            for _ in 0..49 {
+                assert!(
+                    dispatcher
+                        .call(
+                            "fixture".into(),
+                            "settings.admin_api_key_exists".into(),
+                            json!(null)
+                        )
+                        .await
+                        .is_ok()
+                );
+            }
+            assert!(
+                dispatcher
+                    .call(
+                        "fixture".into(),
+                        "settings.admin_api_key_exists".into(),
+                        json!(null)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(invocation.context.child("exhausted".into()).is_err());
+            drop(held);
+            return Ok(PluginHttpResponse {
+                status: 200,
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!({"shared":true})).unwrap(),
+            });
+        }
+        let result = dispatcher
+            .call(
+                "fixture".into(),
+                input["operation"].as_str().unwrap().into(),
+                input["input"].clone(),
+            )
+            .await;
+        Ok(PluginHttpResponse {
+            status: 200,
+            content_type: "application/json".into(),
+            body: serde_json::to_vec(&result).unwrap(),
+        })
     }
     async fn middleware(
         &self,
@@ -910,6 +964,7 @@ impl Fixture {
         assets: Option<std::path::PathBuf>,
     ) -> Self {
         let plugin = Arc::new(Plugin {
+            service_ports: Mutex::default(),
             service_seen: Mutex::new(vec![]),
             access: PluginAccess::default(),
             mode,

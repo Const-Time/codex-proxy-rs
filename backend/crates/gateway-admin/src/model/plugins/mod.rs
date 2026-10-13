@@ -84,6 +84,8 @@ pub struct PluginView {
     pub resources: Vec<PluginResource>,
 }
 pub struct PluginHttpRequest {
+    /// Host-only parent graph and ports; absent for callers without service authority.
+    pub invocation: Option<PluginInvocationContext>,
     /// Supplied by API authentication; never decoded from plugin input.
     pub actor: super::MutationContext,
     pub method: String,
@@ -91,6 +93,12 @@ pub struct PluginHttpRequest {
     pub query: String,
     pub content_type: Option<String>,
     pub body: Vec<u8>,
+}
+#[derive(Clone)]
+pub struct PluginInvocationContext {
+    pub context: gateway_core::engine::middleware::http::Context,
+    pub http: Option<Arc<dyn gateway_core::engine::middleware::http::Dispatcher>>,
+    pub services: Option<Arc<dyn gateway_core::engine::middleware::service::Dispatcher>>,
 }
 pub struct PluginHttpResponse {
     pub status: u16,

@@ -12,19 +12,64 @@ use std::{
 };
 
 #[derive(Default)]
-pub(crate) struct ManagementCalls(Mutex<BTreeMap<String, MutationContext>>);
+pub(crate) struct ManagementCalls(Mutex<BTreeMap<String, Arc<ManagementCaller>>>);
+pub(crate) struct ManagementCaller {
+    actor: MutationContext,
+    pub(crate) invocation: Option<PluginInvocationContext>,
+    pub(crate) cancellation: gateway_core::lifecycle::CancellationToken,
+}
 impl ManagementCalls {
-    pub(crate) fn enter(self: &Arc<Self>, scope: String, actor: MutationContext) -> ManagementCall {
+    pub(crate) fn enter(
+        self: &Arc<Self>,
+        scope: String,
+        actor: MutationContext,
+        mut invocation: Option<PluginInvocationContext>,
+        revocation: gateway_core::lifecycle::CancellationToken,
+    ) -> ManagementCall {
+        let cancellation = gateway_core::lifecycle::CancellationToken::linked(
+            std::iter::once(revocation)
+                .chain(invocation.iter().map(|i| i.context.cancellation.clone())),
+        );
+        if let Some(invocation) = &mut invocation {
+            invocation.context.parent_call_id = Some(std::mem::replace(
+                &mut invocation.context.call_id,
+                scope.clone(),
+            ));
+            invocation.context.request_id = actor.request_id.clone();
+            invocation.context.cancellation = cancellation.clone();
+            invocation.services = invocation.services.as_ref().map(|dispatcher| {
+                dispatcher.scoped(&gateway_core::engine::middleware::service::Context {
+                    operation: "management.handle",
+                    request_id: actor.request_id.clone(),
+                    call_id: scope.clone(),
+                    parent_call_id: invocation.context.parent_call_id.clone(),
+                    cancellation: cancellation.clone(),
+                    deadline_at: invocation.context.deadline_at,
+                    call_scope: invocation.context.call_scope.clone(),
+                    dispatcher: None,
+                })
+            });
+        }
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(scope.clone(), actor);
+            .insert(
+                scope.clone(),
+                Arc::new(ManagementCaller {
+                    actor,
+                    invocation,
+                    cancellation,
+                }),
+            );
         ManagementCall {
             calls: self.clone(),
             scope,
         }
     }
     pub(crate) fn actor(&self, scope: &str) -> Option<MutationContext> {
+        self.caller(scope).map(|caller| caller.actor.clone())
+    }
+    pub(crate) fn caller(&self, scope: &str) -> Option<Arc<ManagementCaller>> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -38,11 +83,15 @@ pub(crate) struct ManagementCall {
 }
 impl Drop for ManagementCall {
     fn drop(&mut self) {
-        self.calls
+        if let Some(caller) = self
+            .calls
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.scope);
+            .remove(&self.scope)
+        {
+            caller.cancellation.cancel();
+        }
     }
 }
 pub(crate) async fn call(
