@@ -65,7 +65,7 @@ Runtime 已接通真实 SDK 子进程的适配调用、受管 HTTP/流读取和 
 
 正常 JSON/SSE/WS 和原生模型调用入口将同一管理发布快照传入 Core。匹配依据宿主冻结的 Key、分组及公开模型，排除全部发起插件祖先；匹配但未恢复的实例保留拒绝门禁，不能悄悄走原生执行。成功选中的进程撤销加入同一请求取消链；停用、配置替换或保存结果不确定时撤销旧发布。未匹配的进程撤销不加入当前请求。
 
-执行回归使用真实 SDK 子进程和本地 HTTP/WebSocket 服务；管理发布回归使用真实 SDK 候选进程，测试专用 Runtime 仅绕过生产启用门禁。完整 Core/原生 Provider 推理端到端、upstream 阶段其他宿主回调、原始 HTTP body 事件及第三方插件兼容仍待完成；`upstream_adapter` 生产启用门禁保留，当前管理页面可保存停用实例的绑定。
+执行回归使用真实 SDK 子进程和本地 HTTP/WebSocket 服务；管理发布回归使用真实 SDK 候选进程，测试专用 Runtime 仅绕过生产启用门禁。真实 Core、原生 OpenAI Provider、PostgreSQL/Redis 账号协调与 SDK 子进程的 HTTP 回归已验证冻结分组权限、受管认证头、实际档位和本地定价倍率、唯一费用结算、尾部故障禁止重放，以及用户取消、Key 撤权和插件停用后的原租约释放。Core 观测端推进混合 canonical/wire 帧中的序列事实，防止漏记开始或完成；wire 帧仍不受旁路事实的交付门禁约束。xAI、完整原生续接/WS 链路、upstream 阶段其他宿主回调、原始 HTTP body 事件及第三方插件兼容继续验收；`upstream_adapter` 生产启用门禁保留，当前管理页面可保存停用实例的绑定。
 
 ## HTTP 运行时桥接
 

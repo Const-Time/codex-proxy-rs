@@ -347,12 +347,14 @@ impl Stream for ProviderStream {
         match this.events.as_mut().poll_next(context) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(event))) => {
-                // 带 wire 的 canonical facts 只是旁路观测：wire 才是客户端协议的
-                // 权威表达。只有 canonical-only Provider 输出需要以状态机作为交付条件。
-                if event.wire_event().is_none() && !event.canonical_facts().is_empty() {
-                    this.strict_canonical_seen = true;
+                // wire facts 仍推进混合流的序列状态，但不能以旁路观测拒绝 wire。
+                // canonical-only 输出沿原状态机检查；否则开始/完成分属两类帧时
+                // 会漏记 Started 或 Completed，把合法混合流误报为协议失败。
+                if !event.canonical_facts().is_empty() {
+                    let strict = event.wire_event().is_none();
+                    this.strict_canonical_seen |= strict;
                     for fact in event.canonical_facts() {
-                        if this.validator.observe(fact).is_err() {
+                        if this.validator.observe(fact).is_err() && strict {
                             this.terminated = true;
                             let error = ProviderError::new(
                                 ProviderErrorKind::Protocol,

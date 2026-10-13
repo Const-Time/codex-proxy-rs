@@ -1441,12 +1441,21 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
         }
     }
     let (metadata, body) = UpstreamAdapterRequest::decode(&call.payload).unwrap();
-    assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Upstream);
-    assert_eq!(metadata.account_id, "acct_fixture");
-    assert_eq!(metadata.credential_revision, 3);
-    assert_eq!(metadata.upstream_model, "native-model");
-    assert!(!String::from_utf8_lossy(&call.payload).contains("fixture-provider-secret"));
     let input: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Upstream);
+    assert_eq!(
+        metadata.account_id,
+        input["fixture_account"].as_str().unwrap_or("acct_fixture")
+    );
+    assert_eq!(
+        metadata.credential_revision,
+        input["fixture_credential_revision"].as_u64().unwrap_or(3)
+    );
+    assert_eq!(
+        metadata.upstream_model,
+        input["fixture_model"].as_str().unwrap_or("native-model")
+    );
+    assert!(!String::from_utf8_lossy(&call.payload).contains("fixture-provider-secret"));
     let mode = input["behavior"].as_str().unwrap_or("http");
     let callback_error = |_| PluginFault::new(ErrorCode::Fault, "managed callback failed");
     if mode.starts_with("websocket") {
@@ -1529,7 +1538,7 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
     let started = UpstreamAdapterEvent::new(event(
         vec![CanonicalEvent::Started {
             id: "adapter-response".into(),
-            model: Some("native-model".into()),
+            model: Some(metadata.upstream_model.clone()),
         }],
         None,
     ))
@@ -1551,7 +1560,7 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
                     "adapter-response"
                 }
                 .into(),
-                model: Some("native-model".into()),
+                model: Some(metadata.upstream_model.clone()),
                 reason: FinishReason::Stop,
             },
         ],

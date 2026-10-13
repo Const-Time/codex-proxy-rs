@@ -1,5 +1,6 @@
 mod binding;
 mod execution;
+mod native;
 use crate::support::*;
 use gateway_admin::{
     plugins::PluginManager,
