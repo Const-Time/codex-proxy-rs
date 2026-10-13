@@ -513,9 +513,9 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 
 受管上游适配端口只替换 Generate 的业务 wire。Core 将请求冻结计划传入原协调器；Provider 在原生解码前选择适配器，但仍独占账号租约、凭据解释、定价和失败反馈。适配器调用受首次流消费屏障约束，沿原取消、重试和结算链执行。Runtime 在候选进程准备时校验上游适配声明；Host 的受管出站模块统一负责 HTTP/WebSocket、DNS 固定、代理、TLS、容量和资源回收。Core 会话状态保留扩展执行归属与连接范围；无适配器时原生 Provider 拒绝消费扩展私有状态，中间件对归属事实的投影不改变宿主权威。Runtime 的网络回调绑定原请求、attempt、账号和凭据版本，事件经过序列验证，成功终态等待 RPC 正常结束；尾部失败仍保留计量事实。续接由同代连接池独占保管，核对实例、Key、账号与凭据版本，空闲连接不持有账号租约，撤销时关闭。Admin 在原发布快照中冻结实例绑定，按 Provider、公开模型与原 Key/分组范围选择，拒绝重叠发布并排除发起祖先；失效实例保留拒绝门禁，成功选择后撤销加入原取消链。绑定沿原实例 CAS 和恢复流程持久化。其余阶段授权及完整端到端验收尚未完成，生产能力保持关闭。
 
-upstream 的嵌套模型、内部 HTTP 和私有状态回调沿同一宿主在途 scope 授权。Runtime 将原 Core 父调用绑定到既有 Models 回调 owner，不通过插件的 wire ID 创建权限；父子调用保留冻结策略、调用图、取消及原结算入口。子模型不复用父调用占用的账号，发起插件祖先从子调用的适配计划中排除。内部 HTTP 使用原父请求冻结的 dispatcher，产生效果后原 Core 禁止父请求透明重放；未读子流不触发 Provider。RPC 终态或撤销关闭关联资源。本阶段不构造管理操作者；主动 service 及其余回调仍待接入。
+upstream 的嵌套模型、内部 HTTP 和私有状态回调沿同一宿主在途 scope 授权。Runtime 将原 Core 父调用绑定到既有 Models 回调 owner，不通过插件的 wire ID 创建权限；父子调用保留冻结策略、调用图、取消及原结算入口。子模型不复用父调用占用的账号，发起插件祖先从子调用的适配计划中排除。内部 HTTP 使用原父请求冻结的 dispatcher，产生效果后原 Core 禁止父请求透明重放；未读子流不触发 Provider。RPC 终态或撤销关闭关联资源。本阶段的主动 service 使用宿主签发的插件实例/revision 身份及原冻结服务发布，不构造管理员会话；其余回调继续接入。
 
-Admin 的插件服务身份由 Runtime 验证后的实例记录及原 PluginAccess 代次租约签发，不从 RPC JSON 构造。公开服务 dispatcher 将其绑定为独立 Plugin 审计操作者，实例不符或撤销后拒绝调用；原 SettingsService、事务、配置发布与取消后的写入收尾继续负责实际业务。审计使用既有 admin_audit_events，追加 0039 扩展 actor kind，历史事件不回填。插件身份不转换为用户会话或共享额度管理权限；Provider pending owner 保留实例和 revision，不能跨代完成授权。Runtime 全阶段的主动 service 绑定继续接入。
+Admin 的插件服务身份由 Runtime 验证后的实例记录及原 PluginAccess 代次租约签发，不从 RPC JSON 构造。公开服务 dispatcher 将其绑定为独立 Plugin 审计操作者，实例不符或撤销后拒绝调用；原 SettingsService、事务、配置发布与取消后的写入收尾继续负责实际业务。审计使用既有 admin_audit_events，追加 0039 扩展 actor kind，历史事件不回填。插件身份不转换为用户会话或共享额度管理权限；Provider pending owner 保留实例和 revision，不能跨代完成授权。Core 的 PreparedRoot 与 NestedExecutionContext 携带原请求的冻结服务工厂，RetryInput 仅传递原工厂和调用图事实。Runtime 的 request/attempt、routing/scheduling/retry/upstream 将其绑定到当前实际进程租约；RPC 完成或取消撤销该调用端口，原事务仍按既有 owner 收尾。服务中间件的进程身份由宿主重新绑定，已鉴权管理调用保留原操作者。HTTP、独立 WebSocket、注册、认证及其余阶段的主动 service 继续接入。
 
 Runtime 的通用外部 HTTP 与上游专用 HTTP 使用同一个受管网络资源 owner，复用 Host 出站端口、原调用期限和取消链。前者保留插件显式请求头；只有上游专用入口装饰选定账号凭据。upstream 的通用请求继承账号代理并共用发送水位，辅助发送及不确定发送沿原调用图禁止透明重放。模型服务未配置时仍可使用通用 HTTP；管理、middleware 和策略入口由各自原 owner 绑定真实调用图与撤销源，重试输入只增加宿主调用图事实，不增加模型或管理权限。RPC 终态与提前退出关闭同一套正文资源，句柄不能跨 scope 使用。
 

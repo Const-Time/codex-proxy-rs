@@ -16,10 +16,20 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[derive(Clone)]
 pub struct Service {
     inner: Arc<dyn SettingsService>,
 }
 impl Service {
+    pub(crate) fn factory(
+        &self,
+        registry: crate::plugins::middleware::PluginMiddlewareRegistry,
+    ) -> Arc<dyn gateway_core::engine::middleware::service::Factory> {
+        Arc::new(super::factory::Factory {
+            service: self.clone(),
+            registry,
+        })
+    }
     /// The caller is supplied by an authenticated host boundary, never by RPC input.
     pub fn dispatcher(
         &self,
@@ -263,6 +273,38 @@ impl gateway_core::engine::middleware::service::Dispatcher for Dispatcher {
                 dispatcher: None,
             },
         })
+    }
+    fn for_caller(
+        &self,
+        context: &gateway_core::engine::middleware::service::Context,
+        caller: gateway_core::engine::middleware::service::Caller,
+    ) -> Result<
+        Arc<dyn gateway_core::engine::middleware::service::Dispatcher>,
+        gateway_core::engine::middleware::service::Error,
+    > {
+        if self.plugin.is_none() {
+            return Ok(self.scoped(context));
+        }
+        let authority = PluginServiceAuthority::from_caller(caller).map_err(super::encode_error)?;
+        Ok(Service::new(self.inner.clone()).plugin_dispatcher(
+            Origin {
+                registry: self.origin.registry.clone(),
+                request_id: context.request_id.clone(),
+                call_id: context.call_id.clone(),
+                cancellation: gateway_core::lifecycle::CancellationToken::linked([
+                    self.origin.cancellation.clone(),
+                    context.cancellation.clone(),
+                ]),
+                deadline_at: self
+                    .origin
+                    .deadline_at
+                    .at()
+                    .map_or(context.deadline_at, |at| context.deadline_at.cap(at)),
+                call_scope: context.call_scope.clone(),
+                dispatcher: None,
+            },
+            authority,
+        ))
     }
     fn call(
         &self,

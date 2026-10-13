@@ -1,5 +1,6 @@
 //! The service terminal retains domain validation and the authenticated caller.
 mod authority;
+mod factory;
 mod local;
 pub use authority::PluginServiceAuthority;
 pub mod settings;

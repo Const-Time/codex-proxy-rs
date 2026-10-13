@@ -3,14 +3,13 @@ use crate::model::{
     AdminError, MutationActor, MutationContext,
     plugins::{PluginAccess, PluginRecord},
 };
+use gateway_core::engine::middleware::service::Caller;
 use gateway_core::lifecycle::CancellationToken;
 use std::num::NonZeroU64;
 
 #[derive(Clone)]
 pub struct PluginServiceAuthority {
-    instance_id: String,
-    revision: NonZeroU64,
-    access: PluginAccess,
+    caller: Caller,
 }
 impl PluginServiceAuthority {
     /// The runtime supplies its validated record and original generation lease.
@@ -27,22 +26,30 @@ impl PluginServiceAuthority {
             ));
         }
         Ok(Self {
-            instance_id: record.id.clone(),
-            revision,
-            access,
+            caller: Caller::new(record.id.clone(), revision, access.cancellation())
+                .map_err(|_| AdminError::invalid("插件服务身份无效"))?,
         })
     }
+    pub(super) fn from_caller(caller: Caller) -> Result<Self, AdminError> {
+        if caller.cancellation().is_cancelled() {
+            return Err(AdminError::new(
+                crate::model::AdminErrorKind::Forbidden,
+                "插件服务身份已撤销",
+            ));
+        }
+        Ok(Self { caller })
+    }
     pub(super) fn authorizes(&self, instance: &str) -> bool {
-        self.instance_id == instance && !self.access.is_revoked()
+        self.caller.instance_id() == instance && !self.caller.cancellation().is_cancelled()
     }
     pub(super) fn cancellation(&self) -> CancellationToken {
-        self.access.cancellation()
+        self.caller.cancellation()
     }
     pub(super) fn actor(&self, request_id: String) -> MutationContext {
         MutationContext {
             actor: MutationActor::Plugin {
-                instance_id: self.instance_id.clone(),
-                revision: self.revision,
+                instance_id: self.caller.instance_id().into(),
+                revision: self.caller.revision(),
             },
             request_id,
         }

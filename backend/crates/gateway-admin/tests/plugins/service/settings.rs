@@ -274,3 +274,164 @@ async fn revocation_after_native_mutation_started_keeps_single_transaction_alive
     .unwrap();
     assert_eq!(store.mutations.lock().unwrap().len(), 1);
 }
+
+fn service_context() -> core::Context {
+    core::Context {
+        operation: "fixture",
+        request_id: "native-parent".into(),
+        call_id: "native-call".into(),
+        parent_call_id: None,
+        cancellation: Default::default(),
+        deadline_at: Default::default(),
+        call_scope: Default::default(),
+        dispatcher: None,
+    }
+}
+#[tokio::test]
+async fn published_service_factory_keeps_original_owner_audit_and_publication_revocation() {
+    use gateway_admin::ports::plugins::PluginService;
+    let store = Arc::new(Store::default());
+    let services = crate::use_case::AdminHarness::new()
+        .settings(store.clone())
+        .build()
+        .await;
+    let manager = super::super::http::manager().await;
+    let manager = manager.with_services(services.service_settings());
+    let registry = manager.middleware_registry().unwrap();
+    let factory = registry.service_factory().unwrap();
+    let context = service_context();
+    let host = factory
+        .bind(
+            &context,
+            core::Caller::new(
+                "plugin_factory".into(),
+                9.try_into().unwrap(),
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    host.call(
+        "plugin_factory".into(),
+        "settings.delete_admin_api_key".into(),
+        input(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store.mutations.lock().unwrap()[0],
+        MutationContext {
+            actor: MutationActor::Plugin {
+                instance_id: "plugin_factory".into(),
+                revision: 9.try_into().unwrap()
+            },
+            request_id: "native-parent".into()
+        }
+    );
+    manager.restore().await.unwrap();
+    assert!(
+        host.call(
+            "plugin_factory".into(),
+            "settings.delete_admin_api_key".into(),
+            input()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(store.mutations.lock().unwrap().len(), 1);
+    manager.shutdown().await;
+}
+#[tokio::test]
+async fn service_layer_rebinds_actual_plugin_and_preserves_parent_and_human_authority() {
+    let store = Arc::new(Store::default());
+    let original = CancellationToken::new();
+    let host = dispatcher(store.clone(), Default::default(), original.clone()).await;
+    let context = service_context();
+    let child_cancel = CancellationToken::new();
+    let child = core::Caller::new(
+        "nested_plugin".into(),
+        12.try_into().unwrap(),
+        child_cancel.clone(),
+    )
+    .unwrap();
+    let scoped = host.for_caller(&context, child.clone()).unwrap();
+    assert!(
+        scoped
+            .call(
+                "plugin_fixture".into(),
+                "settings.delete_admin_api_key".into(),
+                input()
+            )
+            .await
+            .is_err()
+    );
+    scoped
+        .call(
+            "nested_plugin".into(),
+            "settings.delete_admin_api_key".into(),
+            input(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.mutations.lock().unwrap()[0].actor,
+        MutationActor::Plugin {
+            instance_id: "nested_plugin".into(),
+            revision: 12.try_into().unwrap()
+        }
+    );
+    original.cancel();
+    assert!(
+        scoped
+            .call(
+                "nested_plugin".into(),
+                "settings.delete_admin_api_key".into(),
+                input()
+            )
+            .await
+            .is_err()
+    );
+    let services = crate::use_case::AdminHarness::new()
+        .settings(store.clone())
+        .build()
+        .await;
+    let actor = MutationContext {
+        actor: MutationActor::AdminSession {
+            admin_user_id: "actual-admin".into(),
+        },
+        request_id: "human-request".into(),
+    };
+    let human = services
+        .service_settings()
+        .dispatcher(
+            Origin {
+                registry: super::super::http::registry().await,
+                request_id: "human-request".into(),
+                call_id: "human-call".into(),
+                cancellation: Default::default(),
+                deadline_at: Default::default(),
+                call_scope: Default::default(),
+                dispatcher: None,
+            },
+            actor.clone(),
+        )
+        .for_caller(&context, child)
+        .unwrap();
+    human
+        .call(
+            "nested_plugin".into(),
+            "settings.delete_admin_api_key".into(),
+            input(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.mutations.lock().unwrap()[1], actor);
+    child_cancel.cancel();
+    assert!(
+        host.for_caller(
+            &context,
+            core::Caller::new("revoked".into(), 1.try_into().unwrap(), child_cancel).unwrap()
+        )
+        .is_err()
+    );
+}

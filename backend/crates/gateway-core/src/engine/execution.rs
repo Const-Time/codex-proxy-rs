@@ -159,6 +159,7 @@ pub enum ClientAuthenticationError {
 /// cloned or constructed by protocol adapters; consuming it starts the existing
 /// execution path without replacing its identity or resetting its deadline.
 pub struct PreparedRootExecution {
+    service_factory: Option<Arc<dyn super::middleware::service::Factory>>,
     http_dispatcher: Option<Arc<dyn super::middleware::http::Dispatcher>>,
     retry_policy: Option<Arc<dyn super::retry_policy::RetryPolicy>>,
     upstream_adapters: Option<Arc<dyn super::upstream_adapter::UpstreamAdapterPlan>>,
@@ -202,6 +203,13 @@ impl PreparedRootExecution {
                 )
             })?;
         self.with_settings(settings)
+    }
+    pub fn with_service_factory(
+        mut self,
+        factory: Arc<dyn super::middleware::service::Factory>,
+    ) -> Self {
+        self.service_factory = Some(factory);
+        self
     }
     pub fn with_http_dispatcher(
         mut self,
@@ -285,6 +293,7 @@ impl PreparedRootExecution {
     }
     pub fn nested_context(&self) -> super::nested::NestedExecutionContext {
         super::nested::NestedExecutionContext {
+            service_factory: self.service_factory.clone(),
             http_dispatcher: self.http_dispatcher.clone(),
             lifetime: Arc::downgrade(&self.lifetime),
             client: self.client.clone(),
@@ -309,6 +318,7 @@ impl PreparedRootExecution {
         parent: super::nested::NestedExecutionContext,
     ) -> Result<Self, GatewayError> {
         parent.validate()?;
+        self.service_factory = parent.service_factory.clone();
         self.http_dispatcher = parent.http_dispatcher.clone();
         self.lifetime.bind_parent(parent.lifetime.clone());
         self.parent_deadline = parent.deadline;
@@ -1051,6 +1061,7 @@ impl DefaultExecutionService {
         } = request;
         let execution_context = prepared.nested_context();
         let PreparedRootExecution {
+            service_factory: _,
             http_dispatcher: _,
             retry_policy,
             upstream_adapters,
@@ -1729,6 +1740,7 @@ impl ExecutionService for DefaultExecutionService {
         let lifetime = super::nested::ExecutionLifetime::new();
         let cancellation = CancellationToken::linked([authorization.cancellation()]);
         Ok(PreparedRootExecution {
+            service_factory: None,
             http_dispatcher: None,
             retry_policy: None,
             upstream_adapters: None,

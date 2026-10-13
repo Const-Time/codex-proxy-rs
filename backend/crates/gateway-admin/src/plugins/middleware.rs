@@ -34,6 +34,7 @@ impl Publication {
         PluginMiddlewareRegistry(
             self.clone(),
             CancellationToken::linked([self.epoch.cancellation()]),
+            None,
         )
     }
     pub(super) fn publish(
@@ -232,8 +233,24 @@ impl Publication {
 /// A single publication snapshot, captured before request preparation. A version
 /// switch revokes it even if preparation has not yet entered the first layer.
 #[derive(Clone)]
-pub struct PluginMiddlewareRegistry(pub(super) Publication, pub(super) CancellationToken);
+pub struct PluginMiddlewareRegistry(
+    pub(super) Publication,
+    pub(super) CancellationToken,
+    Option<super::service::settings::Service>,
+);
 impl PluginMiddlewareRegistry {
+    pub(super) fn with_services(
+        mut self,
+        services: Option<super::service::settings::Service>,
+    ) -> Self {
+        self.2 = services;
+        self
+    }
+    pub fn service_factory(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::engine::middleware::service::Factory>> {
+        self.2.as_ref().map(|service| service.factory(self.clone()))
+    }
     pub fn model_catalog(
         &self,
     ) -> Result<gateway_core::routing::ContributedModelCatalog, AdminError> {

@@ -17,11 +17,13 @@ use std::{
 pub(crate) struct Callbacks {
     inner: Arc<dyn CallbackHandler>,
     outbound: Arc<crate::outbound::Registry>,
+    services: Arc<crate::services::Registry>,
     models: Option<Arc<crate::models::Models>>,
     pub(super) client: SharedClient,
     calls: Mutex<BTreeMap<String, (CallContext, Arc<ManagedCall>)>>,
 }
 pub(super) struct Binding {
+    _services: Option<crate::services::Binding>,
     callbacks: Arc<Callbacks>,
     context: CallContext,
 }
@@ -36,10 +38,12 @@ impl Callbacks {
         client: SharedClient,
         models: Option<Arc<crate::models::Models>>,
         outbound: Arc<crate::outbound::Registry>,
+        services: Arc<crate::services::Registry>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner,
             outbound,
+            services,
             models,
             client,
             calls: Mutex::default(),
@@ -61,6 +65,17 @@ impl Callbacks {
         {
             return Err(invalid(UpstreamSendState::NotSent));
         }
+        let service_binding = parent
+            .as_ref()
+            .map(|parent| {
+                self.services.bind_parent(
+                    context,
+                    parent,
+                    CancellationToken::linked([call.cancellation.clone(), call.closed.clone()]),
+                )
+            })
+            .transpose()
+            .map_err(|error| super::failure::fault_error(error, UpstreamSendState::NotSent))?;
         if let (Some(models), Some(parent)) = (&self.models, parent) {
             models
                 .bind(
@@ -83,6 +98,7 @@ impl Callbacks {
         }
         calls.insert(context.resource_scope_id.clone(), (context.clone(), call));
         Ok(Binding {
+            _services: service_binding,
             callbacks: self.clone(),
             context: context.clone(),
         })

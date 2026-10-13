@@ -14,6 +14,7 @@
 | 管理请求 | method/path/query/contentType 与二进制正文；不转发浏览器 Cookie 或请求头；响应必须没有自定义头 |
 | 页面桥 | 上游 v2 桥的管理请求、Responses JSON/SSE 模型调用与高度调整；本地父页面代为鉴权，iframe 使用独立的 opaque origin |
 | 通用外部 HTTP | `host.http.do/do_stream/stream_read/stream_close`，宿主签发的调用范围内使用；沿原取消与资源清理链，不需要配置模型服务 |
+| 主动服务调用 | 管理及已有授权 service 层保留原操作者；request/attempt、routing/scheduling/retry/upstream 沿原 Core 上下文使用实例与 revision 身份调用设置服务 |
 | 私有状态 | `host.state.get/put/delete`，实例和命名空间隔离，版本比较交换、schema 和配额校验 |
 | 只读事实 | management 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`；不含密钥或凭据 |
 | 页面推理 | 本人管理员会话显式选择自己的 Key，复用正常 Responses 的权限、路由、预算、倍率和结算 |
@@ -30,7 +31,7 @@
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
-中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层可以主动调用这些业务，其他阶段继续实施。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
+中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层，以及原 Core 的 request/attempt、routing/scheduling/retry/upstream 阶段可主动调用这些业务；HTTP、独立 WebSocket、注册和认证等阶段继续接入。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
 
 绑定与实例共用 revision 和配置 CAS。候选升级准备失败仍使用旧代；无法确认配置是否提交时阻止继续使用旧绑定，重新保存确认后恢复。恢复失败的必需中间件保留作用范围内的门禁，进程退出也不自动跳过。启停、绑定和版本变更撤销旧调用计划，包含 RPC 已结束但正文尚未交付的响应。
 
@@ -110,7 +111,7 @@ HTTP 层可领取 API 提供的原始 WebSocket 升级能力，保留验证后�
 
 服务子调用排除发起实例及全部祖先，与模型和 HTTP 子调用共用原 Core 的深度、活跃名额和总次数限制。管理 RPC 的模型及 HTTP 回调也继承原入口调用图和冻结 HTTP 端口，不创建第二个预算或读取后来替换的全局端口。RPC 结束、父请求取消、停用和换代撤销旧端口；等待中的服务回调取消时保留 ambiguous 结果，不自动重试。原生写入仍按前述规则持有图名额至事务和发布完成。
 
-Admin 已提供宿主签发的插件服务身份端口，写入审计使用 `plugin:<实例>@<revision>`，与管理员会话、管理 API Key 和系统任务分开。该身份只绑定原插件代次及其撤销信号，不能作为管理端登录身份，也不自动获得本地共享额度或用户管理权限；服务输入中的操作者仍由宿主覆盖。目前这是主动 service 全阶段接线的前置能力，Runtime 其余阶段尚未接入，不能据此宣称上游原包兼容。SDK 追加了插件操作者事实；旧制品的服务输入兼容仍须实际验收。
+Admin 已提供宿主签发的插件服务身份端口，写入审计使用 `plugin:<实例>@<revision>`，与管理员会话、管理 API Key 和系统任务分开。该身份只绑定原插件代次及其撤销信号，不能作为管理端登录身份，也不自动获得本地共享额度或用户管理权限；服务输入中的操作者仍由宿主覆盖。Core 模型及策略调用携带与原请求计划相同的冻结服务发布；原生子调用继承父端口，不重新读取全局服务发布。Runtime 已将 request/attempt、routing/scheduling/retry/upstream 的真实在途调用绑定到这个端口，核对原实例、代次及完整 CallContext，并沿原图、期限和取消链清理。嵌套 service 层重新绑定实际执行插件；源自已鉴权管理调用的原操作者保持不变。HTTP、独立 WebSocket、注册、认证和其余阶段仍待接线。真实 SDK 回归与原 Admin 服务/审计回归分别验证这两个边界，不等同于完整 API/数据库业务端到端或上游原包兼容。SDK 追加了插件操作者事实；旧制品的服务输入兼容仍须实际验收。
 
 本地运行设置和定价使用 SDK `call::services::local_settings_v1`，操作前缀为 `local.settings.v1.`。管理页对应接口也经过这些服务层，HTTP 响应格式保持原合同。下列写操作的输入均以 `(MutationContext, command)` 传递，宿主绑定真实审计身份；模型映射、版本、价格与源预览仍由原 Admin/Store 用例校验和发布。
 

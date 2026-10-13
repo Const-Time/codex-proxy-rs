@@ -58,7 +58,7 @@ impl UpstreamAccountConnection for Connection {
     }
 }
 
-async fn fixture() -> (Fixture, Server) {
+pub(crate) async fn fixture() -> (Fixture, Server) {
     let f = Fixture::with_accounts(&["acct_allowed", "acct_alternative"]).await;
     f.snapshot
         .publish(crate::models::fixture::snapshot_with_attempts(
@@ -89,11 +89,22 @@ async fn start(
     mode: &str,
     dispatcher: Option<Arc<dyn core::Dispatcher>>,
 ) -> StartedExecution {
+    start_with_factory(f, mode, dispatcher, None).await
+}
+pub(crate) async fn start_with_factory(
+    f: &Fixture,
+    mode: &str,
+    dispatcher: Option<Arc<dyn core::Dispatcher>>,
+    factory: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+) -> StartedExecution {
     let mut prepared = f
         .execution
         .prepare_execution(f.execution.authenticate("sk_native_fixture").unwrap())
         .unwrap()
         .with_upstream_adapters(Arc::new(f.manager.middleware_registry().unwrap()));
+    if let Some(factory) = factory {
+        prepared = prepared.with_service_factory(factory);
+    }
     if let Some(dispatcher) = dispatcher {
         prepared = prepared.with_http_dispatcher(dispatcher);
     }

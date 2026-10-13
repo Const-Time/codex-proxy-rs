@@ -223,6 +223,9 @@ async fn fixture() -> (PluginManager, Vec<Arc<Process>>) {
     manager.restore().await.unwrap();
     (manager, processes)
 }
+pub(super) async fn manager() -> PluginManager {
+    fixture().await.0
+}
 pub(super) async fn registry() -> gateway_admin::plugins::middleware::PluginMiddlewareRegistry {
     let (manager, _) = fixture().await;
     manager.middleware_registry().unwrap()

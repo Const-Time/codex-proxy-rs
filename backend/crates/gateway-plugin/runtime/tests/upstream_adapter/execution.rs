@@ -182,7 +182,7 @@ pub(super) fn invocation(
         account,
     }
 }
-pub(super) struct Server {
+pub(crate) struct Server {
     pub(super) url: String,
     pub(super) requests: Arc<Mutex<Vec<String>>>,
     pub(super) entered: Arc<tokio::sync::Notify>,

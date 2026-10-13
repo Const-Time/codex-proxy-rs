@@ -369,6 +369,15 @@ impl PluginRuntime for PluginEngine {
         let failed_access = access.clone();
         let ended_access = access.clone();
         let outbound = crate::outbound::Registry::new(self.outbound.clone(), access.cancellation());
+        let services = crate::services::Registry::new(
+            gateway_core::engine::middleware::service::Caller::new(
+                record.id.clone(),
+                std::num::NonZeroU64::new(record.revision)
+                    .ok_or_else(|| AdminError::invalid("插件版本无效"))?,
+                access.cancellation(),
+            )
+            .map_err(|_| AdminError::invalid("插件服务身份无效"))?,
+        );
         let models = self.models.clone().map(|services| {
             crate::models::Models::new(services, access.cancellation(), self.http.clone())
         });
@@ -388,12 +397,14 @@ impl PluginRuntime for PluginEngine {
         let calls = callbacks.calls.clone();
         let middleware = crate::middleware::MiddlewareCallbacks::new(callbacks)
             .with_models(models.clone())
-            .with_outbound(outbound.clone());
+            .with_outbound(outbound.clone())
+            .with_services(services.clone());
         let upstream_callbacks = crate::upstream_adapter::callbacks::Callbacks::new(
             middleware.clone(),
             self.outbound.clone(),
             models.clone(),
             outbound.clone(),
+            services.clone(),
         );
         let session = Arc::new(
             RpcSession::start_supervised(
@@ -412,7 +423,7 @@ impl PluginRuntime for PluginEngine {
                 },
                 RpcLimits::default(),
                 &self.processes,
-                outbound.wrap(upstream_callbacks.clone()),
+                services.wrap(outbound.wrap(upstream_callbacks.clone())),
                 crate::rpc::RpcSessionLifecycle::new(
                     move |_| failed_access.revoke(),
                     move || ended_access.revoke(),
@@ -519,6 +530,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            services,
             upstream_adapters,
             model_aliases,
             outbound,
@@ -535,6 +547,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    services: Arc<crate::services::Registry>,
     outbound: Arc<crate::outbound::Registry>,
     upstream_adapters: Vec<Arc<crate::upstream_adapter::PluginUpstreamAdapter>>,
     model_aliases: Vec<gateway_core::routing::ContributedModelAlias>,
@@ -642,7 +655,14 @@ impl PluginProcess for LivePlugin {
         if self.status() != "ready" || self.access.is_revoked() {
             return Err(gateway_core::engine::retry_policy::RetryPolicyFault);
         }
-        crate::retry_policy::invoke(&self.session, self.outbound.clone(), input, timeout).await
+        crate::retry_policy::invoke(
+            &self.session,
+            self.outbound.clone(),
+            self.services.clone(),
+            input,
+            timeout,
+        )
+        .await
     }
     async fn schedule_account(
         &self,
@@ -658,6 +678,7 @@ impl PluginProcess for LivePlugin {
             &self.session,
             self.models.clone(),
             self.outbound.clone(),
+            self.services.clone(),
             input,
         )
         .await
@@ -676,6 +697,7 @@ impl PluginProcess for LivePlugin {
             &self.session,
             self.models.clone(),
             self.outbound.clone(),
+            self.services.clone(),
             input,
         )
         .await

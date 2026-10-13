@@ -1910,6 +1910,10 @@ where
         retry_allowed: bool,
     ) -> super::retry_policy::RetryInput {
         super::retry_policy::RetryInput {
+            service_factory: self
+                .execution_context
+                .as_ref()
+                .and_then(|context| context.service_factory()),
             call_scope: self
                 .execution_context
                 .as_ref()

@@ -32,6 +32,7 @@ pub(crate) async fn invoke(
     session: &Arc<RpcSession>,
     models: Option<Arc<Models>>,
     outbound: Arc<crate::outbound::Registry>,
+    services: Arc<crate::services::Registry>,
     input: AccountScheduleInput,
 ) -> Result<AccountScheduleDecision, AccountSchedulingFault> {
     if session.capability_version(Capability::Scheduler) != Some(1)
@@ -60,6 +61,9 @@ pub(crate) async fn invoke(
         )
         .map_err(|_| AccountSchedulingFault)?;
     let _network = outbound.guard(&context);
+    let _services = services
+        .bind_parent(&context, &input.nested_context(), input.cancellation())
+        .map_err(|_| AccountSchedulingFault)?;
     if let Some(models) = &models {
         models
             .bind(

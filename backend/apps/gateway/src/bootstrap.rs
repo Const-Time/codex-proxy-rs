@@ -127,6 +127,7 @@ pub async fn run() -> Result<(), BootstrapError> {
                 ),
             )
             .with_model_catalog(core.model_catalog_validator())
+            .with_services(admin.services().service_settings())
         },
     );
     plugins.restore().await?;

@@ -61,6 +61,15 @@ pub(super) fn bind(
             .model_catalog()
             .map_err(|_| MiddlewareError::Fault)?,
     )?;
+    // Native children retain the service publication issued to their parent.
+    let prepared = if prepared.nested_context().service_factory().is_none() {
+        match registry.service_factory() {
+            Some(factory) => prepared.with_service_factory(factory),
+            None => prepared,
+        }
+    } else {
+        prepared
+    };
     let registry = Arc::new(registry);
     let attempt_context = MiddlewareContext {
         mount: MiddlewareMount::Attempt,

@@ -15,6 +15,7 @@ pub const MAXIMUM_POLICY_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct RetryInput {
+    pub(crate) service_factory: Option<Arc<dyn super::middleware::service::Factory>>,
     pub(crate) request_id: ModelRequestId,
     pub(crate) call_scope: super::nested::ExtensionCallScope,
     pub(crate) client_key_id: ClientApiKeyId,
@@ -32,6 +33,9 @@ pub struct RetryInput {
     pub(crate) cancellation: CancellationToken,
 }
 impl RetryInput {
+    pub fn service_factory(&self) -> Option<Arc<dyn super::middleware::service::Factory>> {
+        self.service_factory.clone()
+    }
     pub fn call_scope(&self) -> &super::nested::ExtensionCallScope {
         &self.call_scope
     }
