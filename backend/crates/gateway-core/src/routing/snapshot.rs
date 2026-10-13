@@ -190,6 +190,8 @@ pub enum RuntimeSnapshotCompileError {
     RevisionChanged,
     #[error("runtime snapshot contains invalid frozen data")]
     InvalidData,
+    #[error("extension model aliases conflict with the provider catalog or settings mappings")]
+    InvalidExtensionModels,
     #[error("provider model catalog changed while the snapshot was compiling")]
     CatalogChanged,
 }
@@ -449,6 +451,7 @@ async fn compile_runtime_snapshot(
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
     values: Arc<SettingsValues>,
+    model_aliases: Arc<BTreeMap<String, super::ContributedModelAlias>>,
     revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     providers: Arc<BTreeSet<ProviderKind>>,
@@ -471,7 +474,11 @@ impl RuntimeSnapshot {
     /// Derive settings without refreshing catalogs, identities, permissions or the host revision.
     pub fn resolve_settings(&self, values: SettingsValues) -> Result<Arc<Self>, InvalidSettings> {
         let compiled = values.compile()?;
-        Ok(Arc::new(self.clone().with_values(values, compiled)))
+        let derived = self.clone().with_values(values, compiled);
+        derived
+            .validate_model_aliases()
+            .map_err(|_| InvalidSettings)?;
+        Ok(Arc::new(derived))
     }
 
     fn with_values(
@@ -565,6 +572,7 @@ impl RuntimeSnapshot {
         client_policy_map.retain(|_, policy| policy.enabled());
 
         Ok(Self {
+            model_aliases: Arc::default(),
             values: Arc::new(SettingsValues::new(
                 account_selection_policy.max_concurrent_per_account().get(),
                 interval_ms,
@@ -585,6 +593,59 @@ impl RuntimeSnapshot {
             client_policies: Arc::new(client_policy_map),
             min_codex_client_versions: CodexClientMinVersions::default(),
         })
+    }
+
+    /// Compile a complete frozen contribution set against this exact provider
+    /// catalog and settings view. Failure leaves the caller's old snapshot intact.
+    pub fn with_model_aliases(
+        mut self,
+        aliases: Vec<super::ContributedModelAlias>,
+    ) -> Result<Self, RuntimeSnapshotCompileError> {
+        let mut compiled = BTreeMap::new();
+        for alias in aliases {
+            if compiled
+                .insert(alias.id.as_str().to_owned(), alias)
+                .is_some()
+            {
+                return Err(RuntimeSnapshotCompileError::InvalidExtensionModels);
+            }
+        }
+        self.model_aliases = Arc::new(compiled);
+        self.validate_model_aliases()?;
+        Ok(self)
+    }
+    fn model_alias(&self, model: &str) -> Option<&super::ContributedModelAlias> {
+        self.model_aliases.get(model)
+    }
+    fn validate_model_aliases(&self) -> Result<(), RuntimeSnapshotCompileError> {
+        for alias in self.model_aliases.values() {
+            if alias.owner.is_empty()
+                || !self.providers.contains(&alias.provider)
+                || self.values.model_mappings.contains_key(alias.id.as_str())
+                || self
+                    .values
+                    .model_mappings
+                    .contains_key(alias.target.as_str())
+                || self
+                    .values
+                    .model_mappings
+                    .values()
+                    .any(|target| target == alias.id.as_str())
+                || self.model_alias(alias.target.as_str()).is_some()
+                || self.provider_models.values().any(|models| {
+                    models
+                        .keys()
+                        .any(|model| model.as_str() == alias.id.as_str())
+                })
+                || !self
+                    .provider_models
+                    .get(&alias.provider)
+                    .is_some_and(|models| models.contains_key(&alias.target))
+            {
+                return Err(RuntimeSnapshotCompileError::InvalidExtensionModels);
+            }
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -665,6 +726,12 @@ impl RuntimeSnapshot {
                 .keys()
                 .filter_map(|model| PublicModelId::new(model.clone()).ok()),
         );
+        models.extend(
+            self.model_aliases
+                .values()
+                .filter(|alias| &alias.provider == provider)
+                .map(|alias| alias.id.clone()),
+        );
         models.into_iter().collect()
     }
 
@@ -692,6 +759,15 @@ impl RuntimeSnapshot {
             };
             if let Ok(public_model) = PublicModelId::new(alias.clone()) {
                 profiles.insert(public_model, presentation.clone());
+            }
+        }
+        for alias in self
+            .model_aliases
+            .values()
+            .filter(|alias| &alias.provider == provider)
+        {
+            if let Some(presentation) = presentations.get(&alias.target) {
+                profiles.insert(alias.id.clone(), presentation.clone());
             }
         }
         profiles
@@ -756,7 +832,11 @@ impl RuntimeSnapshot {
         public_model: &PublicModelId,
         provider: &ProviderKind,
     ) -> bool {
-        if !self.providers.contains(provider) {
+        if !self.providers.contains(provider)
+            || self
+                .model_alias(public_model.as_str())
+                .is_some_and(|alias| &alias.provider != provider)
+        {
             return false;
         }
         let upstream_model = self.mapped_model(public_model.as_str());
@@ -784,6 +864,12 @@ impl RuntimeSnapshot {
         public_model: &PublicModelId,
         scope: &FrozenAccountScope,
     ) -> bool {
+        if self
+            .model_alias(public_model.as_str())
+            .is_some_and(|alias| &alias.provider != provider)
+        {
+            return false;
+        }
         let upstream_model = self.mapped_model(public_model.as_str());
         match self
             .model_catalog_accounts
@@ -803,6 +889,9 @@ impl RuntimeSnapshot {
 
     #[must_use]
     pub fn mapped_model(&self, requested: &str) -> String {
+        if let Some(alias) = self.model_alias(requested) {
+            return alias.target.as_str().to_owned();
+        }
         let original = requested;
         let mut current = original.to_owned();
         let mut seen = BTreeSet::new();
@@ -853,6 +942,12 @@ impl RuntimeSnapshot {
             |provider| BTreeSet::from([provider.clone()]),
         );
         for provider in &providers {
+            if self
+                .model_alias(public_model.as_str())
+                .is_some_and(|alias| &alias.provider != provider)
+            {
+                continue;
+            }
             if !self.providers.contains(provider) {
                 continue;
             }
@@ -866,7 +961,9 @@ impl RuntimeSnapshot {
             }
             let requested_model = public_model.as_str();
             let mapped_model = self.mapped_model(requested_model);
-            let upstream_model = if self.values.model_mappings.contains_key(requested_model) {
+            let upstream_model = if self.values.model_mappings.contains_key(requested_model)
+                || self.model_alias(requested_model).is_some()
+            {
                 UpstreamModelId::new(mapped_model)
             } else {
                 UpstreamModelId::from_client_wire(mapped_model)

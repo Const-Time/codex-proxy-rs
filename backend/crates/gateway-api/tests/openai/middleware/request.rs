@@ -4,6 +4,185 @@ use axum::http::StatusCode;
 use futures::StreamExt;
 use gateway_admin::model::plugins::PluginMiddlewareMount;
 use gateway_core::metering::Decimal;
+
+#[tokio::test]
+async fn catalog_alias_is_listed_and_executes_through_json_and_sse_with_one_charge() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    for stream in [false, true] {
+        let f = Fixture::new(Mode::Catalog, false).await;
+        for endpoint in [
+            "/v1/models",
+            "/v1/models/plugin-model",
+            "/v1/models?client_version=0.155.0",
+        ] {
+            let response = f
+                .app
+                .clone()
+                .oneshot(
+                    Request::get(endpoint)
+                        .header("authorization", "Bearer sk_middleware")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+            let body = bytes(response).await;
+            assert!(
+                String::from_utf8_lossy(&body).contains("plugin-model"),
+                "{endpoint}: {}",
+                String::from_utf8_lossy(&body)
+            );
+            if endpoint.contains('?') {
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let alias = value["models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|model| model["slug"] == "plugin-model")
+                    .unwrap();
+                assert_eq!(alias["native_field"], json!({"effort":"high"}));
+            }
+        }
+        let response = f
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header("authorization", "Bearer sk_middleware")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model":"plugin-model","input":"original input","stream":stream})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(String::from_utf8_lossy(&bytes(response).await).contains("resp_original"));
+        f.settled().await;
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.effects.requests.lock().unwrap()[0].1, "model-b");
+        assert!(f.plugin.seen.lock().unwrap().is_empty());
+        f.manager.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn catalog_config_conflicts_and_revocation_cannot_deliver_an_old_alias() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let f = Fixture::new(Mode::Catalog, false).await;
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("authorization", "Bearer sk_middleware")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model":"plugin-model","input":"original input","stream":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    f.settled().await;
+    f.plugin.access.revoke();
+    assert!(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .is_err()
+    );
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/v1/models")
+                .header("authorization", "Bearer sk_middleware")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    f.manager.shutdown().await;
+    let f = Fixture::new(Mode::Catalog, false).await;
+    let base = f.snapshots.acquire().unwrap();
+    f.snapshots
+        .publish(
+            base.as_ref()
+                .clone()
+                .with_model_mappings(std::collections::BTreeMap::from([(
+                    "plugin-model".into(),
+                    "model-a".into(),
+                )])),
+        );
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/v1/models")
+                .header("authorization", "Bearer sk_middleware")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn catalog_revocation_interrupts_a_waiting_native_directory_query() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let f = Fixture::new(Mode::Catalog, false).await;
+    let (_sender, receiver) = tokio::sync::oneshot::channel();
+    *f.effects.catalog_gate.lock().unwrap() = Some(receiver);
+    let call = f.app.clone().oneshot(
+        Request::get("/v1/models?client_version=0.155.0")
+            .header("authorization", "Bearer sk_middleware")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    tokio::pin!(call);
+    tokio::select! {_=&mut call=>panic!("catalog should wait"),_=async {while f.effects.catalog_calls.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}}=>{}}
+    f.plugin.access.revoke();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), call)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn catalog_revoked_between_authentication_and_lookup_cannot_lose_its_guard() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let f = Fixture::new(Mode::Catalog, false).await;
+    *f.effects.revoke_catalog_before_lookup.lock().unwrap() = Some(f.plugin.access.clone());
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/v1/models?client_version=0.155.0")
+                .header("authorization", "Bearer sk_middleware")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(f.effects.catalog_calls.load(Ordering::SeqCst), 0);
+    f.manager.shutdown().await;
+}
 #[tokio::test]
 async fn consulted_policy_revocation_blocks_buffered_json_after_core_settlement() {
     for f in [

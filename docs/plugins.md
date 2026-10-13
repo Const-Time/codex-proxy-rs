@@ -24,13 +24,24 @@
 | 模型路由 | model_router v1 的 routing 阶段；按冻结 Key/分组选择公开模型及授权 Provider，最终能力与账号范围由 Core 校验 |
 | 账号调度 | scheduler v1 的 scheduling 阶段；首个匹配插件只从宿主合格候选选择账号，租约及资格检查保留在 Core/Provider |
 | 重试策略 | retry_policy v1 的 retry 阶段；可停止或继续宿主允许的恢复路径，整条策略链共享两秒等待预算 |
-| 未开放的能力 | middleware、upstream_adapter、model_catalog、observer、command_line、maintenance、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling 阶段的原生模型回调 |
+| 模型目录 | model_catalog v1；注册内置 Provider 的模型别名，继承真实目标的能力、账号范围和定价 |
+| 未开放的能力 | middleware、upstream_adapter、observer、command_line、maintenance、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling 阶段的原生模型回调 |
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
 中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层可以主动调用这些业务，其他阶段继续实施。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
 
 绑定与实例共用 revision 和配置 CAS。候选升级准备失败仍使用旧代；无法确认配置是否提交时阻止继续使用旧绑定，重新保存确认后恢复。恢复失败的必需中间件保留作用范围内的门禁，进程退出也不自动跳过。启停、绑定和版本变更撤销旧调用计划，包含 RPC 已结束但正文尚未交付的响应。
+
+## 模型目录
+
+`model_catalog` v1 在 registration 阶段调用 `model_catalog.register`，以二进制 JSON 返回上游 SDK 的 `ModelCatalogRegistration`。注册有 5 秒上限、64 KiB 正文上限和每实例 256 个别名上限；注册阶段不提供模型、业务服务或状态写入权限。
+
+别名只能直接指向 `openai` 或 `xai` 已知目录中的真实模型。ID 必须全局唯一，不能与原生模型、设置映射的键或目标重名；目标不能是其他别名或设置映射的键。候选启用、升级和重启恢复先通过 Core 校验，失败升级保留旧进程和旧配置。
+
+目录事实与中间件使用同一插件发布快照，不写入另一套模型配置。普通模型列表、Codex 目录、模型详情、Responses JSON/SSE/WS 和插件原生模型调用均使用这份目录；Codex 只改写别名标识，保留真实目标的完整原生字段。别名固定 Provider，不能扩大账号模型权限或凭空增加能力，费用仍由原 Core 根据真实调用结算一次。
+
+每次请求在原 Key 快照上重新校验别名，并保留请求设置覆盖和授权撤销。宿主后续配置若与已发布别名冲突，该目录不可用；不会静默把别名改指到另一模型。可修改冲突设置或从保留的管理入口停用插件恢复。进程退出、停用、换代和提交状态未确认都会撤销旧目录及其在途调用；恢复失败保留门禁，查询期间撤销也不能返回旧结果。
 
 ## HTTP 运行时桥接
 

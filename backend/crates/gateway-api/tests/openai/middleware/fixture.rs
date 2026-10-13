@@ -101,6 +101,7 @@ impl PluginStore for Store {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
+    Catalog,
     WebSocketRewrite,
     WebSocketDrop,
     HttpDispatchModel,
@@ -156,6 +157,9 @@ pub(crate) struct Plugin {
 struct Runtime(Arc<Plugin>);
 #[async_trait]
 impl PluginRuntime for Runtime {
+    fn contributes_model_catalog(&self, _: &PluginArtifact) -> AdminResult<bool> {
+        Ok(matches!(self.0.mode, Mode::Catalog))
+    }
     fn describe(&self, info: PluginArtifactInfo) -> AdminResult<PluginArtifactInfo> {
         Ok(info)
     }
@@ -180,6 +184,18 @@ impl PluginRuntime for Runtime {
 }
 #[async_trait]
 impl PluginProcess for Plugin {
+    fn model_aliases(&self) -> Vec<gateway_core::routing::ContributedModelAlias> {
+        if !matches!(self.mode, Mode::Catalog) {
+            return vec![];
+        }
+        use gateway_core::routing::*;
+        vec![ContributedModelAlias {
+            owner: "fixture".into(),
+            id: PublicModelId::new("plugin-model").unwrap(),
+            provider: ProviderKind::new("openai").unwrap(),
+            target: UpstreamModelId::new("model-b").unwrap(),
+        }]
+    }
     async fn service_middleware(
         &self,
         context: gateway_core::engine::middleware::service::Context,
@@ -576,6 +592,9 @@ impl PluginProcess for Plugin {
 }
 #[derive(Default)]
 pub(crate) struct Effects {
+    pub(crate) revoke_catalog_before_lookup: Mutex<Option<PluginAccess>>,
+    pub(crate) catalog_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(crate) catalog_calls: AtomicUsize,
     pub(crate) provider_failure: Mutex<Option<fn() -> ProviderError>>,
     retry: AtomicBool,
     pub(crate) active: AtomicUsize,
@@ -728,6 +747,37 @@ impl Provider for Effects {
         &self,
     ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
         Ok(vec![])
+    }
+    async fn query_client_model_catalog(
+        &self,
+        _: &gateway_core::routing::FrozenAccountScope,
+        protocol: &str,
+        _: &str,
+    ) -> Result<
+        Option<Vec<gateway_core::routing::ProviderModelDescriptor>>,
+        gateway_core::routing::ProviderCatalogUnavailable,
+    > {
+        self.catalog_calls.fetch_add(1, Ordering::SeqCst);
+        let gate = self.catalog_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
+        assert_eq!(protocol, "codex");
+        Ok(Some(
+            ["model-a", "model-b"]
+                .into_iter()
+                .map(|id| gateway_core::routing::ProviderModelDescriptor {
+                    model: gateway_core::routing::UpstreamModelId::new(id).unwrap(),
+                    payload: gateway_core::operation::RawJsonPayload::new(
+                        "codex",
+                        Bytes::from(
+                            json!({"slug":id,"native_field":{"effort":"high"}}).to_string(),
+                        ),
+                    )
+                    .unwrap(),
+                })
+                .collect(),
+        ))
     }
     async fn execute(
         &self,
@@ -917,6 +967,7 @@ impl Provider for Effects {
     }
 }
 pub(crate) struct Fixture {
+    pub(crate) snapshots: RuntimeSnapshotHandle,
     pub(crate) admin: crate::admin::AdminTestFixture,
     pub(crate) dispatcher: Arc<dyn gateway_core::engine::middleware::http::Dispatcher>,
     pub(crate) execution: Arc<dyn ExecutionService>,
@@ -991,7 +1042,12 @@ impl Fixture {
             http_seen: Mutex::new(vec![]),
             websocket_seen: Mutex::new(vec![]),
         });
-        let records = if !mounts.is_empty() || routing || scheduling || retry {
+        let records = if !mounts.is_empty()
+            || routing
+            || scheduling
+            || retry
+            || matches!(mode, Mode::Catalog)
+        {
             vec![PluginRecord {
                 retry_policy: retry.then_some(PluginRetryPolicyBinding {
                     order: 0,
@@ -1024,42 +1080,43 @@ impl Fixture {
         } else {
             vec![]
         };
-        let manager = Arc::new(PluginManager::new(
-            Arc::new(Store {
-                records: Mutex::new(records),
-            }),
-            Arc::new(Runtime(plugin.clone())),
+        let snapshots = RuntimeSnapshotHandle::new(snapshot_with_capabilities_and_accounts(
+            "sk_middleware",
+            "openai",
+            features
+                .iter()
+                .copied()
+                .chain([gateway_core::operation::Feature::NativeContinuation])
+                .fold(
+                    gateway_core::routing::ModelCapabilities::new(
+                        [gateway_core::operation::OperationKind::Generate].into(),
+                        Some(16000),
+                    ),
+                    |caps, feature| {
+                        caps.with_feature(feature, gateway_core::routing::SupportLevel::Native)
+                    },
+                ),
+            if retry {
+                &["acct_api_test", "acct_api_retry"]
+            } else {
+                &["acct_api_test"]
+            },
         ));
+        let manager = Arc::new(
+            PluginManager::new(
+                Arc::new(Store {
+                    records: Mutex::new(records),
+                }),
+                Arc::new(Runtime(plugin.clone())),
+            )
+            .with_model_catalog(Arc::new(snapshots.clone())),
+        );
         manager.restore().await.unwrap();
         let effects = Arc::new(Effects::default());
         effects.retry.store(retry, Ordering::SeqCst);
         let execution = Arc::new(
             DefaultExecutionService::new(
-                RuntimeSnapshotHandle::new(snapshot_with_capabilities_and_accounts(
-                    "sk_middleware",
-                    "openai",
-                    features
-                        .iter()
-                        .copied()
-                        .chain([gateway_core::operation::Feature::NativeContinuation])
-                        .fold(
-                            gateway_core::routing::ModelCapabilities::new(
-                                [gateway_core::operation::OperationKind::Generate].into(),
-                                Some(16000),
-                            ),
-                            |caps, feature| {
-                                caps.with_feature(
-                                    feature,
-                                    gateway_core::routing::SupportLevel::Native,
-                                )
-                            },
-                        ),
-                    if retry {
-                        &["acct_api_test", "acct_api_retry"]
-                    } else {
-                        &["acct_api_test"]
-                    },
-                )),
+                snapshots.clone(),
                 effects.clone(),
                 ProviderRegistry::new([effects.clone() as Arc<dyn Provider>]).unwrap(),
                 effects.clone(),
@@ -1093,6 +1150,7 @@ impl Fixture {
         let dispatcher = app.dispatcher();
         let app = app.router();
         Self {
+            snapshots,
             dispatcher,
             admin,
             execution,
@@ -1219,6 +1277,21 @@ struct PostStartExecution {
     effects: Arc<Effects>,
 }
 impl ExecutionService for PostStartExecution {
+    fn client_model_catalog<'a>(
+        &'a self,
+        client: &'a AuthenticatedClient,
+        protocol: &'a str,
+        version: &'a str,
+    ) -> BoxFuture<
+        'a,
+        Result<
+            Vec<gateway_core::routing::PublicModelDescriptor>,
+            gateway_core::routing::ProviderCatalogUnavailable,
+        >,
+    > {
+        self.inner.client_model_catalog(client, protocol, version)
+    }
+
     fn request_settings(&self) -> Option<gateway_core::routing::RequestSettings> {
         self.inner.request_settings()
     }
@@ -1232,6 +1305,17 @@ impl ExecutionService for PostStartExecution {
         &self,
         client: &AuthenticatedClient,
     ) -> Option<gateway_core::runtime::ClientAccessGuard> {
+        if client.bound_access().is_some()
+            && let Some(access) = self
+                .effects
+                .revoke_catalog_before_lookup
+                .lock()
+                .unwrap()
+                .take()
+        {
+            access.revoke();
+            return None;
+        }
         self.inner.client_access(client)
     }
     fn public_models(

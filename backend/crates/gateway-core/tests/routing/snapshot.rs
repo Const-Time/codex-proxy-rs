@@ -388,10 +388,18 @@ fn catalog_visibility_requires_a_source_account_in_the_current_scope() {
             .compile(),
         )
         .unwrap();
+        let snapshot = snapshot
+            .with_model_aliases(vec![gateway_core::routing::ContributedModelAlias {
+                owner: "catalog-plugin".into(),
+                id: PublicModelId::new("plugin-alias").unwrap(),
+                provider: ProviderKind::new("alpha").unwrap(),
+                target: UpstreamModelId::new("upstream-model").unwrap(),
+            }])
+            .unwrap();
         let scope = snapshot.client_policies().next().unwrap().account_scope();
         let listed = snapshot.public_models_for_scope(scope);
         assert_eq!(!listed.is_empty(), visible);
-        for name in ["alias", "upstream-model"] {
+        for name in ["alias", "upstream-model", "plugin-alias"] {
             assert_eq!(
                 snapshot.contains_public_model_for_scope(
                     &PublicModelId::from_client_wire(name).unwrap(),

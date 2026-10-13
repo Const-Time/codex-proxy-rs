@@ -203,6 +203,8 @@ OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足�
 Responses 编码时仅为缺失的顶层 `store` 补齐 `false`；显式提供的值、嵌套同名字段和其他未知
 字段保持原样。HTTP/SSE 与 WebSocket 共用此规则，Images 与独立 Search 不受影响。
 
+启用的 `model_catalog` 插件可向上述模型列表及详情贡献别名，Codex 目录保留真实目标字段，仅替换 `slug`。别名固定到声明的内置 Provider，Responses JSON/SSE/WS 与插件模型调用使用同一别名事实；原账号模型限制、倍率和结算继续生效。目录与设置冲突、目标不可用或插件代次被撤销时拒绝使用，不静默回退到其他 Provider。模型目录查询期间发生撤销也不会返回旧目录。
+
 管理员按账号刷新 OpenAI / xAI 模型目录时，会优先使用被指定账号自身的凭据，即使该账号已停用。
 此例外只服务于管理端目录查询与连接测试，不允许停用账号参与普通客户端调度或后台目录发现。
 

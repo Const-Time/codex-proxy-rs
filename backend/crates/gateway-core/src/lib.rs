@@ -89,6 +89,7 @@ impl CoreStorePorts {
 }
 
 pub struct CoreBundle {
+    model_catalog: Arc<dyn routing::ModelCatalogValidator>,
     execution: Arc<dyn ExecutionService>,
     snapshot_control: Arc<dyn SnapshotControl>,
     account_probe: Arc<dyn AccountProbe>,
@@ -97,6 +98,9 @@ pub struct CoreBundle {
 }
 
 impl CoreBundle {
+    pub fn model_catalog_validator(&self) -> Arc<dyn routing::ModelCatalogValidator> {
+        self.model_catalog.clone()
+    }
     #[must_use]
     pub fn execution_service(&self) -> Arc<dyn ExecutionService> {
         Arc::clone(&self.execution)
@@ -165,8 +169,10 @@ pub async fn initialize(
     let execution: Arc<dyn ExecutionService> = service.clone();
     let account_probe: Arc<dyn AccountProbe> = service;
     let snapshot_control: Arc<dyn SnapshotControl> = publisher;
+    let model_catalog = Arc::new(snapshots.clone());
     let health_probes: Vec<Arc<dyn HealthProbe>> = vec![Arc::new(snapshots)];
     Ok(CoreBundle {
+        model_catalog,
         execution,
         snapshot_control,
         account_probe,

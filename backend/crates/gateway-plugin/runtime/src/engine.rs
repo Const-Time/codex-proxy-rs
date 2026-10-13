@@ -184,6 +184,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
                 cap,
                 Capability::Management
                     | Capability::FrontendAuthentication
+                    | Capability::ModelCatalog
                     | Capability::ModelRouter
                     | Capability::Scheduler
                     | Capability::RetryPolicy
@@ -194,6 +195,11 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
 }
 #[async_trait]
 impl PluginRuntime for PluginEngine {
+    fn contributes_model_catalog(&self, artifact: &PluginArtifact) -> Result<bool, AdminError> {
+        let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
+            .map_err(|_| AdminError::invalid("插件清单无效"))?;
+        Ok(manifest.contributes.contains_key(&Capability::ModelCatalog))
+    }
     fn describe(&self, mut info: PluginArtifactInfo) -> Result<PluginArtifactInfo, AdminError> {
         let manifest: Manifest = serde_json::from_value(info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
@@ -409,6 +415,7 @@ impl PluginRuntime for PluginEngine {
         if !reply.payload.is_empty() || registration.contributes != manifest.contributes {
             return Err(AdminError::invalid("插件注册结果与清单不符"));
         }
+        let model_aliases = crate::catalog::register(&session, &record.id).await?;
         let authentication = session
             .capability_version(Capability::FrontendAuthentication)
             .is_some();
@@ -475,6 +482,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            model_aliases,
             models,
             middleware,
             authentication,
@@ -488,6 +496,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    model_aliases: Vec<gateway_core::routing::ContributedModelAlias>,
     models: Option<Arc<crate::models::Models>>,
     middleware: Arc<crate::middleware::MiddlewareCallbacks>,
     authentication: bool,
@@ -500,6 +509,9 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    fn model_aliases(&self) -> Vec<gateway_core::routing::ContributedModelAlias> {
+        self.model_aliases.clone()
+    }
     async fn service_middleware(
         &self,
         mut context: gateway_core::engine::middleware::service::Context,

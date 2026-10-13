@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 #[derive(Clone)]
 struct Entry {
+    catalog: bool,
     binding: Option<PluginMiddlewareBinding>,
     router: Option<PluginModelRouterBinding>,
     retry: Option<PluginRetryPolicyBinding>,
@@ -38,7 +39,9 @@ impl Publication {
         &mut self,
         record: &PluginRecord,
         process: Option<Arc<dyn PluginProcess>>,
+        catalog: bool,
     ) {
+        let catalog = catalog && record.enabled;
         let binding = record.middleware.as_ref().filter(|_| record.enabled);
         let router = record.model_router.as_ref().filter(|_| record.enabled);
         let retry = record.retry_policy.as_ref().filter(|_| record.enabled);
@@ -57,15 +60,22 @@ impl Publication {
             || router.is_some()
             || retry.is_some()
             || scheduler.is_some()
+            || catalog
         {
             self.epoch.revoke();
             self.epoch = PluginAccess::default();
             self.entries.remove(&record.id);
             self.blocked.remove(&record.id);
-            if binding.is_some() || router.is_some() || scheduler.is_some() || retry.is_some() {
+            if binding.is_some()
+                || router.is_some()
+                || scheduler.is_some()
+                || retry.is_some()
+                || catalog
+            {
                 self.entries.insert(
                     record.id.clone(),
                     Entry {
+                        catalog,
                         binding: binding.cloned(),
                         router: router.cloned(),
                         retry: retry.cloned(),
@@ -75,6 +85,59 @@ impl Publication {
                 );
             }
         }
+    }
+    pub(super) fn catalog_candidate(
+        &self,
+        id: &str,
+        process: Option<&Arc<dyn PluginProcess>>,
+        catalog: bool,
+    ) -> Result<Vec<gateway_core::routing::ContributedModelAlias>, AdminError> {
+        let mut aliases = Vec::new();
+        for (owner, entry) in &self.entries {
+            if owner != id
+                && entry.catalog
+                && let Some(process) = entry.process.as_ref()
+            {
+                // A failed restore has no registered facts. It still gates catalog()
+                // but must not prevent other instances from preparing; recovery
+                // validates that instance against all successfully registered facts.
+                aliases.extend(process.model_aliases());
+            }
+        }
+        if catalog {
+            let process = process.ok_or_else(|| AdminError::unavailable("插件模型目录暂不可用"))?;
+            let contributed = process.model_aliases();
+            if contributed.iter().any(|alias| alias.owner != id) {
+                return Err(AdminError::invalid("插件模型目录归属无效"));
+            }
+            aliases.extend(contributed);
+        }
+        Ok(aliases)
+    }
+
+    fn catalog(&self) -> Result<gateway_core::routing::ContributedModelCatalog, AdminError> {
+        if !self.blocked.is_empty() || self.epoch.is_revoked() {
+            return Err(AdminError::unavailable("插件目录发布状态未确认"));
+        }
+        let mut aliases = Vec::new();
+        let mut tokens = vec![self.epoch.cancellation()];
+        for entry in self.entries.values().filter(|entry| entry.catalog) {
+            let process = entry
+                .process
+                .as_ref()
+                .filter(|p| p.status() == "ready")
+                .ok_or_else(|| AdminError::unavailable("插件模型目录暂不可用"))?;
+            let access = process.access();
+            if access.is_revoked() {
+                return Err(AdminError::unavailable("插件模型目录已失效"));
+            }
+            tokens.push(access.cancellation());
+            aliases.extend(process.model_aliases());
+        }
+        Ok(gateway_core::routing::ContributedModelCatalog::new(
+            aliases,
+            CancellationToken::linked(tokens),
+        ))
     }
     pub(super) fn block(&mut self, id: &str) {
         self.epoch.revoke();
@@ -165,6 +228,11 @@ impl Publication {
 #[derive(Clone)]
 pub struct PluginMiddlewareRegistry(Publication, CancellationToken);
 impl PluginMiddlewareRegistry {
+    pub fn model_catalog(
+        &self,
+    ) -> Result<gateway_core::routing::ContributedModelCatalog, AdminError> {
+        self.0.catalog()
+    }
     pub fn freeze_service(
         &self,
         context: &gateway_core::engine::middleware::service::Context,

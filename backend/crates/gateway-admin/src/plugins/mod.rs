@@ -29,6 +29,7 @@ struct AuthenticationPublication {
     epoch: PluginAccess,
 }
 pub struct PluginManager {
+    model_catalog: Option<Arc<dyn gateway_core::routing::ModelCatalogValidator>>,
     middleware: RwLock<middleware::Publication>,
     authentication: RwLock<AuthenticationPublication>,
     store: Arc<dyn PluginStore>,
@@ -39,6 +40,7 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new(store: Arc<dyn PluginStore>, runtime: Arc<dyn PluginRuntime>) -> Self {
         Self {
+            model_catalog: None,
             middleware: RwLock::default(),
             authentication: RwLock::default(),
             store,
@@ -47,6 +49,35 @@ impl PluginManager {
             active: RwLock::new(BTreeMap::new()),
         }
     }
+    pub fn with_model_catalog(
+        mut self,
+        validator: Arc<dyn gateway_core::routing::ModelCatalogValidator>,
+    ) -> Self {
+        self.model_catalog = Some(validator);
+        self
+    }
+    fn validate_catalog_candidate(
+        &self,
+        record: &PluginRecord,
+        process: Option<&Arc<dyn PluginProcess>>,
+        catalog: bool,
+    ) -> Result<(), AdminError> {
+        if !record.enabled || !catalog {
+            return Ok(());
+        }
+        let validator = self
+            .model_catalog
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("模型目录尚未连接 Core"))?;
+        let aliases = self
+            .middleware
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .catalog_candidate(&record.id, process, catalog)?;
+        validator
+            .validate_model_aliases(aliases)
+            .map_err(|_| AdminError::invalid("插件模型目录与当前模型或映射冲突，或目标不可用"))
+    }
     /// An invalid plugin must not prevent the gateway or other instances from starting.
     pub async fn restore(&self) -> Result<(), AdminError> {
         let _guard = self.changes.lock().await;
@@ -54,16 +85,29 @@ impl PluginManager {
             if !record.enabled {
                 continue;
             }
+            let artifact = self.store.artifact(&record.artifact_sha256).await;
+            let catalog = artifact
+                .as_ref()
+                .ok()
+                .and_then(|artifact| self.runtime.contributes_model_catalog(artifact).ok())
+                .unwrap_or(true);
             let restored = async {
-                let artifact = self.store.artifact(&record.artifact_sha256).await?;
+                let artifact = artifact?;
                 self.runtime.validate(&record, &artifact, None).await?;
-                self.runtime.prepare(&record, artifact).await
+                let process = self.runtime.prepare(&record, artifact).await?;
+                if let Err(error) =
+                    self.validate_catalog_candidate(&record, Some(&process), catalog)
+                {
+                    process.stop().await;
+                    return Err(error);
+                }
+                Ok(process)
             }
             .await;
             self.middleware
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publish(&record, restored.as_ref().ok().cloned());
+                .publish(&record, restored.as_ref().ok().cloned(), catalog);
             if record.frontend_authentication.is_some() {
                 self.publish_authentication(&record, restored.as_ref().ok().cloned());
             }
@@ -372,11 +416,18 @@ impl PluginService for PluginManager {
         self.runtime
             .validate(&record, &artifact, old_artifact.as_ref())
             .await?;
+        let catalog = self.runtime.contributes_model_catalog(&artifact)?;
         let candidate = if record.enabled {
             Some(self.runtime.prepare(&record, artifact).await?)
         } else {
             None
         };
+        if let Err(error) = self.validate_catalog_candidate(&record, candidate.as_ref(), catalog) {
+            if let Some(candidate) = candidate {
+                candidate.stop().await;
+            }
+            return Err(error);
+        }
         if let Err(error) = self.store.save(&record, update.revision, actor).await {
             let persisted = self.store.list().await;
             let committed = persisted
@@ -388,6 +439,12 @@ impl PluginService for PluginManager {
                     .is_ok_and(|rows| rows.iter().find(|r| r.id == record.id) == previous);
                 if !unchanged {
                     if record.middleware.is_some()
+                        || catalog
+                        || old_artifact.as_ref().is_some_and(|artifact| {
+                            self.runtime
+                                .contributes_model_catalog(artifact)
+                                .unwrap_or(true)
+                        })
                         || previous.is_some_and(|r| r.middleware.is_some())
                         || record.retry_policy.is_some()
                         || previous.is_some_and(|r| r.retry_policy.is_some())
@@ -454,7 +511,7 @@ impl PluginService for PluginManager {
             self.middleware
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publish(&record, auth_candidate.clone());
+                .publish(&record, auth_candidate.clone(), catalog);
             self.publish_authentication(&record, auth_candidate);
             old
         };

@@ -56,7 +56,7 @@ impl OpenAiService {
                 .authenticate(authorization.to_owned())
                 .await
                 .map_err(|_| ClientApiKeyAuthError::RuntimeUnavailable)?;
-            return match decision {
+            let client = match decision {
                 PluginAuthenticationDecision::Authenticated { key, access } => self
                     .execution
                     .authenticate_bound_key(&key, access.cancellation())
@@ -69,7 +69,8 @@ impl OpenAiService {
                     )
                     .map_err(map_authentication_error),
                 PluginAuthenticationDecision::Rejected => Err(ClientApiKeyAuthError::InvalidKey),
-            };
+            }?;
+            return self.bind_model_catalog(client);
         }
         self.authenticate(builtin.ok_or(ClientApiKeyAuthError::InvalidKeyFormat)?)
     }
@@ -77,9 +78,27 @@ impl OpenAiService {
         &self,
         plaintext: &str,
     ) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
-        self.execution
+        let client = self
+            .execution
             .authenticate(plaintext)
-            .map_err(map_authentication_error)
+            .map_err(map_authentication_error)?;
+        self.bind_model_catalog(client)
+    }
+
+    fn bind_model_catalog(
+        &self,
+        client: AuthenticatedClient,
+    ) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
+        match self.middleware_registry() {
+            Some(registry) => client
+                .with_model_catalog(
+                    registry
+                        .model_catalog()
+                        .map_err(|_| ClientApiKeyAuthError::RuntimeUnavailable)?,
+                )
+                .map_err(map_authentication_error),
+            None => Ok(client),
+        }
     }
 
     pub(crate) fn client_access(
@@ -101,9 +120,18 @@ impl OpenAiService {
         client: &AuthenticatedClient,
         client_version: &str,
     ) -> Result<Vec<PublicModelDescriptor>, ProviderCatalogUnavailable> {
-        self.execution
-            .client_model_catalog(client, "codex", client_version)
-            .await
+        let access = self.client_access(client).or_else(|| client.bound_access());
+        let cancellation = access
+            .as_ref()
+            .map(|access| access.cancellation())
+            .unwrap_or_default();
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(ProviderCatalogUnavailable),
+            result = self.execution.client_model_catalog(client, "codex", client_version) => {
+                if cancellation.is_cancelled() { Err(ProviderCatalogUnavailable) } else { result }
+            }
+        }
     }
 
     pub(crate) fn contains_public_model(

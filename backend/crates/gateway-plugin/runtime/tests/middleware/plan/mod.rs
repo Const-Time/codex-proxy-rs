@@ -14,6 +14,9 @@ use gateway_plugin_runtime::PluginEngine;
 pub(crate) struct KernelRuntime(pub(crate) PluginEngine);
 #[async_trait]
 impl PluginRuntime for KernelRuntime {
+    fn contributes_model_catalog(&self, artifact: &PluginArtifact) -> Result<bool, AdminError> {
+        self.0.contributes_model_catalog(artifact)
+    }
     fn describe(&self, info: PluginArtifactInfo) -> Result<PluginArtifactInfo, AdminError> {
         self.0.describe(info)
     }

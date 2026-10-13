@@ -56,6 +56,11 @@ pub(super) fn bind(
     registry: PluginMiddlewareRegistry,
     context: MiddlewareContext,
 ) -> Result<RootPlan, MiddlewareError> {
+    let prepared = prepared.with_model_catalog(
+        registry
+            .model_catalog()
+            .map_err(|_| MiddlewareError::Fault)?,
+    )?;
     let registry = Arc::new(registry);
     let attempt_context = MiddlewareContext {
         mount: MiddlewareMount::Attempt,

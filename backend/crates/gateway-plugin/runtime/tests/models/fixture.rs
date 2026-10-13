@@ -779,6 +779,7 @@ impl Fixture {
                 Arc::new(engine)
             };
             PluginManager::new(store.clone(), runtime)
+                .with_model_catalog(Arc::new(snapshot.clone()))
         });
         let artifact = manager
             .upload(archive("1.0.0", middleware), &actor())

@@ -17,6 +17,7 @@ use gateway_core::routing::{
     UpstreamModelId,
 };
 
+mod model_aliases;
 mod request_settings;
 mod snapshot;
 

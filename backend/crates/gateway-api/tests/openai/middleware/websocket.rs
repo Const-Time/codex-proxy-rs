@@ -75,6 +75,23 @@ async fn released(f: &Fixture) {
     .unwrap();
 }
 #[tokio::test]
+async fn catalog_alias_websocket_uses_the_target_and_original_charge() {
+    let f = Fixture::new(Mode::Catalog, false).await;
+    let (_server, mut socket) = connect(&f).await;
+    let mut message = create();
+    message["model"] = json!("plugin-model");
+    send(&mut socket, message).await;
+    for kind in ["response.created", "response.completed"] {
+        let value = event(&mut socket).await;
+        assert_eq!(value["type"], kind, "{value}");
+    }
+    f.settled().await;
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.effects.requests.lock().unwrap()[0].1, "model-b");
+    assert!(f.plugin.seen.lock().unwrap().is_empty());
+    f.manager.shutdown().await;
+}
+#[tokio::test]
 async fn model_routing_runs_for_websocket_without_request_middleware() {
     let f = Fixture::with_router().await;
     let (_server, mut socket) = connect(&f).await;
