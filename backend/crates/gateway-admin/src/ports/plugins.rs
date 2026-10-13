@@ -34,6 +34,13 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    fn upstream_adapter(
+        &self,
+        _id: &str,
+    ) -> Option<Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapter>> {
+        None
+    }
+
     fn upstream_adapters(&self) -> Vec<PluginUpstreamAdapterDeclaration> {
         Vec::new()
     }

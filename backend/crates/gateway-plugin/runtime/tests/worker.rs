@@ -228,6 +228,8 @@ mod worker_models {
 
 struct Worker {
     adapter_mode: String,
+    adapter_url: String,
+    adapter_transport: String,
     catalog_mode: String,
     contributes: serde_json::Value,
     fail: bool,
@@ -238,11 +240,12 @@ impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "upstream_adapter.execute" => upstream_execution(call).await,
             "upstream_adapter.register" => {
                 assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Registration);
                 assert_eq!(call.params, json!({}));
                 assert!(call.payload.is_empty());
-                let mut declaration = json!({"id":"adapter","provider":"openai","base_url":"https://example.test/base/","paths":[{"path":"responses","purpose":"inference"},{"path":"audit","purpose":"auxiliary"}],"authentication_kinds":["oauth"],"transport":"http_sse","protocol":"openai","models":["public-model"]});
+                let mut declaration = json!({"id":"adapter","provider":"openai","base_url":self.adapter_url,"paths":[{"path":"responses","purpose":"inference"},{"path":"audit","purpose":"auxiliary"}],"authentication_kinds":["oauth"],"transport":self.adapter_transport,"protocol":"openai","models":["public-model"]});
                 match self.adapter_mode.as_str() {
                     "id" => declaration["id"] = json!("invalid id"),
                     "provider" => declaration["provider"] = json!("foreign"),
@@ -493,6 +496,14 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        adapter_url: session.handshake().configuration["adapter_url"]
+            .as_str()
+            .unwrap_or("https://example.test/base/")
+            .into(),
+        adapter_transport: session.handshake().configuration["adapter_transport"]
+            .as_str()
+            .unwrap_or("http_sse")
+            .into(),
         adapter_mode: session.handshake().configuration["adapter_mode"]
             .as_str()
             .unwrap_or("valid")
@@ -1411,4 +1422,179 @@ async fn typed_service<O: gateway_plugin_sdk::call::services::Operation>(
         Ok(value) => json!({"result":value}),
         Err(error) => json!({"error":error}),
     }
+}
+
+async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> {
+    use gateway_plugin_sdk::{
+        call::{
+            model::{CanonicalEvent, ExecutionEvent, FinishReason, Usage, WireEvent, WirePayload},
+            upstream_adapter::*,
+        },
+        client::{ResponseStream, UpstreamWebSocketUpgrade},
+    };
+    fn event(facts: Vec<CanonicalEvent>, wire: Option<WireEvent>) -> ExecutionEvent {
+        ExecutionEvent {
+            facts,
+            wire,
+            host: None,
+        }
+    }
+    let (metadata, body) = UpstreamAdapterRequest::decode(&call.payload).unwrap();
+    assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Upstream);
+    assert_eq!(metadata.account_id, "acct_fixture");
+    assert_eq!(metadata.credential_revision, 3);
+    assert_eq!(metadata.upstream_model, "native-model");
+    assert!(!String::from_utf8_lossy(&call.payload).contains("fixture-provider-secret"));
+    let input: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mode = input["behavior"].as_str().unwrap_or("http");
+    let callback_error = |_| PluginFault::new(ErrorCode::Fault, "managed callback failed");
+    if mode.starts_with("websocket") {
+        let connection = match call
+            .host
+            .upstream_websocket(UpstreamWebSocketRequest {
+                path: "responses".into(),
+                headers: vec![],
+                query: vec![],
+            })
+            .await?
+        {
+            UpstreamWebSocketUpgrade::Connected { connection, .. } => connection,
+            UpstreamWebSocketUpgrade::Rejected { .. } => panic!("expected upgrade"),
+        };
+        connection
+            .send(WebSocketMessageKind::Text, b"fixture-ping".to_vec())
+            .await?;
+        if mode == "websocket-read-cancel" {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), connection.read())
+                    .await
+                    .is_err()
+            );
+            connection
+                .send(WebSocketMessageKind::Text, b"fixture-resume".to_vec())
+                .await?;
+        }
+        assert_eq!(connection.read().await?.unwrap().1, b"fixture-pong");
+    } else if mode != "synthetic" && mode != "invalid" {
+        let method = if mode == "http-stream" {
+            "host.upstream.http.do_stream"
+        } else {
+            "host.upstream.http.do"
+        };
+        let reply=call.host.call(method,json!({"method":"POST","path":if mode=="auxiliary" {"audit"}else{"responses"},"headers":[["x-fixture","adapter"]],"query":[]}),body).await.map_err(callback_error)?;
+        assert_eq!(reply.result["status"], 200);
+        if mode == "http-stream" {
+            let stream = reply.result["stream"].as_str().unwrap();
+            let mut total = Vec::new();
+            loop {
+                let reply = call
+                    .host
+                    .call(
+                        "host.upstream.http.stream_read",
+                        json!({"stream":stream,"maximum_bytes":3}),
+                        vec![],
+                    )
+                    .await
+                    .map_err(callback_error)?;
+                assert!(reply.payload.len() <= 3);
+                total.extend(reply.payload);
+                if reply.result["eof"] == true {
+                    break;
+                }
+            }
+            assert_eq!(total, b"fixture-response");
+        } else {
+            assert_eq!(reply.payload, b"fixture-response");
+        }
+    }
+    if mode == "wait" {
+        std::future::pending::<()>().await;
+    }
+    if mode == "failure" || mode == "auxiliary" {
+        let mut event = UpstreamAdapterEvent::new(event(vec![], None));
+        event.failure = Some(UpstreamFailure {
+            kind: UpstreamFailureKind::RateLimited,
+            status: Some(429),
+            retry_after_ms: Some(1200),
+            message: "fixture rejection".into(),
+            code: Some("fixture_limit".into()),
+        });
+        return Ok(CallReply::stream(
+            json!({}),
+            vec![],
+            ResponseStream::from_chunks(vec![event.encode().unwrap()]),
+        ));
+    }
+    let started = UpstreamAdapterEvent::new(event(
+        vec![CanonicalEvent::Started {
+            id: "adapter-response".into(),
+            model: Some("native-model".into()),
+        }],
+        None,
+    ))
+    .encode()
+    .unwrap();
+    let mut completed = UpstreamAdapterEvent::new(event(
+        vec![
+            CanonicalEvent::Usage {
+                usage: Usage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(2),
+                    ..Default::default()
+                },
+            },
+            CanonicalEvent::Completed {
+                id: if mode == "invalid" {
+                    "wrong-id"
+                } else {
+                    "adapter-response"
+                }
+                .into(),
+                model: Some("native-model".into()),
+                reason: FinishReason::Stop,
+            },
+        ],
+        Some(WireEvent {
+            protocol: "openai".into(),
+            payload: WirePayload::RawJson {
+                body: br#"{"id":"adapter-response","status":"completed"}"#.to_vec(),
+            },
+        }),
+    ));
+    completed.service_tier = Some("priority".into());
+    if mode == "continuation" || mode.starts_with("websocket") {
+        if let Some(previous) = metadata.continuation {
+            assert_eq!(previous.state["round"], 1);
+        }
+        completed.continuation = Some(UpstreamContinuation {
+            scope: if mode.starts_with("websocket") {
+                ContinuationScope::ConnectionLocal
+            } else {
+                ContinuationScope::Persisted
+            },
+            upstream_response_id: "adapter-response".into(),
+            state: json!({"round":1}).as_object().unwrap().clone(),
+        });
+    }
+    let mut chunks = vec![started, completed.encode().unwrap()];
+    if mode == "tail" {
+        chunks.push(vec![0]);
+    }
+    if mode == "tail-fault" {
+        let (sender, stream) = ResponseStream::channel(std::num::NonZeroUsize::new(1).unwrap());
+        tokio::spawn(async move {
+            for chunk in chunks {
+                sender.send(chunk).await.unwrap();
+            }
+            let mut fault = PluginFault::new(ErrorCode::Fault, "private fixture tail fault");
+            fault.send_state = gateway_plugin_sdk::SendState::NotSent;
+            sender.fail(fault).await.unwrap();
+        });
+        return Ok(CallReply::stream(json!({}), vec![], stream));
+    }
+    Ok(CallReply::stream(
+        json!({}),
+        vec![],
+        ResponseStream::from_chunks(chunks),
+    ))
 }

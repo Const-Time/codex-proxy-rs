@@ -128,7 +128,7 @@ pub(crate) async fn invoke(
     }
     result
 }
-fn headers(
+pub(crate) fn headers(
     context: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Vec<PolicyHeader>, ModelRoutingFault> {
     let Some(value) = context.get("opaque_request_headers") else {
