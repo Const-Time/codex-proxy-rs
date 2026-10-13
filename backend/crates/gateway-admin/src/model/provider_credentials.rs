@@ -188,8 +188,14 @@ pub struct CredentialImportCommit {
 /// OAuth pending owner 的中立身份；不编码具体 Provider 的 Redis key 或 JSON。
 #[derive(Clone, PartialEq, Eq)]
 pub enum AuthorizationOwner {
-    AdminSession { admin_user_id: String },
+    AdminSession {
+        admin_user_id: String,
+    },
     AdminApiKey,
+    Plugin {
+        instance_id: String,
+        revision: std::num::NonZeroU64,
+    },
     System,
 }
 
@@ -214,6 +220,13 @@ impl AuthorizationOwnerBinding {
                 admin_user_id: admin_user_id.clone(),
             },
             MutationActor::AdminApiKey => AuthorizationOwner::AdminApiKey,
+            MutationActor::Plugin {
+                instance_id,
+                revision,
+            } => AuthorizationOwner::Plugin {
+                instance_id: instance_id.clone(),
+                revision: *revision,
+            },
             MutationActor::System => AuthorizationOwner::System,
         };
         Self {
@@ -336,6 +349,12 @@ impl PendingAuthorizationMutation {
                 serde_json::json!({"kind": "admin_session", "admin_user_id": admin_user_id})
             }
             AuthorizationOwner::AdminApiKey => serde_json::json!({"kind": "admin_api_key"}),
+            AuthorizationOwner::Plugin {
+                instance_id,
+                revision,
+            } => {
+                serde_json::json!({"kind": "plugin", "instance_id": instance_id, "revision": revision})
+            }
             AuthorizationOwner::System => serde_json::json!({"kind": "system"}),
         };
         let mut document = Map::from_iter([
@@ -387,6 +406,18 @@ impl PendingAuthorizationMutation {
                 AuthorizationOwner::AdminSession { admin_user_id }
             }
             StoredAuthorizationOwnerV1::AdminApiKey => AuthorizationOwner::AdminApiKey,
+            StoredAuthorizationOwnerV1::Plugin {
+                instance_id,
+                revision,
+            } => {
+                if !super::auth::valid_plugin_instance(&instance_id) {
+                    return Err(invalid());
+                }
+                AuthorizationOwner::Plugin {
+                    instance_id,
+                    revision,
+                }
+            }
             StoredAuthorizationOwnerV1::System => AuthorizationOwner::System,
         };
         let proxy = document
@@ -431,8 +462,14 @@ enum StoredAuthorizationTargetV1 {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StoredAuthorizationOwnerV1 {
-    AdminSession { admin_user_id: String },
+    AdminSession {
+        admin_user_id: String,
+    },
     AdminApiKey,
+    Plugin {
+        instance_id: String,
+        revision: std::num::NonZeroU64,
+    },
     System,
 }
 

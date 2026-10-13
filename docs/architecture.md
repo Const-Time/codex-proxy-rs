@@ -515,6 +515,8 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 
 upstream 的嵌套模型、内部 HTTP 和私有状态回调沿同一宿主在途 scope 授权。Runtime 将原 Core 父调用绑定到既有 Models 回调 owner，不通过插件的 wire ID 创建权限；父子调用保留冻结策略、调用图、取消及原结算入口。子模型不复用父调用占用的账号，发起插件祖先从子调用的适配计划中排除。内部 HTTP 使用原父请求冻结的 dispatcher，产生效果后原 Core 禁止父请求透明重放；未读子流不触发 Provider。RPC 终态或撤销关闭关联资源。本阶段不构造管理操作者；主动 service 及其余回调仍待接入。
 
+Admin 的插件服务身份由 Runtime 验证后的实例记录及原 PluginAccess 代次租约签发，不从 RPC JSON 构造。公开服务 dispatcher 将其绑定为独立 Plugin 审计操作者，实例不符或撤销后拒绝调用；原 SettingsService、事务、配置发布与取消后的写入收尾继续负责实际业务。审计使用既有 admin_audit_events，追加 0039 扩展 actor kind，历史事件不回填。插件身份不转换为用户会话或共享额度管理权限；Provider pending owner 保留实例和 revision，不能跨代完成授权。Runtime 全阶段的主动 service 绑定继续接入。
+
 Runtime 的通用外部 HTTP 与上游专用 HTTP 使用同一个受管网络资源 owner，复用 Host 出站端口、原调用期限和取消链。前者保留插件显式请求头；只有上游专用入口装饰选定账号凭据。upstream 的通用请求继承账号代理并共用发送水位，辅助发送及不确定发送沿原调用图禁止透明重放。模型服务未配置时仍可使用通用 HTTP；管理、middleware 和策略入口由各自原 owner 绑定真实调用图与撤销源，重试输入只增加宿主调用图事实，不增加模型或管理权限。RPC 终态与提前退出关闭同一套正文资源，句柄不能跨 scope 使用。
 
 插件私有状态与用户共享账本相互独立。当前开放管理员管理能力、私有状态、只读事实、显式共享额度管理和经 Core 执行的页面推理。支持矩阵、可信进程边界和恢复操作见 [插件文档](plugins.md)。

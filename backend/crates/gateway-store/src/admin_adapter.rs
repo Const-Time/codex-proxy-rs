@@ -491,6 +491,9 @@ impl AuthStore for UserAuthStore {
             gateway_admin::model::auth::AuditActorKind::AdminApiKey => {
                 postgres::AdminAuditActorKind::AdminApiKey
             }
+            gateway_admin::model::auth::AuditActorKind::Plugin => {
+                postgres::AdminAuditActorKind::Plugin
+            }
             gateway_admin::model::auth::AuditActorKind::System => {
                 postgres::AdminAuditActorKind::System
             }

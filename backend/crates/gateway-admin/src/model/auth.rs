@@ -10,6 +10,20 @@ pub fn admin_session_actor_ref(admin_user_id: &str) -> String {
     format!("admin:{admin_user_id}")
 }
 
+/// Stable audit identity for a host-bound plugin generation.
+#[must_use]
+pub fn plugin_actor_ref(instance_id: &str, revision: std::num::NonZeroU64) -> String {
+    format!("plugin:{instance_id}@{revision}")
+}
+
+pub(crate) fn valid_plugin_instance(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+}
+
 /// 已认证的管理主体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminPrincipal {
@@ -86,6 +100,7 @@ pub struct AdminSession {
 pub enum AuditActorKind {
     AdminSession,
     AdminApiKey,
+    Plugin,
     System,
     Anonymous,
 }

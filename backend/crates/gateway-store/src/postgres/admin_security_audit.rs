@@ -12,6 +12,7 @@ const ENTITY: &str = "admin audit event";
 pub enum AdminAuditActorKind {
     AdminSession,
     AdminApiKey,
+    Plugin,
     System,
     Anonymous,
 }
@@ -22,6 +23,7 @@ impl AdminAuditActorKind {
         match self {
             Self::AdminSession => "admin_session",
             Self::AdminApiKey => "admin_api_key",
+            Self::Plugin => "plugin",
             Self::System => "system",
             Self::Anonymous => "anonymous",
         }
@@ -47,6 +49,25 @@ impl AdminAuditEvent {
     pub fn validate(&self) -> StoreResult<()> {
         require_nonempty(ENTITY, "id", &self.id)?;
         require_nonempty(ENTITY, "actor_ref", &self.actor_ref)?;
+        if self.actor_kind == AdminAuditActorKind::Plugin {
+            let valid = self
+                .actor_ref
+                .strip_prefix("plugin:")
+                .and_then(|value| value.rsplit_once('@'))
+                .is_some_and(|(id, revision)| {
+                    !id.is_empty()
+                        && id.len() <= 256
+                        && id
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                        && revision.parse::<std::num::NonZeroU64>().is_ok()
+                        && revision.bytes().all(|c| c.is_ascii_digit())
+                        && !revision.starts_with('0')
+                });
+            if self.actor_admin_user_id.is_some() || !valid {
+                return Err(invalid("plugin audit identity is invalid"));
+            }
+        }
         require_nonempty(ENTITY, "action", &self.action)?;
         require_nonempty(ENTITY, "entity_kind", &self.entity_kind)?;
         require_nonempty(ENTITY, "entity_ref", &self.entity_ref)?;

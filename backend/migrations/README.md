@@ -79,3 +79,5 @@ export CPR_TEST_REDIS_URL='redis://:<password>@127.0.0.1:6379'
 0035 在 plugin_instances 追加 model_router 绑定，保存策略顺序、冻结匹配范围及故障处理，与实例共用 revision 和恢复流程；不新增路由状态机或账本。
 
 0038 在 plugin_instances 追加 upstream_adapter 绑定，保存宿主的 Key/分组作用范围；沿用实例 revision、审计和完整备份恢复，不新增账号、权限或费用账本。
+
+0039 为原 admin_audit_events 追加 plugin 操作者类型，记录宿主签发的实例与 revision，约束身份格式和非管理员归属；旧审计事件、用户权限与账本均不改写。冻结的 0001–0038 保持原始字节不变。
