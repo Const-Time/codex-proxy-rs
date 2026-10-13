@@ -185,6 +185,8 @@ Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 ca
 - OpenAI 是透明边界。Responses 请求保留未知字段和字段顺序；SSE、WebSocket、Images 与 standalone
   Search 的业务正文按原始字节转发，原生续写额度恢复遵循下述 continuation 例外。
   canonical facts 从同一数据旁路提取，用于路由、恢复判断、观测和计费。
+  Core 的 Provider 流观测同时推进带 wire 和纯 canonical 帧的序列事实，避免混合流漏记开始或完成；
+  纯 canonical 帧仍验证顺序，带 wire 帧不会因旁路事实的序列错误被拒绝。
   Responses 在现有 `transport/request.rs` 正文编码边界为缺失的顶层 `store` 补齐 `false`，
   不覆盖显式值或嵌套业务字段；HTTP/SSE 与 WebSocket 共用该边界。
 - API 的客户端事件适配将 SSE 上游 `error` 和 WS 客户端无法消费的裸错误转为 `response.failed`，

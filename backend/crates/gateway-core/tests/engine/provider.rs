@@ -200,6 +200,74 @@ fn provider_stream_should_not_sequence_gate_canonical_observation_attached_to_wi
 }
 
 #[test]
+fn provider_stream_should_track_started_and_completed_across_mixed_wire_and_canonical_frames() {
+    for wire_started in [false, true] {
+        let metadata = ProviderCallMetadata::new(
+            ProviderKind::new("openai").unwrap(),
+            UpstreamModelId::new("gpt-5").unwrap(),
+            ProviderAccountId::new("acct_mixed").unwrap(),
+            UpstreamTransport::new("http_sse").unwrap(),
+        );
+        let meta = ResponseMeta::new("resp_mixed", "gpt-5");
+        let wire = ProtocolWireEvent::json("openai", None, json!({"id":"resp_mixed"})).unwrap();
+        let started = GatewayEvent::Started(meta.clone());
+        let completed = GatewayEvent::Completed(meta);
+        let frames = if wire_started {
+            vec![
+                ProviderEvent::canonical_with_wire(vec![started], wire),
+                ProviderEvent::canonical(completed),
+            ]
+        } else {
+            vec![
+                ProviderEvent::canonical(started),
+                ProviderEvent::canonical_with_wire(vec![completed], wire),
+            ]
+        };
+        let mut stream =
+            ProviderStream::new(metadata, stream::iter(frames.into_iter().map(Ok)), ());
+        futures::executor::block_on(async {
+            assert!(stream.next().await.unwrap().is_ok());
+            assert!(stream.next().await.unwrap().is_ok());
+            assert!(
+                stream.next().await.is_none(),
+                "valid mixed sequence must not invent a terminal failure"
+            );
+        });
+    }
+}
+
+#[test]
+fn provider_stream_should_still_reject_incomplete_mixed_canonical_sequences() {
+    let metadata = ProviderCallMetadata::new(
+        ProviderKind::new("openai").unwrap(),
+        UpstreamModelId::new("gpt-5").unwrap(),
+        ProviderAccountId::new("acct_mixed_incomplete").unwrap(),
+        UpstreamTransport::new("http_sse").unwrap(),
+    );
+    let wire = ProtocolWireEvent::json("openai", None, json!({"id":"resp_incomplete"})).unwrap();
+    let frames = [
+        ProviderEvent::canonical_with_wire(
+            vec![GatewayEvent::Started(ResponseMeta::new(
+                "resp_incomplete",
+                "gpt-5",
+            ))],
+            wire,
+        ),
+        ProviderEvent::canonical(GatewayEvent::Usage(gateway_core::metering::Usage::default())),
+    ];
+    let mut stream = ProviderStream::new(metadata, stream::iter(frames.into_iter().map(Ok)), ());
+    futures::executor::block_on(async {
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(stream.next().await.unwrap().is_ok());
+        assert_eq!(
+            stream.next().await.unwrap().unwrap_err().kind(),
+            ProviderErrorKind::Protocol
+        );
+        assert!(stream.next().await.is_none());
+    });
+}
+
+#[test]
 fn provider_stream_should_report_confirmed_sent_failure_but_ignore_unconfirmed_failure() {
     let feedback = Arc::new(AccountFeedbackStats::default());
     let provider = ProviderKind::new("xai").expect("valid provider");

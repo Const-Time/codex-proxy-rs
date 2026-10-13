@@ -178,10 +178,10 @@ pub(super) fn invocation(
         account,
     }
 }
-struct Server {
-    url: String,
-    requests: Arc<Mutex<Vec<String>>>,
-    entered: Arc<tokio::sync::Notify>,
+pub(super) struct Server {
+    pub(super) url: String,
+    pub(super) requests: Arc<Mutex<Vec<String>>>,
+    pub(super) entered: Arc<tokio::sync::Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Server {
@@ -190,7 +190,7 @@ impl Drop for Server {
     }
 }
 impl Server {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(vec![]));
