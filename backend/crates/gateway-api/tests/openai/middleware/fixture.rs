@@ -90,6 +90,8 @@ impl PluginStore for Store {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
+    WebSocketRewrite,
+    WebSocketDrop,
     HttpDispatchModel,
     HttpDispatchStream,
     HttpDispatchUnauthorized,
@@ -122,6 +124,7 @@ pub(crate) enum Mode {
     ZeroTimeout,
 }
 pub(crate) struct Plugin {
+    pub(crate) websocket_seen: Mutex<Vec<gateway_core::engine::middleware::websocket::Direction>>,
     pub(crate) access: PluginAccess,
     pub(crate) mode: Mode,
     pub(crate) seen: Mutex<Vec<MiddlewareContext>>,
@@ -158,6 +161,51 @@ impl PluginRuntime for Runtime {
 }
 #[async_trait]
 impl PluginProcess for Plugin {
+    async fn websocket_middleware(
+        &self,
+        context: gateway_core::engine::middleware::websocket::Context,
+        mut message: gateway_core::engine::middleware::websocket::Message,
+        next: gateway_core::engine::middleware::websocket::Next,
+    ) -> Result<Option<gateway_core::engine::middleware::websocket::Message>, MiddlewareError> {
+        use gateway_core::engine::middleware::websocket::{Direction, Kind, Message};
+        self.websocket_seen.lock().unwrap().push(context.direction);
+        if matches!(self.mode, Mode::WaitBeforeNext) {
+            return futures::future::pending().await;
+        }
+        if matches!(self.mode, Mode::WebSocketDrop) && message.payload.as_ref() == b"drop" {
+            return Ok(None);
+        }
+        if matches!(self.mode, Mode::HttpUpgrade) && message.kind == Kind::Binary {
+            let mut payload = message.payload.to_vec();
+            payload.push(if context.direction == Direction::Incoming {
+                b'i'
+            } else {
+                b'o'
+            });
+            message.payload = payload.into();
+        }
+        if matches!(self.mode, Mode::WebSocketRewrite) {
+            if context.direction == Direction::Incoming && message.kind == Kind::Binary {
+                context
+                    .sender
+                    .send(Message {
+                        kind: Kind::Text,
+                        payload: Bytes::from_static(br#"{"type":"plugin.notice"}"#),
+                    })
+                    .await?;
+                message.kind = Kind::Text;
+                message.payload = Bytes::from_static(
+                    br#"{"type":"response.create","model":"model-a","input":"original input"}"#,
+                );
+            } else if context.direction == Direction::Outgoing && message.kind == Kind::Text {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&message.payload).unwrap();
+                value["raw_plugin"] = json!(true);
+                message.payload = Bytes::from(value.to_string());
+            }
+        }
+        next.run(message).await
+    }
     async fn http_middleware(
         &self,
         context: gateway_core::engine::middleware::http::Context,
@@ -792,6 +840,7 @@ impl Fixture {
             scheduling_calls: AtomicUsize::new(0),
             retry_calls: AtomicUsize::new(0),
             http_seen: Mutex::new(vec![]),
+            websocket_seen: Mutex::new(vec![]),
         });
         let records = if !mounts.is_empty() || routing || scheduling || retry {
             vec![PluginRecord {

@@ -325,6 +325,7 @@ impl PluginHandler for Worker {
                 Ok(CallReply::unary(decision,vec![]))
             },
             "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::Http => worker_http::handle(call).await,
+            "middleware.handle" if call.context.stage == gateway_plugin_sdk::Stage::WebSocket => worker_websocket(call).await,
             "middleware.handle" => worker_middleware::handle(call).await,
             "plugin.register" if !self.fail=>Ok(CallReply::unary(json!({"contributes":self.contributes}),vec![])),
             "frontend_auth.identifier"=>Ok(CallReply::unary(json!({"identifier":"fixture-auth"}),vec![])),
@@ -1095,4 +1096,89 @@ mod worker_http {
         }
         response.into_reply()
     }
+}
+
+async fn worker_websocket(
+    call: gateway_plugin_sdk::client::PluginCall,
+) -> Result<gateway_plugin_sdk::client::CallReply, PluginFault> {
+    use gateway_plugin_sdk::client::{
+        CallReply, MiddlewareInput, MiddlewareOutput, WebSocketCall, WebSocketKind,
+        WebSocketMessage,
+    };
+    let mut call = WebSocketCall::decode(call)?;
+    let mode = call
+        .headers
+        .iter()
+        .find(|h| h.name == "x-fixture-mode")
+        .map(|h| String::from_utf8(h.value.clone()).unwrap())
+        .unwrap_or_default();
+    if mode == "wait" {
+        return futures::future::pending().await;
+    }
+    if mode == "forged" {
+        return Ok(CallReply::unary(
+            json!({"kind":{"kind":"binary"},"payload":{"kind":"handle","handle":"not-this-call"}}),
+            vec![],
+        ));
+    }
+    if mode == "drop" {
+        return Option::<WebSocketMessage>::None.encode();
+    }
+    if mode == "send" || mode == "send-fail" {
+        let sent = call
+            .sender
+            .send(WebSocketMessage::new(WebSocketKind::Binary, vec![0, 255]))
+            .await;
+        if mode == "send-fail" {
+            assert!(sent.is_err());
+            return Option::<WebSocketMessage>::None.encode();
+        }
+        sent?;
+    }
+    if mode == "double" {
+        let request = json!({"kind":{"kind":"binary"},"payload":{"kind":"bytes"}});
+        call.host
+            .call(
+                gateway_plugin_sdk::call::middleware::NEXT_METHOD,
+                request.clone(),
+                vec![1],
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+        assert!(
+            call.host
+                .call(
+                    gateway_plugin_sdk::call::middleware::NEXT_METHOD,
+                    request,
+                    vec![2]
+                )
+                .await
+                .is_err()
+        );
+        return Option::<WebSocketMessage>::None.encode();
+    }
+    if mode == "partial" {
+        assert!(!call.message.payload.read().await?.unwrap().is_empty());
+    }
+    if mode == "rewrite" {
+        let mut bytes = call.message.payload.collect().await?;
+        bytes.push(42);
+        call.message = WebSocketMessage::new(WebSocketKind::Binary, bytes);
+    }
+    let result = call.next.run(call.message).await;
+    if mode == "both-fail" {
+        assert!(result.is_err());
+        assert!(
+            call.sender
+                .send(WebSocketMessage::new(WebSocketKind::Binary, vec![0]))
+                .await
+                .is_err()
+        );
+        return Option::<WebSocketMessage>::None.encode();
+    }
+    if mode == "next-fail" {
+        assert!(result.is_err());
+        return Option::<WebSocketMessage>::None.encode();
+    }
+    result?.encode()
 }

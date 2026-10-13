@@ -18,7 +18,145 @@ use gateway_core::{
 use http_body_util::BodyExt;
 use std::sync::{Arc, Mutex};
 
+pub(crate) fn headers(
+    headers: &http::HeaderMap,
+) -> Arc<[gateway_core::engine::middleware::MiddlewareHeader]> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            gateway_core::engine::middleware::MiddlewareHeader::new(
+                name.as_str(),
+                bytes::Bytes::copy_from_slice(value.as_bytes()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn open(
+    socket: WebSocket,
+    context: core::Context,
+    connection_id: String,
+    headers: Arc<[gateway_core::engine::middleware::MiddlewareHeader]>,
+    plan: gateway_admin::plugins::websocket::PluginWebSocketMiddlewarePlan,
+    guard: Option<Box<dyn ConnectionGuard>>,
+) -> Arc<Session> {
+    let (writer, reader) = socket.split();
+    let writer = Arc::new(Writer {
+        socket: tokio::sync::Mutex::new(writer),
+        context: context.clone(),
+    });
+    let (incoming, received) = tokio::sync::mpsc::channel(1);
+    let read = tokio::spawn(read_messages(reader, incoming, context.clone()));
+    Arc::new(Session {
+        received: tokio::sync::Mutex::new(received),
+        writer,
+        reader: read.abort_handle(),
+        _guard: Mutex::new(guard),
+        context,
+        plan,
+        connection_id,
+        headers,
+    })
+}
+
+impl Session {
+    async fn transform(
+        &self,
+        message: ws::Message,
+        direction: ws::Direction,
+    ) -> Result<Option<ws::Message>, MiddlewareError> {
+        self.plan
+            .run(
+                ws::Context {
+                    connection_id: self.connection_id.clone(),
+                    direction,
+                    headers: self.headers.clone(),
+                    excluded_plugin_instances: self.context.call_scope.excluded_instances().clone(),
+                    cancellation: self.context.cancellation.clone(),
+                    deadline_at: self.context.deadline_at,
+                    sender: self.writer.clone(),
+                },
+                message,
+                gateway_core::middleware::compose(vec![], |message| {
+                    Box::pin(async { Ok(Some(message)) })
+                }),
+            )
+            .await
+    }
+}
+
+/// Adapts the shared raw session to the existing native protocol pump. The pump
+/// keeps its original command acknowledgements, control handling and write limits.
+pub(crate) struct Transport {
+    incoming: futures::stream::BoxStream<'static, Result<Message, MiddlewareError>>,
+    outgoing: std::pin::Pin<Box<dyn futures::Sink<Message, Error = MiddlewareError> + Send>>,
+}
+impl Transport {
+    pub(crate) fn new(
+        socket: WebSocket,
+        mut context: core::Context,
+        connection_id: String,
+        headers: Arc<[gateway_core::engine::middleware::MiddlewareHeader]>,
+        plan: gateway_admin::plugins::websocket::PluginWebSocketMiddlewarePlan,
+    ) -> Self {
+        use ws::{Sender as _, Session as _};
+        context.cancellation = plan.cancellation();
+        let session = open(socket, context, connection_id, headers, plan, None);
+        let incoming = futures::stream::try_unfold(session.clone(), |session| async move {
+            session
+                .receive()
+                .await?
+                .map(|message| from_core(message).map(|message| (message, session)))
+                .transpose()
+        })
+        .boxed();
+        let outgoing = Box::pin(futures::sink::unfold(
+            session,
+            |session, message| async move {
+                session.send(into_core(message)).await?;
+                Ok(session)
+            },
+        ));
+        Self { incoming, outgoing }
+    }
+}
+impl futures::Stream for Transport {
+    type Item = Result<Message, MiddlewareError>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.incoming.as_mut().poll_next(cx)
+    }
+}
+impl futures::Sink<Message> for Transport {
+    type Error = MiddlewareError;
+    fn poll_ready(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.outgoing.as_mut().poll_ready(cx)
+    }
+    fn start_send(mut self: std::pin::Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+        self.outgoing.as_mut().start_send(message)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.outgoing.as_mut().poll_flush(cx)
+    }
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.outgoing.as_mut().poll_close(cx)
+    }
+}
+
 pub(super) struct Upgrade {
+    pub(super) registry: gateway_admin::plugins::middleware::PluginMiddlewareRegistry,
     pub(super) context: core::Context,
     pub(super) lifecycle: Arc<dyn ConnectionLifecycle>,
 }
@@ -29,9 +167,18 @@ impl core::upgrade::WebSocketUpgrade for Upgrade {
         protocols: Vec<String>,
     ) -> BoxFuture<'static, Result<(core::Response, core::upgrade::PendingSession), MiddlewareError>>
     {
-        let context = self.context.clone();
+        let mut context = self.context.clone();
+        let registry = self.registry.clone();
         let lifecycle = self.lifecycle.clone();
         Box::pin(async move {
+            let plan = registry
+                .freeze_websocket(
+                    context.call_scope.excluded_instances(),
+                    context.cancellation.clone(),
+                )
+                .map_err(|_| MiddlewareError::Fault)?;
+            context.cancellation = plan.cancellation();
+            let headers = headers(&parts.headers);
             let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
                 .await
                 .map_err(|_| MiddlewareError::InvalidState)?;
@@ -48,11 +195,8 @@ impl core::upgrade::WebSocketUpgrade for Upgrade {
                 });
             let pending=async move {
                 let socket=tokio::select! {biased;()=context.cancellation.cancelled()=>return Err(Arc::new(MiddlewareError::Fault)),()=context.deadline_at.wait()=>return Err(Arc::new(MiddlewareError::Engine(gateway_core::engine::EngineError::Deadline))),socket=receiver=>socket.map_err(|_|Arc::new(MiddlewareError::Fault))?};
-                let (writer,reader)=socket.split();
-                let writer=Writer {socket:tokio::sync::Mutex::new(writer),context:context.clone()};
-                let (incoming,received)=tokio::sync::mpsc::channel(1);
-                let read=tokio::spawn(read_messages(reader,incoming,context.clone()));
-                Ok(Arc::new(Session {received:tokio::sync::Mutex::new(received),writer,reader:read.abort_handle(),_guard:Mutex::new(guard),context}) as Arc<dyn ws::Session>)
+                let connection_id = context.request_id.clone();
+                Ok(open(socket, context, connection_id, headers, plan, Some(guard)) as Arc<dyn ws::Session>)
             }.boxed().shared();
             Ok((
                 response
@@ -63,22 +207,38 @@ impl core::upgrade::WebSocketUpgrade for Upgrade {
     }
 }
 struct Session {
+    plan: gateway_admin::plugins::websocket::PluginWebSocketMiddlewarePlan,
+    connection_id: String,
+    headers: Arc<[gateway_core::engine::middleware::MiddlewareHeader]>,
     received: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Result<ws::Message, MiddlewareError>>>,
-    writer: Writer,
+    writer: Arc<Writer>,
     reader: tokio::task::AbortHandle,
-    _guard: Mutex<Box<dyn ConnectionGuard>>,
+    _guard: Mutex<Option<Box<dyn ConnectionGuard>>>,
     context: core::Context,
 }
 impl ws::Session for Session {
     fn receive(&self) -> BoxFuture<'_, Result<Option<ws::Message>, MiddlewareError>> {
         Box::pin(async move {
-            tokio::select! {biased;()=self.context.cancellation.cancelled()=>Err(MiddlewareError::Fault),()=self.context.deadline_at.wait()=>Err(MiddlewareError::Engine(gateway_core::engine::EngineError::Deadline)),message=async {self.received.lock().await.recv().await}=>message.transpose()}
+            loop {
+                let message = tokio::select! {biased;()=self.context.cancellation.cancelled()=>return Err(MiddlewareError::Fault),()=self.context.deadline_at.wait()=>return Err(MiddlewareError::Engine(gateway_core::engine::EngineError::Deadline)),message=async {self.received.lock().await.recv().await}=>message.transpose()?};
+                let Some(message) = message else {
+                    return Ok(None);
+                };
+                if let Some(message) = self.transform(message, ws::Direction::Incoming).await? {
+                    return Ok(Some(message));
+                }
+            }
         })
     }
 }
 impl ws::Sender for Session {
     fn send(&self, message: ws::Message) -> BoxFuture<'_, Result<(), MiddlewareError>> {
-        self.writer.send(message)
+        Box::pin(async move {
+            if let Some(message) = self.transform(message, ws::Direction::Outgoing).await? {
+                self.writer.send(message).await?;
+            }
+            Ok(())
+        })
     }
 }
 impl Drop for Session {

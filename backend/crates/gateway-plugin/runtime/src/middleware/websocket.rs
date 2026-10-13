@@ -7,7 +7,7 @@ use gateway_core::engine::middleware::{MiddlewareError, websocket as core};
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
     call::middleware::{
-        BODY_CLOSE_METHOD, BODY_READ_METHOD, MiddlewareBodyClose, MiddlewareBodyRead,
+        BODY_CLOSE_METHOD, BODY_READ_METHOD, MiddlewareBodyClose, MiddlewareBodyRead, NEXT_METHOD,
         websocket as wire,
     },
 };
@@ -17,15 +17,39 @@ use std::{
 };
 
 pub(crate) struct Invocation {
+    next: Mutex<Option<core::Next>>,
+    pub(super) cancellation: gateway_core::lifecycle::CancellationToken,
+    pub(super) closed: gateway_core::lifecycle::CancellationToken,
     payloads: Mutex<BTreeMap<String, Bytes>>,
     sender: Arc<dyn core::Sender>,
     error: Mutex<Option<MiddlewareError>>,
 }
 impl Invocation {
+    fn failed(&self, error: MiddlewareError) -> PluginFault {
+        let failure = fault(&error);
+        self.error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(error);
+        failure
+    }
     pub(crate) fn session(sender: Arc<dyn core::Sender>) -> Arc<Self> {
         Arc::new(Self {
+            next: Mutex::new(None),
+            cancellation: Default::default(),
+            closed: Default::default(),
             payloads: Mutex::new(BTreeMap::new()),
             sender,
+            error: Mutex::new(None),
+        })
+    }
+    pub(super) fn new(next: core::Next, context: &core::Context) -> Arc<Self> {
+        Arc::new(Self {
+            next: Mutex::new(Some(next)),
+            cancellation: context.cancellation.clone(),
+            closed: Default::default(),
+            payloads: Mutex::new(BTreeMap::new()),
+            sender: context.sender.clone(),
             error: Mutex::new(None),
         })
     }
@@ -90,19 +114,33 @@ impl Invocation {
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
         Box::pin(async move {
             let result = match method.as_str() {
+                NEXT_METHOD => {
+                    let message = self.decode(
+                        serde_json::from_value(params).map_err(|_| invalid())?,
+                        payload,
+                    )?;
+                    let next = self
+                        .next
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                        .ok_or_else(unavailable)?;
+                    let response = next
+                        .run(message)
+                        .await
+                        .map_err(|error| self.failed(error))?;
+                    serde_json::to_value(response.map(|message| self.encode(message)).transpose()?)
+                        .map_err(|_| invalid())?
+                }
                 wire::SEND_METHOD => {
                     let message = self.decode(
                         serde_json::from_value(params).map_err(|_| invalid())?,
                         payload,
                     )?;
-                    self.sender.send(message).await.map_err(|error| {
-                        let failure = fault(&error);
-                        *self
-                            .error
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
-                        failure
-                    })?;
+                    self.sender
+                        .send(message)
+                        .await
+                        .map_err(|error| self.failed(error))?;
                     serde_json::json!({})
                 }
                 BODY_READ_METHOD if payload.is_empty() => {

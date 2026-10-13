@@ -7,6 +7,7 @@ mod headers;
 pub(crate) mod http;
 mod registry;
 mod websocket;
+mod websocket_execution;
 pub use registry::MiddlewareCallbacks;
 
 use std::sync::{Arc, Mutex};

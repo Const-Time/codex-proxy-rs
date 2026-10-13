@@ -2,6 +2,7 @@ mod capabilities;
 mod http;
 pub(crate) mod plan;
 mod settings;
+mod websocket;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::{

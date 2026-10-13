@@ -500,6 +500,26 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn websocket_middleware(
+        &self,
+        mut context: gateway_core::engine::middleware::websocket::Context,
+        message: gateway_core::engine::middleware::websocket::Message,
+        next: gateway_core::engine::middleware::websocket::Next,
+    ) -> Result<
+        Option<gateway_core::engine::middleware::websocket::Message>,
+        gateway_core::engine::middleware::MiddlewareError,
+    > {
+        if self.status() != "ready" || self.access.is_revoked() {
+            return Err(gateway_core::engine::middleware::MiddlewareError::Fault);
+        }
+        context.cancellation = gateway_core::lifecycle::CancellationToken::linked([
+            context.cancellation,
+            self.access.cancellation(),
+        ]);
+        self.middleware
+            .invoke_websocket(self.session.clone(), context, message, next)
+            .await
+    }
     async fn http_middleware(
         &self,
         mut context: gateway_core::engine::middleware::http::Context,

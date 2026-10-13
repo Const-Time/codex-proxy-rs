@@ -1,6 +1,7 @@
 //! 插件实例是唯一配置权威；候选进程完成准备后才提交并替换旧代。
 pub mod http;
 pub mod middleware;
+pub mod websocket;
 use crate::{
     model::{AdminError, MutationContext, plugins::*},
     ports::plugins::*,
