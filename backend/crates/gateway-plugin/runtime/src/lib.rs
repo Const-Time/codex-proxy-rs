@@ -13,6 +13,7 @@ mod package;
 mod resources;
 mod retry_policy;
 mod rpc;
+mod services;
 mod stream;
 pub mod upstream_adapter;
 pub use engine::{HttpDispatcher, PluginEngine};

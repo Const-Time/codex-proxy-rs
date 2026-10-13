@@ -42,16 +42,23 @@ impl Invocation {
     }
 }
 struct Entry {
+    _services: Option<crate::services::Binding>,
     context: CallContext,
     invocation: Invocation,
 }
 pub struct MiddlewareCallbacks {
+    services: Option<Arc<crate::services::Registry>>,
     outbound: Option<Arc<crate::outbound::Registry>>,
     models: Option<Arc<crate::models::Models>>,
     inner: Arc<dyn CallbackHandler>,
     calls: Mutex<BTreeMap<String, Entry>>,
 }
 impl MiddlewareCallbacks {
+    pub(super) fn service_caller(
+        &self,
+    ) -> Option<gateway_core::engine::middleware::service::Caller> {
+        self.services.as_ref().map(|services| services.caller())
+    }
     pub async fn invoke_service(
         self: &Arc<Self>,
         session: Arc<RpcSession>,
@@ -79,6 +86,7 @@ impl MiddlewareCallbacks {
         calls.insert(
             context.resource_scope_id.clone(),
             Entry {
+                _services: None,
                 context: context.clone(),
                 invocation: invocation.clone(),
             },
@@ -115,6 +123,7 @@ impl MiddlewareCallbacks {
         calls.insert(
             context.resource_scope_id.clone(),
             Entry {
+                _services: None,
                 context: context.clone(),
                 invocation: invocation.clone(),
             },
@@ -127,11 +136,21 @@ impl MiddlewareCallbacks {
     }
     pub fn new(inner: Arc<dyn CallbackHandler>) -> Arc<Self> {
         Arc::new(Self {
+            services: None,
             outbound: None,
             models: None,
             inner,
             calls: Mutex::new(BTreeMap::new()),
         })
+    }
+    pub(crate) fn with_services(
+        mut self: Arc<Self>,
+        services: Arc<crate::services::Registry>,
+    ) -> Arc<Self> {
+        Arc::get_mut(&mut self)
+            .expect("callbacks must be composed before publication")
+            .services = Some(services);
+        self
     }
     pub(crate) fn with_models(
         mut self: Arc<Self>,
@@ -205,6 +224,7 @@ impl MiddlewareCallbacks {
         calls.insert(
             context.resource_scope_id.clone(),
             Entry {
+                _services: None,
                 context: context.clone(),
                 invocation: invocation.clone(),
             },
@@ -230,6 +250,14 @@ impl MiddlewareCallbacks {
         let parent = invocation
             .nested_context()
             .map_err(|_| MiddlewareError::Fault)?;
+        let service_binding = match (&self.services, parent.as_ref()) {
+            (Some(services), Some(parent)) => Some(
+                services
+                    .bind_parent(context, parent, invocation.cancellation.clone())
+                    .map_err(|_| MiddlewareError::Fault)?,
+            ),
+            _ => None,
+        };
         self.bind_outbound(
             context,
             invocation.cancellation.clone(),
@@ -256,6 +284,7 @@ impl MiddlewareCallbacks {
         calls.insert(
             context.resource_scope_id.clone(),
             Entry {
+                _services: service_binding,
                 context: context.clone(),
                 invocation: Invocation::Execution(invocation.clone()),
             },

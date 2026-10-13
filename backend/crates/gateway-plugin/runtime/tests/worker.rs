@@ -19,6 +19,11 @@ mod worker_models {
         input: &Value,
     ) -> Result<Value, gateway_plugin_sdk::PluginFault> {
         let mode = input["mode"].as_str().unwrap_or("unary");
+        if mode == "service" {
+            return Ok(
+                json!({"exists":host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e| gateway_plugin_sdk::PluginFault::new(gateway_plugin_sdk::ErrorCode::Fault,e.message))?}),
+            );
+        }
         if mode == "service-budget" {
             Box::pin(handle_inner(
                 host,
@@ -100,7 +105,7 @@ mod worker_models {
             account_id: input["account"].as_str().map(str::to_owned),
             previous_response_id: input["previous"].as_str().map(str::to_owned),
         };
-        let mut body = json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"],"after_next":input["after_next"],"retry_child":input["retry_child"],"route":input["route"]});
+        let mut body = json!({"model":model,"input":"fixture","mode":input["provider_mode"],"failure":input["failure"],"nested_model":input["nested_model"],"after_next":input["after_next"],"retry_child":input["retry_child"],"route":input["route"],"service_probe":input["service_probe"]});
         if let Some(previous) = request.previous_response_id.as_ref() {
             body["previous_response_id"] = json!(previous);
         }
@@ -615,6 +620,9 @@ impl PluginHandler for Worker {
                 }
                 let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":"retry_calls"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
                 call.host.call("host.state.put",json!({"namespace":"counter","key":"retry_calls","value":existing.result["record"]["value"].as_u64().unwrap_or(0)+1,"expected_version":existing.result["record"]["version"].as_u64()}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                if self.retry == "service-probe" {
+                    assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e| PluginFault::new(ErrorCode::Fault,e.message))?);
+                }
                 if self.retry == "external" {
                     let result=worker_outbound::run(&call.host,&json!({"url":self.adapter_url,"mode":"stream"})).await?;
                     assert_eq!(result["bytes"],json!([0,255,1,0]));
@@ -645,6 +653,9 @@ impl PluginHandler for Worker {
                 assert!(call.host.call("host.data.accounts.list",json!({}),vec![]).await.is_err());
                 let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":"schedules"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
                 call.host.call("host.state.put",json!({"namespace":"counter","key":"schedules","value":existing.result["record"]["value"].as_u64().unwrap_or(0)+1,"expected_version":existing.result["record"]["version"].as_u64()}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                if self.schedule == "service-probe" {
+                    assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e| PluginFault::new(ErrorCode::Fault,e.message))?);
+                }
                 let decision=match self.schedule.as_str() {
                     "reject"=>json!({"decision":"reject"}),
                     "foreign"=>json!({"decision":"pick","account_id":"acct_forbidden"}),
@@ -673,6 +684,9 @@ impl PluginHandler for Worker {
                 assert_eq!(head.protocol, "openai");
                 let body:serde_json::Value=serde_json::from_slice(&call.payload).unwrap();
                 assert_eq!(head.model, body["model"]);
+                if body["service_probe"] == true {
+                    assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e| PluginFault::new(ErrorCode::Fault,e.message))?);
+                }
                 assert!(call.host.call("host.data.accounts.list",json!({}),vec![]).await.is_err());
                 let decision = match body["route"].as_str() {
                     Some("reject") => json!({"decision":"reject"}),
@@ -881,6 +895,14 @@ mod worker_middleware {
     pub async fn handle(call: PluginCall) -> Result<CallReply, PluginFault> {
         let input: serde_json::Value = serde_json::from_slice(&call.payload).unwrap();
         let mode = input["mode"].as_str().unwrap().to_owned();
+        if input["service_probe"] == true {
+            assert!(
+                call.host
+                    .service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(())
+                    .await
+                    .map_err(|e| PluginFault::new(ErrorCode::Fault, e.message))?
+            );
+        }
         if mode == "native-model" {
             let result = super::worker_models::handle(&call.host, &input["native"]).await;
             return Ok(CallReply::stream(
@@ -1800,6 +1822,14 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
     );
     assert!(!String::from_utf8_lossy(&call.payload).contains("fixture-provider-secret"));
     let mode = input["behavior"].as_str().unwrap_or("http");
+    if mode == "service-probe" {
+        assert!(
+            call.host
+                .service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(())
+                .await
+                .map_err(|e| PluginFault::new(ErrorCode::Fault, e.message))?
+        );
+    }
     if mode.starts_with("callback-") {
         upstream_callbacks::run(&call.host, mode, &input).await?;
     }

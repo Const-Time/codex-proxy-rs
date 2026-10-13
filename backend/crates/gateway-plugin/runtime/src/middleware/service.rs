@@ -94,7 +94,11 @@ pub(super) async fn invoke(
         dispatcher: context
             .dispatcher
             .as_ref()
-            .map(|dispatcher| dispatcher.scoped(&callback_context)),
+            .map(|dispatcher| match callbacks.service_caller() {
+                Some(caller) => dispatcher.for_caller(&callback_context, caller),
+                None => Ok(dispatcher.scoped(&callback_context)),
+            })
+            .transpose()?,
         next: Mutex::new(Some(next)),
         cancellation: context.cancellation.clone(),
         closed,

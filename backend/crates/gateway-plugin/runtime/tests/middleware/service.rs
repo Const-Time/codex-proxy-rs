@@ -100,6 +100,7 @@ fn terminal(calls: Arc<AtomicUsize>) -> core::Next {
 
 #[derive(Clone, Default)]
 struct HostServices {
+    callers: Arc<std::sync::Mutex<Vec<(String, u64)>>>,
     contexts: Arc<std::sync::Mutex<Vec<core::Context>>>,
     replies: Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     calls: Arc<std::sync::Mutex<Vec<(String, String, serde_json::Value)>>>,
@@ -114,6 +115,17 @@ impl Drop for WaitingCall {
     }
 }
 impl core::Dispatcher for HostServices {
+    fn for_caller(
+        &self,
+        context: &core::Context,
+        caller: core::Caller,
+    ) -> Result<Arc<dyn core::Dispatcher>, core::Error> {
+        self.callers
+            .lock()
+            .unwrap()
+            .push((caller.instance_id().into(), caller.revision().get()));
+        Ok(self.scoped(context))
+    }
     fn scoped(&self, context: &core::Context) -> Arc<dyn core::Dispatcher> {
         let mut observed = context.clone();
         observed.dispatcher = None;
@@ -244,6 +256,9 @@ async fn sdk_host_service_in_service_stage_uses_its_bound_dispatcher_without_con
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(host.calls.lock().unwrap().len(), 1);
+    let instance = f.manager.list().await.unwrap()[0].id.clone();
+    assert_eq!(*host.callers.lock().unwrap(), vec![(instance, 1)]);
+    assert_eq!(host.contexts.lock().unwrap().len(), 1);
     assert!(host.contexts.lock().unwrap()[0].cancellation.is_cancelled());
     f.manager.shutdown().await;
 }

@@ -30,6 +30,7 @@ struct AuthenticationPublication {
     epoch: PluginAccess,
 }
 pub struct PluginManager {
+    services: Option<service::settings::Service>,
     model_catalog: Option<Arc<dyn gateway_core::routing::ModelCatalogValidator>>,
     middleware: RwLock<middleware::Publication>,
     authentication: RwLock<AuthenticationPublication>,
@@ -41,6 +42,7 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new(store: Arc<dyn PluginStore>, runtime: Arc<dyn PluginRuntime>) -> Self {
         Self {
+            services: None,
             model_catalog: None,
             middleware: RwLock::default(),
             authentication: RwLock::default(),
@@ -49,6 +51,10 @@ impl PluginManager {
             changes: Mutex::new(()),
             active: RwLock::new(BTreeMap::new()),
         }
+    }
+    pub fn with_services(mut self, services: service::settings::Service) -> Self {
+        self.services = Some(services);
+        self
     }
     pub fn with_model_catalog(
         mut self,
@@ -235,7 +241,8 @@ impl PluginService for PluginManager {
             self.middleware
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .snapshot(),
+                .snapshot()
+                .with_services(self.services.clone()),
         )
     }
     fn freeze_middleware(

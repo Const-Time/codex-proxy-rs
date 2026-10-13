@@ -327,6 +327,7 @@ impl Drop for ExecutionLifetime {
 /// Only Core issues this authority. Wire facts and plugin-supplied IDs cannot construct it.
 #[derive(Clone)]
 pub struct NestedExecutionContext {
+    pub(crate) service_factory: Option<Arc<dyn super::middleware::service::Factory>>,
     pub(crate) http_dispatcher: Option<Arc<dyn super::middleware::http::Dispatcher>>,
     pub(crate) lifetime: std::sync::Weak<ExecutionLifetime>,
     pub(crate) client: AuthenticatedClient,
@@ -348,6 +349,26 @@ impl std::fmt::Debug for NestedExecutionContext {
     }
 }
 impl NestedExecutionContext {
+    pub fn service_context(
+        &self,
+        call_id: String,
+        cancellation: CancellationToken,
+    ) -> Result<super::middleware::service::Context, GatewayError> {
+        self.validate()?;
+        Ok(super::middleware::service::Context {
+            operation: "host.services.call",
+            request_id: self.request_id.as_str().into(),
+            call_id,
+            parent_call_id: None,
+            cancellation: CancellationToken::linked([self.cancellation(), cancellation]),
+            deadline_at: self.deadline,
+            call_scope: self.scope.clone(),
+            dispatcher: None,
+        })
+    }
+    pub fn service_factory(&self) -> Option<Arc<dyn super::middleware::service::Factory>> {
+        self.service_factory.clone()
+    }
     pub fn http_dispatcher(&self) -> Option<Arc<dyn super::middleware::http::Dispatcher>> {
         self.http_dispatcher.clone()
     }
