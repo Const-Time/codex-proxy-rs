@@ -1,5 +1,6 @@
 //! 插件实例是唯一配置权威；候选进程完成准备后才提交并替换旧代。
 pub mod http;
+mod maintenance;
 pub mod middleware;
 pub mod service;
 mod upstream_adapter;
@@ -38,6 +39,8 @@ pub struct PluginManager {
     runtime: Arc<dyn PluginRuntime>,
     changes: Mutex<()>,
     active: RwLock<ActivePlugins>,
+    maintenance_changed: tokio::sync::Notify,
+    stopping: gateway_core::lifecycle::CancellationToken,
 }
 impl PluginManager {
     pub fn new(store: Arc<dyn PluginStore>, runtime: Arc<dyn PluginRuntime>) -> Self {
@@ -50,6 +53,8 @@ impl PluginManager {
             runtime,
             changes: Mutex::new(()),
             active: RwLock::new(BTreeMap::new()),
+            maintenance_changed: tokio::sync::Notify::new(),
+            stopping: Default::default(),
         }
     }
     pub fn with_services(mut self, services: service::settings::Service) -> Self {
@@ -132,9 +137,11 @@ impl PluginManager {
                 tracing::warn!(instance_id = record.id, "插件恢复失败，实例保持不可用");
             }
         }
+        self.maintenance_changed.notify_one();
         Ok(())
     }
     pub async fn shutdown(&self) {
+        self.stopping.cancel();
         let _guard = self.changes.lock().await;
         self.authentication
             .write()
@@ -500,6 +507,7 @@ impl PluginService for PluginManager {
                             old.stop().await;
                         });
                     }
+                    self.maintenance_changed.notify_one();
                 }
                 if let Some(candidate) = candidate {
                     candidate.stop().await;
@@ -535,6 +543,7 @@ impl PluginService for PluginManager {
             self.publish_authentication(&record, auth_candidate);
             old
         };
+        self.maintenance_changed.notify_one();
         if let Some((_, old)) = old {
             tokio::spawn(async move {
                 old.stop().await;
@@ -571,6 +580,7 @@ impl PluginService for PluginManager {
                 old.stop().await;
             });
         }
+        self.maintenance_changed.notify_one();
         Ok(())
     }
     async fn resource(

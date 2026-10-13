@@ -37,7 +37,8 @@ use engine::provider::ProviderRegistry;
 use health::HealthProbe;
 use routing::snapshot::{RuntimeSnapshotCompiler, SnapshotStorePort};
 use runtime::{
-    RuntimeSnapshotHandle, RuntimeSnapshotPublisher, SnapshotControl, SnapshotSubscriptionPort,
+    RuntimeSnapshotHandle, RuntimeSnapshotPublisher, SnapshotControl, SnapshotPublications,
+    SnapshotSubscriptionPort,
 };
 use task::{WorkerContribution, WorkerDefinitionError};
 
@@ -92,6 +93,7 @@ pub struct CoreBundle {
     model_catalog: Arc<dyn routing::ModelCatalogValidator>,
     execution: Arc<dyn ExecutionService>,
     snapshot_control: Arc<dyn SnapshotControl>,
+    snapshot_publications: SnapshotPublications,
     account_probe: Arc<dyn AccountProbe>,
     health_probes: Vec<Arc<dyn HealthProbe>>,
     worker_contributions: Vec<WorkerContribution>,
@@ -109,6 +111,11 @@ impl CoreBundle {
     #[must_use]
     pub fn snapshot_control(&self) -> Arc<dyn SnapshotControl> {
         Arc::clone(&self.snapshot_control)
+    }
+
+    #[must_use]
+    pub fn snapshot_publications(&self) -> SnapshotPublications {
+        self.snapshot_publications.clone()
     }
 
     #[must_use]
@@ -170,11 +177,13 @@ pub async fn initialize(
     let account_probe: Arc<dyn AccountProbe> = service;
     let snapshot_control: Arc<dyn SnapshotControl> = publisher;
     let model_catalog = Arc::new(snapshots.clone());
+    let snapshot_publications = snapshots.publications();
     let health_probes: Vec<Arc<dyn HealthProbe>> = vec![Arc::new(snapshots)];
     Ok(CoreBundle {
         model_catalog,
         execution,
         snapshot_control,
+        snapshot_publications,
         account_probe,
         health_probes,
         worker_contributions,

@@ -1,4 +1,4 @@
-//! Management caller identity stays in the host, indexed by an authenticated RPC resource scope.
+//! Native invocation identities stay in the host, indexed by their authenticated RPC scope.
 use crate::RpcReply;
 use gateway_admin::{
     model::{AdminErrorKind, MutationContext, plugins::*},
@@ -12,20 +12,20 @@ use std::{
 };
 
 #[derive(Default)]
-pub(crate) struct ManagementCalls(Mutex<BTreeMap<String, Arc<ManagementCaller>>>);
-pub(crate) struct ManagementCaller {
+pub(crate) struct InvocationCalls(Mutex<BTreeMap<String, Arc<InvocationCaller>>>);
+pub(crate) struct InvocationCaller {
     actor: MutationContext,
     pub(crate) invocation: Option<PluginInvocationContext>,
     pub(crate) cancellation: gateway_core::lifecycle::CancellationToken,
 }
-impl ManagementCalls {
+impl InvocationCalls {
     pub(crate) fn enter(
         self: &Arc<Self>,
         scope: String,
         actor: MutationContext,
         mut invocation: Option<PluginInvocationContext>,
         revocation: gateway_core::lifecycle::CancellationToken,
-    ) -> ManagementCall {
+    ) -> InvocationCall {
         let cancellation = gateway_core::lifecycle::CancellationToken::linked(
             std::iter::once(revocation)
                 .chain(invocation.iter().map(|i| i.context.cancellation.clone())),
@@ -55,13 +55,13 @@ impl ManagementCalls {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 scope.clone(),
-                Arc::new(ManagementCaller {
+                Arc::new(InvocationCaller {
                     actor,
                     invocation,
                     cancellation,
                 }),
             );
-        ManagementCall {
+        InvocationCall {
             calls: self.clone(),
             scope,
         }
@@ -69,7 +69,7 @@ impl ManagementCalls {
     pub(crate) fn actor(&self, scope: &str) -> Option<MutationContext> {
         self.caller(scope).map(|caller| caller.actor.clone())
     }
-    pub(crate) fn caller(&self, scope: &str) -> Option<Arc<ManagementCaller>> {
+    pub(crate) fn caller(&self, scope: &str) -> Option<Arc<InvocationCaller>> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -77,11 +77,11 @@ impl ManagementCalls {
             .cloned()
     }
 }
-pub(crate) struct ManagementCall {
-    calls: Arc<ManagementCalls>,
+pub(crate) struct InvocationCall {
+    calls: Arc<InvocationCalls>,
     scope: String,
 }
-impl Drop for ManagementCall {
+impl Drop for InvocationCall {
     fn drop(&mut self) {
         if let Some(caller) = self
             .calls

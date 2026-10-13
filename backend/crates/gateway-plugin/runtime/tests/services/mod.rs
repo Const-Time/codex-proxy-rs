@@ -1,3 +1,4 @@
+mod maintenance;
 mod roots;
 mod transport;
 mod upstream_sdk;

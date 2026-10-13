@@ -199,6 +199,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
                     | Capability::ModelRouter
                     | Capability::Scheduler
                     | Capability::RetryPolicy
+                    | Capability::Maintenance
             ) || decl.version != 1
         })
         .map(|(cap, _)| cap.identifier().into())
@@ -564,7 +565,7 @@ struct LivePlugin {
     models: Option<Arc<crate::models::Models>>,
     middleware: Arc<crate::middleware::MiddlewareCallbacks>,
     authentication: bool,
-    calls: Arc<crate::resources::ManagementCalls>,
+    calls: Arc<crate::resources::InvocationCalls>,
     access: PluginAccess,
     session: Arc<RpcSession>,
     package: Arc<PreparedPackage>,
@@ -573,6 +574,68 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    fn supports_maintenance(&self) -> bool {
+        self.session.capability_version(Capability::Maintenance) == Some(1)
+    }
+    async fn reconcile(
+        &self,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<(), AdminError> {
+        use gateway_admin::model::{MutationActor, MutationContext};
+        use gateway_core::lifecycle::CancellationToken;
+        if !self.supports_maintenance()
+            || self.status() != "ready"
+            || !self.active.load(Ordering::Acquire)
+        {
+            return Err(AdminError::unavailable("插件维护代次不可用"));
+        }
+        let cancellation = CancellationToken::linked([cancellation, self.access.cancellation()]);
+        let mut context = self.session.context(
+            Stage::Maintenance,
+            self.session
+                .maximum_call_timeout()
+                .min(Duration::from_secs(30)),
+        );
+        context.request_id = Some(context.resource_scope_id.clone());
+        let mut origin = self
+            .services
+            .root_origin(&context)
+            .map_err(|_| AdminError::unavailable("维护服务发布不可用"))?;
+        origin.context.cancellation = cancellation.clone();
+        let effects = origin.context.call_scope.clone();
+        let _services = self
+            .services
+            .bind_origin(&context, origin)
+            .map_err(|_| AdminError::unavailable("维护服务作用域不可用"))?;
+        self.outbound
+            .bind(&context, cancellation.clone(), Some(effects))
+            .map_err(|_| AdminError::unavailable("维护网络作用域不可用"))?;
+        let _outbound = self.outbound.guard(&context);
+        let caller = self.services.caller();
+        let _caller = self.calls.enter(
+            context.resource_scope_id.clone(),
+            MutationContext {
+                actor: MutationActor::Plugin {
+                    instance_id: caller.instance_id().into(),
+                    revision: caller.revision(),
+                },
+                request_id: context.resource_scope_id.clone(),
+            },
+            None,
+            cancellation.clone(),
+        );
+        let reply = tokio::select! { biased;
+            () = cancellation.cancelled() => return Err(AdminError::unavailable("插件维护已取消")),
+            result = self.session.call("plugin.reconcile", context, json!({}), vec![]) =>
+                result.map_err(|_| AdminError::bad_gateway("插件维护失败，结果可能已生效"))?,
+        };
+        if reply.result != json!({}) || !reply.payload.is_empty() {
+            self.session.invalid_response(Stage::Maintenance);
+            return Err(AdminError::bad_gateway("插件维护响应无效"));
+        }
+        Ok(())
+    }
+
     fn upstream_adapter(
         &self,
         id: &str,

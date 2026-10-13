@@ -26,7 +26,7 @@ pub(crate) struct Callbacks {
     models: Option<Arc<crate::models::Models>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
     resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
-    pub(crate) calls: Arc<crate::resources::ManagementCalls>,
+    pub(crate) calls: Arc<crate::resources::InvocationCalls>,
     store: Arc<dyn PluginStore>,
     id: String,
     revision: u64,
@@ -166,6 +166,7 @@ impl CallbackHandler for Callbacks {
                 || !matches!(
                     context.stage,
                     Stage::Management
+                        | Stage::Maintenance
                         | Stage::Authentication
                         | Stage::Routing
                         | Stage::Scheduling
@@ -176,6 +177,16 @@ impl CallbackHandler for Callbacks {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
                     "plugin generation is not active",
+                ));
+            }
+            if context.stage == Stage::Maintenance
+                && calls
+                    .caller(&context.resource_scope_id)
+                    .is_none_or(|caller| caller.cancellation.is_cancelled())
+            {
+                return Err(PluginFault::new(
+                    ErrorCode::Cancelled,
+                    "maintenance scope ended",
                 ));
             }
             if matches!(context.stage, Stage::Routing | Stage::Scheduling)

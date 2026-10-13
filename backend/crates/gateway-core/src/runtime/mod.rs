@@ -68,11 +68,75 @@ pub struct RuntimeSnapshotUnavailable;
 #[derive(Clone, Default)]
 pub struct RuntimeSnapshotHandle {
     current: Arc<RwLock<PublishedSnapshot>>,
+    changed: Arc<event_listener::Event>,
 }
-#[derive(Default)]
 struct PublishedSnapshot {
     snapshot: Option<Arc<RuntimeSnapshot>>,
     access: Vec<Weak<ClientAccess>>,
+    publication: u64,
+    availability: CancellationToken,
+}
+impl Default for PublishedSnapshot {
+    fn default() -> Self {
+        let availability = CancellationToken::new();
+        availability.cancel();
+        Self {
+            snapshot: None,
+            access: Vec::new(),
+            publication: 0,
+            availability,
+        }
+    }
+}
+/// Read-only notification of facts actually published by Core, never a Store commit notice.
+#[derive(Clone)]
+pub struct SnapshotPublications {
+    current: Arc<RwLock<PublishedSnapshot>>,
+    changed: Arc<event_listener::Event>,
+}
+/// Suspension immediately revokes the availability lease, even if notifications coalesce.
+#[derive(Clone)]
+pub struct SnapshotPublication {
+    revision: Option<ConfigRevision>,
+    availability: CancellationToken,
+}
+impl SnapshotPublication {
+    #[must_use]
+    pub fn revision(&self) -> Option<ConfigRevision> {
+        self.revision
+    }
+    #[must_use]
+    pub fn cancellation(&self) -> CancellationToken {
+        // Consumers may end their own lease, never Core's shared availability period.
+        CancellationToken::linked([self.availability.clone()])
+    }
+}
+impl SnapshotPublications {
+    /// Each subscriber receives the latest state first. Slow readers coalesce publications.
+    pub fn subscribe(&self) -> Pin<Box<dyn Stream<Item = SnapshotPublication> + Send + 'static>> {
+        Box::pin(futures::stream::unfold(
+            (self.clone(), None),
+            |(source, mut last)| async move {
+                loop {
+                    let changed = source.changed.listen();
+                    let next = {
+                        let current = read_unpoisoned(&source.current);
+                        (last != Some(current.publication)).then(|| {
+                            last = Some(current.publication);
+                            SnapshotPublication {
+                                revision: current.snapshot.as_ref().map(|s| s.revision()),
+                                availability: current.availability.clone(),
+                            }
+                        })
+                    };
+                    if let Some(next) = next {
+                        return Some((next, (source, last)));
+                    }
+                    changed.await;
+                }
+            },
+        ))
+    }
 }
 struct ClientAccess {
     policy: crate::policy::ClientPolicy,
@@ -104,7 +168,18 @@ impl RuntimeSnapshotHandle {
             current: Arc::new(RwLock::new(PublishedSnapshot {
                 snapshot: Some(Arc::new(initial)),
                 access: Vec::new(),
+                publication: 0,
+                availability: CancellationToken::new(),
             })),
+            changed: Arc::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn publications(&self) -> SnapshotPublications {
+        SnapshotPublications {
+            current: self.current.clone(),
+            changed: self.changed.clone(),
         }
     }
 
@@ -122,7 +197,12 @@ impl RuntimeSnapshotHandle {
             }
             !access.cancellation.is_cancelled()
         });
+        if current.snapshot.is_none() {
+            current.availability = CancellationToken::new();
+        }
         current.snapshot = Some(Arc::new(snapshot));
+        current.publication = current.publication.wrapping_add(1);
+        self.changed.notify(usize::MAX);
     }
 
     pub fn suspend(&self) {
@@ -131,6 +211,9 @@ impl RuntimeSnapshotHandle {
             access.cancellation.cancel();
         }
         current.snapshot = None;
+        current.availability.cancel();
+        current.publication = current.publication.wrapping_add(1);
+        self.changed.notify(usize::MAX);
     }
 
     #[must_use]

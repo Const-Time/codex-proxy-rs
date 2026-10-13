@@ -12,51 +12,66 @@ use serde_json::{Value, json};
 struct Worker {
     contributes: Value,
     mutate: bool,
+    maintenance: bool,
+    reconciled: std::sync::atomic::AtomicBool,
     observation: Option<std::path::PathBuf>,
     rewrite: Option<String>,
 }
 fn fault(error: gateway_plugin_sdk::call::services::ServiceError) -> PluginFault {
     PluginFault::new(ErrorCode::Fault, error.message)
 }
+async fn mutate(host: &gateway_plugin_sdk::client::HostClient) -> Result<(), PluginFault> {
+    // Wire identity is deliberately false: the host must retain
+    // its original plugin lease and persisted audit principal.
+    let input = MutationContext {
+        actor: MutationActor::AdminSession {
+            admin_user_id: "forged-user".into(),
+        },
+        request_id: "forged-request".into(),
+    };
+    assert!(
+        !host
+            .service::<settings::ApiKeyExists>(())
+            .await
+            .map_err(fault)?
+    );
+    let generated = host
+        .service::<settings::RegenerateApiKey>(input.clone())
+        .await
+        .map_err(fault)?;
+    assert!(generated.mutation.exists && generated.key.len() >= 32);
+    assert!(
+        host.service::<settings::ApiKeyExists>(())
+            .await
+            .map_err(fault)?
+    );
+    let deleted = host
+        .service::<settings::DeleteApiKey>(input)
+        .await
+        .map_err(fault)?;
+    assert!(!deleted.exists);
+    Ok(())
+}
 impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+                "plugin.reconcile" => {
+                    assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Maintenance);
+                    assert_eq!(call.params, json!({}));
+                    assert!(call.payload.is_empty());
+                    if self.maintenance
+                        && !self
+                            .reconciled
+                            .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        mutate(&call.host).await?;
+                    }
+                    Ok(CallReply::unary(json!({}), vec![]))
+                }
                 "plugin.register" => {
                     if self.mutate {
-                        // Wire identity is deliberately false: the host must retain
-                        // its original plugin lease and persisted audit principal.
-                        let input = MutationContext {
-                            actor: MutationActor::AdminSession {
-                                admin_user_id: "forged-user".into(),
-                            },
-                            request_id: "forged-request".into(),
-                        };
-                        assert!(
-                            !call
-                                .host
-                                .service::<settings::ApiKeyExists>(())
-                                .await
-                                .map_err(fault)?
-                        );
-                        let generated = call
-                            .host
-                            .service::<settings::RegenerateApiKey>(input.clone())
-                            .await
-                            .map_err(fault)?;
-                        assert!(generated.mutation.exists && generated.key.len() >= 32);
-                        assert!(
-                            call.host
-                                .service::<settings::ApiKeyExists>(())
-                                .await
-                                .map_err(fault)?
-                        );
-                        let deleted = call
-                            .host
-                            .service::<settings::DeleteApiKey>(input)
-                            .await
-                            .map_err(fault)?;
-                        assert!(!deleted.exists);
+                        mutate(&call.host).await?;
                     }
                     Ok(CallReply::unary(
                         json!({"contributes":self.contributes}),
@@ -127,6 +142,10 @@ async fn main() {
         mutate: session.handshake().configuration["mutate"]
             .as_bool()
             .unwrap_or(false),
+        maintenance: session.handshake().configuration["maintenance"]
+            .as_bool()
+            .unwrap_or(false),
+        reconciled: std::sync::atomic::AtomicBool::new(false),
         observation: session.handshake().configuration["observation"]
             .as_str()
             .map(Into::into),

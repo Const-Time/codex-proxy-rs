@@ -34,6 +34,16 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    fn supports_maintenance(&self) -> bool {
+        false
+    }
+    async fn reconcile(
+        &self,
+        _cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<()> {
+        Err(AdminError::unavailable("插件维护能力不可用"))
+    }
+
     fn upstream_adapter(
         &self,
         _id: &str,
