@@ -8,6 +8,47 @@ use futures::future::BoxFuture;
 use crate::account::ProviderAccountId;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Static registration facts captured from the same extension publication as
+/// execution middleware. No process calls or separate routing configuration.
+#[derive(Clone)]
+pub struct ContributedModelCatalog {
+    aliases: std::sync::Arc<[ContributedModelAlias]>,
+    cancellation: crate::lifecycle::CancellationToken,
+}
+impl ContributedModelCatalog {
+    #[must_use]
+    pub fn new(
+        aliases: Vec<ContributedModelAlias>,
+        cancellation: crate::lifecycle::CancellationToken,
+    ) -> Self {
+        Self {
+            aliases: aliases.into(),
+            cancellation,
+        }
+    }
+    pub fn cancellation(&self) -> crate::lifecycle::CancellationToken {
+        self.cancellation.clone()
+    }
+    pub(crate) fn apply(
+        &self,
+        snapshot: &super::RuntimeSnapshot,
+    ) -> Result<super::RuntimeSnapshot, super::snapshot::RuntimeSnapshotCompileError> {
+        if self.cancellation.is_cancelled() {
+            return Err(super::snapshot::RuntimeSnapshotCompileError::InvalidExtensionModels);
+        }
+        snapshot.clone().with_model_aliases(self.aliases.to_vec())
+    }
+}
+
+/// Core validates a proposed complete registration set before Admin commits an
+/// instance revision; each request validates it again against its own snapshot.
+pub trait ModelCatalogValidator: Send + Sync {
+    fn validate_model_aliases(
+        &self,
+        aliases: Vec<ContributedModelAlias>,
+    ) -> Result<(), super::snapshot::RuntimeSnapshotCompileError>;
+}
+
 pub trait ProviderCatalogPort: Send + Sync {
     fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration>;
     fn query_model_capabilities(
@@ -106,4 +147,14 @@ impl ProviderModelCapabilities {
     pub const fn presentation(&self) -> Option<&ModelPresentation> {
         self.presentation.as_ref()
     }
+}
+
+/// An immutable plugin contribution. It points directly to a provider-owned
+/// model and never grants access to an account or adds provider capabilities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContributedModelAlias {
+    pub owner: String,
+    pub id: PublicModelId,
+    pub provider: ProviderKind,
+    pub target: UpstreamModelId,
 }

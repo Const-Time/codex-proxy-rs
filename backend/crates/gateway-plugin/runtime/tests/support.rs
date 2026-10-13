@@ -179,22 +179,32 @@ impl PluginStore for MemoryStore {
     }
 }
 pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
-    build_archive(version, extra_capability, false, false, false, false, false)
+    build_archive(
+        version,
+        extra_capability,
+        false,
+        false,
+        false,
+        (false, false, false),
+    )
 }
 pub fn authentication_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, true, false, false, false, false)
+    build_archive(version, false, true, false, false, (false, false, false))
 }
 pub fn routing_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, false, true, false, false, false)
+    build_archive(version, false, false, true, false, (false, false, false))
 }
 pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, false, false, true, false, false)
+    build_archive(version, false, false, false, true, (false, false, false))
 }
 pub fn retry_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, false, false, false, false, true, false)
+    build_archive(version, false, false, false, false, (true, false, false))
 }
 pub fn http_archive(version: &str) -> Arc<[u8]> {
-    build_archive(version, true, false, false, false, false, true)
+    build_archive(version, true, false, false, false, (false, true, false))
+}
+pub fn catalog_archive(version: &str) -> Arc<[u8]> {
+    build_archive(version, false, false, false, false, (false, false, true))
 }
 fn build_archive(
     version: &str,
@@ -202,9 +212,9 @@ fn build_archive(
     authentication: bool,
     routing: bool,
     scheduling: bool,
-    retry: bool,
-    http: bool,
+    modes: (bool, bool, bool),
 ) -> Arc<[u8]> {
+    let (retry, http, catalog) = modes;
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
     let page = b"<!doctype html><html><body>Plugin fixture</body></html>";
     let mut contributes =
@@ -233,9 +243,13 @@ fn build_archive(
         contributes["middleware"]["stages"] =
             json!(["http", "websocket", "service", "request", "attempt"]);
     }
+    if catalog {
+        contributes["model_catalog"] =
+            json!({"id":"local.fixture.catalog","version":1,"stages":["registration"]});
+    }
     let manifest = json!({"manifestVersion":2,"name":"fixture","displayName":"Fixture","publisher":"local","version":version,"description":"Lifecycle fixture","license":"MIT",
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,
-        "configurationSchema":{"type":"object","properties":{"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
+        "configurationSchema":{"type":"object","properties":{"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
         "state":[{"namespace":"counter","schemaVersion":1,"schema":{"type":"integer"},"maximumRecords":10,"maximumBytes":1024,"maximumValueBytes":128}],
         "resources":{"index.html":"text/html"},"package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},
         "files":{"bin/plugin":hex::encode(Sha256::digest(&executable)),"index.html":hex::encode(Sha256::digest(page))}}});

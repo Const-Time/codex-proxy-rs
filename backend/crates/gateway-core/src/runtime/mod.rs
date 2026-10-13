@@ -200,6 +200,20 @@ impl HealthProbe for RuntimeSnapshotHandle {
     }
 }
 
+impl crate::routing::ModelCatalogValidator for RuntimeSnapshotHandle {
+    fn validate_model_aliases(
+        &self,
+        aliases: Vec<crate::routing::ContributedModelAlias>,
+    ) -> Result<(), RuntimeSnapshotCompileError> {
+        self.acquire()
+            .map_err(|_| RuntimeSnapshotCompileError::StoreUnavailable)?
+            .as_ref()
+            .clone()
+            .with_model_aliases(aliases)
+            .map(|_| ())
+    }
+}
+
 /// Admin 提交配置后触发本进程刷新与跨进程通知的对象安全端口。
 pub trait SnapshotControl: Send + Sync {
     fn publish_committed(&self, committed_revision: ConfigRevision) -> BoxFuture<'_, ()>;

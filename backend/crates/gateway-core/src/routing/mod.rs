@@ -5,6 +5,7 @@ mod request_settings;
 pub use request_settings::{ExecutionSettings, RequestSettings};
 pub mod snapshot;
 pub use catalog::{
+    ContributedModelAlias, ContributedModelCatalog, ModelCatalogValidator,
     ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
     ProviderModelCapabilities, ProviderModelDescriptor, PublicModelDescriptor,
 };

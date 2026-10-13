@@ -20,6 +20,21 @@ pub struct PluginModelExecution {
     plugins: Weak<PluginManager>,
 }
 impl PluginModelExecution {
+    fn bind_model_catalog(
+        &self,
+        client: AuthenticatedClient,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        let registry = self
+            .plugins
+            .upgrade()
+            .and_then(|p| p.middleware_registry())
+            .ok_or(ClientAuthenticationError::SnapshotUnavailable)?;
+        client.with_model_catalog(
+            registry
+                .model_catalog()
+                .map_err(|_| ClientAuthenticationError::SnapshotUnavailable)?,
+        )
+    }
     pub fn new(execution: Arc<dyn ExecutionService>, plugins: Weak<PluginManager>) -> Self {
         Self { execution, plugins }
     }
@@ -185,7 +200,7 @@ fn rewrite(
 }
 impl ExecutionService for PluginModelExecution {
     fn authenticate(&self, secret: &str) -> Result<AuthenticatedClient, ClientAuthenticationError> {
-        self.execution.authenticate(secret)
+        self.bind_model_catalog(self.execution.authenticate(secret)?)
     }
     fn client_access(
         &self,
@@ -198,7 +213,7 @@ impl ExecutionService for PluginModelExecution {
         key: &ClientApiKeyId,
         stop: CancellationToken,
     ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
-        self.execution.authenticate_bound_key(key, stop)
+        self.bind_model_catalog(self.execution.authenticate_bound_key(key, stop)?)
     }
     fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId> {
         self.execution.public_models(client)

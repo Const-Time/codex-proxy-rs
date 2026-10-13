@@ -227,6 +227,7 @@ mod worker_models {
 }
 
 struct Worker {
+    catalog_mode: String,
     contributes: serde_json::Value,
     fail: bool,
     schedule: String,
@@ -236,6 +237,20 @@ impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "model_catalog.register"=>{
+                use gateway_plugin_sdk::call::catalog::{ModelCatalogRegistration,ModelAlias};
+                assert_eq!(call.context.stage,gateway_plugin_sdk::Stage::Registration);
+                for method in ["host.models.list","host.services.call","host.state.put"] {assert!(call.host.call(method,json!({}),vec![]).await.is_err());}
+                let mut models=vec![ModelAlias{id:"plugin-model".into(),provider:"openai".into(),model:"gpt-native".into()}];
+                match self.catalog_mode.as_str() {
+                    "empty"=>models.clear(),"duplicate"=>models.push(models[0].clone()),"self"=>models[0].model=models[0].id.clone(),"provider"=>models[0].provider="foreign".into(),"bad-id"=>models[0].id="bad\nmodel".into(),"oversized"=>{models=(0..257).map(|i|ModelAlias{id:format!("alias-{i}"),provider:"openai".into(),model:"gpt-native".into()}).collect();},_=>{}
+                }
+                let mut payload=serde_json::to_vec(&ModelCatalogRegistration{models}).unwrap();
+                if self.catalog_mode=="large-payload" {payload=vec![b' ';65537];}
+                if self.catalog_mode=="unknown-field" {payload=br#"{"models":[],"extra":true}"#.to_vec();}
+                if self.catalog_mode=="unknown-alias-field" {payload=br#"{"models":[{"id":"alias","provider":"openai","model":"gpt-native","capabilities":[] }]}"#.to_vec();}
+                Ok(CallReply::unary(if self.catalog_mode=="envelope" {json!({"extra":true})}else{json!({})},payload))
+            },
             "policy.retry_decision" => {
                 use gateway_plugin_sdk::call::policy::{RetryDecisionRequest, RetryAction};
                 let head: RetryDecisionRequest = serde_json::from_value(call.params.clone()).unwrap();
@@ -449,6 +464,10 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        catalog_mode: session.handshake().configuration["catalog_mode"]
+            .as_str()
+            .unwrap_or("valid")
+            .into(),
         contributes: serde_json::to_value(&session.handshake().contributes).unwrap(),
         retry: session.handshake().configuration["retry"]
             .as_str()

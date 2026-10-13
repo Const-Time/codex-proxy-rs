@@ -34,6 +34,11 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    /// Registration facts only; the original Core snapshot must validate the complete set.
+    fn model_aliases(&self) -> Vec<gateway_core::routing::ContributedModelAlias> {
+        Vec::new()
+    }
+
     async fn service_middleware(
         &self,
         _context: gateway_core::engine::middleware::service::Context,
@@ -120,6 +125,10 @@ pub trait PluginProcess: Send + Sync {
 }
 #[async_trait]
 pub trait PluginRuntime: Send + Sync {
+    /// Manifest interpretation stays with the package/protocol owner.
+    fn contributes_model_catalog(&self, _artifact: &PluginArtifact) -> Result<bool> {
+        Ok(false)
+    }
     fn describe(&self, info: PluginArtifactInfo) -> Result<PluginArtifactInfo>;
     async fn inspect(&self, archive: Arc<[u8]>) -> Result<PluginArtifact>;
     async fn validate(

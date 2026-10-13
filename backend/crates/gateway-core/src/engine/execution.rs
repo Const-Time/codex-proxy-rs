@@ -100,12 +100,29 @@ pub struct ExecutionRequestMetadata {
 
 #[derive(Clone)]
 pub struct AuthenticatedClient {
+    model_catalog: Option<crate::routing::ContributedModelCatalog>,
     snapshot: Arc<RuntimeSnapshot>,
     policy: ClientPolicy,
     bound_authorization: Option<crate::runtime::ClientAccessGuard>,
 }
 
 impl AuthenticatedClient {
+    /// Add only validated aliases to this client's original authorization facts.
+    pub fn with_model_catalog(
+        mut self,
+        catalog: crate::routing::ContributedModelCatalog,
+    ) -> Result<Self, ClientAuthenticationError> {
+        self.snapshot = Arc::new(
+            catalog
+                .apply(&self.snapshot)
+                .map_err(|_| ClientAuthenticationError::SnapshotUnavailable)?,
+        );
+        self.bound_authorization = self
+            .bound_authorization
+            .map(|access| access.with_revocation(catalog.cancellation()));
+        self.model_catalog = Some(catalog);
+        Ok(self)
+    }
     pub fn bound_access(&self) -> Option<crate::runtime::ClientAccessGuard> {
         self.bound_authorization.clone()
     }
@@ -160,6 +177,31 @@ pub struct PreparedRootExecution {
 }
 
 impl PreparedRootExecution {
+    /// Bind the catalog from the same frozen publication as the request layers.
+    /// Rebase the existing settings branch without replacing authorization or billing.
+    pub fn with_model_catalog(
+        mut self,
+        catalog: crate::routing::ContributedModelCatalog,
+    ) -> Result<Self, GatewayError> {
+        self.validate()?;
+        self.cancellation = CancellationToken::linked([self.cancellation, catalog.cancellation()]);
+        self.client = self.client.with_model_catalog(catalog).map_err(|_| {
+            GatewayError::new(
+                GatewayErrorKind::Internal,
+                "plugin model catalog is unavailable",
+            )
+        })?;
+        let settings = self
+            .settings
+            .rebase(self.client.snapshot.clone())
+            .map_err(|_| {
+                GatewayError::new(
+                    GatewayErrorKind::InvalidRequest,
+                    "plugin model catalog conflicts with request settings",
+                )
+            })?;
+        self.with_settings(settings)
+    }
     pub fn with_http_dispatcher(
         mut self,
         dispatcher: Arc<dyn super::middleware::http::Dispatcher>,
@@ -1463,7 +1505,10 @@ impl ExecutionService for DefaultExecutionService {
         &self,
         client: &AuthenticatedClient,
     ) -> Option<crate::runtime::ClientAccessGuard> {
-        let access = self.snapshots.client_access(client.policy()).ok()?;
+        let mut access = self.snapshots.client_access(client.policy()).ok()?;
+        if let Some(catalog) = &client.model_catalog {
+            access = access.with_revocation(catalog.cancellation());
+        }
         Some(match &client.bound_authorization {
             Some(bound) => access.with_revocation(bound.cancellation()),
             None => access,
@@ -1487,6 +1532,7 @@ impl ExecutionService for DefaultExecutionService {
             .ok_or(ClientAuthenticationError::InvalidKey)?;
         self.client_api_key_usage.record_used(policy.key_id());
         Ok(AuthenticatedClient {
+            model_catalog: None,
             snapshot,
             policy,
             bound_authorization: None,
@@ -1520,6 +1566,7 @@ impl ExecutionService for DefaultExecutionService {
         }
         self.client_api_key_usage.record_used(policy.key_id());
         Ok(AuthenticatedClient {
+            model_catalog: None,
             snapshot,
             policy,
             bound_authorization: Some(bound),
@@ -1625,10 +1672,15 @@ impl ExecutionService for DefaultExecutionService {
         &self,
         client: AuthenticatedClient,
     ) -> Result<PreparedRootExecution, GatewayError> {
+        let model_catalog = client.model_catalog.clone();
         let previous = client
             .bound_authorization
             .as_ref()
             .map_or_else(CancellationToken::new, |access| access.cancellation());
+        let previous = match &model_catalog {
+            Some(catalog) => CancellationToken::linked([previous, catalog.cancellation()]),
+            None => previous,
+        };
         if previous.is_cancelled() {
             return Err(GatewayError::new(
                 GatewayErrorKind::Unauthorized,
@@ -1646,6 +1698,15 @@ impl ExecutionService for DefaultExecutionService {
                     "runtime snapshot is unavailable",
                 ),
             })?;
+        let client = match model_catalog {
+            Some(catalog) => client.with_model_catalog(catalog).map_err(|_| {
+                GatewayError::new(
+                    GatewayErrorKind::Internal,
+                    "plugin model catalog is unavailable",
+                )
+            })?,
+            None => client,
+        };
         let started_at = SystemTime::now();
         let deadline_at = crate::lifecycle::Deadline::default();
         let authorization = client.bound_authorization.as_ref().ok_or_else(|| {

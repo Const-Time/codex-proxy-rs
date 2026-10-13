@@ -4295,3 +4295,192 @@ mod retry_policy {
         });
     }
 }
+
+struct CatalogChargedProvider;
+#[async_trait]
+impl Provider for CatalogChargedProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![])
+    }
+    async fn query_client_model_catalog(
+        &self,
+        _: &gateway_core::routing::FrozenAccountScope,
+        _: &str,
+        _: &str,
+    ) -> Result<
+        Option<Vec<gateway_core::routing::ProviderModelDescriptor>>,
+        gateway_core::routing::ProviderCatalogUnavailable,
+    > {
+        Ok(Some(vec![gateway_core::routing::ProviderModelDescriptor {
+            model: UpstreamModelId::new("gpt-start").unwrap(),
+            payload: gateway_core::operation::RawJsonPayload::new(
+                "codex",
+                bytes::Bytes::from_static(
+                    br#"{"slug":"gpt-start","native_field":{"effort":"high"}}"#,
+                ),
+            )
+            .unwrap(),
+        }]))
+    }
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        ChargedProvider { fail: false }
+            .execute(request, context)
+            .await
+    }
+}
+#[test]
+fn contributed_alias_native_catalog_and_execution_share_original_scope_and_single_ledger() {
+    block_on(async {
+        for transport in [
+            ClientTransport::HttpJson,
+            ClientTransport::HttpSse,
+            ClientTransport::WebSocket,
+        ] {
+            let admissions = Arc::new(Admissions::default());
+            let budget = Arc::new(Budget {
+                active: admissions.active.clone(),
+                ..Default::default()
+            });
+            let store = Arc::new(TrackingExecutionStore::default());
+            let base = start_snapshot();
+            let catalog = gateway_core::routing::ContributedModelCatalog::new(
+                vec![gateway_core::routing::ContributedModelAlias {
+                    owner: "catalog-fixture".into(),
+                    id: PublicModelId::new("plugin-alias").unwrap(),
+                    provider: ProviderKind::new("openai").unwrap(),
+                    target: UpstreamModelId::new("gpt-start").unwrap(),
+                }],
+                gateway_core::lifecycle::CancellationToken::new(),
+            );
+            let snapshots = RuntimeSnapshotHandle::new(base.clone());
+            let service = DefaultExecutionService::new(
+                snapshots.clone(),
+                store.clone(),
+                ProviderRegistry::new([Arc::new(CatalogChargedProvider) as Arc<dyn Provider>])
+                    .unwrap(),
+                admissions.clone(),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            )
+            .with_budget(budget.clone());
+            let client = service
+                .authenticate("sk_start_test")
+                .unwrap()
+                .with_model_catalog(catalog)
+                .unwrap();
+            let alias = PublicModelId::new("plugin-alias").unwrap();
+            assert!(service.public_models(&client).contains(&alias));
+            let catalog = service
+                .client_model_catalog(&client, "codex", "fixture")
+                .await
+                .unwrap();
+            let mut native = None;
+            let mut contributed = None;
+            for entry in catalog {
+                if let gateway_core::routing::PublicModelDescriptor::Native { model, payload } =
+                    entry
+                {
+                    if model.as_str() == "gpt-start" {
+                        native = Some(payload);
+                    } else if model == alias {
+                        contributed = Some(payload);
+                    }
+                }
+            }
+            assert_eq!(contributed.as_ref(), native.as_ref());
+            assert!(contributed.is_some());
+            // A later host snapshot cannot mutate an already prepared execution view.
+            let prepared = service.prepare_execution(client.clone()).unwrap();
+            snapshots.publish(base);
+            assert!(
+                !service
+                    .contains_public_model(&service.authenticate("sk_start_test").unwrap(), &alias)
+            );
+            assert!(service.contains_public_model(&client, &alias));
+            let metadata = request(&service, transport).metadata;
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: alias,
+                        operation: start_operation_for_model("plugin-alias"),
+                        metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            let request_id = started.request_id.clone();
+            consume_charged_prefix(started.session.as_mut()).await;
+            started.session.detach_finalize().await;
+            assert_cleanup_completed(&admissions, &budget, &request_id);
+            assert_eq!(store.requested_models(), vec![Some("plugin-alias".into())]);
+            assert_eq!(store.upstream_models(), vec![Some("gpt-start".into())]);
+            assert_eq!(budget.charges.lock().unwrap().len(), 1);
+            assert_eq!(budget.charges.lock().unwrap()[0].amount_usd, known_charge());
+        }
+    });
+}
+
+#[test]
+fn contributed_catalog_revalidates_preparation_and_cannot_override_a_request_settings_branch() {
+    use gateway_core::{lifecycle::CancellationToken, routing::ContributedModelCatalog};
+    let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+    let admissions = Arc::new(Admissions::default());
+    let store = Arc::new(TrackingExecutionStore::default());
+    let service = DefaultExecutionService::new(
+        snapshots.clone(),
+        store.clone(),
+        ProviderRegistry::new([Arc::new(CatalogChargedProvider) as Arc<dyn Provider>]).unwrap(),
+        admissions,
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let stop = CancellationToken::new();
+    let catalog = ContributedModelCatalog::new(
+        vec![gateway_core::routing::ContributedModelAlias {
+            owner: "catalog-fixture".into(),
+            id: PublicModelId::new("plugin-alias").unwrap(),
+            provider: ProviderKind::new("openai").unwrap(),
+            target: UpstreamModelId::new("gpt-start").unwrap(),
+        }],
+        stop.clone(),
+    );
+    let client = service
+        .authenticate("sk_start_test")
+        .unwrap()
+        .with_model_catalog(catalog.clone())
+        .unwrap();
+    snapshots.publish(start_snapshot().with_model_mappings(BTreeMap::from([(
+        "plugin-alias".into(),
+        "gpt-start".into(),
+    )])));
+    assert!(service.prepare_execution(client.clone()).is_err());
+    snapshots.publish(start_snapshot());
+    let prepared = service
+        .prepare_execution(service.authenticate("sk_start_test").unwrap())
+        .unwrap();
+    let mut values = prepared.settings().execution_values().unwrap();
+    values.runtime = values.runtime.with_model_mappings(BTreeMap::from([(
+        "plugin-alias".into(),
+        "gpt-start".into(),
+    )]));
+    let settings = prepared.settings().replace_execution(&values, "rewrite");
+    assert!(settings.is_ok());
+    let prepared = prepared.with_settings(settings.unwrap()).unwrap();
+    assert!(prepared.with_model_catalog(catalog).is_err());
+    stop.cancel();
+    assert!(service.prepare_execution(client).is_err());
+    assert!(store.requested_models().is_empty());
+}
