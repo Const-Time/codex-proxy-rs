@@ -1910,6 +1910,11 @@ where
         retry_allowed: bool,
     ) -> super::retry_policy::RetryInput {
         super::retry_policy::RetryInput {
+            call_scope: self
+                .execution_context
+                .as_ref()
+                .map(|context| context.scope().clone())
+                .unwrap_or_default(),
             request_id: self.request_id.clone(),
             client_key_id: self.client_api_key_ref.clone(),
             account_group_ids: self

@@ -29,7 +29,7 @@ pub(crate) struct Invocation {
     pub(super) cancellation: gateway_core::lifecycle::CancellationToken,
     downstream_error: Mutex<Option<MiddlewareError>>,
     pub(super) callbacks_closed: gateway_core::lifecycle::CancellationToken,
-    context: core::Context,
+    pub(super) context: core::Context,
     dispatcher: Option<Arc<dyn core::Dispatcher>>,
 }
 

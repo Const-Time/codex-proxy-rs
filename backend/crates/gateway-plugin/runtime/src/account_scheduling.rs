@@ -31,6 +31,7 @@ fn milliseconds(time: Option<SystemTime>) -> Option<u64> {
 pub(crate) async fn invoke(
     session: &Arc<RpcSession>,
     models: Option<Arc<Models>>,
+    outbound: Arc<crate::outbound::Registry>,
     input: AccountScheduleInput,
 ) -> Result<AccountScheduleDecision, AccountSchedulingFault> {
     if session.capability_version(Capability::Scheduler) != Some(1)
@@ -51,6 +52,14 @@ pub(crate) async fn invoke(
         input.request_id().as_str(),
         input.attempt_index()
     ));
+    outbound
+        .bind(
+            &context,
+            input.cancellation(),
+            Some(input.nested_context().scope().clone()),
+        )
+        .map_err(|_| AccountSchedulingFault)?;
+    let _network = outbound.guard(&context);
     if let Some(models) = &models {
         models
             .bind(

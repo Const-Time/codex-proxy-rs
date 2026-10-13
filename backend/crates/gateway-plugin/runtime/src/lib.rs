@@ -8,6 +8,7 @@ mod management_validation;
 pub mod middleware;
 mod model_routing;
 mod models;
+mod outbound;
 mod package;
 mod resources;
 mod retry_policy;

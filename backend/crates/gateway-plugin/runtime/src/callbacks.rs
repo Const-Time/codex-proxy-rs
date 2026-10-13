@@ -22,6 +22,7 @@ struct Namespace {
     schema: jsonschema::Validator,
 }
 pub(crate) struct Callbacks {
+    outbound: Arc<crate::outbound::Registry>,
     models: Option<Arc<crate::models::Models>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
     resources: Option<Arc<dyn gateway_admin::ports::plugins::PluginResourceService>>,
@@ -58,6 +59,7 @@ impl Callbacks {
         manifest: &Manifest,
         active: Arc<AtomicBool>,
         data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
+        outbound: Arc<crate::outbound::Registry>,
     ) -> Result<Self, gateway_admin::model::AdminError> {
         let namespaces = manifest
             .state
@@ -73,6 +75,7 @@ impl Callbacks {
             })
             .collect::<Result<_, gateway_admin::model::AdminError>>()?;
         Ok(Self {
+            outbound,
             models: None,
             quota: None,
             resources: None,
@@ -107,6 +110,18 @@ fn store_error(error: gateway_admin::model::AdminError) -> PluginFault {
 }
 impl CallbackHandler for Callbacks {
     fn begin(&self, context: &CallContext) {
+        if context.stage == Stage::Management
+            && let Some(caller) = self.calls.caller(&context.resource_scope_id)
+        {
+            let _ = self.outbound.bind(
+                context,
+                caller.cancellation.clone(),
+                caller
+                    .invocation
+                    .as_ref()
+                    .map(|origin| origin.context.call_scope.clone()),
+            );
+        }
         if context.stage == Stage::Management
             && let Some(models) = &self.models
         {
@@ -184,7 +199,7 @@ impl CallbackHandler for Callbacks {
             ) {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
-                    "this policy stage only permits private state callbacks",
+                    "this policy stage has no management authority",
                 ));
             }
             if method == gateway_plugin_sdk::call::services::CALL_METHOD {

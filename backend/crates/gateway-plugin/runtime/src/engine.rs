@@ -47,7 +47,7 @@ impl HttpDispatcher {
 }
 
 pub struct PluginEngine {
-    outbound: crate::upstream_adapter::callbacks::SharedClient,
+    outbound: crate::outbound::SharedClient,
     http: Option<Arc<HttpDispatcher>>,
     models: Option<Arc<crate::models::ModelServices>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
@@ -368,6 +368,7 @@ impl PluginRuntime for PluginEngine {
         let access = PluginAccess::default();
         let failed_access = access.clone();
         let ended_access = access.clone();
+        let outbound = crate::outbound::Registry::new(self.outbound.clone(), access.cancellation());
         let models = self.models.clone().map(|services| {
             crate::models::Models::new(services, access.cancellation(), self.http.clone())
         });
@@ -378,18 +379,21 @@ impl PluginRuntime for PluginEngine {
                 &manifest,
                 active.clone(),
                 self.data.clone(),
+                outbound.clone(),
             )?
             .with_resources(self.resources.clone())
             .with_quota(self.quota.clone())
             .with_models(models.clone()),
         );
         let calls = callbacks.calls.clone();
-        let middleware =
-            crate::middleware::MiddlewareCallbacks::new(callbacks).with_models(models.clone());
+        let middleware = crate::middleware::MiddlewareCallbacks::new(callbacks)
+            .with_models(models.clone())
+            .with_outbound(outbound.clone());
         let upstream_callbacks = crate::upstream_adapter::callbacks::Callbacks::new(
             middleware.clone(),
             self.outbound.clone(),
             models.clone(),
+            outbound.clone(),
         );
         let session = Arc::new(
             RpcSession::start_supervised(
@@ -408,7 +412,7 @@ impl PluginRuntime for PluginEngine {
                 },
                 RpcLimits::default(),
                 &self.processes,
-                upstream_callbacks.clone(),
+                outbound.wrap(upstream_callbacks.clone()),
                 crate::rpc::RpcSessionLifecycle::new(
                     move |_| failed_access.revoke(),
                     move || ended_access.revoke(),
@@ -517,6 +521,7 @@ impl PluginRuntime for PluginEngine {
         Ok(Arc::new(LivePlugin {
             upstream_adapters,
             model_aliases,
+            outbound,
             models,
             middleware,
             authentication,
@@ -530,6 +535,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    outbound: Arc<crate::outbound::Registry>,
     upstream_adapters: Vec<Arc<crate::upstream_adapter::PluginUpstreamAdapter>>,
     model_aliases: Vec<gateway_core::routing::ContributedModelAlias>,
     models: Option<Arc<crate::models::Models>>,
@@ -636,7 +642,7 @@ impl PluginProcess for LivePlugin {
         if self.status() != "ready" || self.access.is_revoked() {
             return Err(gateway_core::engine::retry_policy::RetryPolicyFault);
         }
-        crate::retry_policy::invoke(&self.session, input, timeout).await
+        crate::retry_policy::invoke(&self.session, self.outbound.clone(), input, timeout).await
     }
     async fn schedule_account(
         &self,
@@ -648,7 +654,13 @@ impl PluginProcess for LivePlugin {
         if self.status() != "ready" || self.access.is_revoked() {
             return Err(gateway_core::engine::account_scheduling::AccountSchedulingFault);
         }
-        crate::account_scheduling::invoke(&self.session, self.models.clone(), input).await
+        crate::account_scheduling::invoke(
+            &self.session,
+            self.models.clone(),
+            self.outbound.clone(),
+            input,
+        )
+        .await
     }
     async fn route_model(
         &self,
@@ -660,7 +672,13 @@ impl PluginProcess for LivePlugin {
         if self.status() != "ready" || self.access.is_revoked() {
             return Err(gateway_core::engine::model_routing::ModelRoutingFault);
         }
-        crate::model_routing::invoke(&self.session, self.models.clone(), input).await
+        crate::model_routing::invoke(
+            &self.session,
+            self.models.clone(),
+            self.outbound.clone(),
+            input,
+        )
+        .await
     }
     async fn middleware(
         &self,

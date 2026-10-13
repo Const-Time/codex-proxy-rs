@@ -24,6 +24,7 @@ impl Drop for ModelScope {
 pub(crate) async fn invoke(
     session: &Arc<RpcSession>,
     models: Option<Arc<Models>>,
+    outbound: Arc<crate::outbound::Registry>,
     input: ModelRouteInput,
 ) -> Result<ModelRouteDecision, ModelRoutingFault> {
     if session.capability_version(Capability::ModelRouter) != Some(1)
@@ -48,6 +49,14 @@ pub(crate) async fn invoke(
     }
     let mut context = session.context(Stage::Routing, timeout);
     context.request_id = Some(input.request_id().as_str().into());
+    outbound
+        .bind(
+            &context,
+            input.cancellation(),
+            Some(input.nested_context().scope().clone()),
+        )
+        .map_err(|_| ModelRoutingFault)?;
+    let _network = outbound.guard(&context);
     if let Some(models) = &models {
         models
             .bind(

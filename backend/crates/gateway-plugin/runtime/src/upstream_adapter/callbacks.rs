@@ -1,21 +1,22 @@
 //! Request-scoped managed network resources share the existing RPC lifecycle.
 use super::{failure::invalid, network::ManagedCall};
+use crate::outbound::SharedClient;
 use crate::{CallbackHandler, RpcReply};
 use futures::future::BoxFuture;
 use gateway_core::{
     engine::nested::NestedExecutionContext, error::ProviderError, lifecycle::CancellationToken,
     upstream::UpstreamSendState,
 };
-use gateway_host::outbound::{HttpClient, HttpError};
+use gateway_host::outbound::HttpClient;
 use gateway_plugin_sdk::{CallContext, ErrorCode, PluginFault, Stage};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
-pub(crate) type SharedClient = Arc<OnceLock<Result<HttpClient, HttpError>>>;
 pub(crate) struct Callbacks {
     inner: Arc<dyn CallbackHandler>,
+    outbound: Arc<crate::outbound::Registry>,
     models: Option<Arc<crate::models::Models>>,
     pub(super) client: SharedClient,
     calls: Mutex<BTreeMap<String, (CallContext, Arc<ManagedCall>)>>,
@@ -34,9 +35,11 @@ impl Callbacks {
         inner: Arc<dyn CallbackHandler>,
         client: SharedClient,
         models: Option<Arc<crate::models::Models>>,
+        outbound: Arc<crate::outbound::Registry>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner,
+            outbound,
             models,
             client,
             calls: Mutex::default(),
@@ -69,6 +72,15 @@ impl Callbacks {
                 )
                 .map_err(|error| super::failure::fault_error(error, UpstreamSendState::NotSent))?;
         }
+        if let Err(error) = self.outbound.bind_scope(context, call.http.clone()) {
+            if let Some(models) = &self.models {
+                models.finish(context);
+            }
+            return Err(super::failure::fault_error(
+                error,
+                UpstreamSendState::NotSent,
+            ));
+        }
         calls.insert(context.resource_scope_id.clone(), (context.clone(), call));
         Ok(Binding {
             callbacks: self.clone(),
@@ -96,6 +108,7 @@ impl CallbackHandler for Callbacks {
             models.finish(context);
         }
         self.inner.finish(context);
+        self.outbound.finish(context);
     }
     fn call(
         &self,
