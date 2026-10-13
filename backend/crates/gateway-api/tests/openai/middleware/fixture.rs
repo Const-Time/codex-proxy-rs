@@ -89,7 +89,11 @@ impl PluginStore for Store {
     }
 }
 #[derive(Clone, Copy)]
-pub(super) enum Mode {
+pub(crate) enum Mode {
+    HttpUpgrade,
+    HttpUpgradeBadResponse,
+    HttpUpgradeDiscard,
+    HttpAuthError,
     Rewrite,
     InvalidModel,
     Transport,
@@ -110,14 +114,15 @@ pub(super) enum Mode {
     Settings,
     ZeroTimeout,
 }
-pub(super) struct Plugin {
-    pub(super) access: PluginAccess,
-    pub(super) mode: Mode,
-    pub(super) seen: Mutex<Vec<MiddlewareContext>>,
-    pub(super) headers: Mutex<Vec<String>>,
-    pub(super) routing_calls: AtomicUsize,
-    pub(super) scheduling_calls: AtomicUsize,
-    pub(super) retry_calls: AtomicUsize,
+pub(crate) struct Plugin {
+    pub(crate) access: PluginAccess,
+    pub(crate) mode: Mode,
+    pub(crate) seen: Mutex<Vec<MiddlewareContext>>,
+    pub(crate) headers: Mutex<Vec<String>>,
+    pub(crate) routing_calls: AtomicUsize,
+    pub(crate) scheduling_calls: AtomicUsize,
+    pub(crate) retry_calls: AtomicUsize,
+    pub(crate) http_seen: Mutex<Vec<(String, gateway_core::engine::middleware::http::Context)>>,
 }
 struct Runtime(Arc<Plugin>);
 #[async_trait]
@@ -146,6 +151,14 @@ impl PluginRuntime for Runtime {
 }
 #[async_trait]
 impl PluginProcess for Plugin {
+    async fn http_middleware(
+        &self,
+        context: gateway_core::engine::middleware::http::Context,
+        request: gateway_core::engine::middleware::http::Request,
+        next: gateway_core::engine::middleware::http::Next,
+    ) -> Result<gateway_core::engine::middleware::http::Response, MiddlewareError> {
+        crate::middleware::fixture::handle(self, context, request, next).await
+    }
     async fn retry_decision(
         &self,
         input: gateway_core::engine::retry_policy::RetryInput,
@@ -374,23 +387,23 @@ impl PluginProcess for Plugin {
     }
 }
 #[derive(Default)]
-pub(super) struct Effects {
-    pub(super) provider_failure: Mutex<Option<fn() -> ProviderError>>,
+pub(crate) struct Effects {
+    pub(crate) provider_failure: Mutex<Option<fn() -> ProviderError>>,
     retry: AtomicBool,
-    pub(super) active: AtomicUsize,
-    pub(super) calls: AtomicUsize,
-    pub(super) commits: AtomicUsize,
-    pub(super) completion: Mutex<Option<Arc<tokio::sync::Notify>>>,
-    pub(super) charges: Mutex<Vec<ClientBudgetCharge>>,
-    pub(super) finalizations: Mutex<Vec<ModelRequestFinalization>>,
-    pub(super) requests: Mutex<Vec<(String, String, String, gateway_core::lifecycle::Deadline)>>,
-    pub(super) raw_requests: Mutex<Vec<Operation>>,
-    pub(super) revoke_after_start: Mutex<Option<PluginAccess>>,
-    pub(super) operations: Mutex<Vec<Operation>>,
-    pub(super) settings: Mutex<Vec<gateway_core::routing::RequestSettings>>,
-    pub(super) interrupt: AtomicBool,
-    pub(super) state: Mutex<Option<gateway_core::operation::ProviderSessionState>>,
-    pub(super) raw_response: Mutex<Option<Bytes>>,
+    pub(crate) active: AtomicUsize,
+    pub(crate) calls: AtomicUsize,
+    pub(crate) commits: AtomicUsize,
+    pub(crate) completion: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(crate) charges: Mutex<Vec<ClientBudgetCharge>>,
+    pub(crate) finalizations: Mutex<Vec<ModelRequestFinalization>>,
+    pub(crate) requests: Mutex<Vec<(String, String, String, gateway_core::lifecycle::Deadline)>>,
+    pub(crate) raw_requests: Mutex<Vec<Operation>>,
+    pub(crate) revoke_after_start: Mutex<Option<PluginAccess>>,
+    pub(crate) operations: Mutex<Vec<Operation>>,
+    pub(crate) settings: Mutex<Vec<gateway_core::routing::RequestSettings>>,
+    pub(crate) interrupt: AtomicBool,
+    pub(crate) state: Mutex<Option<gateway_core::operation::ProviderSessionState>>,
+    pub(crate) raw_response: Mutex<Option<Bytes>>,
 }
 impl ClientAdmissionPort for Effects {
     fn maintain(
@@ -715,14 +728,15 @@ impl Provider for Effects {
         Ok(ProviderStream::new(meta, stream, ()))
     }
 }
-pub(super) struct Fixture {
-    pub(super) app: axum::Router,
-    pub(super) manager: Arc<PluginManager>,
-    pub(super) plugin: Arc<Plugin>,
-    pub(super) effects: Arc<Effects>,
+pub(crate) struct Fixture {
+    pub(crate) app: axum::Router,
+    pub(crate) manager: Arc<PluginManager>,
+    pub(crate) plugin: Arc<Plugin>,
+    pub(crate) effects: Arc<Effects>,
+    pub(crate) lifecycle: Arc<TestLifecycle>,
 }
 impl Fixture {
-    pub(super) async fn new(mode: Mode, installed: bool) -> Self {
+    pub(crate) async fn new(mode: Mode, installed: bool) -> Self {
         Self::with_mounts(
             mode,
             if installed {
@@ -733,23 +747,23 @@ impl Fixture {
         )
         .await
     }
-    pub(super) async fn with_mounts(mode: Mode, mounts: Vec<PluginMiddlewareMount>) -> Self {
+    pub(crate) async fn with_mounts(mode: Mode, mounts: Vec<PluginMiddlewareMount>) -> Self {
         Self::with_features(mode, mounts, &[]).await
     }
-    pub(super) async fn with_features(
+    pub(crate) async fn with_features(
         mode: Mode,
         mounts: Vec<PluginMiddlewareMount>,
         features: &[gateway_core::operation::Feature],
     ) -> Self {
         Self::with_policy(mode, mounts, features, false, false, false).await
     }
-    pub(super) async fn with_router() -> Self {
+    pub(crate) async fn with_router() -> Self {
         Self::with_policy(Mode::Rewrite, vec![], &[], true, false, false).await
     }
-    pub(super) async fn with_scheduler() -> Self {
+    pub(crate) async fn with_scheduler() -> Self {
         Self::with_policy(Mode::Rewrite, vec![], &[], false, true, false).await
     }
-    pub(super) async fn with_retry() -> Self {
+    pub(crate) async fn with_retry() -> Self {
         Self::with_policy(Mode::Rewrite, vec![], &[], false, false, true).await
     }
     async fn with_policy(
@@ -768,6 +782,7 @@ impl Fixture {
             routing_calls: AtomicUsize::new(0),
             scheduling_calls: AtomicUsize::new(0),
             retry_calls: AtomicUsize::new(0),
+            http_seen: Mutex::new(vec![]),
         });
         let records = if !mounts.is_empty() || routing || scheduling || retry {
             vec![PluginRecord {
@@ -845,6 +860,7 @@ impl Fixture {
             .with_budget(effects.clone()),
         );
         let admin = crate::admin::AdminTestFixture::new().await;
+        let lifecycle = Arc::new(TestLifecycle::default());
         let app = gateway_api::initialize(
             gateway_api::ApiConfig {
                 asset_directory: std::env::temp_dir(),
@@ -859,7 +875,7 @@ impl Fixture {
             admin.services.with_plugins(manager.clone()),
             vec![],
             Arc::new(EmptyWorkerHealth),
-            Arc::new(TestLifecycle::default()),
+            lifecycle.clone(),
         )
         .unwrap()
         .router();
@@ -868,9 +884,10 @@ impl Fixture {
             manager,
             plugin,
             effects,
+            lifecycle,
         }
     }
-    pub(super) async fn request(&self, stream: bool) -> axum::response::Response {
+    pub(crate) async fn request(&self, stream: bool) -> axum::response::Response {
         self.app
             .clone()
             .oneshot(
@@ -890,7 +907,7 @@ impl Fixture {
             .await
             .unwrap()
     }
-    pub(super) async fn settled(&self) {
+    pub(crate) async fn settled(&self) {
         for _ in 0..100 {
             if self.effects.active.load(Ordering::SeqCst) == 0 {
                 break;
@@ -960,7 +977,7 @@ impl Effects {
     }
 }
 impl Fixture {
-    pub(super) async fn raw_request(&self, endpoint: &str) -> axum::response::Response {
+    pub(crate) async fn raw_request(&self, endpoint: &str) -> axum::response::Response {
         self.app
             .clone()
             .oneshot(
@@ -986,6 +1003,9 @@ struct PostStartExecution {
     effects: Arc<Effects>,
 }
 impl ExecutionService for PostStartExecution {
+    fn request_settings(&self) -> Option<gateway_core::routing::RequestSettings> {
+        self.inner.request_settings()
+    }
     fn authenticate(
         &self,
         plaintext: &str,

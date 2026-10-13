@@ -116,6 +116,29 @@ impl ResponsesWebSocketAdapter {
             lifecycle: self.service.lifecycle(),
             connection_guard,
         };
+        let origin = crate::middleware::current();
+        if let Some(origin) = origin {
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let mut response = websocket
+                .max_message_size(usize::MAX)
+                .max_frame_size(usize::MAX)
+                .on_upgrade(move |socket| async move {
+                    let _ = send.send(socket);
+                });
+            let task = Box::pin(async move {
+                let socket = tokio::select! {biased;()=origin.context.cancellation.cancelled()=>return Err(gateway_core::engine::middleware::MiddlewareError::Fault),socket=receive=>socket.map_err(|_|gateway_core::engine::middleware::MiddlewareError::Fault)?};
+                crate::middleware::scope(Some(origin), serve_responses_websocket(socket, session))
+                    .await;
+                Ok(())
+            });
+            let upgraded = gateway_core::engine::middleware::http::upgrade::Upgraded::new(
+                response.status(),
+                task,
+            )
+            .expect("validated transport handshake");
+            response.extensions_mut().insert(upgraded);
+            return response;
+        }
         websocket
             // 覆盖 axum/tungstenite 的私有 64 MiB message 与 16 MiB frame 默认值。
             // Responses JSON 的协议可接受性由上游决定，代理不另设 wire 长度上限。
@@ -155,13 +178,19 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
     );
     let _connection_guard = connection_guard;
     let access = client.bound_access();
-    let cancellation = match &access {
+    let mut cancellation = match &access {
         Some(access) => gateway_core::lifecycle::CancellationToken::linked([
             lifecycle.cancellation(),
             access.cancellation(),
         ]),
         None => lifecycle.cancellation(),
     };
+    if let Some(origin) = crate::middleware::current() {
+        cancellation = gateway_core::lifecycle::CancellationToken::linked([
+            cancellation,
+            origin.context.cancellation,
+        ]);
+    }
     let request_headers =
         request_headers.with_downstream_websocket_connection_id(connection_id.clone());
     let mut connection = ResponsesWebSocketConnection::new(socket, connection_id, cancellation);

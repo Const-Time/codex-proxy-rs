@@ -138,6 +138,9 @@ impl OpenAiService {
     pub(crate) fn middleware_registry(
         &self,
     ) -> Option<gateway_admin::plugins::middleware::PluginMiddlewareRegistry> {
+        if let Some(origin) = crate::middleware::current() {
+            return Some(origin.registry);
+        }
         self.administration
             .as_ref()?
             .plugins()
@@ -148,7 +151,35 @@ impl OpenAiService {
         &self,
         client: AuthenticatedClient,
     ) -> Result<PreparedRootExecution, GatewayError> {
-        self.execution.prepare_execution(client)
+        let mut prepared = self.execution.prepare_execution(client)?;
+        if let Some(origin) = crate::middleware::current() {
+            if let Some(settings) = origin.settings {
+                if settings.execution_values().is_some() {
+                    return Err(GatewayError::new(
+                        GatewayErrorKind::InvalidRequest,
+                        "HTTP settings cannot replace Key execution authority",
+                    ));
+                }
+                let settings = settings
+                    .rebase(prepared.client().snapshot().clone())
+                    .map_err(|_| {
+                        GatewayError::new(
+                            GatewayErrorKind::InvalidRequest,
+                            "HTTP runtime settings are invalid",
+                        )
+                    })?
+                    .with_execution(
+                        prepared.client().policy(),
+                        prepared
+                            .settings()
+                            .execution_values()
+                            .and_then(|settings| settings.timeout_ms),
+                    );
+                prepared = prepared.with_settings(settings)?;
+            }
+            prepared = prepared.with_revocation(origin.context.cancellation);
+        }
+        Ok(prepared)
     }
     pub(crate) async fn start_prepared_response(
         &self,

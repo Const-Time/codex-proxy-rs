@@ -1,7 +1,7 @@
 mod attempt;
 mod body;
 mod delivery;
-mod fixture;
+pub(crate) mod fixture;
 mod raw;
 mod request;
 mod websocket;

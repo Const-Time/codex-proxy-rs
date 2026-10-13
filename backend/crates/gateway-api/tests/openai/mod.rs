@@ -3,7 +3,7 @@ mod endpoint;
 mod error;
 mod execution;
 mod images;
-mod middleware;
+pub(crate) mod middleware;
 mod models;
 mod responses;
 mod router;
@@ -231,15 +231,26 @@ fn snapshot_with_capabilities_and_accounts(
 #[derive(Default)]
 pub(crate) struct TestLifecycle {
     cancellation: gateway_core::lifecycle::CancellationToken,
+    pub(crate) active: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-struct TestConnectionGuard;
+struct TestConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for TestConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 impl ConnectionGuard for TestConnectionGuard {}
 
 impl ConnectionLifecycle for TestLifecycle {
     fn try_register(&self) -> Result<Box<dyn ConnectionGuard>, ConnectionDraining> {
-        Ok(Box::new(TestConnectionGuard))
+        if self.is_draining() {
+            return Err(ConnectionDraining);
+        }
+        self.active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(TestConnectionGuard(self.active.clone())))
     }
 
     fn cancellation(&self) -> gateway_core::lifecycle::CancellationToken {
