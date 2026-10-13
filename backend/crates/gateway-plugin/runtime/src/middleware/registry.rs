@@ -14,6 +14,7 @@ use std::{
 
 #[derive(Clone)]
 enum Invocation {
+    Service(Arc<super::service::Invocation>),
     WebSocket(Arc<super::websocket::Invocation>),
     Execution(Arc<MiddlewareInvocation>),
     Http(Arc<super::http::Invocation>),
@@ -21,6 +22,7 @@ enum Invocation {
 impl Invocation {
     fn same(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::Service(a), Self::Service(b)) => Arc::ptr_eq(a, b),
             (Self::WebSocket(a), Self::WebSocket(b)) => Arc::ptr_eq(a, b),
             (Self::Execution(a), Self::Execution(b)) => Arc::ptr_eq(a, b),
             (Self::Http(a), Self::Http(b)) => Arc::ptr_eq(a, b),
@@ -28,6 +30,9 @@ impl Invocation {
         }
     }
     fn close(&self) {
+        if let Self::Service(invocation) = self {
+            invocation.closed.cancel();
+        }
         if let Self::WebSocket(invocation) = self {
             invocation.closed.cancel();
         }
@@ -46,6 +51,41 @@ pub struct MiddlewareCallbacks {
     calls: Mutex<BTreeMap<String, Entry>>,
 }
 impl MiddlewareCallbacks {
+    pub async fn invoke_service(
+        self: &Arc<Self>,
+        session: Arc<RpcSession>,
+        context: gateway_core::engine::middleware::service::Context,
+        input: serde_json::Value,
+        next: gateway_core::engine::middleware::service::Next,
+    ) -> Result<serde_json::Value, gateway_core::engine::middleware::service::Error> {
+        super::service::invoke(self.clone(), session, context, input, next).await
+    }
+    pub(super) fn bind_service(
+        self: &Arc<Self>,
+        context: &CallContext,
+        invocation: Arc<super::service::Invocation>,
+    ) -> Result<Binding, MiddlewareError> {
+        let mut calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
+            return Err(MiddlewareError::Fault);
+        }
+        let invocation = Invocation::Service(invocation);
+        calls.insert(
+            context.resource_scope_id.clone(),
+            Entry {
+                context: context.clone(),
+                invocation: invocation.clone(),
+            },
+        );
+        Ok(Binding {
+            callbacks: self.clone(),
+            scope: context.resource_scope_id.clone(),
+            invocation,
+        })
+    }
     pub async fn invoke_websocket(
         self: &Arc<Self>,
         session: Arc<RpcSession>,
@@ -253,7 +293,11 @@ impl CallbackHandler for MiddlewareCallbacks {
             .filter(|entry| {
                 matches!(
                     context.stage,
-                    Stage::Http | Stage::WebSocket | Stage::Request | Stage::Attempt
+                    Stage::Http
+                        | Stage::WebSocket
+                        | Stage::Service
+                        | Stage::Request
+                        | Stage::Attempt
                 ) && entry.context.resource_stream == context.resource_stream
                     && entry.context.stage == context.stage
                     && entry.context.instance_id == context.instance_id
@@ -273,6 +317,13 @@ impl CallbackHandler for MiddlewareCallbacks {
                     "middleware invocation is no longer active",
                 )
             })?;
+            if let Invocation::Service(invocation) = invocation {
+                return tokio::select! {biased;
+                    ()=invocation.cancellation.cancelled()=>Err(PluginFault::new(ErrorCode::Cancelled,"service invocation cancelled")),
+                    ()=invocation.closed.cancelled()=>Err(PluginFault::new(ErrorCode::PermissionDenied,"service callback scope ended")),
+                    result=invocation.clone().call(method,params,payload)=>result,
+                };
+            }
             if let Invocation::WebSocket(invocation) = invocation {
                 return tokio::select! {biased;
                     ()=invocation.cancellation.cancelled()=>Err(PluginFault::new(ErrorCode::Cancelled, "WebSocket invocation cancelled")),

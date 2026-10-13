@@ -34,6 +34,15 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn service_middleware(
+        &self,
+        _context: gateway_core::engine::middleware::service::Context,
+        _input: serde_json::Value,
+        _next: gateway_core::engine::middleware::service::Next,
+    ) -> std::result::Result<serde_json::Value, gateway_core::engine::middleware::service::Error>
+    {
+        Err(gateway_core::engine::middleware::service::Error::unavailable("服务中间件不可用"))
+    }
     async fn websocket_middleware(
         &self,
         _context: gateway_core::engine::middleware::websocket::Context,

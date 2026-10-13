@@ -1,6 +1,7 @@
 mod capabilities;
 mod http;
 pub(crate) mod plan;
+mod service;
 mod settings;
 mod websocket;
 use bytes::Bytes;

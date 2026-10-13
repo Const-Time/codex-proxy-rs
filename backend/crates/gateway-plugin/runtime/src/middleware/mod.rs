@@ -6,6 +6,7 @@ pub(crate) mod facts;
 mod headers;
 pub(crate) mod http;
 mod registry;
+mod service;
 mod websocket;
 mod websocket_execution;
 pub use registry::MiddlewareCallbacks;

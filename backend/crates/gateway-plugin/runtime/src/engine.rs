@@ -500,6 +500,25 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn service_middleware(
+        &self,
+        mut context: gateway_core::engine::middleware::service::Context,
+        input: serde_json::Value,
+        next: gateway_core::engine::middleware::service::Next,
+    ) -> Result<serde_json::Value, gateway_core::engine::middleware::service::Error> {
+        if self.status() != "ready" || self.access.is_revoked() {
+            return Err(
+                gateway_core::engine::middleware::service::Error::unavailable("服务中间件不可用"),
+            );
+        }
+        context.cancellation = gateway_core::lifecycle::CancellationToken::linked([
+            context.cancellation,
+            self.access.cancellation(),
+        ]);
+        self.middleware
+            .invoke_service(self.session.clone(), context, input, next)
+            .await
+    }
     async fn websocket_middleware(
         &self,
         mut context: gateway_core::engine::middleware::websocket::Context,

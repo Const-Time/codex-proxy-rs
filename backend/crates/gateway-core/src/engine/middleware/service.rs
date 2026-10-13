@@ -1,6 +1,5 @@
 //! A typed service terminal keeps authorization, validation, transactions and side effects.
 use crate::lifecycle::{CancellationToken, Deadline};
-use std::collections::BTreeSet;
 pub type Value = serde_json::Value;
 pub type Next = crate::middleware::Next<Value, Value, Error>;
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
@@ -38,5 +37,5 @@ pub struct Context {
     pub parent_call_id: Option<String>,
     pub cancellation: CancellationToken,
     pub deadline_at: Deadline,
-    pub excluded_plugin_instances: BTreeSet<String>,
+    pub call_scope: crate::engine::nested::ExtensionCallScope,
 }
