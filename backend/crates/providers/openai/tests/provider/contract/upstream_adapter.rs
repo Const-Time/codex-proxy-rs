@@ -230,3 +230,55 @@ async fn upstream_adapter_rejection_and_account_scope_do_not_fall_back_to_native
     assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
     assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn extension_session_owner_cannot_fall_through_to_native_openai_without_adapter() {
+    use gateway_core::{error::ContinuationRecoveryDisposition, operation::ExtensionSessionOwner};
+    let store = Arc::new(MemoryAccountStore::default());
+    let provider = provider(&store);
+    for protocol in ["openai", "custom_adapter"] {
+        let state = ProviderSessionState::new(
+            "openai",
+            json!({"private":"adapter-only"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+        .with_extension_owner(ExtensionSessionOwner {
+            instance_id: "old-instance".into(),
+            contribution_id: "contribution".into(),
+            adapter_id: "adapter".into(),
+            generation: 1,
+            incarnation: "old-process".into(),
+            connection_local: true,
+        });
+        let request = GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                protocol,
+                json!({"input":[]}).as_object().unwrap().clone(),
+            )
+            .unwrap(),
+        )
+        .with_provider_session_state(state);
+        let result = provider
+            .execute(
+                planned_request("openai", Operation::Generate(request)),
+                context("req_extension_owner", CancellationToken::new()),
+            )
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("native execution must reject adapter state"),
+        };
+        assert_eq!(
+            error.kind(),
+            ProviderErrorKind::ContinuationRecoveryRequired
+        );
+        assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+        assert_eq!(
+            error.continuation_recovery_disposition(),
+            Some(ContinuationRecoveryDisposition::ClientReplayRequired)
+        );
+    }
+}

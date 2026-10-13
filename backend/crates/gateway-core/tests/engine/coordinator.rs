@@ -6306,3 +6306,59 @@ mod retry_policy {
         );
     }
 }
+
+#[test]
+fn extension_session_owner_keeps_connection_local_pins_out_of_persisted_scope() {
+    use gateway_core::{
+        engine::continuation::NativeContinuationScope, operation::ExtensionSessionOwner,
+    };
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, _, _) = coordinator(vec![Script::Stream {
+        account_id: "acct_one",
+        items: vec![
+            Ok(GatewayEvent::Started(ResponseMeta::new(
+                "adapter-response",
+                "gpt-5",
+            ))),
+            Ok(GatewayEvent::Completed(ResponseMeta::new(
+                "adapter-response",
+                "gpt-5",
+            ))),
+        ],
+    }]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    block_on(session.collect_uncommitted()).unwrap();
+    for connection_local in [false, true] {
+        let state = ProviderSessionState::new("openai", Map::new())
+            .unwrap()
+            .with_extension_owner(ExtensionSessionOwner {
+                instance_id: "instance".into(),
+                contribution_id: "contribution".into(),
+                adapter_id: "adapter".into(),
+                generation: 4,
+                incarnation: "incarnation".into(),
+                connection_local,
+            });
+        let pin = session.native_continuation_pin(&state).unwrap();
+        assert_eq!(
+            pin.scope(),
+            if connection_local {
+                NativeContinuationScope::ConnectionLocal
+            } else {
+                NativeContinuationScope::Persisted
+            }
+        );
+        assert_eq!(pin.session_state(), Some(&state));
+        assert_eq!(pin.account().as_str(), "acct_one");
+        assert_eq!(pin.upstream_response_id().as_str(), "adapter-response");
+    }
+}

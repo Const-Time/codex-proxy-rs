@@ -3777,3 +3777,50 @@ mod upstream_adapter {
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
     }
 }
+
+#[tokio::test]
+async fn extension_session_owner_cannot_fall_through_to_native_xai_or_compaction() {
+    use gateway_core::{error::ContinuationRecoveryDisposition, operation::ExtensionSessionOwner};
+    let selector = StubSelector::success();
+    let transport = StubInferenceTransport::success();
+    let provider = provider(selector.clone(), transport.clone()).await;
+    for operation in [operation(), compaction_operation()] {
+        let state = ProviderSessionState::new(
+            "xai",
+            json!({"private":"adapter-only"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+        .with_extension_owner(ExtensionSessionOwner {
+            instance_id: "old-instance".into(),
+            contribution_id: "contribution".into(),
+            adapter_id: "adapter".into(),
+            generation: 1,
+            incarnation: "old-process".into(),
+            connection_local: true,
+        });
+        let result = provider
+            .execute(
+                provider_request_with_operation(
+                    "xai",
+                    operation.with_provider_session_state(state),
+                ),
+                context(CancellationToken::new(), None),
+            )
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("native execution must reject adapter state"),
+        };
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidRequest);
+        assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+        assert_eq!(
+            error.continuation_recovery_disposition(),
+            Some(ContinuationRecoveryDisposition::ClientReplayRequired)
+        );
+        assert_eq!(selector.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+}

@@ -794,6 +794,7 @@ mod worker_middleware {
         if matches!(
             mode.as_str(),
             "inspect"
+                | "inspect-session-owner"
                 | "inspect-transformed"
                 | "map"
                 | "expand"
@@ -803,6 +804,26 @@ mod worker_middleware {
         ) {
             let mut first = true;
             response.body = response.body.with_facts()?.map_frames(move |mut frame| {
+                if mode == "inspect-session-owner" {
+                    let state = frame
+                        .facts
+                        .as_ref()
+                        .unwrap()
+                        .host
+                        .as_ref()
+                        .unwrap()
+                        .session_update
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(state.provider, "openai");
+                    let owner = state.extension_owner.as_ref().unwrap();
+                    assert_eq!(owner.instance_id, "owner-instance");
+                    assert_eq!(owner.contribution_id, "owner-contribution");
+                    assert_eq!(owner.adapter_id, "owner-adapter");
+                    assert_eq!(owner.generation, 7);
+                    assert_eq!(owner.incarnation, "owner-process");
+                    assert!(owner.connection_local);
+                }
                 if let Some(facts) = &mut frame.facts {
                     if mode == "inspect-transformed" {
                         assert!(facts.host.as_ref().unwrap().middleware_transformed);

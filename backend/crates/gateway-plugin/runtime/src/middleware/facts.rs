@@ -195,7 +195,14 @@ fn session(value: &ProviderSessionState) -> facts::SessionState {
     facts::SessionState {
         provider: value.provider().to_owned(),
         payload: value.payload().clone(),
-        extension_owner: None,
+        extension_owner: value.extension_owner().map(|owner| facts::SessionOwner {
+            instance_id: owner.instance_id.clone(),
+            contribution_id: owner.contribution_id.clone(),
+            adapter_id: owner.adapter_id.clone(),
+            generation: owner.generation,
+            incarnation: owner.incarnation.clone(),
+            connection_local: owner.connection_local,
+        }),
     }
 }
 
