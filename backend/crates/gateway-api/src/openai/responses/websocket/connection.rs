@@ -243,13 +243,39 @@ impl ResponsesWebSocketConnection {
         socket: WebSocket,
         connection_id: String,
         cancellation: CancellationToken,
-    ) -> Self {
-        spawn_connection(
+        headers: Arc<[gateway_core::engine::middleware::MiddlewareHeader]>,
+    ) -> Result<Self, gateway_core::engine::middleware::MiddlewareError> {
+        if let Some(origin) = crate::middleware::current() {
+            let plan = origin
+                .registry
+                .freeze_websocket(
+                    origin.context.call_scope.excluded_instances(),
+                    cancellation.clone(),
+                )
+                .map_err(|_| gateway_core::engine::middleware::MiddlewareError::Fault)?;
+            if !plan.is_empty() {
+                let cancellation = plan.cancellation();
+                let transport = crate::middleware::websocket::Transport::new(
+                    socket,
+                    origin.context,
+                    connection_id.clone(),
+                    headers,
+                    plan,
+                );
+                return Ok(spawn_connection(
+                    transport,
+                    Arc::<str>::from(connection_id),
+                    cancellation,
+                    ConnectionConfig::PRODUCTION,
+                ));
+            }
+        }
+        Ok(spawn_connection(
             socket,
             Arc::<str>::from(connection_id),
             cancellation,
             ConnectionConfig::PRODUCTION,
-        )
+        ))
     }
 
     pub(in crate::openai) fn id(&self) -> &str {

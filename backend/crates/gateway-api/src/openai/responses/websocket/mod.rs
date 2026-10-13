@@ -107,6 +107,7 @@ impl ResponsesWebSocketAdapter {
                 .map(|(name, value)| (name.as_str(), value.as_bytes())),
         );
         let session = ResponsesWebSocketSession {
+            raw_headers: crate::middleware::websocket::headers(&raw_headers),
             service: self.service.clone(),
             client,
             connection_id,
@@ -151,6 +152,7 @@ impl ResponsesWebSocketAdapter {
 }
 
 struct ResponsesWebSocketSession {
+    raw_headers: Arc<[gateway_core::engine::middleware::MiddlewareHeader]>,
     service: OpenAiService,
     client: AuthenticatedClient,
     connection_id: String,
@@ -163,6 +165,7 @@ struct ResponsesWebSocketSession {
 
 async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocketSession) {
     let ResponsesWebSocketSession {
+        raw_headers,
         service,
         client,
         connection_id,
@@ -193,7 +196,11 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
     }
     let request_headers =
         request_headers.with_downstream_websocket_connection_id(connection_id.clone());
-    let mut connection = ResponsesWebSocketConnection::new(socket, connection_id, cancellation);
+    let Ok(mut connection) =
+        ResponsesWebSocketConnection::new(socket, connection_id, cancellation, raw_headers)
+    else {
+        return;
+    };
     let mut request_count = 0_u64;
     let mut replay = ConnectionReplaySnapshot::default();
 

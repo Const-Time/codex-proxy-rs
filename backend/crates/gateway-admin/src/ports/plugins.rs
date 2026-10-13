@@ -34,6 +34,17 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn websocket_middleware(
+        &self,
+        _context: gateway_core::engine::middleware::websocket::Context,
+        _message: gateway_core::engine::middleware::websocket::Message,
+        _next: gateway_core::engine::middleware::websocket::Next,
+    ) -> std::result::Result<
+        Option<gateway_core::engine::middleware::websocket::Message>,
+        gateway_core::engine::middleware::MiddlewareError,
+    > {
+        Err(gateway_core::engine::middleware::MiddlewareError::Fault)
+    }
     async fn http_middleware(
         &self,
         _context: gateway_core::engine::middleware::http::Context,

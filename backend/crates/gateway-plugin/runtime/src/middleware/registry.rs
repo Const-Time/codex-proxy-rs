@@ -14,18 +14,23 @@ use std::{
 
 #[derive(Clone)]
 enum Invocation {
+    WebSocket(Arc<super::websocket::Invocation>),
     Execution(Arc<MiddlewareInvocation>),
     Http(Arc<super::http::Invocation>),
 }
 impl Invocation {
     fn same(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::WebSocket(a), Self::WebSocket(b)) => Arc::ptr_eq(a, b),
             (Self::Execution(a), Self::Execution(b)) => Arc::ptr_eq(a, b),
             (Self::Http(a), Self::Http(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
     fn close(&self) {
+        if let Self::WebSocket(invocation) = self {
+            invocation.closed.cancel();
+        }
         if let Self::Http(invocation) = self {
             invocation.close_callbacks();
         }
@@ -41,6 +46,41 @@ pub struct MiddlewareCallbacks {
     calls: Mutex<BTreeMap<String, Entry>>,
 }
 impl MiddlewareCallbacks {
+    pub async fn invoke_websocket(
+        self: &Arc<Self>,
+        session: Arc<RpcSession>,
+        context: gateway_core::engine::middleware::websocket::Context,
+        message: gateway_core::engine::middleware::websocket::Message,
+        next: gateway_core::engine::middleware::websocket::Next,
+    ) -> Result<Option<gateway_core::engine::middleware::websocket::Message>, MiddlewareError> {
+        super::websocket_execution::invoke(self.clone(), session, context, message, next).await
+    }
+    pub(super) fn bind_websocket(
+        self: &Arc<Self>,
+        context: &CallContext,
+        invocation: Arc<super::websocket::Invocation>,
+    ) -> Result<Binding, MiddlewareError> {
+        let mut calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
+            return Err(MiddlewareError::Fault);
+        }
+        let invocation = Invocation::WebSocket(invocation);
+        calls.insert(
+            context.resource_scope_id.clone(),
+            Entry {
+                context: context.clone(),
+                invocation: invocation.clone(),
+            },
+        );
+        Ok(Binding {
+            callbacks: self.clone(),
+            scope: context.resource_scope_id.clone(),
+            invocation,
+        })
+    }
     pub fn new(inner: Arc<dyn CallbackHandler>) -> Arc<Self> {
         Arc::new(Self {
             models: None,
@@ -211,8 +251,10 @@ impl CallbackHandler for MiddlewareCallbacks {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&context.resource_scope_id)
             .filter(|entry| {
-                matches!(context.stage, Stage::Http | Stage::Request | Stage::Attempt)
-                    && entry.context.resource_stream == context.resource_stream
+                matches!(
+                    context.stage,
+                    Stage::Http | Stage::WebSocket | Stage::Request | Stage::Attempt
+                ) && entry.context.resource_stream == context.resource_stream
                     && entry.context.stage == context.stage
                     && entry.context.instance_id == context.instance_id
                     && entry.context.generation == context.generation
@@ -231,6 +273,13 @@ impl CallbackHandler for MiddlewareCallbacks {
                     "middleware invocation is no longer active",
                 )
             })?;
+            if let Invocation::WebSocket(invocation) = invocation {
+                return tokio::select! {biased;
+                    ()=invocation.cancellation.cancelled()=>Err(PluginFault::new(ErrorCode::Cancelled, "WebSocket invocation cancelled")),
+                    ()=invocation.closed.cancelled()=>Err(PluginFault::new(ErrorCode::PermissionDenied, "WebSocket callback scope ended")),
+                    result=invocation.clone().call(method, params, payload, 8*1024*1024)=>result,
+                };
+            }
             if let Invocation::Http(invocation) = invocation {
                 if model_method {
                     return Err(PluginFault::new(

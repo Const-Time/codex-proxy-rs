@@ -7,6 +7,156 @@ use tokio_tungstenite::{
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[tokio::test]
+async fn standalone_websocket_layers_transform_native_input_output_and_send_without_recursive_entry_or_extra_charge()
+ {
+    let f = Fixture::with_mounts(
+        Mode::WebSocketRewrite,
+        vec![PluginMiddlewareMount::WebSocket],
+    )
+    .await;
+    let (_server, mut socket) = connect(&f, "/v1/responses").await;
+    socket
+        .send(Message::Binary(vec![0, 255, 0].into()))
+        .await
+        .unwrap();
+    let mut notice = false;
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Message::Text(text) = message {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if value["type"] == "plugin.notice" {
+                notice = true;
+                assert!(value.get("raw_plugin").is_none());
+                continue;
+            }
+            assert_eq!(value["raw_plugin"], true);
+            if value["type"] == "response.completed" {
+                break;
+            }
+        }
+    }
+    assert!(notice);
+    f.settled().await;
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+    assert_eq!(f.effects.charges.lock().unwrap()[0].amount_usd.scaled(), 25);
+    socket.send(Message::Ping(vec![1, 2].into())).await.unwrap();
+    loop {
+        if let Message::Pong(bytes) = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+        {
+            assert_eq!(bytes.as_ref(), &[1, 2]);
+            break;
+        }
+    }
+    f.plugin.access.revoke();
+    let _ = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap();
+    released(&f).await;
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn plugin_owned_websocket_runs_both_directions_and_releases_connection_on_revocation() {
+    let f = Fixture::with_mounts(
+        Mode::HttpUpgrade,
+        vec![
+            PluginMiddlewareMount::Http,
+            PluginMiddlewareMount::WebSocket,
+        ],
+    )
+    .await;
+    let (_server, mut socket) = connect(&f, "/plugin/socket").await;
+    socket
+        .send(Message::Binary(vec![0, 255, 0].into()))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, Message::Binary(vec![0, 255, 0, b'i', b'o'].into()));
+    assert_eq!(f.plugin.websocket_seen.lock().unwrap().len(), 2);
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+    f.plugin.access.revoke();
+    let _ = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap();
+    released(&f).await;
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn dropped_raw_message_does_not_start_a_model_and_next_message_can_complete() {
+    let f = Fixture::with_mounts(Mode::WebSocketDrop, vec![PluginMiddlewareMount::WebSocket]).await;
+    let (_server, mut socket) = connect(&f, "/v1/responses").await;
+    socket.send(Message::Text("drop".into())).await.unwrap();
+    socket
+        .send(Message::Text(json_create().into()))
+        .await
+        .unwrap();
+    loop {
+        if let Message::Text(text) = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            && text.contains("response.completed")
+        {
+            break;
+        }
+    }
+    f.settled().await;
+    assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+    f.plugin.access.revoke();
+    let _ = tokio::time::timeout(Duration::from_secs(3), socket.next()).await;
+    released(&f).await;
+    f.manager.shutdown().await;
+}
+fn json_create() -> String {
+    serde_json::json!({"type":"response.create","model":"model-a","input":"original input"})
+        .to_string()
+}
+
+#[tokio::test]
+async fn idle_and_pending_native_websocket_are_closed_by_message_plugin_revocation() {
+    for pending in [false, true] {
+        let f = Fixture::with_mounts(Mode::WaitBeforeNext, vec![PluginMiddlewareMount::WebSocket])
+            .await;
+        let (_server, mut socket) = connect(&f, "/v1/responses").await;
+        if pending {
+            socket
+                .send(Message::Text(json_create().into()))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while f.plugin.websocket_seen.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        f.plugin.access.revoke();
+        let _ = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap();
+        released(&f).await;
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 0);
+        f.manager.shutdown().await;
+    }
+}
 struct Server(tokio::task::JoinHandle<()>);
 impl Drop for Server {
     fn drop(&mut self) {

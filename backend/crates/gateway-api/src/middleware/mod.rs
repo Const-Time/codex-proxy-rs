@@ -1,6 +1,6 @@
 //! Router placement, HTTP lifetimes and transport stay at the API boundary.
 mod dispatcher;
-mod websocket;
+pub(crate) mod websocket;
 
 use axum::{
     Router,
@@ -153,6 +153,7 @@ async fn handle(
     request
         .extensions_mut()
         .insert(Arc::new(websocket::Upgrade {
+            registry: registry.clone(),
             context: context.clone(),
             lifecycle: lifecycle.clone(),
         }) as Arc<dyn core::upgrade::WebSocketUpgrade>);

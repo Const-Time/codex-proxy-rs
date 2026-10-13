@@ -966,7 +966,7 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 
 `frontendAuthentication` 为 null 或 `{failurePolicy: "reject" | "delegate", identities: {"外部身份": "本地 Key ID"}}`，列表返回当前绑定。省略该字段与 null 一样表示不使用此实例认证，更新时需提交完整绑定。只允许声明 frontend_authentication v1 的插件设置它，且最多一个启用实例。数据面 Authorization 由插件解释；仅明确 not_matched 且选择 delegate 时回退普通 Key。拒绝或映射 Key 无效返回 401，认证器失败返回 503。管理登录与插件页面本人选 Key 入口不受该绑定影响；完整范围和撤销语义见 [外部认证](plugins.md#外部认证)。
 
-`middleware` 为 null 或 `{order, mounts, scope}`：order 是 -10000～10000 的整数，mounts 是不重复且非空的 http/websocket/service/request/attempt 列表，scope 是 `{kind: "all"}`、`{kind: "keys", ids: [...]}` 或 `{kind: "groups", ids: [...]}`，指定范围包含 1～256 个唯一有效 ID。包含 http、websocket 或 service 时必须使用 all 范围；Key/分组范围只适用于 request/attempt。更新时需提交完整绑定，省略/null 清除绑定。仅允许与制品 middleware v4 声明一致的挂载；当前支持保存停用配置，数据面尚未开放启用。HTTP Runtime RPC 已通过真实 SDK 验证，API 入口和原始 WebSocket 升级传输已接入本地合同验证；HTTP、管理和 request/attempt 阶段的宿主主动分派已接通；独立 WebSocket/service 执行桥继续实施。门禁及撤销合同见 [插件说明](plugins.md)。
+`middleware` 为 null 或 `{order, mounts, scope}`：order 是 -10000～10000 的整数，mounts 是不重复且非空的 http/websocket/service/request/attempt 列表，scope 是 `{kind: "all"}`、`{kind: "keys", ids: [...]}` 或 `{kind: "groups", ids: [...]}`，指定范围包含 1～256 个唯一有效 ID。包含 http、websocket 或 service 时必须使用 all 范围；Key/分组范围只适用于 request/attempt。更新时需提交完整绑定，省略/null 清除绑定。仅允许与制品 middleware v4 声明一致的挂载；当前支持保存停用配置，数据面尚未开放启用。HTTP Runtime RPC 已通过真实 SDK 验证，API 入口和原始 WebSocket 升级传输已接入本地合同验证；HTTP、管理和 request/attempt 阶段的宿主主动分派已接通；独立 WebSocket 消息层已接入原生及插件自有会话，service 执行桥继续实施。门禁及撤销合同见 [插件说明](plugins.md)。
 
 资源与调用的 body 为 base64，响应 data 是 `{status, contentType, body}`；HTML 始终通过 JSON envelope 返回，由父页面注入隔离 iframe，不作为同源 HTML 直接响应。请求头和自定义响应头未开放。失效 revision 返回冲突；业务调用失败不自动重试，结果可能已经生效。能力与大小限制见 [插件支持矩阵](plugins.md)。
 

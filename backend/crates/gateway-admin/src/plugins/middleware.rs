@@ -165,6 +165,21 @@ impl Publication {
 #[derive(Clone)]
 pub struct PluginMiddlewareRegistry(Publication, CancellationToken);
 impl PluginMiddlewareRegistry {
+    pub fn freeze_websocket(
+        &self,
+        excluded: &BTreeSet<String>,
+        cancellation: CancellationToken,
+    ) -> Result<super::websocket::PluginWebSocketMiddlewarePlan, AdminError> {
+        let SelectedMiddleware { processes, tokens } = self.0.select(excluded, |binding| {
+            binding.mounts.contains(&PluginMiddlewareMount::WebSocket)
+                && matches!(binding.scope, PluginExecutionScope::All {})
+        })?;
+        let cancellation = CancellationToken::linked(std::iter::once(cancellation).chain(tokens));
+        Ok(super::websocket::PluginWebSocketMiddlewarePlan::new(
+            processes,
+            cancellation,
+        ))
+    }
     pub fn freeze_http(
         &self,
         mut context: gateway_core::engine::middleware::http::Context,
