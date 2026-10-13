@@ -1,5 +1,40 @@
 mod upgrade;
 
+#[test]
+fn independent_transport_events_have_fresh_budgets_and_borrowed_http_events_keep_parent_budget() {
+    let root = call_context();
+    for _ in 0..70 {
+        let event = root.transport_event();
+        drop(event.child("fixture".into()).unwrap());
+        assert_eq!(event.request_id, root.request_id);
+        assert_eq!(event.parent_call_id.as_deref(), Some(root.call_id.as_str()));
+    }
+    let child = root.child("parent-plugin".into()).unwrap();
+    for _ in 1..64 {
+        drop(
+            child
+                .transport_event()
+                .child("child-plugin".into())
+                .unwrap(),
+        );
+    }
+    assert!(
+        child
+            .transport_event()
+            .child("child-plugin".into())
+            .is_err()
+    );
+    assert!(
+        child
+            .transport_event()
+            .call_scope
+            .excluded_instances()
+            .contains("parent-plugin")
+    );
+    root.cancellation.cancel();
+    assert!(child.transport_event().service_context().is_err());
+}
+
 fn call_context() -> core::Context {
     core::Context {
         request_id: "ingress".into(),

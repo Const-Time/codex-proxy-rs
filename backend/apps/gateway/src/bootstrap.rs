@@ -105,6 +105,7 @@ pub async fn run() -> Result<(), BootstrapError> {
     let http = Arc::new(gateway_plugin_runtime::HttpDispatcher::default());
     let plugins = Arc::new_cyclic(
         |plugins: &std::sync::Weak<gateway_admin::plugins::PluginManager>| {
+            let service_plugins = plugins.clone();
             gateway_admin::plugins::PluginManager::new(
                 store.plugin_store(),
                 Arc::new(
@@ -114,6 +115,18 @@ pub async fn run() -> Result<(), BootstrapError> {
                         store.plugin_store(),
                     )
                     .with_http(http.clone())
+                    .with_services(Arc::new(move || {
+                        use gateway_admin::ports::plugins::PluginService;
+                        let registry = service_plugins
+                            .upgrade()
+                            .and_then(|plugins| plugins.middleware_registry())
+                            .ok_or_else(|| {
+                                gateway_core::engine::middleware::service::Error::unavailable(
+                                    "plugin service publication unavailable",
+                                )
+                            })?;
+                        Ok(registry.service_factory())
+                    }))
                     .with_data(admin.services().plugin_data())
                     .with_resources(admin.services().plugin_resources())
                     .with_quota(admin.services().plugin_quota())

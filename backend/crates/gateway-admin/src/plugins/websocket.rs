@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct PluginWebSocketMiddlewarePlan {
+    services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
     processes: Arc<[Arc<dyn PluginProcess>]>,
     cancellation: CancellationToken,
 }
@@ -16,11 +17,18 @@ impl PluginWebSocketMiddlewarePlan {
     pub(super) fn new(
         processes: Vec<Arc<dyn PluginProcess>>,
         cancellation: CancellationToken,
+        services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
     ) -> Self {
         Self {
+            services,
             processes: processes.into(),
             cancellation,
         }
+    }
+    pub fn service_factory(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::engine::middleware::service::Factory>> {
+        self.services.clone()
     }
     pub fn is_empty(&self) -> bool {
         self.processes.is_empty()
@@ -36,6 +44,7 @@ impl PluginWebSocketMiddlewarePlan {
     ) -> Result<Option<core::Message>, MiddlewareError> {
         context.cancellation =
             CancellationToken::linked([context.cancellation, self.cancellation.clone()]);
+        context.origin = Some(context.service_origin(self.services.clone()));
         let cancellation = context.cancellation.clone();
         let deadline = context.deadline_at;
         let layers: Vec<Middleware<core::Message, Option<core::Message>, MiddlewareError>> = self

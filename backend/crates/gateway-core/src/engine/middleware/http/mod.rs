@@ -36,6 +36,31 @@ pub struct Context {
 }
 
 impl Context {
+    pub fn transport_event(&self) -> Self {
+        Self {
+            call_id: uuid::Uuid::now_v7().to_string(),
+            parent_call_id: Some(self.call_id.clone()),
+            call_scope: if self.model_parent.is_some() {
+                self.call_scope.clone()
+            } else {
+                self.call_scope.transport_event()
+            },
+            ..self.clone()
+        }
+    }
+    pub fn service_context(&self) -> Result<super::service::Context, crate::error::GatewayError> {
+        self.validate()?;
+        Ok(super::service::Context {
+            operation: "host.services.call",
+            request_id: self.request_id.clone(),
+            call_id: self.call_id.clone(),
+            parent_call_id: self.parent_call_id.clone(),
+            cancellation: self.cancellation.clone(),
+            deadline_at: self.deadline_at,
+            call_scope: self.call_scope.clone(),
+            dispatcher: None,
+        })
+    }
     pub fn from_execution(parent: crate::engine::nested::NestedExecutionContext) -> Self {
         Self {
             request_id: parent.request_id().as_str().to_owned(),
@@ -96,6 +121,9 @@ impl Context {
 
 /// Captures the host router and its publication snapshot, without network loopback.
 pub trait Dispatcher: Send + Sync {
+    fn service_factory(&self) -> Option<std::sync::Arc<dyn super::service::Factory>> {
+        None
+    }
     fn request_settings(&self) -> Option<RequestSettings> {
         None
     }

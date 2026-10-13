@@ -15,20 +15,89 @@ use std::{
 struct Scope {
     context: CallContext,
     dispatcher: Option<Arc<dyn core::Dispatcher>>,
+    failure: Option<PluginFault>,
     cancellation: CancellationToken,
     deadline: gateway_core::lifecycle::Deadline,
     closed: CancellationToken,
 }
 pub(crate) struct Registry {
     caller: core::Caller,
+    source: Option<core::Source>,
     scopes: Mutex<BTreeMap<String, Arc<Scope>>>,
 }
 impl Registry {
-    pub(crate) fn new(caller: core::Caller) -> Arc<Self> {
+    pub(crate) fn new(caller: core::Caller, source: Option<core::Source>) -> Arc<Self> {
         Arc::new(Self {
             caller,
+            source,
             scopes: Mutex::default(),
         })
+    }
+    pub(crate) fn root_origin(&self, context: &CallContext) -> Result<core::Origin, PluginFault> {
+        let factory = self
+            .source
+            .as_ref()
+            .map(|source| source())
+            .transpose()
+            .map_err(|_| PluginFault::new(ErrorCode::Fault, "host service source unavailable"))?
+            .flatten();
+        Ok(core::Origin {
+            factory,
+            context: core::Context {
+                operation: "host.services.call",
+                request_id: context
+                    .request_id
+                    .clone()
+                    .unwrap_or_else(|| context.resource_scope_id.clone()),
+                call_id: context.resource_scope_id.clone(),
+                parent_call_id: None,
+                cancellation: self.caller.cancellation(),
+                deadline_at: Default::default(),
+                call_scope: Default::default(),
+                dispatcher: None,
+            },
+        })
+    }
+    pub(crate) fn bind_origin(
+        self: &Arc<Self>,
+        context: &CallContext,
+        origin: core::Origin,
+    ) -> Result<Binding, PluginFault> {
+        self.bind(context, origin.factory, origin.context)
+    }
+    fn begin(self: &Arc<Self>, context: &CallContext) {
+        if context.stage != Stage::Registration {
+            return;
+        }
+        // Registration has no model or administrative parent. Its original RPC
+        // owns one graph and freezes the service publication before plugin code runs.
+        let result = self
+            .root_origin(context)
+            .and_then(|origin| self.bind_origin(context, origin));
+        match result {
+            Ok(binding) => {
+                binding.transfer();
+            }
+            Err(failure) => {
+                let mut scopes = self
+                    .scopes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if scopes.len() < 32 {
+                    scopes.insert(
+                        context.resource_scope_id.clone(),
+                        Arc::new(Scope {
+                            context: context.clone(),
+                            dispatcher: None,
+                            failure: Some(failure),
+                            cancellation: self.caller.cancellation(),
+                            deadline: Default::default(),
+                            closed: Default::default(),
+                        }),
+                    );
+                }
+            }
+        }
     }
     pub(crate) fn caller(&self) -> core::Caller {
         self.caller.clone()
@@ -90,6 +159,7 @@ impl Registry {
         let scope = Arc::new(Scope {
             context: context.clone(),
             dispatcher,
+            failure: None,
             cancellation: origin.cancellation,
             deadline: origin.deadline_at,
             closed,
@@ -106,6 +176,7 @@ impl Registry {
         }
         scopes.insert(context.resource_scope_id.clone(), scope.clone());
         Ok(Binding {
+            transferred: false,
             registry: self.clone(),
             id: context.resource_scope_id.clone(),
             scope,
@@ -143,6 +214,9 @@ impl Registry {
             let scope = scope.ok_or_else(|| {
                 PluginFault::new(ErrorCode::PermissionDenied, "service callback scope ended")
             })?;
+            if let Some(failure) = &scope.failure {
+                return Err(failure.clone());
+            }
             let dispatcher = scope.dispatcher.clone().ok_or_else(|| {
                 PluginFault::new(ErrorCode::Unsupported, "host service is not configured")
             })?;
@@ -159,9 +233,18 @@ pub(crate) struct Binding {
     registry: Arc<Registry>,
     id: String,
     scope: Arc<Scope>,
+    transferred: bool,
+}
+impl Binding {
+    fn transfer(mut self) {
+        self.transferred = true;
+    }
 }
 impl Drop for Binding {
     fn drop(&mut self) {
+        if self.transferred {
+            return;
+        }
         self.scope.closed.cancel();
         let mut scopes = self
             .registry
@@ -183,6 +266,7 @@ struct Callbacks {
 impl CallbackHandler for Callbacks {
     fn begin(&self, context: &CallContext) {
         self.inner.begin(context);
+        self.registry.begin(context);
     }
     fn streaming(&self, context: &CallContext) {
         self.inner.streaming(context);
@@ -201,7 +285,11 @@ impl CallbackHandler for Callbacks {
         if method == gateway_plugin_sdk::call::services::CALL_METHOD
             && matches!(
                 context.stage,
-                Stage::Request
+                Stage::Registration
+                    | Stage::Authentication
+                    | Stage::Http
+                    | Stage::WebSocket
+                    | Stage::Request
                     | Stage::Attempt
                     | Stage::Routing
                     | Stage::Scheduling

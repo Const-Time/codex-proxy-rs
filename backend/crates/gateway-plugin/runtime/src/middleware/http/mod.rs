@@ -30,7 +30,7 @@ pub(crate) struct Invocation {
     downstream_error: Mutex<Option<MiddlewareError>>,
     pub(super) callbacks_closed: gateway_core::lifecycle::CancellationToken,
     pub(super) context: core::Context,
-    dispatcher: Option<Arc<dyn core::Dispatcher>>,
+    pub(super) dispatcher: Option<Arc<dyn core::Dispatcher>>,
 }
 
 struct State {

@@ -47,6 +47,7 @@ impl HttpDispatcher {
 }
 
 pub struct PluginEngine {
+    services: Option<gateway_core::engine::middleware::service::Source>,
     outbound: crate::outbound::SharedClient,
     http: Option<Arc<HttpDispatcher>>,
     models: Option<Arc<crate::models::ModelServices>>,
@@ -62,6 +63,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            services: None,
             outbound: Arc::default(),
             http: None,
             models: None,
@@ -74,6 +76,13 @@ impl PluginEngine {
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
             data: None,
         }
+    }
+    pub fn with_services(
+        mut self,
+        services: gateway_core::engine::middleware::service::Source,
+    ) -> Self {
+        self.services = Some(services);
+        self
     }
     pub fn with_http(mut self, http: Arc<HttpDispatcher>) -> Self {
         self.http = Some(http);
@@ -377,6 +386,7 @@ impl PluginRuntime for PluginEngine {
                 access.cancellation(),
             )
             .map_err(|_| AdminError::invalid("插件服务身份无效"))?,
+            self.services.clone(),
         );
         let models = self.models.clone().map(|services| {
             crate::models::Models::new(services, access.cancellation(), self.http.clone())
@@ -726,11 +736,18 @@ impl PluginProcess for LivePlugin {
     async fn authenticate(
         &self,
         authorization: String,
+        origin: Option<gateway_core::engine::middleware::service::Origin>,
     ) -> Result<PluginAuthenticationResult, AdminError> {
         if !self.authentication || self.status() != "ready" || self.access.is_revoked() {
             return Err(AdminError::unavailable("认证器不可用"));
         }
-        let result = crate::authentication::authenticate(&self.session, authorization).await?;
+        let result = crate::authentication::authenticate(
+            &self.session,
+            self.services.clone(),
+            authorization,
+            origin,
+        )
+        .await?;
         if self.access.is_revoked() || self.status() != "ready" {
             return Err(AdminError::unavailable("认证器已失效"));
         }

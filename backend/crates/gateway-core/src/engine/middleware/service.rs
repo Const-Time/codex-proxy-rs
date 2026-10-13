@@ -2,6 +2,14 @@
 use crate::lifecycle::{CancellationToken, Deadline};
 pub type Value = serde_json::Value;
 pub type Next = crate::middleware::Next<Value, Value, Error>;
+/// Root process calls freeze this native composition port before RPC begins.
+pub type Source =
+    std::sync::Arc<dyn Fn() -> Result<Option<std::sync::Arc<dyn Factory>>, Error> + Send + Sync>;
+#[derive(Clone, Debug)]
+pub struct Origin {
+    pub context: Context,
+    pub factory: Option<std::sync::Arc<dyn Factory>>,
+}
 /// A native process lease. This value is never decoded from plugin input.
 #[derive(Clone)]
 pub struct Caller {
