@@ -1,4 +1,58 @@
 mod upgrade;
+
+fn call_context() -> core::Context {
+    core::Context {
+        request_id: "ingress".into(),
+        call_id: "http-root".into(),
+        parent_call_id: None,
+        call_scope: Default::default(),
+        cancellation: Default::default(),
+        deadline_at: Deadline::default(),
+    }
+}
+#[test]
+fn http_call_graph_bounds_depth_active_and_total_children_without_recycling_total_budget() {
+    let root = call_context();
+    let children = (0..16)
+        .map(|_| root.child("fixture".into()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(root.child("fixture".into()).is_err());
+    let held = children[0].clone();
+    drop(children);
+    assert!(held.call_scope.is_direct_child_of(&root.call_scope));
+    drop(held);
+    for _ in 16..64 {
+        drop(root.child("fixture".into()).unwrap());
+    }
+    assert!(root.child("fixture".into()).is_err());
+    let mut nested = call_context();
+    for number in 0..8 {
+        nested = nested.child(format!("plugin-{number}")).unwrap();
+    }
+    assert!(nested.child("last".into()).is_err());
+    assert!(call_context().child(String::new()).is_err());
+}
+#[test]
+fn http_child_proof_binds_host_graph_and_parent_while_cancellation_only_flows_downward() {
+    let root = call_context();
+    let child = root.child("fixture".into()).unwrap();
+    let sibling = root.child("other".into()).unwrap();
+    assert!(child.call_scope.is_direct_child_of(&root.call_scope));
+    assert!(
+        !child
+            .call_scope
+            .is_direct_child_of(&call_context().call_scope)
+    );
+    assert_eq!(child.parent_call_id.as_deref(), Some("http-root"));
+    assert_eq!(child.request_id, root.request_id);
+    assert_ne!(child.call_id, root.call_id);
+    assert!(child.child("fixture".into()).is_err());
+    child.cancellation.cancel();
+    assert!(!root.cancellation.is_cancelled());
+    assert!(!sibling.cancellation.is_cancelled());
+    root.cancellation.cancel();
+    assert!(sibling.cancellation.is_cancelled());
+}
 use bytes::Bytes;
 use futures::{FutureExt, channel::oneshot, executor::block_on};
 use gateway_core::{

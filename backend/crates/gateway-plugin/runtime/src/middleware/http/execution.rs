@@ -30,12 +30,8 @@ pub(crate) async fn invoke(
     let mut call = session.context(Stage::Http, remaining);
     call.request_id = Some(context.request_id.clone());
     call.resource_stream = true;
-    let (invocation, request) = Invocation::new(
-        request,
-        next,
-        call.instance_id.clone(),
-        context.cancellation.clone(),
-    )?;
+    let (invocation, request) =
+        Invocation::new(request, next, call.instance_id.clone(), context.clone())?;
     let binding = callbacks.bind_http(&call, invocation.clone())?;
     let mut stream = tokio::select! {
         biased;

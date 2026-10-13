@@ -11,7 +11,6 @@ use futures::future::BoxFuture;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{BodyExt as _, Empty, combinators::UnsyncBoxBody};
 use std::{
-    collections::BTreeSet,
     pin::Pin,
     task::{Context as TaskContext, Poll},
     time::Duration,
@@ -29,9 +28,22 @@ pub struct Context {
     pub request_id: String,
     pub call_id: String,
     pub parent_call_id: Option<String>,
-    pub excluded_plugin_instances: BTreeSet<String>,
+    pub call_scope: crate::engine::nested::ExtensionCallScope,
     pub cancellation: CancellationToken,
     pub deadline_at: Deadline,
+}
+
+impl Context {
+    /// The host issues ancestry and IDs; plugin wire values cannot substitute them.
+    pub fn child(&self, instance: String) -> Result<Self, crate::error::GatewayError> {
+        Ok(Self {
+            call_scope: self.call_scope.fork_http(instance)?,
+            call_id: uuid::Uuid::now_v7().to_string(),
+            parent_call_id: Some(self.call_id.clone()),
+            cancellation: CancellationToken::linked([self.cancellation.clone()]),
+            ..self.clone()
+        })
+    }
 }
 
 /// Captures the host router and its publication snapshot, without network loopback.

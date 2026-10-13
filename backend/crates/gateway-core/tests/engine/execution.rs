@@ -3806,6 +3806,66 @@ fn child_effects_observed_during_parent_backoff_prevent_the_next_attempt() {
     });
 }
 
+#[test]
+fn http_dispatch_effects_in_the_adopted_scope_prevent_replaying_the_parent_model_request() {
+    block_on(async {
+        for dispatched in [false, true] {
+            let provider = Arc::new(NestedRetryProbe {
+                retry: AtomicBool::new(true),
+                calls: AtomicUsize::new(0),
+                delay: Duration::ZERO,
+            });
+            let store = Arc::new(TrackingExecutionStore::default());
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(start_snapshot()),
+                store.clone(),
+                ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                Arc::new(UnusedAdmissions),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            );
+            let scope = gateway_core::engine::nested::ExtensionCallScope::default();
+            if dispatched {
+                scope.observe_http_dispatch();
+            }
+            let input = request(&service, ClientTransport::HttpJson);
+            let prepared = service
+                .prepare_http_execution(
+                    input.client,
+                    scope,
+                    gateway_core::lifecycle::CancellationToken::default(),
+                )
+                .unwrap();
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: input.public_model,
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            let result = started.session.collect_uncommitted().await;
+            if dispatched {
+                assert!(matches!(result, Err(EngineError::Provider(_))));
+            } else {
+                result.unwrap();
+                started.session.commit_downstream(Some(200)).await.unwrap();
+            }
+            assert_eq!(
+                provider.calls.load(Ordering::SeqCst),
+                if dispatched { 1 } else { 2 }
+            );
+            started.session.detach_finalize().await;
+            let records = store.finalizations.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].attempt_count, if dispatched { 1 } else { 2 });
+        }
+    });
+}
+
 mod retry_policy {
     use super::*;
     use gateway_core::engine::retry_policy::{

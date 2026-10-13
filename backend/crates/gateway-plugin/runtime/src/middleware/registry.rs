@@ -192,6 +192,14 @@ impl CallbackHandler for MiddlewareCallbacks {
         payload: Vec<u8>,
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
         let model_method = crate::models::is_method(&method);
+        if method.starts_with("host.http.") && context.stage != Stage::Http {
+            return Box::pin(async {
+                Err(PluginFault::new(
+                    ErrorCode::Unsupported,
+                    "host HTTP dispatch is not connected for this stage",
+                ))
+            });
+        }
         if model_method && !matches!(context.stage, Stage::Request | Stage::Attempt) {
             return self.inner.call(context, method, params, payload);
         }

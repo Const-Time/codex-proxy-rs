@@ -730,7 +730,8 @@ mod worker_http {
     use gateway_plugin_sdk::{
         ErrorCode, PluginFault,
         client::{
-            CallReply, HttpBody, HttpCall, HttpFrame, HttpResponse, PluginCall, ResponseStream,
+            CallReply, HttpBody, HttpCall, HttpFrame, HttpRequest, HttpResponse, PluginCall,
+            ResponseStream,
         },
     };
     use serde_json::json;
@@ -753,6 +754,116 @@ mod worker_http {
             .unwrap_or_else(|| "pass".into());
         if mode == "deny" {
             return Err(PluginFault::new(ErrorCode::Rejected, "fixture denied"));
+        }
+        if mode == "dispatch" {
+            let body = std::mem::replace(&mut call.request.body, HttpBody::empty());
+            let request = HttpRequest {
+                settings: call.request.settings.clone(),
+                method: "POST".into(),
+                uri: "/internal/raw?data=%2F".into(),
+                version: wire::Version::Http2,
+                headers: call.request.headers.clone(),
+                timeout_ms: None,
+                body,
+            };
+            return call.host.dispatch_http(request).await?.into_reply();
+        }
+        if mode == "dispatch-body-error" {
+            let request = HttpRequest {
+                settings: serde_json::Value::Null,
+                method: "GET".into(),
+                uri: "/internal/raw".into(),
+                version: wire::Version::Http11,
+                headers: vec![],
+                timeout_ms: None,
+                body: HttpBody::empty(),
+            };
+            let mut response = call.host.dispatch_http(request).await?;
+            let error = response.body.read().await.err().unwrap();
+            assert_eq!(error.code, ErrorCode::Fault);
+            return HttpResponse::new(
+                200,
+                HttpBody::from_bytes(b"caught child body error".to_vec()),
+            )
+            .into_reply();
+        }
+        if mode == "dispatch-error" {
+            let request = HttpRequest {
+                settings: serde_json::Value::Null,
+                method: "GET".into(),
+                uri: "/internal/raw".into(),
+                version: wire::Version::Http11,
+                headers: vec![],
+                timeout_ms: None,
+                body: HttpBody::empty(),
+            };
+            let error = match call.host.dispatch_http(request).await {
+                Ok(_) => panic!("must fail"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, ErrorCode::Fault);
+            return HttpResponse::new(200, HttpBody::from_bytes(b"caught child error".to_vec()))
+                .into_reply();
+        }
+        if mode == "dispatch-invalid" || mode == "dispatch-missing" {
+            let targets: &[&str] = if mode == "dispatch-invalid" {
+                &[
+                    "https://external.test/x",
+                    "relative",
+                    "http://127.0.0.1:9/x",
+                ]
+            } else {
+                &["/internal/raw"]
+            };
+            for uri in targets {
+                let request = HttpRequest {
+                    settings: serde_json::Value::Null,
+                    method: "GET".into(),
+                    uri: (*uri).into(),
+                    version: wire::Version::Http11,
+                    headers: vec![],
+                    timeout_ms: None,
+                    body: HttpBody::empty(),
+                };
+                let error = match call.host.dispatch_http(request).await {
+                    Ok(_) => panic!("must reject"),
+                    Err(error) => error,
+                };
+                assert_eq!(
+                    error.code,
+                    if mode == "dispatch-invalid" {
+                        ErrorCode::InvalidInput
+                    } else {
+                        ErrorCode::Unsupported
+                    }
+                );
+            }
+            return HttpResponse::new(200, HttpBody::from_bytes(b"rejected".to_vec())).into_reply();
+        }
+        if mode == "dispatch-total" {
+            for number in 0..65 {
+                let request = HttpRequest {
+                    settings: serde_json::Value::Null,
+                    method: "GET".into(),
+                    uri: "/internal/raw".into(),
+                    version: wire::Version::Http11,
+                    headers: vec![],
+                    timeout_ms: None,
+                    body: HttpBody::empty(),
+                };
+                if number == 64 {
+                    let error = match call.host.dispatch_http(request).await {
+                        Ok(_) => panic!("must exhaust total budget"),
+                        Err(error) => error,
+                    };
+                    assert_eq!(error.code, ErrorCode::Capacity);
+                } else {
+                    let mut response = call.host.dispatch_http(request).await?;
+                    while response.body.read().await?.is_some() {}
+                    response.body.close().await?;
+                }
+            }
+            return HttpResponse::new(200, HttpBody::from_bytes(b"bounded".to_vec())).into_reply();
         }
         if mode == "no-authority" {
             for method in [

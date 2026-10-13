@@ -1,3 +1,4 @@
+mod dispatcher;
 pub(crate) mod fixture;
 mod websocket;
 

@@ -56,6 +56,12 @@ impl Drop for ActiveChild {
 }
 
 /// One execution owns its own effects marker; descendants notify only their ancestors.
+#[derive(Debug, Clone, Copy)]
+enum PermitLifetime {
+    Execution,
+    Http,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtensionCallScope {
     graph: Arc<Graph>,
@@ -63,6 +69,7 @@ pub struct ExtensionCallScope {
     parent_request_id: Option<ModelRequestId>,
     initiating_plugin_instance_id: Option<String>,
     permit: Option<Arc<ActiveChild>>,
+    permit_lifetime: PermitLifetime,
     effects: Arc<AtomicBool>,
     ancestor_effects: Arc<[Arc<AtomicBool>]>,
 }
@@ -74,12 +81,39 @@ impl Default for ExtensionCallScope {
             parent_request_id: None,
             initiating_plugin_instance_id: None,
             permit: None,
+            permit_lifetime: PermitLifetime::Execution,
             effects: Arc::default(),
             ancestor_effects: Arc::from([]),
         }
     }
 }
 impl ExtensionCallScope {
+    /// HTTP callbacks use the same bounded graph as model callbacks. This scope
+    /// describes placement and effects only; it does not authenticate a client.
+    pub fn fork_http(&self, instance: String) -> Result<Self, GatewayError> {
+        let mut scope = self.fork_call(self.parent_request_id.clone(), instance)?;
+        scope.permit_lifetime = PermitLifetime::Http;
+        Ok(scope)
+    }
+    pub fn is_direct_child_of(&self, parent: &Self) -> bool {
+        Arc::ptr_eq(&self.graph, &parent.graph)
+            && self
+                .permit
+                .as_ref()
+                .is_some_and(|permit| !permit.released.load(Ordering::Acquire))
+            && self.ancestors.len() == parent.ancestors.len() + 1
+            && parent.ancestors.is_subset(&self.ancestors)
+            && self
+                .ancestor_effects
+                .last()
+                .is_some_and(|effects| Arc::ptr_eq(effects, &parent.effects))
+    }
+    /// A Router dispatch can mutate host state before an upstream send. Its
+    /// initiating execution and ancestors must not replay those unknown effects.
+    pub fn observe_http_dispatch(&self) {
+        self.effects.store(true, Ordering::Release);
+        self.observe_upstream_effect();
+    }
     pub fn excluded_instances(&self) -> &BTreeSet<String> {
         &self.ancestors
     }
@@ -142,11 +176,15 @@ impl ExtensionCallScope {
                 graph: self.graph.clone(),
                 released: AtomicBool::new(false),
             })),
+            permit_lifetime: PermitLifetime::Execution,
             effects: Arc::default(),
             ancestor_effects: Arc::from(effects),
         })
     }
     pub(crate) fn release(&self) {
+        if matches!(self.permit_lifetime, PermitLifetime::Http) {
+            return;
+        }
         if let Some(permit) = &self.permit {
             permit.release();
         }

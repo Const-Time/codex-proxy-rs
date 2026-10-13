@@ -494,6 +494,22 @@ pub trait ExecutionService: Send + Sync {
             "prepared execution is unavailable",
         ))
     }
+    /// HTTP placement has already reserved any child permit. Normal authentication
+    /// still owns the Key; adoption cannot reserve a second permit or ledger.
+    fn prepare_http_execution(
+        &self,
+        client: AuthenticatedClient,
+        call_scope: super::nested::ExtensionCallScope,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedRootExecution, GatewayError> {
+        let mut prepared = self.prepare_execution(client)?;
+        prepared.extension_scope = call_scope;
+        // The HTTP response/session owns this permit through its transport EOF.
+        // Model cleanup must not release an idle HTTP call's budget early.
+        prepared = prepared.with_revocation(cancellation);
+        prepared.validate()?;
+        Ok(prepared)
+    }
     /// A standalone plugin call shares its host RPC's limits and cancellation.
     /// It has no model parent; the management call context retains the instance and caller.
     fn prepare_plugin_execution(

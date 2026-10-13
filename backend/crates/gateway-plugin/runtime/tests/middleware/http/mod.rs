@@ -1,3 +1,4 @@
+mod dispatch;
 mod upgrade;
 use super::plan::KernelRuntime;
 use bytes::Bytes;
@@ -65,6 +66,17 @@ impl Fixture {
         context: core::Context,
         next: core::Next,
     ) -> Result<core::Response, MiddlewareError> {
+        self.run_with_dispatcher(mode, body, context, next, None)
+            .await
+    }
+    async fn run_with_dispatcher(
+        &self,
+        mode: &str,
+        body: core::Body,
+        context: core::Context,
+        next: core::Next,
+        dispatcher: Option<Arc<dyn core::Dispatcher>>,
+    ) -> Result<core::Response, MiddlewareError> {
         let mut request = core::Request::new(body);
         *request.method_mut() = http::Method::PATCH;
         *request.uri_mut() = "/before?raw=%2F".parse().unwrap();
@@ -83,6 +95,9 @@ impl Fixture {
             .headers_mut()
             .append("x-repeat", "two".parse().unwrap());
         request.extensions_mut().insert(Marker);
+        if let Some(dispatcher) = dispatcher {
+            request.extensions_mut().insert(dispatcher);
+        }
         self.manager
             .middleware_registry()
             .unwrap()
@@ -110,7 +125,7 @@ fn context() -> core::Context {
         request_id: "raw-request".into(),
         call_id: "host-call".into(),
         parent_call_id: None,
-        excluded_plugin_instances: Default::default(),
+        call_scope: Default::default(),
         cancellation: Default::default(),
         deadline_at: Deadline::from_timeout(SystemTime::now(), None).unwrap(),
     }
