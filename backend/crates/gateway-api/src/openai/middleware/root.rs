@@ -70,6 +70,14 @@ pub(super) fn bind(
     } else {
         prepared
     };
+    let prepared = if prepared.nested_context().observer_plan().is_none() {
+        match registry.observer_plan() {
+            Some(plan) => prepared.with_observer_plan(plan),
+            None => prepared,
+        }
+    } else {
+        prepared
+    };
     let registry = Arc::new(registry);
     let attempt_context = MiddlewareContext {
         mount: MiddlewareMount::Attempt,

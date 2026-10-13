@@ -16,7 +16,7 @@ use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::{Arc, Mutex};
 
-pub(super) struct Environment {
+pub(crate) struct Environment {
     pub store: gateway_store::StoreBundle,
     pub core: gateway_core::CoreBundle,
     pub admin: AdminBundle,

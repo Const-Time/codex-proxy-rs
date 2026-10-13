@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginRetryPolicyBinding, PluginUpstreamAdapterBinding } from '@/api/modules/plugins'
+import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginObserverBinding, PluginRetryPolicyBinding, PluginUpstreamAdapterBinding } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
 import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
@@ -57,6 +57,34 @@ function upstreamBinding(): PluginUpstreamAdapterBinding | null {
   if (upstreamScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
     throw new Error('请填写不重复的适配器作用范围 ID，最多 256 个')
   return { scope: upstreamScope.value === 'all' ? { kind: 'all' } : { kind: upstreamScope.value, ids } }
+}
+const observerEnabled = ref(false)
+const observerOrder = ref('0')
+const observerCompleted = ref(true)
+const observerWebSocket = ref(false)
+const observerCompletedScope = ref<'all' | 'keys' | 'groups'>('all')
+const observerWebSocketScope = ref<'all' | 'keys' | 'groups'>('all')
+const observerCompletedIds = ref('')
+const observerWebSocketIds = ref('')
+function observationScope(kind: 'all' | 'keys' | 'groups', input: string): PluginMiddlewareBinding['scope'] {
+  const ids = input.split(/\s+/u).filter(Boolean)
+  if (kind !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
+    throw new Error('请填写不重复的观察作用范围 ID，最多 256 个')
+  return kind === 'all' ? { kind: 'all' } : { kind, ids }
+}
+function observerBinding(): PluginObserverBinding | null {
+  if (!observerEnabled.value)
+    return null
+  const order = Number(observerOrder.value)
+  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
+    throw new Error('观察顺序必须是 -10000 到 10000 的整数')
+  if (!observerCompleted.value && !observerWebSocket.value)
+    throw new Error('请至少选择一种观察事件')
+  return {
+    order,
+    requestCompleted: observerCompleted.value ? observationScope(observerCompletedScope.value, observerCompletedIds.value) : null,
+    websocketResponse: observerWebSocket.value ? observationScope(observerWebSocketScope.value, observerWebSocketIds.value) : null,
+  }
 }
 const retryEnabled = ref(false)
 const retryOrder = ref('0')
@@ -189,6 +217,14 @@ function edit(item?: PluginInstance) {
   upstreamEnabled.value = !!item?.upstreamAdapter
   upstreamScope.value = item?.upstreamAdapter?.scope.kind ?? 'all'
   upstreamIds.value = item?.upstreamAdapter && item.upstreamAdapter.scope.kind !== 'all' ? item.upstreamAdapter.scope.ids.join('\n') : ''
+  observerEnabled.value = !!item?.observer
+  observerOrder.value = String(item?.observer?.order ?? 0)
+  observerCompleted.value = item?.observer ? !!item.observer.requestCompleted : true
+  observerWebSocket.value = !!item?.observer?.websocketResponse
+  observerCompletedScope.value = item?.observer?.requestCompleted?.kind ?? 'all'
+  observerWebSocketScope.value = item?.observer?.websocketResponse?.kind ?? 'all'
+  observerCompletedIds.value = item?.observer?.requestCompleted && item.observer.requestCompleted.kind !== 'all' ? item.observer.requestCompleted.ids.join('\n') : ''
+  observerWebSocketIds.value = item?.observer?.websocketResponse && item.observer.websocketResponse.kind !== 'all' ? item.observer.websocketResponse.ids.join('\n') : ''
   retryEnabled.value = !!item?.retryPolicy
   retryOrder.value = String(item?.retryPolicy?.order ?? 0)
   retryScope.value = item?.retryPolicy?.scope.kind ?? 'all'
@@ -239,7 +275,7 @@ async function save(enabled: boolean) {
       else if (secrets.value[key])
         values[key] = secrets.value[key]!
     }
-    await savePlugin(editing.value?.id, { upstreamAdapter: upstreamBinding(), retryPolicy: retryBinding(), accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+    await savePlugin(editing.value?.id, { observer: observerBinding(), upstreamAdapter: upstreamBinding(), retryPolicy: retryBinding(), accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
     editOpen.value = false
     secrets.value = {}
   })
@@ -247,7 +283,7 @@ async function save(enabled: boolean) {
 async function disable(item: PluginInstance) {
   selected.value = undefined
   await perform(async () => {
-    await savePlugin(item.id, { upstreamAdapter: item.upstreamAdapter ?? null, retryPolicy: item.retryPolicy ?? null, accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
+    await savePlugin(item.id, { observer: item.observer ?? null, upstreamAdapter: item.upstreamAdapter ?? null, retryPolicy: item.retryPolicy ?? null, accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
   })
 }
 onMounted(() => perform(async () => { }))
@@ -346,6 +382,32 @@ onMounted(() => perform(async () => { }))
           <label v-if="retryScope !== 'all'" for="plugin-retry-ids" class="block">{{ retryScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-retry-ids" v-model="retryIds" :rows="3" :disabled="busy" /></label>
           <p class="text-sm text-cp-text-secondary">
             依次咨询匹配的策略，插件委托或故障时交给后续策略处理。明确停止会保留原始失败。整条链最多等待两秒；插件不能增加重试次数、缩短退避或绕过安全恢复条件。
+          </p>
+        </template>
+      </details>
+      <details class="space-y-3 rounded-lg border border-cp-border p-3">
+        <summary>观察订阅</summary>
+        <p class="text-sm text-cp-text-secondary">
+          观察插件可读取请求终态、用量和费用，以及实际上游 WebSocket 的原始响应内容。请选择需要共享的事件和作用范围。
+        </p>
+        <BaseCheckbox v-model="observerEnabled" show-label label="向此插件投递观察事件" :disabled="busy" />
+        <template v-if="observerEnabled">
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label for="plugin-observer-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-observer-order" v-model="observerOrder" type="number" :disabled="busy" /></label>
+          <BaseCheckbox v-model="observerCompleted" show-label label="请求完成事件" :disabled="busy" />
+          <template v-if="observerCompleted">
+            <BaseSelect v-model="observerCompletedScope" aria-label="请求完成观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+            <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+            <label v-if="observerCompletedScope !== 'all'" for="plugin-observer-completed-ids" class="block">{{ observerCompletedScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-completed-ids" v-model="observerCompletedIds" :rows="3" :disabled="busy" /></label>
+          </template>
+          <BaseCheckbox v-model="observerWebSocket" show-label label="实际上游 WebSocket 响应帧" :disabled="busy" />
+          <template v-if="observerWebSocket">
+            <BaseSelect v-model="observerWebSocketScope" aria-label="WebSocket 观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+            <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+            <label v-if="observerWebSocketScope !== 'all'" for="plugin-observer-websocket-ids" class="block">{{ observerWebSocketScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-websocket-ids" v-model="observerWebSocketIds" :rows="3" :disabled="busy" /></label>
+          </template>
+          <p class="text-sm text-cp-text-secondary">
+            观察失败或停用不会改变请求结果。投递有容量和时间限制，繁忙时可能跳过事件；插件可用事件 ID 自行去重。
           </p>
         </template>
       </details>

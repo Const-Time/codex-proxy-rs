@@ -50,7 +50,7 @@ impl Fixture {
         .with_services(Arc::new(move || Ok(Some(global_port.clone()))));
         let artifact = engine.inspect(observer_archive("1.0.0")).await.unwrap();
         assert!(
-            artifact
+            !artifact
                 .info
                 .unsupported_capabilities
                 .iter()
@@ -58,6 +58,7 @@ impl Fixture {
         );
         let id = format!("observer_{}", uuid::Uuid::new_v4().simple());
         let record = PluginRecord {
+            observer: None,
             upstream_adapter: None,
             retry_policy: None,
             account_scheduler: None,
@@ -77,8 +78,7 @@ impl Fixture {
             .lock()
             .unwrap()
             .insert(id.clone(), record.clone());
-        // This inner bridge test uses a real prepared process. The public Admin
-        // capability gate remains closed until publication and API wiring exist.
+        // The native prepared process remains inactive until its original owner publishes it.
         let process = engine.prepare(&record, artifact.clone()).await.unwrap();
         Self {
             engine,
@@ -246,7 +246,7 @@ async fn wait_cancel(probe: &Probe) {
 }
 
 #[tokio::test]
-async fn prepared_observer_is_inactive_and_public_capability_remains_gated() {
+async fn prepared_observer_is_inactive_and_declared_capability_is_validated() {
     let f = Fixture::new("observer").await;
     assert!(f.process.observer_identity().is_none());
     assert!(
@@ -254,12 +254,10 @@ async fn prepared_observer_is_inactive_and_public_capability_remains_gated() {
             .observer_plan(vec![f.target(0, all(), None)], None, Default::default())
             .is_err()
     );
-    assert!(
-        f.engine
-            .validate(&f.record, &f.artifact, None)
-            .await
-            .is_err()
-    );
+    f.engine
+        .validate(&f.record, &f.artifact, None)
+        .await
+        .unwrap();
     f.process.activate();
     let identity = f.process.observer_identity().unwrap();
     assert_eq!(identity.instance_id, f.id);
@@ -817,4 +815,352 @@ async fn websocket_queue_overflow_keeps_order_and_does_not_block_later_frames() 
     assert_eq!(f.process.status(), "ready");
     plan.dispatch(terminal("req_overflow"));
     f.stop().await;
+}
+
+struct Published {
+    manager: gateway_admin::plugins::PluginManager,
+    store: Arc<MemoryStore>,
+    engine: Arc<PluginEngine>,
+    id: String,
+    digest: String,
+    _cache: tempfile::TempDir,
+}
+impl Published {
+    async fn new(mode: &str) -> Self {
+        let cache = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let engine = Arc::new(PluginEngine::new(
+            cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            store.clone(),
+        ));
+        let manager = gateway_admin::plugins::PluginManager::new(store.clone(), engine.clone());
+        use gateway_admin::ports::plugins::PluginService;
+        let artifact = manager
+            .upload(observer_archive("1.0.0"), &actor())
+            .await
+            .unwrap();
+        let mut command = update(&artifact.sha256, 0, true);
+        command.configuration = json!({"adapter_mode":mode});
+        command.observer = Some(PluginObserverBinding {
+            order: -3,
+            request_completed: all(),
+            websocket_response: all(),
+        });
+        let installed = manager.update(None, command, &actor()).await.unwrap();
+        Self {
+            manager,
+            store,
+            engine,
+            id: installed.id,
+            digest: artifact.sha256,
+            _cache: cache,
+        }
+    }
+    fn registry(&self) -> gateway_admin::plugins::middleware::PluginMiddlewareRegistry {
+        use gateway_admin::ports::plugins::PluginService;
+        self.manager.middleware_registry().unwrap()
+    }
+    async fn wait(&self, event: &str, revision: u64) -> Value {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(record) = self
+                    .store
+                    .state_get(
+                        &PluginStateScope {
+                            instance_id: self.id.clone(),
+                            revision,
+                            namespace: "observations".into(),
+                            schema_version: 1,
+                            maximum_records: 256,
+                            maximum_bytes: 4 * 1024 * 1024,
+                        },
+                        event,
+                    )
+                    .await
+                    .unwrap()
+                {
+                    return record.value;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    async fn change(&self, enabled: bool, mode: &str) {
+        use gateway_admin::ports::plugins::PluginService;
+        let record = self.store.records.lock().unwrap()[&self.id].clone();
+        let mut command = update(&self.digest, record.revision, enabled);
+        command.configuration = json!({"adapter_mode":mode});
+        command.observer = record.observer;
+        self.manager
+            .update(Some(&self.id), command, &actor())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn original_publication_shares_observer_budget_without_revoking_business() {
+    let f = Published::new("observer").await;
+    let first = f.registry();
+    let second = f.registry();
+    let plan = first.observer_plan().unwrap();
+    assert!(Arc::ptr_eq(&plan, &second.observer_plan().unwrap()));
+    let business = first.model_catalog().unwrap().cancellation();
+    plan.dispatch(terminal("req_published"));
+    f.wait("req_published:terminal", 1).await;
+    f.change(false, "observer").await;
+    assert!(!business.is_cancelled());
+    assert!(f.registry().observer_plan().is_none());
+    plan.dispatch(terminal("req_old_publication"));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    f.change(true, "observer").await;
+    assert!(
+        f.store
+            .state_get(
+                &PluginStateScope {
+                    instance_id: f.id.clone(),
+                    revision: 3,
+                    namespace: "observations".into(),
+                    schema_version: 1,
+                    maximum_records: 256,
+                    maximum_bytes: 4 * 1024 * 1024
+                },
+                "req_old_publication:terminal"
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn frozen_observation_scope_survives_failed_upgrade_and_restores_actual_revision() {
+    use gateway_admin::ports::plugins::PluginService;
+    let f = Published::new("observer").await;
+    let plan = f.registry().observer_plan().unwrap();
+    let mut bad = update(&f.digest, 1, true);
+    bad.configuration = json!({"fail":true});
+    bad.observer = f.store.records.lock().unwrap()[&f.id].observer.clone();
+    assert!(f.manager.update(Some(&f.id), bad, &actor()).await.is_err());
+    assert!(Arc::ptr_eq(&plan, &f.registry().observer_plan().unwrap()));
+    plan.dispatch_websocket_response(json_frame("req_upgrade_old", 1));
+    f.wait("req_upgrade_old:websocket:1:1", 1).await;
+    f.manager.shutdown().await;
+    let restored = gateway_admin::plugins::PluginManager::new(f.store.clone(), f.engine.clone());
+    restored.restore().await.unwrap();
+    let restored_plan = restored
+        .middleware_registry()
+        .unwrap()
+        .observer_plan()
+        .unwrap();
+    assert!(!Arc::ptr_eq(&plan, &restored_plan));
+    restored_plan.dispatch(terminal("req_restored"));
+    f.wait("req_restored:terminal", 1).await;
+    restored.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_observer_restore_does_not_gate_model_catalog_or_other_instances() {
+    use gateway_admin::ports::plugins::PluginService;
+    let f = Published::new("observer").await;
+    f.manager.shutdown().await;
+    f.store
+        .records
+        .lock()
+        .unwrap()
+        .get_mut(&f.id)
+        .unwrap()
+        .configuration = json!({"fail":true});
+    let manager = gateway_admin::plugins::PluginManager::new(f.store.clone(), f.engine.clone());
+    manager.restore().await.unwrap();
+    let registry = manager.middleware_registry().unwrap();
+    assert!(registry.model_catalog().is_ok());
+    assert!(registry.observer_plan().is_none());
+    assert_eq!(manager.list().await.unwrap()[0].status, "failed");
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn observer_only_unknown_commit_revokes_observation_without_gating_business() {
+    let f = Published::new("observer").await;
+    let first = f.registry();
+    let plan = first.observer_plan().unwrap();
+    let business = first.model_catalog().unwrap().cancellation();
+    f.store.save_fault.store(3, Ordering::SeqCst);
+    use gateway_admin::ports::plugins::PluginService;
+    let mut command = update(&f.digest, 1, false);
+    command.observer = f.store.records.lock().unwrap()[&f.id].observer.clone();
+    assert_eq!(
+        f.manager
+            .update(Some(&f.id), command, &actor())
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::UpstreamResultUnknown
+    );
+    assert!(!business.is_cancelled());
+    assert!(f.registry().model_catalog().is_ok());
+    assert!(f.registry().observer_plan().is_none());
+    plan.dispatch(terminal("req_unknown_commit"));
+    f.manager.shutdown().await;
+}
+
+struct ApiLifecycle;
+impl gateway_core::health::WorkerHealthSource for ApiLifecycle {
+    fn snapshot(&self) -> Vec<gateway_core::health::WorkerHealthSnapshot> {
+        vec![]
+    }
+}
+struct ApiConnection;
+impl gateway_core::lifecycle::ConnectionGuard for ApiConnection {}
+impl gateway_core::lifecycle::ConnectionLifecycle for ApiLifecycle {
+    fn try_register(
+        &self,
+    ) -> Result<
+        Box<dyn gateway_core::lifecycle::ConnectionGuard>,
+        gateway_core::lifecycle::ConnectionDraining,
+    > {
+        Ok(Box::new(ApiConnection))
+    }
+    fn cancellation(&self) -> CancellationToken {
+        CancellationToken::new()
+    }
+    fn is_draining(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn original_api_core_sdk_observer_persists_one_native_terminal_in_postgres() {
+    use gateway_admin::ports::plugins::PluginService;
+    use gateway_core::engine::middleware::http as http_core;
+    use http_body_util::BodyExt as _;
+    let Some(environment) = crate::services::upstream_sdk::environment::Environment::new().await
+    else {
+        return;
+    };
+    let native = crate::models::fixture::Fixture::new().await;
+    let store = environment.store.plugin_store();
+    let manager = Arc::new(
+        gateway_admin::plugins::PluginManager::new(
+            store.clone(),
+            Arc::new(PluginEngine::new(
+                environment.cache.path().join("observer"),
+                "3.11.2".parse().unwrap(),
+                store.clone(),
+            )),
+        )
+        .with_services(environment.admin.services().service_settings()),
+    );
+    let artifact = manager
+        .upload(observer_archive("1.0.0"), &actor())
+        .await
+        .unwrap();
+    let mut command = update(&artifact.sha256, 0, true);
+    command.secrets.clear();
+    command.configuration = json!({"adapter_mode":"observer"});
+    command.observer = Some(PluginObserverBinding {
+        order: 0,
+        request_completed: all(),
+        websocket_response: all(),
+    });
+    let installed = manager.update(None, command, &actor()).await.unwrap();
+    let lifecycle = Arc::new(ApiLifecycle);
+    let api = gateway_api::initialize(
+        gateway_api::ApiConfig {
+            asset_directory: environment.cache.path().into(),
+            cors_allowed_origins: vec![],
+            request_timeout_seconds: None,
+            request_id_header: "x-request-id".into(),
+        },
+        native.execution.clone(),
+        environment.admin.services().with_plugins(manager.clone()),
+        vec![],
+        lifecycle.clone(),
+        lifecycle,
+    )
+    .unwrap();
+    for (index, stream) in [false, true].into_iter().enumerate() {
+        let context = http_core::Context {
+            request_id: format!("req_observer_api_{index}"),
+            call_id: format!("observer-api-call-{index}"),
+            parent_call_id: None,
+            call_scope: Default::default(),
+            model_parent: None,
+            cancellation: CancellationToken::new(),
+            deadline_at: Default::default(),
+        }
+        .child("native-api-caller".into())
+        .unwrap();
+        let body = http_body_util::Full::new(bytes::Bytes::from(
+            serde_json::to_vec(
+                &json!({"model":"gpt-native","input":"observer API fixture","stream":stream}),
+            )
+            .unwrap(),
+        ))
+        .map_err(|never| match never {})
+        .boxed_unsync();
+        let request = http::Request::post("/v1/responses")
+            .header("authorization", "Bearer sk_native_fixture")
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+        let response = api.dispatcher().dispatch(context, request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("completed"));
+        native.clean(index + 1).await;
+        let request_id = native.core.requests.lock().unwrap()[index]
+            .id
+            .as_str()
+            .to_owned();
+        let event_id = format!("{request_id}:terminal");
+        let scope = PluginStateScope {
+            instance_id: installed.id.clone(),
+            revision: 1,
+            namespace: "observations".into(),
+            schema_version: 1,
+            maximum_records: 256,
+            maximum_bytes: 4 * 1024 * 1024,
+        };
+        let saved = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(record) = store.state_get(&scope, &event_id).await.unwrap() {
+                    break record.value;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let data = &saved["event"]["data"];
+        assert_eq!(data["request_id"], request_id);
+        assert_eq!(data["provider"], "openai");
+        assert_eq!(data["account_id"], "acct_allowed");
+        assert_eq!(data["requested_model"], "gpt-native");
+        assert_eq!(data["terminal"]["outcome"], "succeeded");
+        assert_eq!(data["terminal"]["attempt_count"], 1);
+        assert_eq!(
+            data["usage"]["cost"]["total"]["amount"].as_str().unwrap(),
+            native.core.charges.lock().unwrap()[index]
+                .amount_usd
+                .canonical()
+        );
+        assert_eq!(saved["count"], 1);
+        assert_eq!(saved["payload_len"], 0);
+        assert_eq!(native.core.finalizations.lock().unwrap().len(), index + 1);
+        assert_eq!(native.core.active.load(Ordering::SeqCst), 0);
+    }
+    manager.shutdown().await;
+    drop(api);
+    drop(manager);
+    drop(store);
+    native.manager.shutdown().await;
+    drop(native);
+    environment.close().await;
 }

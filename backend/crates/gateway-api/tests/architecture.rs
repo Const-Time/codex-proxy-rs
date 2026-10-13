@@ -150,6 +150,7 @@ fn test_tree_should_match_frozen_rust_mirror() {
         "tests/openai/middleware/mod.rs",
         "tests/openai/middleware/request.rs",
         "tests/openai/middleware/raw.rs",
+        "tests/openai/middleware/root.rs",
         "tests/openai/middleware/websocket.rs",
         "tests/openai/middleware/attempt/mod.rs",
         "tests/openai/middleware/fixture.rs",

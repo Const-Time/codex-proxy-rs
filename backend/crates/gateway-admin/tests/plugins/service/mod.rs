@@ -15,6 +15,7 @@ fn record() -> PluginRecord {
         middleware: None,
         model_router: None,
         account_scheduler: None,
+        observer: None,
         upstream_adapter: None,
         retry_policy: None,
     }

@@ -966,6 +966,8 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 
 实例配置包括 `revision, name, artifactSha256, enabled, trustedProcess, configuration, secrets`。创建 revision 为 0；修改必须提交读取时的 revision。启用必须显式信任所选制品。secrets 是字段名到字符串或 null 的对象：省略保留，null 清除；响应仅含 configuredSecrets 字段名，不返回敏感值。
 
+`observer` 为 null 或 `{order, requestCompleted, websocketResponse}`。`order` 为 -10000～10000 的整数；两种事件分别为 null 或上文全部请求/Key/分组的 scope，至少选择一种。指定范围须为 1～256 个唯一有效 ID；省略/null 清除绑定，保存时提交完整订阅。制品须声明 observer v1 和 observation 阶段；绑定随原 revision、备份和重启恢复。终态与实际上游 WebSocket 原始帧通过有界后台 RPC 投递，不控制业务结果；停用仅撤销观察计划，同实例其他业务能力仍使用原撤销规则。详见 [插件支持矩阵](plugins.md)。
+
 `upstreamAdapter` 为 null 或 `{scope}`，scope 使用全部请求、Key 或分组的同一格式；指定范围须为 1～256 个唯一有效 ID。更新时需提交完整绑定，省略/null 清除绑定。绑定覆盖实例注册的全部上游适配器，按 Provider 和公开模型匹配；重叠范围拒绝发布。缺少 upstream_adapter v1/v2 声明的制品不能保存绑定；当前生产启用门禁仍保留，可保存停用配置。完整能力与验收进度见 [受管上游适配器](plugins.md#受管上游适配器接入进度)。
 
 `frontendAuthentication` 为 null 或 `{failurePolicy: "reject" | "delegate", identities: {"外部身份": "本地 Key ID"}}`，列表返回当前绑定。省略该字段与 null 一样表示不使用此实例认证，更新时需提交完整绑定。只允许声明 frontend_authentication v1 的插件设置它，且最多一个启用实例。数据面 Authorization 由插件解释；仅明确 not_matched 且选择 delegate 时回退普通 Key。拒绝或映射 Key 无效返回 401，认证器失败返回 503。管理登录与插件页面本人选 Key 入口不受该绑定影响；完整范围和撤销语义见 [外部认证](plugins.md#外部认证)。

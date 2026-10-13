@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 #[derive(Clone)]
 pub(super) struct Entry {
+    observer: Option<PluginObserverBinding>,
     pub(super) upstream: Option<PluginUpstreamAdapterBinding>,
     catalog: bool,
     binding: Option<PluginMiddlewareBinding>,
@@ -18,6 +19,16 @@ pub(super) struct Entry {
     retry: Option<PluginRetryPolicyBinding>,
     scheduler: Option<PluginAccountSchedulerBinding>,
     pub(super) process: Option<Arc<dyn PluginProcess>>,
+}
+impl Entry {
+    fn controls_execution(&self) -> bool {
+        self.catalog
+            || self.binding.is_some()
+            || self.router.is_some()
+            || self.retry.is_some()
+            || self.scheduler.is_some()
+            || self.upstream.is_some()
+    }
 }
 struct SelectedMiddleware {
     processes: Vec<Arc<dyn PluginProcess>>,
@@ -28,6 +39,8 @@ pub(super) struct Publication {
     pub(super) entries: BTreeMap<String, Entry>,
     pub(super) blocked: BTreeSet<String>,
     pub(super) epoch: PluginAccess,
+    observation_epoch: PluginAccess,
+    observer_plan: Option<Arc<dyn gateway_core::engine::observation::RequestObserverPlan>>,
 }
 impl Publication {
     pub(super) fn snapshot(&self) -> PluginMiddlewareRegistry {
@@ -49,38 +62,49 @@ impl Publication {
         let upstream = record.upstream_adapter.as_ref().filter(|_| record.enabled);
         let retry = record.retry_policy.as_ref().filter(|_| record.enabled);
         let scheduler = record.account_scheduler.as_ref().filter(|_| record.enabled);
-        if upstream.is_some_and(|binding| binding.validate().is_err())
-            || binding.is_some_and(|binding| binding.validate().is_err())
-            || router.is_some_and(|r| r.validate().is_err())
-            || retry.is_some_and(|r| r.validate().is_err())
-            || scheduler.is_some_and(|s| s.validate().is_err())
+        let observer = record.observer.as_ref().filter(|_| record.enabled);
+        if upstream.is_some_and(|b| b.validate().is_err())
+            || binding.is_some_and(|b| b.validate().is_err())
+            || router.is_some_and(|b| b.validate().is_err())
+            || retry.is_some_and(|b| b.validate().is_err())
+            || scheduler.is_some_and(|b| b.validate().is_err())
         {
             self.block(&record.id);
             return;
         }
-        if self.entries.contains_key(&record.id)
-            || self.blocked.contains(&record.id)
-            || binding.is_some()
+        let observer = observer.filter(|b| b.validate().is_ok());
+        let execution = binding.is_some()
             || router.is_some()
+            || upstream.is_some()
             || retry.is_some()
             || scheduler.is_some()
-            || upstream.is_some()
-            || catalog
+            || catalog;
+        let previous = self.entries.get(&record.id);
+        let affects_execution = execution
+            || previous.is_some_and(Entry::controls_execution)
+            || self.blocked.contains(&record.id);
+        let affects_observation = affects_execution
+            || observer.is_some()
+            || previous.is_some_and(|e| e.observer.is_some());
+        if previous.is_some()
+            || self.blocked.contains(&record.id)
+            || execution
+            || observer.is_some()
         {
-            self.epoch.revoke();
-            self.epoch = PluginAccess::default();
+            if affects_execution {
+                self.epoch.revoke();
+                self.epoch = PluginAccess::default();
+            }
+            if affects_observation {
+                self.revoke_observation();
+            }
             self.entries.remove(&record.id);
             self.blocked.remove(&record.id);
-            if binding.is_some()
-                || router.is_some()
-                || scheduler.is_some()
-                || retry.is_some()
-                || upstream.is_some()
-                || catalog
-            {
+            if execution || observer.is_some() {
                 self.entries.insert(
                     record.id.clone(),
                     Entry {
+                        observer: observer.cloned(),
                         upstream: upstream.cloned(),
                         catalog,
                         binding: binding.cloned(),
@@ -91,6 +115,55 @@ impl Publication {
                     },
                 );
             }
+        }
+    }
+    fn revoke_observation(&mut self) {
+        self.observation_epoch.revoke();
+        self.observation_epoch = PluginAccess::default();
+        self.observer_plan = None;
+    }
+    pub(super) fn rebuild_observers(
+        &mut self,
+        runtime: &dyn PluginRuntime,
+        services: Option<super::service::settings::Service>,
+    ) {
+        if self.observer_plan.is_some() || !self.blocked.is_empty() {
+            return;
+        }
+        let targets = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                let binding = entry.observer.as_ref()?;
+                let process = entry
+                    .process
+                    .as_ref()
+                    .filter(|p| p.observer_identity().is_some());
+                let Some(process) = process else {
+                    tracing::warn!(instance_id = id, "观察订阅进程不可用，跳过投递");
+                    return None;
+                };
+                Some(PluginObserverTarget {
+                    process: process.clone(),
+                    order: binding.order,
+                    request_completed: binding.request_completed.clone(),
+                    websocket_response: binding.websocket_response.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return;
+        }
+        // This is the same publication. Its precompiled observer field is absent
+        // while the service factory captures it, preventing plan -> factory -> plan cycles.
+        let registry = self.snapshot().with_services(services);
+        match runtime.observer_plan(
+            targets,
+            registry.service_factory(),
+            self.observation_epoch.cancellation(),
+        ) {
+            Ok(plan) => self.observer_plan = plan,
+            Err(_) => tracing::warn!("观察订阅编译失败，业务发布保持原状态"),
         }
     }
     pub(super) fn catalog_candidate(
@@ -148,16 +221,23 @@ impl Publication {
     }
     pub(super) fn block(&mut self, id: &str) {
         self.epoch.revoke();
+        self.revoke_observation();
         self.blocked.insert(id.to_owned());
     }
     pub(super) fn remove(&mut self, id: &str) {
-        if self.entries.remove(id).is_some() | self.blocked.remove(id) {
+        let previous = self.entries.remove(id);
+        let blocked = self.blocked.remove(id);
+        if previous.as_ref().is_some_and(Entry::controls_execution) || blocked {
             self.epoch.revoke();
             self.epoch = PluginAccess::default();
+            self.revoke_observation();
+        } else if previous.as_ref().is_some_and(|e| e.observer.is_some()) {
+            self.revoke_observation();
         }
     }
     pub(super) fn shutdown(&self) {
         self.epoch.revoke();
+        self.observation_epoch.revoke();
     }
     fn select(
         &self,
@@ -239,6 +319,11 @@ pub struct PluginMiddlewareRegistry(
     Option<super::service::settings::Service>,
 );
 impl PluginMiddlewareRegistry {
+    pub fn observer_plan(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::engine::observation::RequestObserverPlan>> {
+        self.0.observer_plan.clone()
+    }
     pub(super) fn with_services(
         mut self,
         services: Option<super::service::settings::Service>,

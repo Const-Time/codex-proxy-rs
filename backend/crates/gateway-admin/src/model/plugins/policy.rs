@@ -77,3 +77,29 @@ impl PluginUpstreamAdapterBinding {
         Ok(())
     }
 }
+
+/// Event scopes share one instance order; observation failures never control execution.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginObserverBinding {
+    pub order: i32,
+    pub request_completed: Option<PluginExecutionScope>,
+    pub websocket_response: Option<PluginExecutionScope>,
+}
+impl PluginObserverBinding {
+    pub fn validate(&self) -> Result<(), super::super::AdminError> {
+        if !(-10_000..=10_000).contains(&self.order)
+            || (self.request_completed.is_none() && self.websocket_response.is_none())
+            || self
+                .request_completed
+                .iter()
+                .chain(self.websocket_response.iter())
+                .any(|scope| !scope.is_valid())
+        {
+            return Err(super::super::AdminError::invalid(
+                "观察订阅顺序、事件或作用范围无效",
+            ));
+        }
+        Ok(())
+    }
+}

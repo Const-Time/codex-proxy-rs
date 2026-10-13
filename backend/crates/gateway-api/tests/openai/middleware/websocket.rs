@@ -629,3 +629,37 @@ async fn websocket_request_settings_reach_each_attempt() {
     );
     f.manager.shutdown().await;
 }
+
+#[tokio::test]
+async fn websocket_ingress_binds_observer_terminal_without_mislabeling_http_upstream_frames() {
+    let f = Fixture::new(Mode::Observation, false).await;
+    let (_server, mut socket) = connect(&f).await;
+    send(&mut socket, create()).await;
+    loop {
+        if next(&mut socket).await["type"] == "response.completed" {
+            break;
+        }
+    }
+    f.settled().await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.plugin.observed.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let facts = f.plugin.observed.lock().unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].outcome(),
+            gateway_core::engine::observation::RequestObservationOutcome::Succeeded
+        );
+        assert_eq!(facts[0].attempt_count(), 1);
+        assert_eq!(facts[0].client_key_id().as_str(), "key_api_test");
+        assert_eq!(facts[0].account_id().unwrap().as_str(), "acct_api_test");
+    }
+    assert!(f.plugin.observed_websocket.lock().unwrap().is_empty());
+    socket.close(None).await.unwrap();
+    f.manager.shutdown().await;
+}

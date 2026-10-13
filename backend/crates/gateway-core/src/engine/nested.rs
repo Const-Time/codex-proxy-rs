@@ -382,6 +382,9 @@ impl NestedExecutionContext {
             dispatcher: None,
         })
     }
+    pub fn observer_plan(&self) -> Option<Arc<dyn super::observation::RequestObserverPlan>> {
+        self.observer_plan.clone()
+    }
     pub fn service_factory(&self) -> Option<Arc<dyn super::middleware::service::Factory>> {
         self.service_factory.clone()
     }

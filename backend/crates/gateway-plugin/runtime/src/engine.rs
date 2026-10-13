@@ -200,6 +200,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
                     | Capability::Scheduler
                     | Capability::RetryPolicy
                     | Capability::Maintenance
+                    | Capability::Observer
             ) || decl.version != 1
         })
         .map(|(cap, _)| cap.identifier().into())
@@ -269,6 +270,16 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if let Some(binding) = &record.observer {
+            binding.validate()?;
+            if manifest
+                .contributes
+                .get(&Capability::Observer)
+                .is_none_or(|d| d.version != 1 || !d.stages.contains(&Stage::Observation))
+            {
+                return Err(AdminError::invalid("此制品未提供观察能力"));
+            }
+        }
         if let Some(binding) = &record.upstream_adapter {
             binding.validate()?;
             if manifest

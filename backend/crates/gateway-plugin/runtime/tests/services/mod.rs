@@ -1,7 +1,7 @@
 mod maintenance;
 mod roots;
 mod transport;
-mod upstream_sdk;
+pub(crate) mod upstream_sdk;
 use crate::{models::fixture::Fixture, support::*};
 use gateway_admin::{model::plugins::*, ports::plugins::PluginService};
 use gateway_core::{
