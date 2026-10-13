@@ -47,6 +47,7 @@ impl HttpDispatcher {
 }
 
 pub struct PluginEngine {
+    outbound: crate::upstream_adapter::callbacks::SharedClient,
     http: Option<Arc<HttpDispatcher>>,
     models: Option<Arc<crate::models::ModelServices>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
@@ -61,6 +62,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            outbound: Arc::default(),
             http: None,
             models: None,
             quota: None,
@@ -374,6 +376,10 @@ impl PluginRuntime for PluginEngine {
         let calls = callbacks.calls.clone();
         let middleware =
             crate::middleware::MiddlewareCallbacks::new(callbacks).with_models(models.clone());
+        let upstream_callbacks = crate::upstream_adapter::callbacks::Callbacks::new(
+            middleware.clone(),
+            self.outbound.clone(),
+        );
         let session = Arc::new(
             RpcSession::start_supervised(
                 prepared.clone(),
@@ -391,7 +397,7 @@ impl PluginRuntime for PluginEngine {
                 },
                 RpcLimits::default(),
                 &self.processes,
-                middleware.clone(),
+                upstream_callbacks.clone(),
                 crate::rpc::RpcSessionLifecycle::new(
                     move |_| failed_access.revoke(),
                     move || ended_access.revoke(),
@@ -416,6 +422,21 @@ impl PluginRuntime for PluginEngine {
             return Err(AdminError::invalid("插件注册结果与清单不符"));
         }
         let upstream_adapters = crate::upstream_adapter::register(&session, &manifest).await?;
+        let upstream_adapters = upstream_adapters
+            .into_iter()
+            .map(|registered| {
+                crate::upstream_adapter::PluginUpstreamAdapter::new(
+                    registered,
+                    manifest.contributes[&Capability::UpstreamAdapter]
+                        .id
+                        .clone(),
+                    session.clone(),
+                    upstream_callbacks.clone(),
+                    access.cancellation(),
+                    active.clone(),
+                )
+            })
+            .collect();
         let model_aliases = crate::catalog::register(&session, &record.id).await?;
         let authentication = session
             .capability_version(Capability::FrontendAuthentication)
@@ -498,7 +519,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
-    upstream_adapters: Vec<crate::upstream_adapter::RegisteredAdapter>,
+    upstream_adapters: Vec<Arc<crate::upstream_adapter::PluginUpstreamAdapter>>,
     model_aliases: Vec<gateway_core::routing::ContributedModelAlias>,
     models: Option<Arc<crate::models::Models>>,
     middleware: Arc<crate::middleware::MiddlewareCallbacks>,
@@ -512,10 +533,22 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    fn upstream_adapter(
+        &self,
+        id: &str,
+    ) -> Option<Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapter>> {
+        self.upstream_adapters
+            .iter()
+            .find(|adapter| adapter.id() == id)
+            .map(|adapter| {
+                adapter.clone() as Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapter>
+            })
+    }
+
     fn upstream_adapters(&self) -> Vec<PluginUpstreamAdapterDeclaration> {
         self.upstream_adapters
             .iter()
-            .map(crate::upstream_adapter::RegisteredAdapter::facts)
+            .map(|adapter| adapter.facts())
             .collect()
     }
 

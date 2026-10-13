@@ -1,4 +1,10 @@
 //! Frozen registration facts for a managed adapter; execution keeps Provider ownership.
+pub(crate) mod callbacks;
+mod event;
+mod execution;
+mod failure;
+mod network;
+mod sessions;
 mod target;
 use crate::RpcSession;
 use gateway_admin::model::{AdminError, plugins::PluginUpstreamAdapterDeclaration};
@@ -9,7 +15,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 pub struct RegisteredAdapter {
     declaration: UpstreamAdapterDeclaration,
-    target: target::UpstreamTarget,
+    target: std::sync::Arc<target::UpstreamTarget>,
 }
 impl RegisteredAdapter {
     pub fn compile(
@@ -48,7 +54,7 @@ impl RegisteredAdapter {
         let target = target::UpstreamTarget::compile(&declaration)?;
         Ok(Self {
             declaration,
-            target,
+            target: std::sync::Arc::new(target),
         })
     }
     pub fn declaration(&self) -> &UpstreamAdapterDeclaration {
@@ -111,4 +117,69 @@ pub(crate) async fn register(
             RegisteredAdapter::compile(declaration, contribution)
         })
         .collect()
+}
+
+use gateway_core::{
+    engine::{
+        provider::EventStream,
+        upstream_adapter::{UpstreamAdapter, UpstreamAdapterInvocation},
+    },
+    lifecycle::CancellationToken,
+};
+use std::sync::Arc;
+pub(crate) struct PluginUpstreamAdapter {
+    registered: RegisteredAdapter,
+    instance_id: String,
+    contribution_id: String,
+    session: Arc<RpcSession>,
+    callbacks: Arc<callbacks::Callbacks>,
+    connections: Arc<sessions::ConnectionPool>,
+    cancellation: CancellationToken,
+    active: Arc<std::sync::atomic::AtomicBool>,
+}
+impl PluginUpstreamAdapter {
+    pub(crate) fn new(
+        registered: RegisteredAdapter,
+        contribution_id: String,
+        session: Arc<RpcSession>,
+        callbacks: Arc<callbacks::Callbacks>,
+        cancellation: CancellationToken,
+        active: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<Self> {
+        let instance_id = session
+            .context(Stage::Upstream, Duration::from_secs(1))
+            .instance_id;
+        Arc::new(Self {
+            registered,
+            instance_id,
+            contribution_id,
+            session,
+            callbacks,
+            connections: sessions::ConnectionPool::new(cancellation.clone()),
+            cancellation,
+            active,
+        })
+    }
+    pub(crate) fn facts(&self) -> PluginUpstreamAdapterDeclaration {
+        self.registered.facts()
+    }
+    pub(crate) fn id(&self) -> &str {
+        &self.registered.declaration.id
+    }
+}
+impl std::fmt::Debug for PluginUpstreamAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginUpstreamAdapter")
+            .field("instance_id", &self.instance_id)
+            .field("adapter_id", &self.id())
+            .finish_non_exhaustive()
+    }
+}
+impl UpstreamAdapter for PluginUpstreamAdapter {
+    fn transport(&self) -> &str {
+        self.registered.declaration.transport.as_str()
+    }
+    fn execute(self: Arc<Self>, invocation: UpstreamAdapterInvocation) -> EventStream {
+        execution::execute(self, invocation)
+    }
 }

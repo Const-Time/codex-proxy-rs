@@ -737,6 +737,17 @@ pub struct ProviderEvent {
 }
 
 impl ProviderEvent {
+    /// Add another fact from the same upstream frame without duplicating its wire projection.
+    #[must_use]
+    pub fn with_fact(mut self, fact: GatewayEvent) -> Self {
+        self.canonical.push(fact);
+        self
+    }
+    /// Attach host observations to the same envelope as the upstream frame.
+    pub fn attach_observation(&mut self, observation: ProviderResponseObservation) {
+        self.observation = Some(Box::new(observation));
+    }
+
     /// Protocol adapters replace only the delivery projection, retaining host receipts.
     #[must_use]
     pub fn with_wire_projection(mut self, wire: Option<ProtocolWireEvent>) -> Self {
