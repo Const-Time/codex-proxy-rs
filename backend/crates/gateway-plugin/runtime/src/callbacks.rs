@@ -116,6 +116,9 @@ impl CallbackHandler for Callbacks {
                 None,
                 self.calls.actor(&context.resource_scope_id),
                 gateway_core::lifecycle::CancellationToken::new(),
+                self.calls
+                    .caller(&context.resource_scope_id)
+                    .and_then(|caller| caller.invocation.clone()),
             );
         }
     }
@@ -181,6 +184,34 @@ impl CallbackHandler for Callbacks {
                     ErrorCode::PermissionDenied,
                     "this policy stage only permits private state callbacks",
                 ));
+            }
+            if method == gateway_plugin_sdk::call::services::CALL_METHOD {
+                let caller = calls.caller(&context.resource_scope_id).ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "service caller is no longer active",
+                    )
+                })?;
+                if caller.cancellation.is_cancelled() {
+                    return Err(PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "service caller has ended",
+                    ));
+                }
+                let dispatcher = caller
+                    .invocation
+                    .as_ref()
+                    .and_then(|origin| origin.services.clone())
+                    .ok_or_else(|| {
+                        PluginFault::new(
+                            ErrorCode::PermissionDenied,
+                            "service authority is not bound",
+                        )
+                    })?;
+                return tokio::select! {biased;
+                    ()=caller.cancellation.cancelled()=>Err(crate::middleware::service_cancelled()),
+                    result=crate::middleware::call_service(dispatcher,id,params,payload)=>result,
+                };
             }
             if crate::models::is_method(&method)
                 || (context.stage == Stage::Management && method.starts_with("host.http."))

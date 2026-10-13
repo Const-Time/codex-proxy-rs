@@ -40,16 +40,40 @@ pub(crate) struct Origin {
 pub(crate) fn current() -> Option<Origin> {
     CURRENT.try_with(Clone::clone).ok()
 }
-pub(crate) fn service_origin(request_id: &str) -> Option<gateway_admin::plugins::service::Origin> {
-    current().map(|origin| gateway_admin::plugins::service::Origin {
-        // Admin's audit boundary issues its own request ID after HTTP placement.
-        registry: origin.registry,
-        request_id: request_id.to_owned(),
-        call_id: origin.context.call_id,
-        cancellation: origin.context.cancellation,
-        deadline_at: origin.context.deadline_at,
-        call_scope: origin.context.call_scope,
+pub(crate) fn service_origin(
+    services: &gateway_admin::AdminServices,
+    actor: &gateway_admin::model::MutationContext,
+) -> Option<gateway_admin::plugins::service::Origin> {
+    current().map(|origin| {
+        let mut origin = gateway_admin::plugins::service::Origin {
+            // Admin's audit boundary issues its own request ID after HTTP placement.
+            registry: origin.registry,
+            request_id: actor.request_id.clone(),
+            call_id: origin.context.call_id,
+            cancellation: origin.context.cancellation,
+            deadline_at: origin.context.deadline_at,
+            call_scope: origin.context.call_scope,
+            dispatcher: None,
+        };
+        origin.dispatcher = Some(
+            services
+                .service_settings()
+                .dispatcher(origin.clone(), actor.clone()),
+        );
+        origin
     })
+}
+pub(crate) fn plugin_invocation(
+    services: &gateway_admin::AdminServices,
+    actor: &gateway_admin::model::MutationContext,
+) -> Option<gateway_admin::model::plugins::PluginInvocationContext> {
+    current().map(
+        |origin| gateway_admin::model::plugins::PluginInvocationContext {
+            services: service_origin(services, actor).and_then(|origin| origin.dispatcher),
+            context: origin.context,
+            http: Some(origin.dispatcher),
+        },
+    )
 }
 pub(crate) async fn scope<T>(
     origin: Option<Origin>,

@@ -13,6 +13,8 @@ use gateway_plugin_sdk::{
 use std::sync::{Arc, Mutex};
 
 pub(super) struct Invocation {
+    instance: String,
+    dispatcher: Option<Arc<dyn core::Dispatcher>>,
     next: Mutex<Option<core::Next>>,
     pub(super) cancellation: CancellationToken,
     pub(super) closed: CancellationToken,
@@ -25,6 +27,15 @@ impl Invocation {
         payload: Vec<u8>,
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
         Box::pin(async move {
+            if method == wire::CALL_METHOD {
+                let dispatcher = self.dispatcher.clone().ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "service authority is not bound",
+                    )
+                })?;
+                return call_service(dispatcher, self.instance.clone(), params, payload).await;
+            }
             if method != NEXT_METHOD || !payload.is_empty() {
                 return Err(PluginFault::new(
                     ErrorCode::InvalidInput,
@@ -73,12 +84,21 @@ pub(super) async fn invoke(
     if context.cancellation.is_cancelled() || remaining.is_zero() {
         return Err(core::Error::unavailable("服务调用已结束"));
     }
+    let mut call = session.context(Stage::Service, remaining);
+    let closed = CancellationToken::new();
+    let mut callback_context = context.clone();
+    callback_context.cancellation =
+        CancellationToken::linked([context.cancellation.clone(), closed.clone()]);
     let invocation = Arc::new(Invocation {
+        instance: call.instance_id.clone(),
+        dispatcher: context
+            .dispatcher
+            .as_ref()
+            .map(|dispatcher| dispatcher.scoped(&callback_context)),
         next: Mutex::new(Some(next)),
         cancellation: context.cancellation.clone(),
-        closed: Default::default(),
+        closed,
     });
-    let mut call = session.context(Stage::Service, remaining);
     call.request_id = Some(context.request_id.clone());
     let _binding = callbacks
         .bind_service(&call, invocation)
@@ -107,6 +127,43 @@ pub(super) async fn invoke(
         message: error.message,
         details: error.details,
     })
+}
+
+pub(crate) async fn call_service(
+    dispatcher: Arc<dyn core::Dispatcher>,
+    instance: String,
+    params: core::Value,
+    payload: Vec<u8>,
+) -> Result<RpcReply, PluginFault> {
+    if !payload.is_empty() {
+        return Err(PluginFault::new(
+            ErrorCode::InvalidInput,
+            "service call has unexpected payload",
+        ));
+    }
+    let request: wire::Request = serde_json::from_value(params)
+        .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid service call"))?;
+    let response: wire::Response = dispatcher
+        .call(instance, request.operation, request.input)
+        .await
+        .map_err(|error| wire::ServiceError {
+            kind: error.kind,
+            message: error.message,
+            details: error.details,
+        });
+    Ok(RpcReply {
+        result: serde_json::to_value(response)
+            .map_err(|_| PluginFault::new(ErrorCode::Fault, "service result encoding failed"))?,
+        payload: vec![],
+    })
+}
+pub(crate) fn service_cancelled() -> PluginFault {
+    let mut fault = PluginFault::new(
+        ErrorCode::Uncertain,
+        "service call cancelled; refresh state before retrying",
+    );
+    fault.send_state = gateway_plugin_sdk::SendState::Ambiguous;
+    fault
 }
 fn rpc_error(error: RpcError) -> core::Error {
     let fault = match error {

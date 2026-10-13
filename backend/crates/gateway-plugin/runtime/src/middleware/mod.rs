@@ -10,6 +10,7 @@ mod service;
 mod websocket;
 mod websocket_execution;
 pub use registry::MiddlewareCallbacks;
+pub(crate) use service::{call_service, service_cancelled};
 
 use std::sync::{Arc, Mutex};
 

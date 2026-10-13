@@ -19,6 +19,23 @@ mod worker_models {
         input: &Value,
     ) -> Result<Value, gateway_plugin_sdk::PluginFault> {
         let mode = input["mode"].as_str().unwrap_or("unary");
+        if mode == "service-budget" {
+            Box::pin(handle_inner(
+                host,
+                &json!({"mode":"unary","key":"key_alice"}),
+            ))
+            .await?;
+            Box::pin(handle_inner(host, &json!({"mode":"http"}))).await?;
+            for completed in 0..64 {
+                if let Err(error) = host
+                    .service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(())
+                    .await
+                {
+                    return Ok(json!({"completed":completed,"kind":error.kind}));
+                }
+            }
+            return Ok(json!({"completed":64}));
+        }
         if mode == "http" {
             if input["model_first"] == true {
                 Box::pin(handle_inner(
@@ -388,6 +405,16 @@ impl PluginHandler for Worker {
                     match call.host.call(input["method"].as_str().unwrap(),input["params"].clone(),serde_json::to_vec(&input["payload"]).unwrap()).await {
                         Ok(reply)=>json!({"result":serde_json::from_slice::<serde_json::Value>(&reply.payload).unwrap()}),
                         Err(error)=>json!({"error":error.into_plugin_fault()})
+                    }
+                } else if input["operation"]=="services" {
+                    if input["mode"]=="raw" {
+                        match call.host.call(gateway_plugin_sdk::call::services::CALL_METHOD,input["request"].clone(),if input["binary"]==true {vec![1]}else{vec![]}).await {
+                            Ok(reply)=>json!({"result":reply.result}),Err(error)=>json!({"fault":error.into_plugin_fault()}),
+                        }
+                    } else {
+                        match call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await {
+                            Ok(value)=>json!({"exists":value}),Err(error)=>json!({"error":error}),
+                        }
                     }
                 } else if input["operation"]=="models" {
                     worker_models::handle(&call.host, &input).await
@@ -1119,6 +1146,12 @@ async fn worker_service(
         Some("service-fixture-parent")
     );
     let mode = call.request_id.clone();
+    if mode == "host-service" {
+        return ServiceResponse::from_result::<ApiKeyExists>(
+            host.service::<ApiKeyExists>(()).await,
+        )?
+        .encode();
+    }
     if mode == "reject" {
         let mut fault = PluginFault::new(ErrorCode::Rejected, "fixture service rejection");
         fault.send_state = gateway_plugin_sdk::SendState::Ambiguous;

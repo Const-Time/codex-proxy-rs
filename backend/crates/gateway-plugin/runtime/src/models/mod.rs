@@ -113,7 +113,13 @@ impl Models {
         parent: Option<NestedExecutionContext>,
         actor: Option<MutationContext>,
         revocation: CancellationToken,
+        invocation: Option<gateway_admin::model::plugins::PluginInvocationContext>,
     ) -> Result<(), PluginFault> {
+        let parent = parent.or_else(|| {
+            invocation
+                .as_ref()
+                .and_then(|origin| origin.context.model_parent.clone())
+        });
         let mut scopes = self
             .scopes
             .lock()
@@ -128,16 +134,25 @@ impl Models {
         let cancellation = CancellationToken::linked([
             self.cancellation.clone(),
             revocation,
+            invocation
+                .as_ref()
+                .map_or_else(CancellationToken::new, |origin| {
+                    origin.context.cancellation.clone()
+                }),
             parent
                 .as_ref()
                 .map_or_else(CancellationToken::new, NestedExecutionContext::cancellation),
         ]);
-        let graph = parent
+        let graph = invocation
             .as_ref()
-            .map_or_else(ExtensionCallScope::default, |parent| parent.scope().clone());
-        let http = crate::middleware::http::Invocation::standalone(
-            context.instance_id.clone(),
-            gateway_core::engine::middleware::http::Context {
+            .map(|origin| origin.context.call_scope.clone())
+            .unwrap_or_else(|| {
+                parent
+                    .as_ref()
+                    .map_or_else(ExtensionCallScope::default, |parent| parent.scope().clone())
+            });
+        let mut http_context = invocation.as_ref().map_or_else(
+            || gateway_core::engine::middleware::http::Context {
                 request_id: context
                     .request_id
                     .clone()
@@ -151,10 +166,21 @@ impl Models {
                     .as_ref()
                     .map_or_else(Default::default, NestedExecutionContext::deadline),
             },
-            parent
-                .as_ref()
-                .and_then(NestedExecutionContext::http_dispatcher)
-                .or_else(|| self.http.as_ref().and_then(|http| http.get())),
+            |origin| origin.context.clone(),
+        );
+        http_context.cancellation = cancellation.clone();
+        let http = crate::middleware::http::Invocation::standalone(
+            context.instance_id.clone(),
+            http_context,
+            invocation.as_ref().map_or_else(
+                || {
+                    parent
+                        .as_ref()
+                        .and_then(NestedExecutionContext::http_dispatcher)
+                        .or_else(|| self.http.as_ref().and_then(|http| http.get()))
+                },
+                |origin| origin.http.clone(),
+            ),
         );
         scopes.insert(
             context.resource_scope_id.clone(),

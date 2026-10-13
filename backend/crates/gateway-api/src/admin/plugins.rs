@@ -237,6 +237,10 @@ async fn invoke<S: AdminSessionState + Send + Sync>(
             &input.id,
             input.revision,
             PluginHttpRequest {
+                invocation: crate::middleware::plugin_invocation(
+                    state.admin_services(),
+                    &auth.context().mutation_context(),
+                ),
                 actor: auth.context().mutation_context(),
                 method: input.method,
                 path: input.path,
