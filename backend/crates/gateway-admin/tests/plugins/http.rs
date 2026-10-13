@@ -227,7 +227,7 @@ fn context() -> http::Context {
         request_id: "http_request".into(),
         call_id: "root".into(),
         parent_call_id: None,
-        excluded_plugin_instances: Default::default(),
+        call_scope: Default::default(),
         cancellation: CancellationToken::new(),
         deadline_at: Deadline::default(),
     }
@@ -248,7 +248,7 @@ async fn pre_auth_http_plan_uses_publication_order_and_all_ancestor_exclusions_w
     let (manager, processes) = fixture().await;
     let registry = manager.middleware_registry().unwrap();
     let mut context = context();
-    context.excluded_plugin_instances.insert("a".into());
+    context.call_scope = context.call_scope.fork_http("a".into()).unwrap();
     let plan = registry.freeze_http(context).unwrap();
     assert!(!plan.is_empty());
     let calls = Arc::new(AtomicUsize::new(0));

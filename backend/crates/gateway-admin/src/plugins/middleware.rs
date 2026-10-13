@@ -127,7 +127,7 @@ impl Publication {
         mut context: gateway_core::engine::middleware::http::Context,
     ) -> Result<super::http::PluginHttpMiddlewarePlan, AdminError> {
         let SelectedMiddleware { processes, tokens } =
-            self.select(&context.excluded_plugin_instances, |binding| {
+            self.select(context.call_scope.excluded_instances(), |binding| {
                 binding.mounts.contains(&PluginMiddlewareMount::Http)
                     && matches!(binding.scope, PluginExecutionScope::All {})
             })?;

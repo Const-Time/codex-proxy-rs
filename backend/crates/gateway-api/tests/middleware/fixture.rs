@@ -16,6 +16,15 @@ pub(crate) async fn handle(
         .unwrap()
         .push((request.uri().to_string(), context.clone()));
     match plugin.mode {
+        Mode::HttpDispatchModel
+        | Mode::HttpDispatchStream
+        | Mode::HttpDispatchUnauthorized
+        | Mode::HttpDispatchAdmin
+        | Mode::HttpDispatchBudget
+        | Mode::HttpDispatchForged
+        | Mode::HttpDispatchSettings => {
+            return super::dispatcher::handle(plugin, context, request).await;
+        }
         Mode::WaitBeforeNext => return futures::future::pending().await,
         Mode::Rewrite => {
             *request.uri_mut() = "/v1/responses?raw=%2F".parse().unwrap();

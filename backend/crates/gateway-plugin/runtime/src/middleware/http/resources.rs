@@ -20,6 +20,7 @@ struct Entries {
     responses: BTreeMap<String, http::response::Parts>,
 }
 struct BodyResource {
+    original: bool,
     cancellation: gateway_core::lifecycle::CancellationToken,
     state: tokio::sync::Mutex<BodyState>,
 }
@@ -88,6 +89,13 @@ impl Resources {
         drop(entries);
     }
     pub(super) fn insert_body(&self, body: core::Body) -> Result<wire::Body, PluginFault> {
+        self.insert_scoped_body(body, true)
+    }
+    fn insert_scoped_body(
+        &self,
+        body: core::Body,
+        original: bool,
+    ) -> Result<wire::Body, PluginFault> {
         let mut entries = self
             .entries
             .lock()
@@ -102,6 +110,7 @@ impl Resources {
         entries.bodies.insert(
             handle.clone(),
             Arc::new(BodyResource {
+                original,
                 cancellation: Default::default(),
                 state: tokio::sync::Mutex::new(BodyState {
                     body: Some(body),
@@ -194,6 +203,7 @@ impl Resources {
         entries.bodies.insert(
             handle.clone(),
             Arc::new(BodyResource {
+                original: true,
                 cancellation: Default::default(),
                 state: tokio::sync::Mutex::new(BodyState {
                     body: Some(body),
@@ -290,10 +300,12 @@ impl Resources {
                     Some(error) => fault(error),
                     None => PluginFault::new(ErrorCode::Fault, "HTTP body read failed"),
                 };
-                *self
-                    .error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                if resource.original {
+                    *self
+                        .error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                }
                 failure
             })?;
             let mut result = wire::BodyRead::default();
@@ -329,8 +341,21 @@ impl Resources {
         }
     }
     pub(crate) fn response(&self, response: core::Response) -> Result<RpcReply, PluginFault> {
+        self.scoped_response(response, true)
+    }
+    pub(super) fn dispatched_response(
+        &self,
+        response: core::Response,
+    ) -> Result<RpcReply, PluginFault> {
+        self.scoped_response(response, false)
+    }
+    fn scoped_response(
+        &self,
+        response: core::Response,
+        original: bool,
+    ) -> Result<RpcReply, PluginFault> {
         let (parts, body) = response.into_parts();
-        let body = self.insert_body(body)?;
+        let body = self.insert_scoped_body(body, original)?;
         let wire::Body::Handle { handle: id } = &body else {
             return Err(invalid());
         };

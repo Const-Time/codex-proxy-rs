@@ -90,6 +90,13 @@ impl PluginStore for Store {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
+    HttpDispatchModel,
+    HttpDispatchStream,
+    HttpDispatchUnauthorized,
+    HttpDispatchAdmin,
+    HttpDispatchBudget,
+    HttpDispatchForged,
+    HttpDispatchSettings,
     HttpUpgrade,
     HttpUpgradeBadResponse,
     HttpUpgradeDiscard,

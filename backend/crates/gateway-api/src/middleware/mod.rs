@@ -1,4 +1,5 @@
 //! Router placement, HTTP lifetimes and transport stay at the API boundary.
+mod dispatcher;
 mod websocket;
 
 use axum::{
@@ -85,49 +86,82 @@ async fn handle(
     lifecycle: Arc<dyn ConnectionLifecycle>,
 ) -> Response {
     let started = Instant::now();
-    let Some(registry) = plugins() else {
-        return dispatch(router, request, started, timeout).await;
-    };
-    let context = core::Context {
-        request_id: request
-            .headers()
-            .get(&header)
-            .and_then(|value| value.to_str().ok())
-            .map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_owned),
-        call_id: uuid::Uuid::now_v7().to_string(),
-        parent_call_id: None,
-        excluded_plugin_instances: Default::default(),
-        cancellation: CancellationToken::linked([lifecycle.cancellation()]),
-        deadline_at: Deadline::from_timeout(SystemTime::now(), None).expect("unbounded deadline"),
+    let inherited = request.extensions_mut().remove::<Origin>();
+    let is_inherited = inherited.is_some();
+    let (registry, context, parent, baseline) = if let Some(origin) = inherited {
+        (
+            origin.registry,
+            origin.context,
+            Some(origin._lifetime),
+            origin.settings,
+        )
+    } else {
+        let Some(registry) = plugins() else {
+            return dispatch(router, request, started, timeout).await;
+        };
+        let context = core::Context {
+            request_id: request
+                .headers()
+                .get(&header)
+                .and_then(|value| value.to_str().ok())
+                .map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_owned),
+            call_id: uuid::Uuid::now_v7().to_string(),
+            parent_call_id: None,
+            call_scope: Default::default(),
+            cancellation: CancellationToken::linked([lifecycle.cancellation()]),
+            deadline_at: Deadline::from_timeout(SystemTime::now(), None)
+                .expect("unbounded deadline"),
+        };
+        (registry, context, None, None)
     };
     let plan = match registry.freeze_http(context.clone()) {
         Ok(plan) => plan,
         Err(_) => return error(&MiddlewareError::Fault),
     };
-    if plan.is_empty() {
+    if plan.is_empty() && !is_inherited {
         return dispatch(router, request, started, timeout).await;
     }
     let context = core::Context {
         cancellation: plan.cancellation(),
         ..context
     };
-    let lifetime = Arc::new(Lifetime(context.cancellation.clone()));
-    request.extensions_mut().insert(core::Settings {
-        timeout,
-        runtime: settings(),
+    let lifetime = Arc::new(Lifetime {
+        cancellation: context.cancellation.clone(),
+        _parent: parent,
+        _call_scope: context.call_scope.clone(),
     });
+    let configuration = request
+        .extensions()
+        .get::<core::Settings>()
+        .cloned()
+        .unwrap_or_else(|| core::Settings {
+            timeout,
+            runtime: if is_inherited { baseline } else { settings() },
+        });
+    request.extensions_mut().insert(configuration.clone());
     request
         .extensions_mut()
         .insert(Arc::new(websocket::Upgrade {
             context: context.clone(),
-            lifecycle,
+            lifecycle: lifecycle.clone(),
         }) as Arc<dyn core::upgrade::WebSocketUpgrade>);
     let origin = Origin {
         context: context.clone(),
         registry,
-        settings: None,
+        settings: configuration.runtime,
         _lifetime: lifetime.clone(),
     };
+    request
+        .extensions_mut()
+        .insert(Arc::new(dispatcher::RouterDispatcher {
+            router: router.clone(),
+            plugins,
+            timeout,
+            header,
+            settings,
+            lifecycle,
+            origin: origin.clone(),
+        }) as Arc<dyn core::Dispatcher>);
     let request = request.map(|body| body.map_err(|error| Box::new(error) as _).boxed_unsync());
     let next = compose(vec![], move |request: core::Request| {
         Box::pin(async move {
@@ -165,7 +199,7 @@ async fn handle(
                 };
                 let lifetime = lifetime.clone();
                 tokio::spawn(async move {
-                    let cancellation = lifetime.0.clone();
+                    let cancellation = lifetime.cancellation.clone();
                     let _lifetime = lifetime;
                     tokio::select! {biased;()=cancellation.cancelled()=>{},_=task=>{}}
                 });
@@ -212,10 +246,14 @@ fn error(failure: &MiddlewareError) -> Response {
     };
     (status,axum::Json(serde_json::json!({"error":{"message":"HTTP middleware failed","type":"middleware_error"}}))).into_response()
 }
-struct Lifetime(CancellationToken);
+struct Lifetime {
+    cancellation: CancellationToken,
+    _parent: Option<Arc<Lifetime>>,
+    _call_scope: gateway_core::engine::nested::ExtensionCallScope,
+}
 impl Drop for Lifetime {
     fn drop(&mut self) {
-        self.0.cancel();
+        self.cancellation.cancel();
     }
 }
 struct ResponseBody {

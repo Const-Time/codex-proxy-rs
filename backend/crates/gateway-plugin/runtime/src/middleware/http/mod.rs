@@ -1,5 +1,6 @@
 //! HTTP 边界只搬运类型化请求、响应与正文资源；业务默认实现仍由 API 持有
 
+mod dispatch;
 mod execution;
 pub(crate) mod resources;
 mod upgrade;
@@ -28,6 +29,8 @@ pub(crate) struct Invocation {
     pub(super) cancellation: gateway_core::lifecycle::CancellationToken,
     downstream_error: Mutex<Option<MiddlewareError>>,
     pub(super) callbacks_closed: gateway_core::lifecycle::CancellationToken,
+    context: core::Context,
+    dispatcher: Option<Arc<dyn core::Dispatcher>>,
 }
 
 struct State {
@@ -66,9 +69,10 @@ impl Invocation {
         request: core::Request,
         next: core::Next,
         instance_id: String,
-        cancellation: gateway_core::lifecycle::CancellationToken,
+        context: core::Context,
     ) -> Result<(Arc<Self>, wire::Request), MiddlewareError> {
         let (parts, body) = request.into_parts();
+        let dispatcher = parts.extensions.get::<Arc<dyn core::Dispatcher>>().cloned();
         let settings = parts
             .extensions
             .get::<core::Settings>()
@@ -104,7 +108,9 @@ impl Invocation {
             }),
             resources: Arc::new(resources::Resources::default()),
             session: Mutex::new(None),
-            cancellation,
+            cancellation: context.cancellation.clone(),
+            context,
+            dispatcher,
             downstream_error: Mutex::new(None),
             callbacks_closed: Default::default(),
         });
@@ -212,6 +218,13 @@ impl Invocation {
                     .await;
             }
             match method.as_str() {
+                wire::DISPATCH_METHOD => {
+                    self.dispatch(
+                        serde_json::from_value(params).map_err(|_| invalid())?,
+                        payload,
+                    )
+                    .await
+                }
                 wire::UPGRADE_METHOD if payload.is_empty() => {
                     self.upgrade(serde_json::from_value(params).map_err(|_| invalid())?)
                         .await
@@ -332,6 +345,7 @@ pub(crate) fn is_method(method: &str) -> bool {
         || matches!(
             method,
             NEXT_METHOD
+                | wire::DISPATCH_METHOD
                 | wire::UPGRADE_METHOD
                 | wire::RECEIVE_METHOD
                 | gateway_plugin_sdk::call::middleware::websocket::SEND_METHOD
