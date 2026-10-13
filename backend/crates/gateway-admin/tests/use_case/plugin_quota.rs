@@ -89,4 +89,13 @@ async fn shared_quota_rejects_ambiguous_scope_unbounded_targets_and_invalid_amou
         service.get(system, target()).await.unwrap_err().kind(),
         AdminErrorKind::Invalid
     );
+    let mut plugin = scope();
+    plugin.actor.actor = MutationActor::Plugin {
+        instance_id: "plugin_fixture".into(),
+        revision: 7.try_into().unwrap(),
+    };
+    assert_eq!(
+        service.get(plugin, target()).await.unwrap_err().kind(),
+        AdminErrorKind::Invalid
+    );
 }

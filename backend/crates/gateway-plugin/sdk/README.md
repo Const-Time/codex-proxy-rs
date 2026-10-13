@@ -124,3 +124,5 @@ RUST_MIN_STACK=16777216 RUSTDOCFLAGS='-D warnings' cargo +1.97.0 doc --manifest-
 源码中的类型和字段是当前合同；宿主接入、目录边界与 Runtime 集成验证见
 [系统架构](../../../../docs/architecture.md)。Provider 固定为宿主内置的 OpenAI 与 xAI；插件实现只依赖公开 SDK 合同。
 单元测试与文档构建不代替目标平台上的安装、配置及实际能力验证
+
+宿主签发的服务操作者可以包含 `MutationActor::Plugin { instance_id, revision }`，它用于本地服务审计，不代表管理端登录或用户共享额度权限。服务请求中的操作者由宿主端口覆盖；插件不能通过提交该值取得权限。Runtime 全阶段主动 service 接线及旧 SDK 制品对新增操作者的兼容仍在验收。

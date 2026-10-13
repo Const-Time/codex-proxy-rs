@@ -80,7 +80,7 @@ use gateway_core::{
     runtime::SnapshotControl,
 };
 
-pub(super) struct AdminHarness {
+pub(crate) struct AdminHarness {
     snapshot: Arc<dyn SnapshotControl>,
     default_password: String,
     session_ttl_minutes: u64,
@@ -100,7 +100,7 @@ pub(super) struct AdminHarness {
 }
 
 impl AdminHarness {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let unavailable = Arc::new(UnavailableStore);
         Self {
             snapshot: Arc::new(NoopSnapshot),
@@ -165,7 +165,7 @@ impl AdminHarness {
         self
     }
 
-    pub(super) fn settings(mut self, store: Arc<dyn SettingsStore>) -> Self {
+    pub(crate) fn settings(mut self, store: Arc<dyn SettingsStore>) -> Self {
         self.settings = store;
         self
     }
@@ -208,7 +208,7 @@ impl AdminHarness {
         self
     }
 
-    pub(super) async fn build(self) -> AdminServices {
+    pub(crate) async fn build(self) -> AdminServices {
         self.build_bundle().await.services()
     }
 

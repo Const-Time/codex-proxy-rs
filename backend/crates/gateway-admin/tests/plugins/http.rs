@@ -223,6 +223,10 @@ async fn fixture() -> (PluginManager, Vec<Arc<Process>>) {
     manager.restore().await.unwrap();
     (manager, processes)
 }
+pub(super) async fn registry() -> gateway_admin::plugins::middleware::PluginMiddlewareRegistry {
+    let (manager, _) = fixture().await;
+    manager.middleware_registry().unwrap()
+}
 fn context() -> http::Context {
     http::Context {
         request_id: "http_request".into(),

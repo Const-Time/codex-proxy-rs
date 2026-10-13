@@ -1,6 +1,6 @@
 //! Common upstream operations and explicitly versioned local settings services.
 //! The original domain service owns validation, persistence and publication.
-use super::{Origin, invoke, local};
+use super::{Origin, PluginServiceAuthority, invoke, local};
 use crate::model::{pricing, settings as domain};
 use crate::{
     model::{
@@ -31,6 +31,27 @@ impl Service {
             inner: self.inner.clone(),
             origin,
             actor,
+            plugin: None,
+        })
+    }
+    /// Trusted processes receive their own audited identity, not a user session.
+    /// The caller freezes the publication and binds the original call graph.
+    pub fn plugin_dispatcher(
+        &self,
+        mut origin: Origin,
+        authority: PluginServiceAuthority,
+    ) -> Arc<dyn gateway_core::engine::middleware::service::Dispatcher> {
+        origin.dispatcher = None;
+        origin.cancellation = gateway_core::lifecycle::CancellationToken::linked([
+            origin.cancellation,
+            authority.cancellation(),
+        ]);
+        let actor = authority.actor(origin.request_id.clone());
+        Arc::new(Dispatcher {
+            inner: self.inner.clone(),
+            origin,
+            actor,
+            plugin: Some(authority),
         })
     }
     pub(crate) fn new(inner: Arc<dyn SettingsService>) -> Self {
@@ -214,6 +235,7 @@ struct Dispatcher {
     inner: Arc<dyn SettingsService>,
     origin: Origin,
     actor: MutationContext,
+    plugin: Option<PluginServiceAuthority>,
 }
 impl gateway_core::engine::middleware::service::Dispatcher for Dispatcher {
     fn scoped(
@@ -223,6 +245,7 @@ impl gateway_core::engine::middleware::service::Dispatcher for Dispatcher {
         Arc::new(Self {
             inner: self.inner.clone(),
             actor: self.actor.clone(),
+            plugin: self.plugin.clone(),
             origin: Origin {
                 registry: self.origin.registry.clone(),
                 request_id: context.request_id.clone(),
@@ -253,6 +276,17 @@ impl gateway_core::engine::middleware::service::Dispatcher for Dispatcher {
         let host = self.clone();
         Box::pin(async move {
             use gateway_core::engine::middleware::service::Error;
+            if host
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| !plugin.authorizes(&instance))
+            {
+                return Err(Error {
+                    kind: "forbidden".into(),
+                    message: "插件服务身份不匹配或已撤销".into(),
+                    details: None,
+                });
+            }
             if host.origin.cancellation.is_cancelled() || host.origin.deadline_at.is_elapsed() {
                 return Err(Error::unavailable("服务调用已结束"));
             }

@@ -77,6 +77,14 @@ pub(crate) fn mutation_audit(
             None,
             "admin_api_key".to_owned(),
         ),
+        MutationActor::Plugin {
+            instance_id,
+            revision,
+        } => (
+            postgres::AdminAuditActorKind::Plugin,
+            None,
+            gateway_admin::model::auth::plugin_actor_ref(instance_id, *revision),
+        ),
         MutationActor::System => (
             postgres::AdminAuditActorKind::System,
             None,

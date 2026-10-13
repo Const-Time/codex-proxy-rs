@@ -30,7 +30,10 @@ impl DefaultPluginQuotaService {
     }
 }
 fn validate_scope(scope: &PluginMutationScope) -> Result<(), AdminError> {
-    if matches!(scope.actor.actor, MutationActor::System) {
+    if !matches!(
+        scope.actor.actor,
+        MutationActor::AdminSession { .. } | MutationActor::AdminApiKey
+    ) {
         return Err(AdminError::invalid("额度操作需要管理员身份"));
     }
     Ok(())

@@ -157,8 +157,15 @@ impl PageSize {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MutationActor {
-    AdminSession { admin_user_id: String },
+    AdminSession {
+        admin_user_id: String,
+    },
     AdminApiKey,
+    /// A trusted installed process; this is not an administrator login identity.
+    Plugin {
+        instance_id: String,
+        revision: std::num::NonZeroU64,
+    },
     System,
 }
 

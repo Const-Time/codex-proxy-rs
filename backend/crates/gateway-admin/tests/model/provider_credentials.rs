@@ -210,6 +210,10 @@ fn pending_mutation_v1_should_round_trip_all_targets_and_owners() {
                     admin_user_id: "admin-1".to_owned(),
                 },
                 MutationActor::AdminApiKey,
+                MutationActor::Plugin {
+                    instance_id: "plugin_fixture".into(),
+                    revision: 7.try_into().unwrap(),
+                },
                 MutationActor::System,
             ] {
                 let expected = PendingAuthorizationMutation::new(
@@ -273,4 +277,47 @@ fn pending_mutation_v1_should_keep_existing_storage_fields_and_reject_invalid_do
     let mut document = legacy;
     document["schema_version"] = json!(2);
     assert!(PendingAuthorizationMutation::from_storage_v1(document).is_err());
+}
+
+#[test]
+fn plugin_authorization_owner_is_bound_to_instance_and_revision_and_preserves_original_request() {
+    let context = |id: &str, revision: u64, request: &str| MutationContext {
+        actor: MutationActor::Plugin {
+            instance_id: id.into(),
+            revision: revision.try_into().unwrap(),
+        },
+        request_id: request.into(),
+    };
+    let original = context("plugin_fixture", 7, "start");
+    let owner = AuthorizationOwnerBinding::from_context(&original);
+    assert!(owner.matches_context(&context("plugin_fixture", 7, "complete")));
+    assert!(!owner.matches_context(&context("plugin_other", 7, "complete")));
+    assert!(!owner.matches_context(&context("plugin_fixture", 8, "complete")));
+    assert!(!owner.matches_context(&MutationContext {
+        actor: MutationActor::System,
+        request_id: "start".into()
+    }));
+    assert_eq!(owner.started_request_id(), "start");
+    let pending = PendingAuthorizationMutation::new(
+        ProviderKind::new("openai").unwrap(),
+        AuthorizationMutationTarget::Create {
+            name: "fixture".into(),
+        },
+        owner,
+    );
+    let original = Value::Object(pending.to_storage_v1());
+    for (field, value) in [
+        ("instance_id", json!("")),
+        ("instance_id", json!("plugin@other")),
+        ("revision", json!(0)),
+        ("revision", json!("7")),
+        ("extra", json!(true)),
+    ] {
+        let mut document = original.clone();
+        document["owner"][field] = value;
+        assert!(
+            PendingAuthorizationMutation::from_storage_v1(document).is_err(),
+            "{field}"
+        );
+    }
 }

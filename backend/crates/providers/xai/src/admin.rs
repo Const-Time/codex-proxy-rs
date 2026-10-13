@@ -1360,6 +1360,15 @@ fn owner_ref(owner: &AuthorizationOwner) -> String {
             digest.update(admin_user_id.as_bytes());
         }
         AuthorizationOwner::AdminApiKey => digest.update(b"admin-api-key"),
+        AuthorizationOwner::Plugin {
+            instance_id,
+            revision,
+        } => {
+            digest.update(b"plugin\0");
+            digest.update((instance_id.len() as u64).to_be_bytes());
+            digest.update(instance_id.as_bytes());
+            digest.update(revision.get().to_be_bytes());
+        }
         AuthorizationOwner::System => digest.update(b"system"),
     }
     URL_SAFE_NO_PAD.encode(digest.finalize())
