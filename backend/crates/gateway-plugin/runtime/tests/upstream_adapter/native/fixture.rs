@@ -1,9 +1,13 @@
 use super::super::{binding::CandidateRuntime, execution::Server, *};
+use super::environment::{Database, connection};
 use crate::models::fixture::Core;
 use chrono::Utc;
 use gateway_admin::model::plugins::*;
 use gateway_core::{
-    account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy},
+    account::{
+        AccountSelectionPolicy, CredentialCasOutcome, CredentialCasUpdate, ProviderAccountId,
+        ProviderAccountUpdate, RotationStrategy,
+    },
     engine::{
         continuation::PreviousResponseId,
         execution::*,
@@ -21,7 +25,6 @@ use provider_openai::credential::{
     CodexAccountProfile, CodexCredentialAdmin, CodexOAuthSecret, ImportCodexOAuthCredential,
 };
 use secrecy::SecretString;
-use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU32,
@@ -42,62 +45,13 @@ pub(super) struct Fixture {
     pub provider: &'static str,
     native_model: &'static str,
     pub continuation: Arc<gateway_store::redis::RedisNativeContinuationRepository>,
+    plugin_store: Arc<MemoryStore>,
+    adapter_url: String,
+    adapter_transport: &'static str,
+    credential_revision: u64,
     _store: gateway_store::StoreBundle,
     _cache: tempfile::TempDir,
     database: Database,
-}
-
-// Real Provider stores and coordination, isolated from every other fixture/production database.
-struct Database {
-    admin: PgPool,
-    name: String,
-}
-impl Database {
-    async fn create() -> Option<(Self, String, String)> {
-        fn env(name: &str) -> Option<String> {
-            let value = std::env::var(name).ok();
-            let ci = std::env::var("CI")
-                .ok()
-                .is_some_and(|v| !matches!(v.as_str(), "" | "false" | "0"));
-            assert!(
-                value.is_some() || !ci,
-                "{name} is required for native adapter integration tests in CI"
-            );
-            value
-        }
-        let database_url = env("CPR_TEST_DATABASE_URL")?;
-        let redis_url = env("CPR_TEST_REDIS_URL")?;
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        let name = format!("cpr_plugin_adapter_{}", uuid::Uuid::new_v4().simple());
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let mut url = url::Url::parse(&database_url).unwrap();
-        url.set_path(&format!("/{name}"));
-        Some((Self { admin, name }, url.into(), redis_url))
-    }
-    async fn close(self) {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "drop database \"{}\" with (force)",
-            self.name
-        )))
-        .execute(&self.admin)
-        .await
-        .unwrap();
-        self.admin.close().await;
-    }
-}
-
-fn connection(value: &str) -> serde_json::Value {
-    let mut url = url::Url::parse(value).unwrap();
-    let password = url.password().unwrap_or_default().to_owned();
-    url.set_password(None).unwrap();
-    json!({"url":url.as_str(),"password":password})
 }
 
 fn snapshot(
@@ -185,6 +139,12 @@ impl Fixture {
         Self::for_provider("openai").await
     }
     pub async fn for_provider(provider: &'static str) -> Option<Self> {
+        Self::for_adapter(provider, None).await
+    }
+    pub async fn for_websocket(provider: &'static str, url: &str) -> Option<Self> {
+        Self::for_adapter(provider, Some(url)).await
+    }
+    async fn for_adapter(provider: &'static str, websocket_url: Option<&str>) -> Option<Self> {
         let native_model = match provider {
             "openai" => "gpt-5.4",
             "xai" => "grok-4.5",
@@ -294,13 +254,19 @@ impl Fixture {
             "3.11.2".parse().unwrap(),
             plugin_store.clone(),
         ));
-        let manager = PluginManager::new(plugin_store, Arc::new(CandidateRuntime(engine)));
+        let manager = PluginManager::new(plugin_store.clone(), Arc::new(CandidateRuntime(engine)));
         let artifact = manager
             .upload(upstream_archive("1.0.0"), &actor())
             .await
             .unwrap();
         let mut command = update(&artifact.sha256, 0, true);
-        command.configuration = json!({"adapter_url":server.url,"adapter_provider":provider});
+        let adapter_url = websocket_url.unwrap_or(&server.url).to_owned();
+        let adapter_transport = if websocket_url.is_some() {
+            "websocket"
+        } else {
+            "http_sse"
+        };
+        command.configuration = json!({"adapter_url":adapter_url,"adapter_transport":adapter_transport,"adapter_provider":provider});
         command.upstream_adapter = Some(PluginUpstreamAdapterBinding {
             scope: PluginExecutionScope::All {},
         });
@@ -318,6 +284,10 @@ impl Fixture {
             provider,
             native_model,
             continuation,
+            plugin_store,
+            adapter_url,
+            adapter_transport,
+            credential_revision: 1,
             _store: store,
             _cache: cache,
             database,
@@ -334,6 +304,16 @@ impl Fixture {
         behavior: &str,
         previous: Option<&str>,
     ) -> Result<StartedExecution, GatewayError> {
+        self.start_transport(key, behavior, previous, ClientTransport::HttpJson)
+            .await
+    }
+    pub async fn start_transport(
+        &self,
+        key: &str,
+        behavior: &str,
+        previous: Option<&str>,
+        transport: ClientTransport,
+    ) -> Result<StartedExecution, GatewayError> {
         let client = self.execution.authenticate(key).unwrap();
         let prepared = self
             .execution
@@ -344,10 +324,10 @@ impl Fixture {
             public_model: PublicModelId::new("public-model").unwrap(),
             operation: Operation::Generate(GenerateRequest::from_protocol_payload(ProtocolPayload::json_object("openai",
                 serde_json::from_value(json!({"model":"public-model","input":"fixture prompt","service_tier":"default", "behavior":behavior,
-                    "fixture_account":self.account.as_str(),"fixture_credential_revision":1,"fixture_model":self.native_model,
+                    "fixture_account":self.account.as_str(),"fixture_credential_revision":self.credential_revision,"fixture_model":self.native_model,
                     "previous_response_id":previous,"expect_continuation":previous.is_some()})).unwrap()
             ).unwrap())),
-            metadata: ExecutionRequestMetadata { protocol:"openai".into(), endpoint:"/v1/responses".into(), transport:ClientTransport::HttpJson, stream:false, client_ip:None, user_agent:None, previous_response_id:previous.map(PreviousResponseId::new) },
+            metadata: ExecutionRequestMetadata { protocol:"openai".into(), endpoint:"/v1/responses".into(), transport, stream:transport==ClientTransport::WebSocket, client_ip:None, user_agent:None, previous_response_id:previous.map(PreviousResponseId::new) },
         }).await
     }
     pub async fn clean(&self, charges: usize) {
@@ -416,8 +396,7 @@ impl Fixture {
             .await
             .unwrap();
         let mut command = update(&artifact.sha256, self.installed.revision, true);
-        command.configuration =
-            json!({"adapter_url":self.server.url,"adapter_provider":self.provider});
+        command.configuration = json!({"adapter_url":self.adapter_url,"adapter_transport":self.adapter_transport,"adapter_provider":self.provider});
         command.upstream_adapter = Some(PluginUpstreamAdapterBinding {
             scope: PluginExecutionScope::All {},
         });
@@ -433,8 +412,7 @@ impl Fixture {
             self.installed.revision,
             false,
         );
-        command.configuration =
-            json!({"adapter_url":self.server.url,"adapter_provider":self.provider});
+        command.configuration = json!({"adapter_url":self.adapter_url,"adapter_transport":self.adapter_transport,"adapter_provider":self.provider});
         command.upstream_adapter = Some(PluginUpstreamAdapterBinding {
             scope: PluginExecutionScope::All {},
         });
@@ -442,5 +420,50 @@ impl Fixture {
             .update(Some(&self.installed.id), command, &actor())
             .await
             .unwrap();
+    }
+    pub async fn restart(&mut self) {
+        self.manager.shutdown().await;
+        let engine = Arc::new(PluginEngine::new(
+            self._cache.path().join("plugins"),
+            "3.11.2".parse().unwrap(),
+            self.plugin_store.clone(),
+        ));
+        self.manager = PluginManager::new(
+            self.plugin_store.clone(),
+            Arc::new(CandidateRuntime(engine)),
+        );
+        self.manager.restore().await.unwrap();
+    }
+    pub async fn advance_credential(&mut self) {
+        let account_store = self.ports.accounts();
+        let current = account_store
+            .load_current_credential(&self.account)
+            .await
+            .unwrap();
+        let profile = ProviderAccountUpdate {
+            account_id: self.account.clone(),
+            name: current.account.name().into(),
+            email: current.account.email().map(str::to_owned),
+            plan_type: current.account.plan_type().map(str::to_owned),
+        };
+        let update = CredentialCasUpdate::new(
+            self.account.clone(),
+            current.account.revision(),
+            profile,
+            current.credential,
+            current.account.has_refresh_token(),
+            current.account.access_token_expires_at(),
+            current.account.next_refresh_at(),
+        )
+        .unwrap()
+        .preserving_profile();
+        let CredentialCasOutcome::Updated(revision) = account_store
+            .compare_and_swap_credential(update)
+            .await
+            .unwrap()
+        else {
+            panic!("isolated credential CAS must succeed")
+        };
+        self.credential_revision = revision.get();
     }
 }

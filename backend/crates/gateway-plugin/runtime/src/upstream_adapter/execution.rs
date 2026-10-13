@@ -10,7 +10,7 @@ use gateway_core::{
     upstream::UpstreamSendState,
 };
 use gateway_plugin_sdk::{
-    CallContext, Stage,
+    CallContext, ErrorCode, Stage,
     call::upstream_adapter::{
         ContinuationScope, EXECUTE_METHOD, UpstreamAdapterRequest, UpstreamContinuation,
         UpstreamTransport,
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     PluginUpstreamAdapter,
     event::{DecodedEvent, EventDecodeError, EventDecoder},
-    failure::{fault_error, invalid, rpc_error},
+    failure::{continuation_unavailable, fault_error, invalid, rpc_error},
 };
 use super::{
     callbacks::Binding,
@@ -213,6 +213,8 @@ impl Execution {
             credential_revision: invocation.account.credential_revision().get(),
         };
         let previous = previous_continuation(&self.adapter, invocation, &context, &owner)?;
+        let connection = previous.as_ref().and_then(|state| state.connection.clone());
+        let resumes_connection = connection.is_some();
         let managed = ManagedCall::new(
             Arc::clone(&invocation.account),
             CallOptions {
@@ -225,11 +227,17 @@ impl Execution {
                 timeout,
                 pool: self.adapter.connections.clone(),
                 owner,
-                connection: previous.as_ref().and_then(|state| state.connection.clone()),
+                connection,
                 websocket_allowed: declaration.transport == UpstreamTransport::WebSocket,
             },
         )
-        .map_err(|error| fault_error(error, UpstreamSendState::NotSent))?;
+        .map_err(|error| {
+            if resumes_connection && error.code == ErrorCode::Rejected {
+                continuation_unavailable()
+            } else {
+                fault_error(error, UpstreamSendState::NotSent)
+            }
+        })?;
         let scope = self.adapter.callbacks.bind(&context, managed.clone())?;
         let headers = crate::model_routing::headers(protocol.context())
             .map_err(|_| invalid())?
@@ -319,7 +327,7 @@ fn previous_continuation(
     context: &CallContext,
     owner: &ConnectionOwner,
 ) -> Result<Option<StoredContinuation>, ProviderError> {
-    let invalid = || invalid(UpstreamSendState::NotSent);
+    let invalid = continuation_unavailable;
     let Some(state) = invocation
         .operation
         .provider_session_state(adapter.registered.declaration.provider.as_str())

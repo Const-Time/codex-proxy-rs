@@ -12,7 +12,9 @@ use gateway_core::{
         provider::ProviderCallMetadata,
         upstream_adapter::{UpstreamAccountConnection, UpstreamAdapterInvocation},
     },
-    error::{ProviderError, ProviderErrorKind},
+    error::{
+        ContinuationFailure, ContinuationRecoveryDisposition, ProviderError, ProviderErrorKind,
+    },
     event::GatewayEvent,
     identity::ProviderKind,
     lifecycle::CancellationToken,
@@ -409,6 +411,18 @@ async fn sdk_adapter_continuation_is_owned_by_instance_key_account_and_credentia
         call.operation.set_provider_session_state(modified);
         let mut stream = call.into_stream(f.process.upstream_adapter("adapter").unwrap());
         let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ProviderErrorKind::ContinuationRecoveryRequired
+        );
+        assert_eq!(
+            error.continuation_failure(),
+            Some(ContinuationFailure::HistoryUnavailable)
+        );
+        assert_eq!(
+            error.continuation_recovery_disposition(),
+            Some(ContinuationRecoveryDisposition::ClientReplayRequired)
+        );
         assert_eq!(error.send_state(), UpstreamSendState::NotSent);
         assert_eq!(server.requests.lock().unwrap().len(), 2);
     }

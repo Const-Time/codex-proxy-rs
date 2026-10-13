@@ -1,5 +1,8 @@
 mod continuation;
+mod environment;
 mod fixture;
+mod lifecycle;
+mod websocket;
 mod xai;
 use fixture::Fixture;
 use gateway_core::{engine::ExecutionOutcome, upstream::UpstreamSendState};

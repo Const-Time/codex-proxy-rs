@@ -10,7 +10,7 @@ use gateway_core::{
 };
 use std::time::Duration;
 
-async fn complete(f: &Fixture, previous: Option<&str>, count: usize) {
+pub(super) async fn complete(f: &Fixture, previous: Option<&str>, count: usize) {
     let mut started = f
         .start_with("sk_native_fixture", "continuation", previous)
         .await
@@ -120,7 +120,8 @@ async fn real_core_native_adapter_upgrade_rejects_old_continuation_without_falli
             )
             .await
             .unwrap();
-        assert!(started.session.collect_uncommitted().await.is_err());
+        let error = started.session.collect_uncommitted().await.unwrap_err();
+        assert_replay_required(&error);
         started.session.detach_finalize().await;
         f.clean(2).await;
         {
@@ -139,4 +140,32 @@ async fn real_core_native_adapter_upgrade_rejects_old_continuation_without_falli
         assert_eq!(f.server.requests.lock().unwrap().len(), 2);
         f.close().await;
     }
+}
+
+pub(super) fn assert_replay_required(error: &gateway_core::engine::EngineError) {
+    use gateway_core::error::{
+        ContinuationFailure, ContinuationRecoveryDisposition, ProviderErrorKind,
+    };
+    let gateway_core::engine::EngineError::Provider(provider) = error else {
+        panic!("expected an original Provider continuation failure: {error:?}")
+    };
+    assert_eq!(
+        provider.kind(),
+        ProviderErrorKind::ContinuationRecoveryRequired
+    );
+    assert_eq!(provider.send_state(), UpstreamSendState::NotSent);
+    assert_eq!(
+        provider.continuation_failure(),
+        Some(ContinuationFailure::HistoryUnavailable)
+    );
+    assert_eq!(
+        provider.continuation_recovery_disposition(),
+        Some(ContinuationRecoveryDisposition::ClientReplayRequired)
+    );
+    let error = gateway_core::engine::execution::gateway_error_from_engine(error);
+    assert_eq!(error.kind(), GatewayErrorKind::InvalidRequest);
+    assert_eq!(
+        error.client_error_code(),
+        Some("previous_response_not_found")
+    );
 }
