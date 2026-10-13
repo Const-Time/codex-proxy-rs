@@ -114,6 +114,21 @@ impl CapabilityRequirements {
 pub struct ProviderSessionState {
     provider: String,
     payload: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extension_owner: Option<Box<ExtensionSessionOwner>>,
+}
+
+/// Host identity of a managed adapter session. The opaque payload belongs to this
+/// adapter generation and must never be interpreted as native Provider state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionSessionOwner {
+    pub instance_id: String,
+    pub contribution_id: String,
+    pub adapter_id: String,
+    pub generation: u64,
+    pub incarnation: String,
+    pub connection_local: bool,
 }
 
 impl ProviderSessionState {
@@ -130,7 +145,11 @@ impl ProviderSessionState {
         validate_text(&provider, 64, true, None).map_err(|_| OperationError::EmptyField {
             field: "provider_session_state provider",
         })?;
-        Ok(Self { provider, payload })
+        Ok(Self {
+            provider,
+            payload,
+            extension_owner: None,
+        })
     }
 
     #[must_use]
@@ -141,6 +160,17 @@ impl ProviderSessionState {
     #[must_use]
     pub const fn payload(&self) -> &Map<String, Value> {
         &self.payload
+    }
+
+    #[must_use]
+    pub fn with_extension_owner(mut self, owner: ExtensionSessionOwner) -> Self {
+        self.extension_owner = Some(Box::new(owner));
+        self
+    }
+
+    #[must_use]
+    pub fn extension_owner(&self) -> Option<&ExtensionSessionOwner> {
+        self.extension_owner.as_deref()
     }
 }
 

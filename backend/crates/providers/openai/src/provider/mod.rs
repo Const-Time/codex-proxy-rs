@@ -412,6 +412,12 @@ impl Provider for CodexProvider {
                 .execute_upstream_adapter(generate, upstream_model.clone(), context, adapter)
                 .await;
         }
+        if generate
+            .provider_session_state(PROVIDER_NAME)
+            .is_some_and(|state| state.extension_owner().is_some())
+        {
+            return Err(continuation_replay_required_error("scope_unavailable"));
+        }
         let previous_session = decode_openai_session_state(generate);
         let continuation_requested = generate.native_continuation_requested();
         let mut upstream_request = encode_generate_request(generate, upstream_model.as_str())

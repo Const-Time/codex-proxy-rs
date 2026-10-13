@@ -211,7 +211,13 @@ impl GrokBuildProvider {
         candidate: &ProviderCandidate,
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
+        let extension_session = generate
+            .provider_session_state(XAI_PROVIDER_NAME)
+            .is_some_and(|state| state.extension_owner().is_some());
         if crate::transport::compaction::has_terminal_compaction_trigger(generate) {
+            if extension_session {
+                return Err(continuation::invalid_continuation());
+            }
             return self.execute_compaction(generate, candidate, context).await;
         }
         let upstream_model = candidate_upstream_model(candidate)?;
@@ -219,6 +225,9 @@ impl GrokBuildProvider {
             return self
                 .execute_upstream_adapter(generate, candidate, context, adapter)
                 .await;
+        }
+        if extension_session {
+            return Err(continuation::invalid_continuation());
         }
         let previous_session = decode_xai_session_state(generate)?;
         let continuation_account = continuation_account(&context, previous_session.as_ref())?;

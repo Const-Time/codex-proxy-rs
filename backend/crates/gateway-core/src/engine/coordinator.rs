@@ -740,7 +740,16 @@ where
                 provider,
                 account,
             )
-            .with_scope(NativeContinuationScope::Persisted)
+            .with_scope(
+                if state
+                    .extension_owner()
+                    .is_some_and(|owner| owner.connection_local)
+                {
+                    NativeContinuationScope::ConnectionLocal
+                } else {
+                    NativeContinuationScope::Persisted
+                },
+            )
             .with_session_state(state.clone()),
         )
     }

@@ -188,3 +188,38 @@ fn image_request_should_preserve_generation_and_edit_payloads_opaque() {
     );
     assert!(!format!("{edit:?}").contains("data:image/png"));
 }
+
+#[test]
+fn extension_session_owner_roundtrips_without_reinterpreting_native_state() {
+    use gateway_core::operation::ExtensionSessionOwner;
+    let payload = json!({"transcript": "private session fixture"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let legacy = json!({"provider":"openai", "payload":payload});
+    let native: ProviderSessionState = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(native.extension_owner().is_none());
+    assert_eq!(serde_json::to_value(&native).unwrap(), legacy);
+    for connection_local in [false, true] {
+        let owner = ExtensionSessionOwner {
+            instance_id: "instance".into(),
+            contribution_id: "contribution".into(),
+            adapter_id: "adapter".into(),
+            generation: 4,
+            incarnation: "incarnation".into(),
+            connection_local,
+        };
+        let state = native.clone().with_extension_owner(owner.clone());
+        let restored: ProviderSessionState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(restored, state);
+        assert_eq!(restored.extension_owner(), Some(&owner));
+        assert_eq!(restored.payload(), &payload);
+        assert_ne!(restored, native);
+        assert!(!format!("{restored:?}").contains("private session fixture"));
+        let request =
+            generate(json!({"model":"gpt-test"})).with_provider_session_state(restored.clone());
+        assert_eq!(request.provider_session_state("openai"), Some(&restored));
+        assert!(request.provider_session_state("xai").is_none());
+    }
+}

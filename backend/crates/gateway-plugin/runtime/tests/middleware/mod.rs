@@ -514,3 +514,70 @@ async fn original_terminal_policy_error_survives_the_plugin_rpc_roundtrip() {
     );
     fixture.stop().await;
 }
+
+#[tokio::test]
+async fn extension_session_owner_is_visible_to_sdk_but_cannot_be_removed_from_host_state() {
+    use gateway_core::operation::{ExtensionSessionOwner, ProviderSessionState};
+    let fixture = Fixture::new().await;
+    let trace = Arc::new(Trace::default());
+    let state = ProviderSessionState::new(
+        "openai",
+        json!({"private":"adapter-only"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap()
+    .with_extension_owner(ExtensionSessionOwner {
+        instance_id: "owner-instance".into(),
+        contribution_id: "owner-contribution".into(),
+        adapter_id: "owner-adapter".into(),
+        generation: 7,
+        incarnation: "owner-process".into(),
+        connection_local: true,
+    });
+    let saved = state.clone();
+    let trace_for_body = trace.clone();
+    let next = gateway_core::middleware::compose(vec![], move |_| {
+        Box::pin(async move {
+            let mut event = ProviderEvent::wire(
+                ProtocolWireEvent::raw_json("openai", Bytes::from_static(br#"{"original":true}"#))
+                    .unwrap(),
+            );
+            event.attach_session_update(state);
+            let frame = MiddlewareFrame::from_provider_event(
+                Bytes::from_static(br#"{"original":true}"#),
+                MiddlewareFraming::JsonDocument,
+                true,
+                event,
+            );
+            Ok(MiddlewareResponse::new(
+                "openai".into(),
+                200,
+                vec![],
+                Box::new(Body {
+                    trace: trace_for_body,
+                    frames: VecDeque::from([frame]),
+                }),
+            ))
+        })
+    });
+    let response = fixture
+        .callbacks
+        .invoke(
+            fixture.session.clone(),
+            context(false),
+            request("inspect-session-owner"),
+            next,
+        )
+        .await
+        .unwrap();
+    let (_, _, _, mut body, _) = response.into_parts();
+    let frame = body.next_frame().await.unwrap().unwrap();
+    let (_, _, _, envelope) = frame.into_parts();
+    assert_eq!(envelope.unwrap().event().session_update(), Some(&saved));
+    assert!(body.next_frame().await.unwrap().is_none());
+    body.close().await;
+    trace.closed_once().await;
+    fixture.stop().await;
+}
