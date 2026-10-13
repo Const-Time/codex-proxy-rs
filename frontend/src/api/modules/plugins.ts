@@ -28,8 +28,10 @@ export interface PluginMiddlewareBinding {
 }
 export interface PluginModelRouterBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
 export interface PluginAccountSchedulerBinding { order: number, scope: PluginMiddlewareBinding['scope'], failurePolicy: 'reject' | 'delegate' }
+export interface PluginUpstreamAdapterBinding { scope: PluginMiddlewareBinding['scope'] }
 export interface PluginRetryPolicyBinding { order: number, scope: PluginMiddlewareBinding['scope'] }
 export interface PluginInstance {
+  upstreamAdapter: PluginUpstreamAdapterBinding | null
   retryPolicy: PluginRetryPolicyBinding | null
   accountScheduler: PluginAccountSchedulerBinding | null
   modelRouter: PluginModelRouterBinding | null
@@ -47,6 +49,7 @@ export interface PluginInstance {
   resources: PluginManagementResource[]
 }
 export interface PluginUpdate {
+  upstreamAdapter: PluginUpstreamAdapterBinding | null
   retryPolicy: PluginRetryPolicyBinding | null
   accountScheduler: PluginAccountSchedulerBinding | null
   modelRouter: PluginModelRouterBinding | null

@@ -2,6 +2,7 @@
 pub mod http;
 pub mod middleware;
 pub mod service;
+mod upstream_adapter;
 pub mod websocket;
 use crate::{
     model::{AdminError, MutationContext, plugins::*},
@@ -56,12 +57,18 @@ impl PluginManager {
         self.model_catalog = Some(validator);
         self
     }
-    fn validate_catalog_candidate(
+    fn validate_candidate(
         &self,
         record: &PluginRecord,
         process: Option<&Arc<dyn PluginProcess>>,
         catalog: bool,
     ) -> Result<(), AdminError> {
+        if record.enabled {
+            self.middleware
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .validate_upstream_candidate(record, process)?;
+        }
         if !record.enabled || !catalog {
             return Ok(());
         }
@@ -95,9 +102,7 @@ impl PluginManager {
                 let artifact = artifact?;
                 self.runtime.validate(&record, &artifact, None).await?;
                 let process = self.runtime.prepare(&record, artifact).await?;
-                if let Err(error) =
-                    self.validate_catalog_candidate(&record, Some(&process), catalog)
-                {
+                if let Err(error) = self.validate_candidate(&record, Some(&process), catalog) {
                     process.stop().await;
                     return Err(error);
                 }
@@ -204,6 +209,7 @@ impl PluginManager {
                 )
         };
         Ok(PluginView {
+            upstream_adapter: record.upstream_adapter,
             retry_policy: record.retry_policy,
             account_scheduler: record.account_scheduler,
             model_router: record.model_router,
@@ -374,6 +380,9 @@ impl PluginService for PluginManager {
         if let Some(binding) = &update.middleware {
             binding.validate()?;
         }
+        if let Some(binding) = &update.upstream_adapter {
+            binding.validate()?;
+        }
         if let Some(binding) = &update.retry_policy {
             binding.validate()?;
         }
@@ -395,6 +404,7 @@ impl PluginService for PluginManager {
             return Err(AdminError::conflict("只能启用一个入口认证器"));
         }
         let record = PluginRecord {
+            upstream_adapter: update.upstream_adapter,
             retry_policy: update.retry_policy,
             account_scheduler: update.account_scheduler,
             model_router: update.model_router,
@@ -422,7 +432,7 @@ impl PluginService for PluginManager {
         } else {
             None
         };
-        if let Err(error) = self.validate_catalog_candidate(&record, candidate.as_ref(), catalog) {
+        if let Err(error) = self.validate_candidate(&record, candidate.as_ref(), catalog) {
             if let Some(candidate) = candidate {
                 candidate.stop().await;
             }
@@ -446,6 +456,8 @@ impl PluginService for PluginManager {
                                 .unwrap_or(true)
                         })
                         || previous.is_some_and(|r| r.middleware.is_some())
+                        || record.upstream_adapter.is_some()
+                        || previous.is_some_and(|r| r.upstream_adapter.is_some())
                         || record.retry_policy.is_some()
                         || previous.is_some_and(|r| r.retry_policy.is_some())
                         || record.account_scheduler.is_some()

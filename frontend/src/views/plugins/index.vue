@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginRetryPolicyBinding } from '@/api/modules/plugins'
+import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginRetryPolicyBinding, PluginUpstreamAdapterBinding } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
 import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
@@ -46,6 +46,17 @@ function routerBinding(): PluginModelRouterBinding | null {
   if (routerScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
     throw new Error('请填写不重复的路由作用范围 ID，最多 256 个')
   return { order, failurePolicy: routerFailure.value, scope: routerScope.value === 'all' ? { kind: 'all' } : { kind: routerScope.value, ids } }
+}
+const upstreamEnabled = ref(false)
+const upstreamScope = ref<'all' | 'keys' | 'groups'>('all')
+const upstreamIds = ref('')
+function upstreamBinding(): PluginUpstreamAdapterBinding | null {
+  if (!upstreamEnabled.value)
+    return null
+  const ids = upstreamIds.value.split(/\s+/u).filter(Boolean)
+  if (upstreamScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
+    throw new Error('请填写不重复的适配器作用范围 ID，最多 256 个')
+  return { scope: upstreamScope.value === 'all' ? { kind: 'all' } : { kind: upstreamScope.value, ids } }
 }
 const retryEnabled = ref(false)
 const retryOrder = ref('0')
@@ -175,6 +186,9 @@ function edit(item?: PluginInstance) {
   routerScope.value = item?.modelRouter?.scope.kind ?? 'all'
   routerIds.value = item?.modelRouter && item.modelRouter.scope.kind !== 'all' ? item.modelRouter.scope.ids.join('\n') : ''
   routerFailure.value = item?.modelRouter?.failurePolicy ?? 'reject'
+  upstreamEnabled.value = !!item?.upstreamAdapter
+  upstreamScope.value = item?.upstreamAdapter?.scope.kind ?? 'all'
+  upstreamIds.value = item?.upstreamAdapter && item.upstreamAdapter.scope.kind !== 'all' ? item.upstreamAdapter.scope.ids.join('\n') : ''
   retryEnabled.value = !!item?.retryPolicy
   retryOrder.value = String(item?.retryPolicy?.order ?? 0)
   retryScope.value = item?.retryPolicy?.scope.kind ?? 'all'
@@ -225,7 +239,7 @@ async function save(enabled: boolean) {
       else if (secrets.value[key])
         values[key] = secrets.value[key]!
     }
-    await savePlugin(editing.value?.id, { retryPolicy: retryBinding(), accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+    await savePlugin(editing.value?.id, { upstreamAdapter: upstreamBinding(), retryPolicy: retryBinding(), accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
     editOpen.value = false
     secrets.value = {}
   })
@@ -233,7 +247,7 @@ async function save(enabled: boolean) {
 async function disable(item: PluginInstance) {
   selected.value = undefined
   await perform(async () => {
-    await savePlugin(item.id, { retryPolicy: item.retryPolicy ?? null, accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
+    await savePlugin(item.id, { upstreamAdapter: item.upstreamAdapter ?? null, retryPolicy: item.retryPolicy ?? null, accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
   })
 }
 onMounted(() => perform(async () => { }))
@@ -306,6 +320,18 @@ onMounted(() => perform(async () => { }))
           <BaseSelect v-model="schedulerFailure" aria-label="调度插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '使用宿主账号调度', value: 'delegate' }]" :disabled="busy" />
           <p class="text-sm text-cp-text-secondary">
             按顺序只调用首个匹配的调度插件，委托时使用宿主选号。账号选择仍受 Key 权限、续接绑定和可用容量约束。明确拒绝会终止请求；插件变更或停用会撤销旧请求。
+          </p>
+        </template>
+      </details>
+      <details class="space-y-3">
+        <summary>上游适配器</summary>
+        <BaseCheckbox v-model="upstreamEnabled" show-label label="使用此插件适配上游请求" :disabled="busy" />
+        <template v-if="upstreamEnabled">
+          <BaseSelect v-model="upstreamScope" aria-label="上游适配器作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+          <label v-if="upstreamScope !== 'all'" for="plugin-upstream-ids" class="block">{{ upstreamScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-upstream-ids" v-model="upstreamIds" :rows="3" :disabled="busy" /></label>
+          <p class="text-sm text-cp-text-secondary">
+            使用插件声明的 Provider 和公开模型范围，重叠绑定会被拒绝。账号权限、选择和计费仍由网关管理；匹配的适配器不可用时请求会失败。当前可保存绑定，启用支持以制品提示为准。
           </p>
         </template>
       </details>

@@ -250,6 +250,16 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if let Some(binding) = &record.upstream_adapter {
+            binding.validate()?;
+            if manifest
+                .contributes
+                .get(&Capability::UpstreamAdapter)
+                .is_none_or(|d| !matches!(d.version, 1 | 2) || !d.stages.contains(&Stage::Upstream))
+            {
+                return Err(AdminError::invalid("此制品未提供上游适配器能力"));
+            }
+        }
         if let Some(binding) = &record.retry_policy {
             binding.validate()?;
             if manifest

@@ -966,6 +966,8 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 
 实例配置包括 `revision, name, artifactSha256, enabled, trustedProcess, configuration, secrets`。创建 revision 为 0；修改必须提交读取时的 revision。启用必须显式信任所选制品。secrets 是字段名到字符串或 null 的对象：省略保留，null 清除；响应仅含 configuredSecrets 字段名，不返回敏感值。
 
+`upstreamAdapter` 为 null 或 `{scope}`，scope 使用全部请求、Key 或分组的同一格式；指定范围须为 1～256 个唯一有效 ID。更新时需提交完整绑定，省略/null 清除绑定。绑定覆盖实例注册的全部上游适配器，按 Provider 和公开模型匹配；重叠范围拒绝发布。缺少 upstream_adapter v1/v2 声明的制品不能保存绑定；当前生产启用门禁仍保留，可保存停用配置。完整能力与验收进度见 [受管上游适配器](plugins.md#受管上游适配器接入进度)。
+
 `frontendAuthentication` 为 null 或 `{failurePolicy: "reject" | "delegate", identities: {"外部身份": "本地 Key ID"}}`，列表返回当前绑定。省略该字段与 null 一样表示不使用此实例认证，更新时需提交完整绑定。只允许声明 frontend_authentication v1 的插件设置它，且最多一个启用实例。数据面 Authorization 由插件解释；仅明确 not_matched 且选择 delegate 时回退普通 Key。拒绝或映射 Key 无效返回 401，认证器失败返回 503。管理登录与插件页面本人选 Key 入口不受该绑定影响；完整范围和撤销语义见 [外部认证](plugins.md#外部认证)。
 
 `middleware` 为 null 或 `{order, mounts, scope}`：order 是 -10000～10000 的整数，mounts 是不重复且非空的 http/websocket/service/request/attempt 列表，scope 是 `{kind: "all"}`、`{kind: "keys", ids: [...]}` 或 `{kind: "groups", ids: [...]}`，指定范围包含 1～256 个唯一有效 ID。包含 http、websocket 或 service 时必须使用 all 范围；Key/分组范围只适用于 request/attempt。更新时需提交完整绑定，省略/null 清除绑定。仅允许与制品 middleware v4 声明一致的挂载；当前支持保存停用配置，数据面尚未开放启用。HTTP Runtime RPC 已通过真实 SDK 验证，API 入口和原始 WebSocket 升级传输已接入本地合同验证；HTTP、管理和 request/attempt 阶段的宿主主动分派已接通；独立 WebSocket 消息层已接入原生及插件自有会话，service Runtime 执行桥已通过真实 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项业务已接入；管理与已授权 service 层的 host.services.call 可调用这些服务，继承宿主身份、冻结发布和原调用图。本地设置/定价使用显式 local.settings.v1 合同，保留订阅开关、定价来源校验和分项倍率，管理 HTTP DTO 不变；其他阶段继续实施。宿主登录和插件安装管理接口保留独立恢复入口，仍执行原鉴权、审计和版本校验；插件资源、invoke 与模型调用不在豁免范围。门禁、撤销及固定恢复路径见 [插件说明](plugins.md)。

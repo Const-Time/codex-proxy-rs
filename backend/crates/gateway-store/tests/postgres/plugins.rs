@@ -37,6 +37,7 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
         .await
         .unwrap();
     let mut first = PluginRecord {
+        upstream_adapter: None,
         retry_policy: None,
         account_scheduler: None,
         model_router: None,
@@ -238,6 +239,11 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         "local.fixture"
     );
     let mut record = PluginRecord {
+        upstream_adapter: Some(PluginUpstreamAdapterBinding {
+            scope: PluginExecutionScope::Keys {
+                ids: vec!["key_adapter".into()],
+            },
+        }),
         retry_policy: Some(PluginRetryPolicyBinding {
             order: -9,
             scope: PluginExecutionScope::Keys {
@@ -274,6 +280,19 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         secrets: BTreeMap::from([("token".into(), "not-in-audit".into())]),
     };
     store.save(&record, 0, &actor).await.unwrap();
+    assert!(store.list().await.unwrap()[0].upstream_adapter == record.upstream_adapter);
+    let mut invalid_adapter = record.clone();
+    invalid_adapter.revision += 1;
+    invalid_adapter.upstream_adapter = Some(PluginUpstreamAdapterBinding {
+        scope: PluginExecutionScope::Keys { ids: vec![] },
+    });
+    assert!(
+        store
+            .save(&invalid_adapter, record.revision, &actor)
+            .await
+            .is_err()
+    );
+    assert!(store.list().await.unwrap()[0] == record);
     assert!(store.list().await.unwrap()[0].retry_policy == record.retry_policy);
     for invalid in [
         PluginRetryPolicyBinding {

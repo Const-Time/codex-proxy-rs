@@ -1049,6 +1049,7 @@ impl Fixture {
             || matches!(mode, Mode::Catalog)
         {
             vec![PluginRecord {
+                upstream_adapter: None,
                 retry_policy: retry.then_some(PluginRetryPolicyBinding {
                     order: 0,
                     scope: PluginExecutionScope::All {},
