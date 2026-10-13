@@ -1,4 +1,5 @@
 //! The service terminal retains domain validation and the authenticated caller.
+pub mod settings;
 use crate::ports::plugins::PluginProcess;
 use futures::future::BoxFuture;
 use gateway_core::{
@@ -8,6 +9,94 @@ use gateway_core::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
+
+/// The entry boundary supplies its existing publication and call graph.
+#[derive(Clone)]
+pub struct Origin {
+    pub registry: super::middleware::PluginMiddlewareRegistry,
+    pub request_id: String,
+    pub call_id: String,
+    pub cancellation: CancellationToken,
+    pub deadline_at: gateway_core::lifecycle::Deadline,
+    pub call_scope: gateway_core::engine::nested::ExtensionCallScope,
+}
+
+async fn invoke<I, O>(
+    origin: Option<Origin>,
+    operation: &'static str,
+    input: I,
+    terminal: impl FnOnce(I) -> BoxFuture<'static, Result<O, crate::model::AdminError>> + Send + 'static,
+) -> Result<O, crate::model::AdminError>
+where
+    I: Serialize + DeserializeOwned + Send + 'static,
+    O: Serialize + DeserializeOwned + Send + 'static,
+{
+    let Some(origin) = origin else {
+        return terminal(input).await;
+    };
+    let context = core::Context {
+        operation,
+        request_id: origin.request_id,
+        call_id: uuid::Uuid::now_v7().to_string(),
+        parent_call_id: Some(origin.call_id),
+        cancellation: origin.cancellation,
+        deadline_at: origin.deadline_at,
+        call_scope: origin.call_scope,
+    };
+    origin
+        .registry
+        .freeze_service(&context)?
+        .call(context, input, move |input| {
+            Box::pin(async move { terminal(input).await.map_err(encode_error) })
+        })
+        .await
+        .map_err(decode_error)
+}
+
+fn encode_error(error: crate::model::AdminError) -> core::Error {
+    use crate::model::AdminErrorKind as K;
+    let kind = match error.kind() {
+        K::Invalid => "invalid",
+        K::Unauthorized => "unauthorized",
+        K::Forbidden => "forbidden",
+        K::NotFound => "not_found",
+        K::Conflict => "conflict",
+        K::RateLimited => "rate_limited",
+        K::BadGateway => "bad_gateway",
+        K::UpstreamResultUnknown => "upstream_result_unknown",
+        K::Unavailable => "unavailable",
+        K::Internal => "internal",
+    };
+    core::Error {
+        kind: kind.into(),
+        message: error.message().into(),
+        details: None,
+    }
+}
+fn decode_error(error: core::Error) -> crate::model::AdminError {
+    use crate::model::{AdminError, AdminErrorKind as K};
+    if error.details.as_ref().is_some_and(|details| {
+        details
+            .get("send_state")
+            .and_then(serde_json::Value::as_str)
+            == Some("ambiguous")
+    }) {
+        return AdminError::upstream_result_unknown(error.message);
+    }
+    let kind = match error.kind.as_str() {
+        "invalid" => K::Invalid,
+        "unauthorized" => K::Unauthorized,
+        "forbidden" => K::Forbidden,
+        "not_found" => K::NotFound,
+        "conflict" => K::Conflict,
+        "rate_limited" => K::RateLimited,
+        "bad_gateway" => K::BadGateway,
+        "upstream_result_unknown" => K::UpstreamResultUnknown,
+        "internal" => K::Internal,
+        _ => K::Unavailable,
+    };
+    AdminError::new(kind, error.message)
+}
 
 #[derive(Clone)]
 pub struct PluginServiceMiddlewarePlan {

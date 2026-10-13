@@ -471,7 +471,7 @@ where
 }
 
 async fn admin_api_key_status<S>(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     State(state): State<S>,
 ) -> Result<impl IntoResponse, AdminError>
 where
@@ -479,8 +479,10 @@ where
 {
     let exists = state
         .admin_services()
-        .settings()
-        .admin_api_key_exists()
+        .service_settings()
+        .admin_api_key_exists(crate::middleware::service_origin(
+            &auth.context().request_id,
+        ))
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -498,8 +500,11 @@ where
 {
     let result = state
         .admin_services()
-        .settings()
-        .regenerate_admin_api_key(&auth.context().mutation_context())
+        .service_settings()
+        .regenerate_admin_api_key(
+            crate::middleware::service_origin(&auth.context().request_id),
+            auth.context().mutation_context(),
+        )
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -519,8 +524,11 @@ where
 {
     state
         .admin_services()
-        .settings()
-        .delete_admin_api_key(&auth.context().mutation_context())
+        .service_settings()
+        .delete_admin_api_key(
+            crate::middleware::service_origin(&auth.context().request_id),
+            auth.context().mutation_context(),
+        )
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
