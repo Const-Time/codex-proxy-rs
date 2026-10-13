@@ -469,6 +469,26 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn http_middleware(
+        &self,
+        mut context: gateway_core::engine::middleware::http::Context,
+        request: gateway_core::engine::middleware::http::Request,
+        next: gateway_core::engine::middleware::http::Next,
+    ) -> Result<
+        gateway_core::engine::middleware::http::Response,
+        gateway_core::engine::middleware::MiddlewareError,
+    > {
+        if self.status() != "ready" || self.access.is_revoked() {
+            return Err(gateway_core::engine::middleware::MiddlewareError::Fault);
+        }
+        context.cancellation = gateway_core::lifecycle::CancellationToken::linked([
+            context.cancellation,
+            self.access.cancellation(),
+        ]);
+        self.middleware
+            .invoke_http(self.session.clone(), context, request, next)
+            .await
+    }
     async fn retry_decision(
         &self,
         input: gateway_core::engine::retry_policy::RetryInput,

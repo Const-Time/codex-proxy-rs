@@ -12,9 +12,28 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[derive(Clone)]
+enum Invocation {
+    Execution(Arc<MiddlewareInvocation>),
+    Http(Arc<super::http::Invocation>),
+}
+impl Invocation {
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Execution(a), Self::Execution(b)) => Arc::ptr_eq(a, b),
+            (Self::Http(a), Self::Http(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+    fn close(&self) {
+        if let Self::Http(invocation) = self {
+            invocation.close_callbacks();
+        }
+    }
+}
 struct Entry {
     context: CallContext,
-    invocation: Arc<MiddlewareInvocation>,
+    invocation: Invocation,
 }
 pub struct MiddlewareCallbacks {
     models: Option<Arc<crate::models::Models>>,
@@ -49,6 +68,41 @@ impl MiddlewareCallbacks {
     ) -> Result<MiddlewareResponse, MiddlewareError> {
         super::execution::invoke(self.clone(), session, context, request, next).await
     }
+    pub async fn invoke_http(
+        self: &Arc<Self>,
+        session: Arc<RpcSession>,
+        context: gateway_core::engine::middleware::http::Context,
+        request: gateway_core::engine::middleware::http::Request,
+        next: gateway_core::engine::middleware::http::Next,
+    ) -> Result<gateway_core::engine::middleware::http::Response, MiddlewareError> {
+        super::http::invoke(self.clone(), session, context, request, next).await
+    }
+    pub(super) fn bind_http(
+        self: &Arc<Self>,
+        context: &CallContext,
+        invocation: Arc<super::http::Invocation>,
+    ) -> Result<Binding, MiddlewareError> {
+        let mut calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
+            return Err(MiddlewareError::Fault);
+        }
+        let invocation = Invocation::Http(invocation);
+        calls.insert(
+            context.resource_scope_id.clone(),
+            Entry {
+                context: context.clone(),
+                invocation: invocation.clone(),
+            },
+        );
+        Ok(Binding {
+            callbacks: self.clone(),
+            scope: context.resource_scope_id.clone(),
+            invocation,
+        })
+    }
     pub(super) fn bind(
         self: &Arc<Self>,
         context: &CallContext,
@@ -76,20 +130,20 @@ impl MiddlewareCallbacks {
             context.resource_scope_id.clone(),
             Entry {
                 context: context.clone(),
-                invocation: invocation.clone(),
+                invocation: Invocation::Execution(invocation.clone()),
             },
         );
         Ok(Binding {
             callbacks: self.clone(),
             scope: context.resource_scope_id.clone(),
-            invocation,
+            invocation: Invocation::Execution(invocation),
         })
     }
 }
 pub(super) struct Binding {
     callbacks: Arc<MiddlewareCallbacks>,
     scope: String,
-    invocation: Arc<MiddlewareInvocation>,
+    invocation: Invocation,
 }
 impl Drop for Binding {
     fn drop(&mut self) {
@@ -100,11 +154,15 @@ impl Drop for Binding {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if calls
             .get(&self.scope)
-            .is_some_and(|e| Arc::ptr_eq(&e.invocation, &self.invocation))
+            .is_some_and(|e| e.invocation.same(&self.invocation))
             && let Some(entry) = calls.remove(&self.scope)
-            && let Some(models) = &self.callbacks.models
         {
-            models.finish(&entry.context);
+            entry.invocation.close();
+            if matches!(entry.invocation, Invocation::Execution(_))
+                && let Some(models) = &self.callbacks.models
+            {
+                models.finish(&entry.context);
+            }
         }
     }
 }
@@ -116,10 +174,14 @@ impl CallbackHandler for MiddlewareCallbacks {
         self.inner.streaming(context);
     }
     fn finish(&self, context: &CallContext) {
-        self.calls
+        if let Some(entry) = self
+            .calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&context.resource_scope_id);
+            .remove(&context.resource_scope_id)
+        {
+            entry.invocation.close();
+        }
         self.inner.finish(context);
     }
     fn call(
@@ -134,6 +196,7 @@ impl CallbackHandler for MiddlewareCallbacks {
             return self.inner.call(context, method, params, payload);
         }
         if !model_method
+            && !super::http::is_method(&method)
             && !matches!(
                 method.as_str(),
                 NEXT_METHOD | BODY_READ_METHOD | BODY_FACTS_METHOD | BODY_CLOSE_METHOD
@@ -147,7 +210,8 @@ impl CallbackHandler for MiddlewareCallbacks {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&context.resource_scope_id)
             .filter(|entry| {
-                matches!(context.stage, Stage::Request | Stage::Attempt)
+                matches!(context.stage, Stage::Http | Stage::Request | Stage::Attempt)
+                    && entry.context.resource_stream == context.resource_stream
                     && entry.context.stage == context.stage
                     && entry.context.instance_id == context.instance_id
                     && entry.context.generation == context.generation
@@ -166,6 +230,23 @@ impl CallbackHandler for MiddlewareCallbacks {
                     "middleware invocation is no longer active",
                 )
             })?;
+            if let Invocation::Http(invocation) = invocation {
+                if model_method {
+                    return Err(PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "HTTP scope has no model execution authority",
+                    ));
+                }
+                return tokio::select! {
+                    biased;
+                    ()=invocation.cancellation.cancelled()=>Err(PluginFault::new(ErrorCode::Cancelled,"HTTP invocation cancelled")),
+                    ()=invocation.callbacks_closed.cancelled()=>Err(PluginFault::new(ErrorCode::PermissionDenied,"HTTP callback scope ended")),
+                    result=invocation.clone().call(method,params,payload,8*1024*1024)=>result,
+                };
+            }
+            let Invocation::Execution(invocation) = invocation else {
+                unreachable!()
+            };
             if model_method {
                 let models = models.ok_or_else(|| {
                     PluginFault::new(

@@ -4,7 +4,9 @@ mod body;
 mod execution;
 pub(crate) mod facts;
 mod headers;
+mod http;
 mod registry;
+mod websocket;
 pub use registry::MiddlewareCallbacks;
 
 use std::sync::{Arc, Mutex};
