@@ -17,6 +17,7 @@ use std::{
 pub(crate) struct Callbacks {
     inner: Arc<dyn CallbackHandler>,
     credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
+    native_calls: Arc<crate::resources::InvocationCalls>,
     outbound: Arc<crate::outbound::Registry>,
     services: Arc<crate::services::Registry>,
     models: Option<Arc<crate::models::Models>>,
@@ -24,6 +25,7 @@ pub(crate) struct Callbacks {
     calls: Mutex<BTreeMap<String, (CallContext, Arc<ManagedCall>)>>,
 }
 pub(super) struct Binding {
+    _native: crate::resources::InvocationCall,
     _services: Option<crate::services::Binding>,
     callbacks: Arc<Callbacks>,
     context: CallContext,
@@ -41,10 +43,12 @@ impl Callbacks {
         outbound: Arc<crate::outbound::Registry>,
         services: Arc<crate::services::Registry>,
         credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
+        native_calls: Arc<crate::resources::InvocationCalls>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner,
             credentials,
+            native_calls,
             outbound,
             services,
             models,
@@ -68,6 +72,27 @@ impl Callbacks {
         {
             return Err(invalid(UpstreamSendState::NotSent));
         }
+        let actor = gateway_admin::model::MutationContext {
+            actor: gateway_admin::model::MutationActor::Plugin {
+                instance_id: context.instance_id.clone(),
+                revision: std::num::NonZeroU64::new(context.generation)
+                    .ok_or_else(|| invalid(UpstreamSendState::NotSent))?,
+            },
+            request_id: context
+                .request_id
+                .clone()
+                .ok_or_else(|| invalid(UpstreamSendState::NotSent))?,
+        };
+        let native = self
+            .native_calls
+            .enter(
+                context.clone(),
+                actor,
+                None,
+                CancellationToken::linked([call.cancellation.clone(), call.closed.clone()]),
+                parent.as_ref().map(|parent| parent.scope().clone()),
+            )
+            .map_err(|error| super::failure::fault_error(error, UpstreamSendState::NotSent))?;
         let service_binding = parent
             .as_ref()
             .map(|parent| {
@@ -102,6 +127,7 @@ impl Callbacks {
         }
         calls.insert(context.resource_scope_id.clone(), (context.clone(), call));
         Ok(Binding {
+            _native: native,
             _services: service_binding,
             callbacks: self.clone(),
             context: context.clone(),
@@ -157,6 +183,10 @@ impl CallbackHandler for Callbacks {
         let models = self.models.clone();
         let inner = self.inner.clone();
         let credentials = self.credentials.clone();
+        let native_caller = self
+            .native_calls
+            .caller(&context.resource_scope_id)
+            .filter(|caller| caller.authorizes(&context));
         Box::pin(async move {
             let call = call.ok_or_else(|| {
                 PluginFault::new(
@@ -172,14 +202,35 @@ impl CallbackHandler for Callbacks {
                             "native account credentials are not configured",
                         )
                     })?;
-                    Box::pin(super::credentials::read(
-                        service,
-                        context,
-                        call.account.clone(),
-                        &method,
-                        params,
-                        payload,
-                    )) as BoxFuture<'_, Result<RpcReply, PluginFault>>
+                    if method == "host.auth.save" {
+                        let caller = native_caller.ok_or_else(|| {
+                            PluginFault::new(
+                                ErrorCode::PermissionDenied,
+                                "native upstream invocation ended",
+                            )
+                        })?;
+                        Box::pin(super::save::save(
+                            service,
+                            caller,
+                            call.clone(),
+                            params,
+                            payload,
+                        )) as BoxFuture<'_, Result<RpcReply, PluginFault>>
+                    } else {
+                        let bound = call.clone();
+                        Box::pin(async move {
+                            let _epoch = bound.credential_gate.read().await;
+                            super::credentials::read(
+                                service,
+                                context,
+                                bound.account.clone(),
+                                &method,
+                                params,
+                                payload,
+                            )
+                            .await
+                        }) as BoxFuture<'_, Result<RpcReply, PluginFault>>
+                    }
                 } else if crate::models::is_method(&method) || method.starts_with("host.http.") {
                     models
                         .ok_or_else(|| {

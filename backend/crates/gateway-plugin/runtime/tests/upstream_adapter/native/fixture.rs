@@ -132,6 +132,12 @@ fn snapshot(
     .with_pricing(Arc::new(prices))
 }
 
+#[derive(Default)]
+struct StartOptions {
+    plan: Option<Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapterPlan>>,
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
 impl Fixture {
     pub async fn new() -> Option<Self> {
         Self::for_provider("openai").await
@@ -297,7 +303,7 @@ impl Fixture {
         previous: Option<&str>,
         transport: ClientTransport,
     ) -> Result<StartedExecution, GatewayError> {
-        self.start_with_plan(key, behavior, previous, transport, None)
+        self.start_with_plan(key, behavior, previous, transport, StartOptions::default())
             .await
     }
     pub async fn start_with_adapter_plan(
@@ -310,10 +316,45 @@ impl Fixture {
             behavior,
             None,
             ClientTransport::HttpJson,
-            Some(plan),
+            StartOptions {
+                plan: Some(plan),
+                ..Default::default()
+            },
         )
         .await
         .unwrap()
+    }
+    pub async fn start_with_fields(
+        &self,
+        behavior: &str,
+        fields: serde_json::Map<String, serde_json::Value>,
+        plan: Option<Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapterPlan>>,
+    ) -> StartedExecution {
+        let transport = if self.adapter_transport == "websocket" {
+            ClientTransport::WebSocket
+        } else {
+            ClientTransport::HttpJson
+        };
+        self.start_with_plan(
+            "sk_native_fixture",
+            behavior,
+            None,
+            transport,
+            StartOptions { plan, fields },
+        )
+        .await
+        .unwrap()
+    }
+    pub async fn refresh_expected_revision(&mut self) {
+        self.credential_revision = self
+            .ports
+            .accounts()
+            .load_current_credential(&self.account)
+            .await
+            .unwrap()
+            .account
+            .revision()
+            .get();
     }
     async fn start_with_plan(
         &self,
@@ -321,7 +362,7 @@ impl Fixture {
         behavior: &str,
         previous: Option<&str>,
         transport: ClientTransport,
-        plan: Option<Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapterPlan>>,
+        options: StartOptions,
     ) -> Result<StartedExecution, GatewayError> {
         let client = self.execution.authenticate(key).unwrap();
         let prepared = self
@@ -329,18 +370,36 @@ impl Fixture {
             .prepare_execution(client)
             .unwrap()
             .with_upstream_adapters(
-                plan.unwrap_or_else(|| Arc::new(self.manager.middleware_registry().unwrap())),
+                options
+                    .plan
+                    .unwrap_or_else(|| Arc::new(self.manager.middleware_registry().unwrap())),
             );
-        self.execution.start_prepared(prepared, PreparedExecutionRequest {
-            public_model: PublicModelId::new("public-model").unwrap(),
-            operation: Operation::Generate(GenerateRequest::from_protocol_payload(ProtocolPayload::json_object("openai",
-                serde_json::from_value(json!({"model":"public-model","input":"fixture prompt","service_tier":"default", "behavior":behavior,
+        let mut input = json!({"model":"public-model","input":"fixture prompt","service_tier":"default", "behavior":behavior,
                     "fixture_account":self.account.as_str(),"fixture_credential_revision":self.credential_revision,"fixture_model":self.native_model,
                     "fixture_forbidden":self.forbidden.as_str(), "fixture_provider":self.provider,
-                    "previous_response_id":previous,"expect_continuation":previous.is_some()})).unwrap()
-            ).unwrap())),
-            metadata: ExecutionRequestMetadata { protocol:"openai".into(), endpoint:"/v1/responses".into(), transport, stream:transport==ClientTransport::WebSocket, client_ip:None, user_agent:None, previous_response_id:previous.map(PreviousResponseId::new) },
-        }).await
+                    "previous_response_id":previous,"expect_continuation":previous.is_some()});
+        input.as_object_mut().unwrap().extend(options.fields);
+        self.execution
+            .start_prepared(
+                prepared,
+                PreparedExecutionRequest {
+                    public_model: PublicModelId::new("public-model").unwrap(),
+                    operation: Operation::Generate(GenerateRequest::from_protocol_payload(
+                        ProtocolPayload::json_object("openai", input.as_object().unwrap().clone())
+                            .unwrap(),
+                    )),
+                    metadata: ExecutionRequestMetadata {
+                        protocol: "openai".into(),
+                        endpoint: "/v1/responses".into(),
+                        transport,
+                        stream: transport == ClientTransport::WebSocket,
+                        client_ip: None,
+                        user_agent: None,
+                        previous_response_id: previous.map(PreviousResponseId::new),
+                    },
+                },
+            )
+            .await
     }
     pub async fn clean(&self, charges: usize) {
         tokio::time::timeout(Duration::from_secs(5), async {

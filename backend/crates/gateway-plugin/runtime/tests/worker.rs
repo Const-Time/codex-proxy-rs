@@ -82,6 +82,9 @@ mod worker_credentials {
 
     pub async fn run(host: &HostClient, mode: &str, input: &Value) -> Result<(), PluginFault> {
         let selected = input["fixture_account"].as_str().unwrap();
+        if mode.starts_with("callback-credentials-save") {
+            return replace(host, mode, input).await;
+        }
         if mode != "callback-credentials" {
             host.call(
                 "host.upstream.http.do",
@@ -211,7 +214,7 @@ mod worker_credentials {
                 facts: credential.facts.clone(),
             },
             AuthSaveRequest::Replace {
-                account_id: selected.into(),
+                account_id: input["fixture_forbidden"].as_str().unwrap().into(),
                 credential_revision: runtime.credential_revision,
                 facts: credential.facts,
             },
@@ -221,7 +224,7 @@ mod worker_credentials {
                 "host.auth.save",
                 json!({}),
                 serde_json::to_vec(&save).unwrap(),
-                ErrorCode::Unsupported,
+                ErrorCode::PermissionDenied,
             )
             .await?;
         }
@@ -233,6 +236,83 @@ mod worker_credentials {
         .await
         .map_err(|e| e.into_plugin_fault())?;
         Ok(())
+    }
+
+    async fn replace(host: &HostClient, mode: &str, input: &Value) -> Result<(), PluginFault> {
+        let selected = input["fixture_account"].as_str().unwrap();
+        let exported: AuthCredential =
+            read(host, "host.auth.get", json!({"account_id":selected})).await?;
+        let mut facts = exported.facts;
+        if mode.ends_with("invalid") {
+            facts.material.insert("schema_version".into(), json!(999));
+        } else {
+            facts
+                .material
+                .insert("access_token".into(), input["fixture_save_token"].clone());
+        }
+        let request = AuthSaveRequest::Replace {
+            account_id: selected.into(),
+            credential_revision: exported.credential_revision,
+            facts,
+        };
+        let save = async {
+            if mode.ends_with("gate") {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            read::<AuthSaveResult>(
+                host,
+                "host.auth.save",
+                serde_json::to_value(&request).unwrap(),
+            )
+            .await
+        };
+        let saved = if mode.ends_with("gate") {
+            let before = host.call(
+                "host.upstream.http.do",
+                json!({"method":"POST","path":"audit","headers":[],"query":[]}),
+                b"credential-barrier".to_vec(),
+            );
+            let (before, saved) = tokio::join!(before, save);
+            before.map_err(|e| e.into_plugin_fault())?;
+            saved?
+        } else {
+            save.await?
+        };
+        assert_eq!(saved.account_id, selected);
+        assert_eq!(saved.credential_revision, exported.credential_revision + 1);
+        let current: AuthRuntimeAccount = read(
+            host,
+            "host.auth.get_runtime",
+            json!({"account_id":selected}),
+        )
+        .await?;
+        assert_eq!(current.credential_revision, saved.credential_revision);
+        let list: AuthListResult = read(host, "host.auth.list", json!({"limit":200})).await?;
+        assert_eq!(
+            list.accounts[0].credential_revision,
+            saved.credential_revision
+        );
+        denied(
+            host,
+            "host.auth.save",
+            json!({}),
+            serde_json::to_vec(&request).unwrap(),
+            ErrorCode::Conflict,
+        )
+        .await?;
+        if !mode.ends_with("websocket") {
+            host.call(
+                "host.upstream.http.do",
+                json!({"method":"POST","path":"responses","headers":[],"query":[]}),
+                b"fixture-saved-auth".to_vec(),
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+        }
+        Ok(())
+    }
+    pub(super) async fn on_websocket(host: &HostClient, input: &Value) -> Result<(), PluginFault> {
+        replace(host, "callback-credentials-save-websocket", input).await
     }
 }
 
@@ -2258,6 +2338,36 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
                 .await?;
         }
         assert_eq!(connection.read().await?.unwrap().1, b"fixture-pong");
+        if mode == "websocket-credential-save" {
+            worker_credentials::on_websocket(&call.host, &input).await?;
+            assert!(
+                connection
+                    .send(WebSocketMessageKind::Text, b"stale-connection".to_vec())
+                    .await
+                    .is_err()
+            );
+            let fresh = match call
+                .host
+                .upstream_websocket(UpstreamWebSocketRequest {
+                    path: "responses".into(),
+                    headers: vec![],
+                    query: vec![],
+                })
+                .await?
+            {
+                UpstreamWebSocketUpgrade::Connected { connection, .. } => connection,
+                UpstreamWebSocketUpgrade::Rejected { .. } => {
+                    return Err(PluginFault::new(
+                        ErrorCode::Fault,
+                        "fresh native handshake rejected",
+                    ));
+                }
+            };
+            fresh
+                .send(WebSocketMessageKind::Text, b"fixture-ping".to_vec())
+                .await?;
+            assert_eq!(fresh.read().await?.unwrap().1, b"fixture-pong");
+        }
     } else if mode != "synthetic" && mode != "invalid" && !mode.starts_with("callback-") {
         let method = if mode == "http-stream" {
             "host.upstream.http.do_stream"

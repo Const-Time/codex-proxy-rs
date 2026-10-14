@@ -20,7 +20,7 @@ use gateway_plugin_sdk::{
     call::{host as wire, upstream_adapter as adapter},
 };
 use std::{sync::Arc, time::Duration};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 struct PendingRead(tokio::task::JoinHandle<Result<Option<WebSocketMessage>, HttpError>>);
 impl Drop for PendingRead {
     fn drop(&mut self) {
@@ -32,6 +32,7 @@ pub(super) struct ManagedCall {
     pub(super) http: Arc<HttpScope>,
     pub(super) cancellation: CancellationToken,
     pub(super) closed: CancellationToken,
+    pub(super) credential_gate: AsyncRwLock<()>,
     target: Arc<UpstreamTarget>,
     socket: AsyncMutex<Option<(String, Arc<ManagedWebSocket>)>>,
     read: AsyncMutex<Option<PendingRead>>,
@@ -76,6 +77,7 @@ impl ManagedCall {
             ),
             cancellation: options.cancellation,
             closed: CancellationToken::new(),
+            credential_gate: AsyncRwLock::default(),
             target: options.target,
             socket: AsyncMutex::new(socket),
             read: AsyncMutex::default(),
@@ -141,6 +143,7 @@ impl ManagedCall {
         ))
     }
     pub(super) async fn retain_connection(&self) -> Result<String, PluginFault> {
+        let _epoch = self.credential_gate.read().await;
         if self.read.lock().await.is_some() {
             return Err(denied());
         }
@@ -153,7 +156,32 @@ impl ManagedCall {
                 return Err(denied());
             }
         };
-        self.pool.put(self.owner.clone(), (url, socket))
+        self.pool.put(self.current_owner(), (url, socket))
+    }
+    fn current_owner(&self) -> ConnectionOwner {
+        ConnectionOwner {
+            credential_revision: self.account.credential_revision().get(),
+            ..self.owner.clone()
+        }
+    }
+    pub(super) async fn reset_credential_transport(&self) {
+        self.read.lock().await.take();
+        if let Some((_, socket)) = self.socket.lock().await.take() {
+            socket.close().await;
+        }
+        self.http.close_streams();
+        self.pool.invalidate_account(
+            &self.owner.account_id,
+            self.account.credential_revision().get(),
+        );
+    }
+    pub(super) fn adopt_transport_epoch(&self) {
+        self.http.rotate_pool_scope(format!(
+            "{}:{}:{}",
+            self.pool.identity,
+            self.owner.account_id,
+            self.account.credential_revision().get()
+        ));
     }
     async fn connection(&self) -> Result<Arc<ManagedWebSocket>, PluginFault> {
         self.socket
@@ -170,6 +198,11 @@ impl ManagedCall {
         params: serde_json::Value,
         payload: Vec<u8>,
     ) -> Result<RpcReply, PluginFault> {
+        // Keep authorization construction and the actual send in one epoch.
+        let _epoch = self.credential_gate.read().await;
+        if self.closed.is_cancelled() || self.cancellation.is_cancelled() {
+            return Err(self.fault(ErrorCode::Cancelled, "upstream invocation ended"));
+        }
         if payload.len() > MAX_PAYLOAD {
             return Err(invalid());
         }

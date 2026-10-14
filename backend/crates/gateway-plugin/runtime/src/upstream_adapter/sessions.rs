@@ -101,6 +101,16 @@ impl ConnectionPool {
             })
     }
 
+    pub(crate) fn invalidate_account(&self, account_id: &str, revision: u64) {
+        self.idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, connection| {
+                connection.owner.account_id != account_id
+                    || connection.owner.credential_revision != revision
+            });
+    }
+
     pub(crate) fn put(
         self: &Arc<Self>,
         owner: ConnectionOwner,

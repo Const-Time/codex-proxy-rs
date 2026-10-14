@@ -1,5 +1,7 @@
+mod capture;
 mod continuation;
 mod credential_adoption;
+mod credential_save;
 mod credentials;
 mod fixture;
 mod lifecycle;
