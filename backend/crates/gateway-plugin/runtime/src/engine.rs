@@ -59,6 +59,7 @@ pub struct PluginEngine {
     store: Arc<dyn PluginStore>,
     processes: ProcessSupervisor,
     validators: Arc<tokio::sync::Semaphore>,
+    log_slots: Arc<tokio::sync::Semaphore>,
     data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl PluginEngine {
@@ -76,6 +77,7 @@ impl PluginEngine {
             store,
             processes: ProcessSupervisor::default(),
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
+            log_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             data: None,
         }
     }
@@ -426,6 +428,10 @@ impl PluginRuntime for PluginEngine {
                 self.data.clone(),
             )
         });
+        let logs = Arc::new(
+            crate::callbacks::PluginLog::new(&manifest, self.log_slots.clone())
+                .map_err(|_| AdminError::invalid("插件日志身份无效"))?,
+        );
         let callbacks = Arc::new(
             crate::callbacks::Callbacks::new(
                 self.store.clone(),
@@ -434,6 +440,7 @@ impl PluginRuntime for PluginEngine {
                 active.clone(),
                 self.data.clone(),
                 outbound.clone(),
+                logs.clone(),
             )?
             .with_resources(self.resources.clone())
             .with_credentials(self.credentials.clone())
@@ -577,6 +584,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            logs,
             credentials: self.credentials.clone(),
             commands,
             services,
@@ -596,6 +604,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    logs: Arc<crate::callbacks::PluginLog>,
     credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     commands: Vec<CommandDescriptor>,
     services: Arc<crate::services::Registry>,
@@ -976,6 +985,7 @@ impl PluginProcess for LivePlugin {
         self.revoke();
         self.session.shutdown(Duration::from_secs(5)).await;
         self.calls.drain().await;
+        self.logs.drain().await;
     }
     async fn resource(&self, path: &str) -> Result<PluginHttpResponse, AdminError> {
         if self.status() != "ready" {

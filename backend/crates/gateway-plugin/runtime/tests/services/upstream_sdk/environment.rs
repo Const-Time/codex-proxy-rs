@@ -43,6 +43,12 @@ impl Environment {
         Self::with_openai_url(None).await
     }
     pub async fn with_openai_url(url: Option<&str>) -> Option<Self> {
+        Self::with_admin_username(url, "sdk-fixture").await
+    }
+    pub async fn with_login_admin() -> Option<Self> {
+        Self::with_admin_username(None, "sdk-fixture@fixture.test").await
+    }
+    async fn with_admin_username(url: Option<&str>, username: &str) -> Option<Self> {
         let (database, database_url, redis_url) = Database::create().await?;
         let cache = tempfile::tempdir().unwrap();
         for name in [
@@ -93,7 +99,7 @@ impl Environment {
         let admin = gateway_admin::initialize(
             gateway_admin::AdminConfig {
                 session_ttl_minutes: 60,
-                default_username: "sdk-fixture".into(),
+                default_username: username.into(),
                 default_password: gateway_admin::InitialAdminPassword::new(
                     "sdk-business-fixture-password",
                 ),

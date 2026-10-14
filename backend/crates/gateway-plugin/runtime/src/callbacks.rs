@@ -1,4 +1,5 @@
 //! 状态回调使用宿主保存的实例/revision，不接受插件指定另一个 owner。
+mod log;
 use crate::{CallbackHandler, RpcReply};
 use futures::future::BoxFuture;
 use gateway_admin::{
@@ -8,6 +9,7 @@ use gateway_admin::{
 use gateway_plugin_sdk::{
     CallContext, ErrorCode, Manifest, PluginFault, Stage, StateNamespace, call::host::*,
 };
+pub(crate) use log::PluginLog;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -22,6 +24,7 @@ struct Namespace {
     schema: jsonschema::Validator,
 }
 pub(crate) struct Callbacks {
+    logs: Arc<PluginLog>,
     credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     outbound: Arc<crate::outbound::Registry>,
     models: Option<Arc<crate::models::Models>>,
@@ -68,6 +71,7 @@ impl Callbacks {
         active: Arc<AtomicBool>,
         data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
         outbound: Arc<crate::outbound::Registry>,
+        logs: Arc<PluginLog>,
     ) -> Result<Self, gateway_admin::model::AdminError> {
         let namespaces = manifest
             .state
@@ -83,6 +87,7 @@ impl Callbacks {
             })
             .collect::<Result<_, gateway_admin::model::AdminError>>()?;
         Ok(Self {
+            logs,
             credentials: None,
             outbound,
             models: None,
@@ -170,7 +175,23 @@ impl CallbackHandler for Callbacks {
         let quota = self.quota.clone();
         let credentials = self.credentials.clone();
         let models = self.models.clone();
+        let logs = self.logs.clone();
         Box::pin(async move {
+            if method == "host.log" {
+                if (context.stage != Stage::Registration && !active.load(Ordering::Acquire))
+                    || context.instance_id != id
+                    || context.generation != revision
+                    || calls
+                        .caller(&context.resource_scope_id)
+                        .is_some_and(|caller| !caller.authorizes(&context))
+                {
+                    return Err(PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "plugin log scope ended",
+                    ));
+                }
+                return logs.record(&context, params, &payload);
+            }
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
                 || context.generation != revision
