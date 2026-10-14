@@ -11,6 +11,10 @@ use crate::{
     ports::plugins::*,
 };
 use async_trait::async_trait;
+use futures::{
+    FutureExt,
+    future::{BoxFuture, Shared},
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -18,6 +22,7 @@ use std::{
 use tokio::sync::Mutex;
 
 type ActivePlugins = BTreeMap<String, (u64, Arc<dyn PluginProcess>)>;
+type Shutdown = Shared<BoxFuture<'static, ()>>;
 
 #[derive(Clone)]
 struct AuthenticationEntry {
@@ -42,6 +47,7 @@ pub struct PluginManager {
     active: RwLock<ActivePlugins>,
     maintenance_changed: tokio::sync::Notify,
     stopping: gateway_core::lifecycle::CancellationToken,
+    shutdown: std::sync::Mutex<Option<Shutdown>>,
 }
 impl PluginManager {
     pub fn new(store: Arc<dyn PluginStore>, runtime: Arc<dyn PluginRuntime>) -> Self {
@@ -56,6 +62,7 @@ impl PluginManager {
             active: RwLock::new(BTreeMap::new()),
             maintenance_changed: tokio::sync::Notify::new(),
             stopping: Default::default(),
+            shutdown: std::sync::Mutex::default(),
         }
     }
     pub fn with_services(mut self, services: service::settings::Service) -> Self {
@@ -150,6 +157,15 @@ impl PluginManager {
     pub async fn shutdown(&self) {
         self.stopping.cancel();
         let _guard = self.changes.lock().await;
+        let previous = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(shutdown) = previous {
+            shutdown.await;
+            return;
+        }
         self.authentication
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -165,11 +181,22 @@ impl PluginManager {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        futures::future::join_all(active.into_values().map(|(_, p)| async move {
-            p.revoke();
-            p.stop().await;
-        }))
-        .await;
+        let runtime = self.runtime.clone();
+        let shutdown = async move {
+            futures::future::join_all(active.into_values().map(|(_, p)| async move {
+                p.revoke();
+                p.stop().await;
+            }))
+            .await;
+            runtime.shutdown().await;
+        }
+        .boxed()
+        .shared();
+        *self
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shutdown.clone());
+        shutdown.await;
     }
     fn publish_authentication(
         &self,

@@ -59,7 +59,7 @@ pub struct PluginEngine {
     store: Arc<dyn PluginStore>,
     processes: ProcessSupervisor,
     validators: Arc<tokio::sync::Semaphore>,
-    log_slots: Arc<tokio::sync::Semaphore>,
+    logs: crate::callbacks::LogRegistry,
     data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl PluginEngine {
@@ -77,7 +77,7 @@ impl PluginEngine {
             store,
             processes: ProcessSupervisor::default(),
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
-            log_slots: Arc::new(tokio::sync::Semaphore::new(8)),
+            logs: crate::callbacks::LogRegistry::default(),
             data: None,
         }
     }
@@ -219,6 +219,9 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
 }
 #[async_trait]
 impl PluginRuntime for PluginEngine {
+    async fn shutdown(&self) {
+        self.logs.drain().await;
+    }
     fn observer_plan(
         &self,
         targets: Vec<gateway_admin::ports::plugins::PluginObserverTarget>,
@@ -428,10 +431,7 @@ impl PluginRuntime for PluginEngine {
                 self.data.clone(),
             )
         });
-        let logs = Arc::new(
-            crate::callbacks::PluginLog::new(&manifest, self.log_slots.clone())
-                .map_err(|_| AdminError::invalid("插件日志身份无效"))?,
-        );
+        let logs = self.logs.register(&manifest)?;
         let callbacks = Arc::new(
             crate::callbacks::Callbacks::new(
                 self.store.clone(),

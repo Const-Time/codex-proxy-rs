@@ -191,6 +191,9 @@ pub trait PluginProcess: Send + Sync {
 }
 #[async_trait]
 pub trait PluginRuntime: Send + Sync {
+    /// Called after active processes stop; drains accepted runtime work from
+    /// candidates whose preparation failed or whose caller was cancelled.
+    async fn shutdown(&self) {}
     fn observer_plan(
         &self,
         _targets: Vec<PluginObserverTarget>,

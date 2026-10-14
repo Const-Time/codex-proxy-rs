@@ -310,16 +310,17 @@ async fn sdk_catalog_disable_during_native_lookup_rejects_the_frozen_result() {
 async fn sdk_catalog_restore_validates_current_targets_and_failed_registration_remains_a_gate() {
     let cache = tempfile::tempdir().unwrap();
     let store = Arc::new(MemoryStore::default());
-    let runtime = Arc::new(PluginEngine::new(
-        cache.path().into(),
-        "3.11.2".parse().unwrap(),
-        store.clone(),
-    ));
+    let runtime = || {
+        Arc::new(PluginEngine::new(
+            cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            store.clone(),
+        ))
+    };
     let snapshot = Arc::new(gateway_core::runtime::RuntimeSnapshotHandle::new(
         catalog_snapshot(),
     ));
-    let manager =
-        PluginManager::new(store.clone(), runtime.clone()).with_model_catalog(snapshot.clone());
+    let manager = PluginManager::new(store.clone(), runtime()).with_model_catalog(snapshot.clone());
     let package = manager
         .upload(catalog_archive("1.0.0"), &actor())
         .await
@@ -330,7 +331,7 @@ async fn sdk_catalog_restore_validates_current_targets_and_failed_registration_r
         .unwrap();
     manager.shutdown().await;
     let restored =
-        PluginManager::new(store.clone(), runtime.clone()).with_model_catalog(snapshot.clone());
+        PluginManager::new(store.clone(), runtime()).with_model_catalog(snapshot.clone());
     restored.restore().await.unwrap();
     assert!(
         restored
@@ -348,8 +349,7 @@ async fn sdk_catalog_restore_validates_current_targets_and_failed_registration_r
         .get_mut(&installed.id)
         .unwrap()
         .configuration = json!({"catalog_mode":"duplicate"});
-    let failed =
-        PluginManager::new(store.clone(), runtime.clone()).with_model_catalog(snapshot.clone());
+    let failed = PluginManager::new(store.clone(), runtime()).with_model_catalog(snapshot.clone());
     failed.restore().await.unwrap();
     assert_eq!(failed.list().await.unwrap()[0].status, "failed");
     assert!(
@@ -389,7 +389,7 @@ async fn sdk_catalog_restore_validates_current_targets_and_failed_registration_r
             "gone".into(),
         )])),
     );
-    let missing = PluginManager::new(store, runtime).with_model_catalog(snapshot);
+    let missing = PluginManager::new(store.clone(), runtime()).with_model_catalog(snapshot);
     missing.restore().await.unwrap();
     assert_eq!(missing.list().await.unwrap()[0].status, "failed");
     assert!(
@@ -406,16 +406,17 @@ async fn sdk_catalog_restore_validates_current_targets_and_failed_registration_r
 async fn sdk_catalog_failed_restore_does_not_stop_other_instances_from_starting() {
     let cache = tempfile::tempdir().unwrap();
     let store = Arc::new(MemoryStore::default());
-    let runtime = Arc::new(PluginEngine::new(
-        cache.path().into(),
-        "3.11.2".parse().unwrap(),
-        store.clone(),
-    ));
+    let runtime = || {
+        Arc::new(PluginEngine::new(
+            cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            store.clone(),
+        ))
+    };
     let snapshot = Arc::new(gateway_core::runtime::RuntimeSnapshotHandle::new(
         catalog_snapshot(),
     ));
-    let manager =
-        PluginManager::new(store.clone(), runtime.clone()).with_model_catalog(snapshot.clone());
+    let manager = PluginManager::new(store.clone(), runtime()).with_model_catalog(snapshot.clone());
     let package = manager
         .upload(catalog_archive("1.0.0"), &actor())
         .await
@@ -436,7 +437,7 @@ async fn sdk_catalog_failed_restore_does_not_stop_other_instances_from_starting(
         records.insert(invalid.id.clone(), invalid);
         records.insert(valid.id.clone(), valid);
     }
-    let restored = PluginManager::new(store, runtime).with_model_catalog(snapshot);
+    let restored = PluginManager::new(store.clone(), runtime()).with_model_catalog(snapshot);
     restored.restore().await.unwrap();
     let rows = restored.list().await.unwrap();
     assert_eq!(rows[0].id, "a-broken");

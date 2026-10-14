@@ -1178,6 +1178,14 @@ impl PluginHandler for Worker {
                 Ok(CallReply::unary(json!({}),vec![]))
             },
             "plugin.register" if !self.fail=>{
+                if self.adapter_mode == "registration-log-fault" || self.adapter_mode == "registration-log-pending" {
+                    let reply = call.host.call("host.log", json!({"event":"fixture.registration"}), vec![]).await.map_err(|error| error.into_plugin_fault())?;
+                    assert_eq!(reply.result, json!({"recorded":true}));
+                    if self.adapter_mode == "registration-log-fault" {
+                        return Err(PluginFault::new(ErrorCode::Rejected, "fixture registration failed after accepted log"));
+                    }
+                    futures::future::pending::<()>().await;
+                }
                 if self.adapter_mode == "registration-service" {
                     assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|error| PluginFault::new(ErrorCode::Fault, error.message))?);
                     denied_service_stage_privileges(&call.host).await?;

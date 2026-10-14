@@ -9,7 +9,7 @@ use gateway_admin::{
 use gateway_plugin_sdk::{
     CallContext, ErrorCode, Manifest, PluginFault, Stage, StateNamespace, call::host::*,
 };
-pub(crate) use log::PluginLog;
+pub(crate) use log::{LogRegistry, PluginLog};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,

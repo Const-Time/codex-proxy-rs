@@ -315,6 +315,11 @@ async fn installs_runs_callbacks_upgrades_and_revokes_old_revision_without_leaki
             .is_err()
     );
     manager.shutdown().await;
+    let runtime = Arc::new(PluginEngine::new(
+        cache.path().to_owned(),
+        "3.11.2".parse().unwrap(),
+        store.clone(),
+    ));
     let restored = PluginManager::new(store, runtime);
     restored.restore().await.unwrap();
     assert_eq!(restored.list().await.unwrap()[0].status, "ready");
