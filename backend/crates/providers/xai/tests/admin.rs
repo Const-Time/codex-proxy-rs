@@ -952,3 +952,94 @@ impl OAuthPendingFlowPort for TestOAuthPending {
         })
     }
 }
+
+use gateway_admin::model::provider_credentials::UnverifiedCredentialFacts;
+
+fn plugin_facts() -> UnverifiedCredentialFacts {
+    let input = create_input("plugin-native", "plugin-subject");
+    let prepared = provider_xai::GrokCredentialAdmin
+        .prepare_import(&input)
+        .unwrap();
+    UnverifiedCredentialFacts {
+        name: input.name,
+        authentication_kind: "oauth".into(),
+        material: ProviderDocument::new(OpaqueProviderData::new(prepared.credential.into_inner())),
+        email: None,
+        upstream_user_id: Some("plugin-subject".into()),
+        upstream_account_id: None,
+        plan_type: None,
+        has_refresh_token: true,
+        access_token_expires_at: Some(input.account.access_token_expires_at),
+        next_refresh_at: None,
+    }
+}
+
+#[tokio::test]
+async fn xai_plugin_import_rejects_noncanonical_facts_before_official_network() {
+    let bundle = provider_xai::initialize(xai_config(), provider_ports())
+        .await
+        .unwrap();
+    let admin = bundle.admin_provider();
+    for index in 0..10 {
+        let mut facts = plugin_facts();
+        match index {
+            0 => facts.name.clear(),
+            1 => facts.authentication_kind = "api_key".into(),
+            2 => facts.has_refresh_token = false,
+            3 => facts.access_token_expires_at = None,
+            4 => facts.upstream_account_id = Some("unverified-account".into()),
+            index => {
+                let mut material = facts.material.into_provider_data().into_inner();
+                let (field, value) = match index {
+                    5 => ("schema_version", json!(99)),
+                    6 => ("auth_method", json!("api_key")),
+                    7 => ("access_token", json!("")),
+                    8 => ("refresh_token", json!("")),
+                    _ => ("scope", json!("openid openid")),
+                };
+                material.insert(field.into(), value);
+                facts.material = ProviderDocument::new(OpaqueProviderData::new(material));
+            }
+        }
+        let error = admin.prepare_plugin_import(facts).await.err().unwrap();
+        assert_eq!(error.kind(), ProviderAdminErrorKind::Invalid);
+        assert!(!format!("{error:?}").contains("refresh-plugin-native"));
+    }
+}
+
+#[tokio::test]
+async fn xai_plugin_rotation_checks_actual_identity_and_revision_before_verification() {
+    let store = Arc::new(MemoryProviderAccountStore::default());
+    let input = create_input("plugin-native", "plugin-subject");
+    seed_input(&store, &input).await.unwrap();
+    let account = account_record(&store.account(&input.account_id).unwrap());
+    let bundle = provider_xai::initialize(
+        xai_config(),
+        provider_ports_with(store, Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .unwrap();
+    let admin = bundle.admin_provider();
+    let mut foreign = plugin_facts();
+    foreign.upstream_user_id = Some("other-subject".into());
+    assert_eq!(
+        admin
+            .prepare_plugin_rotation(account.clone(), foreign)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        ProviderAdminErrorKind::Conflict
+    );
+    let mut stale = account;
+    stale.credential_revision = Revision::new(2).unwrap();
+    assert_eq!(
+        admin
+            .prepare_plugin_rotation(stale, plugin_facts())
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        ProviderAdminErrorKind::Conflict
+    );
+}

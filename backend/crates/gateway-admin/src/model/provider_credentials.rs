@@ -49,6 +49,52 @@ impl fmt::Debug for ProviderDocument {
     }
 }
 
+/// Plugin projections are unverified input. Provider preparation owns material,
+/// identity and refresh facts; this value deliberately has no content Debug.
+pub struct UnverifiedCredentialFacts {
+    pub name: String,
+    pub authentication_kind: String,
+    pub material: ProviderDocument,
+    pub email: Option<String>,
+    pub upstream_user_id: Option<String>,
+    pub upstream_account_id: Option<String>,
+    pub plan_type: Option<String>,
+    pub has_refresh_token: bool,
+    pub access_token_expires_at: Option<DateTime<Utc>>,
+    pub next_refresh_at: Option<DateTime<Utc>>,
+}
+impl UnverifiedCredentialFacts {
+    pub fn validate(&self) -> Result<(), AdminError> {
+        let text = |value: &str, maximum| {
+            !value.trim().is_empty()
+                && value.len() <= maximum
+                && !value.chars().any(char::is_control)
+        };
+        if !text(&self.name, 200)
+            || !text(&self.authentication_kind, 64)
+            || [
+                &self.email,
+                &self.upstream_user_id,
+                &self.upstream_account_id,
+                &self.plan_type,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !text(value, 1024))
+            || self
+                .material
+                .expose_to_provider()
+                .expose_to_provider()
+                .is_empty()
+            || serde_json::to_vec(self.material.expose_to_provider().expose_to_provider())
+                .map_or(true, |bytes| bytes.len() > 256 * 1024)
+        {
+            return Err(AdminError::invalid("插件凭据事实无效或过大"));
+        }
+        Ok(())
+    }
+}
+
 /// Credential 列表稳定游标。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialCursor {

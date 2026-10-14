@@ -141,6 +141,24 @@ pub struct PluginCommandOutput {
     pub exit_code: u8,
     pub saved_accounts: usize,
 }
+
+/// SDK input converted by Runtime; Provider must prepare it before any Store write.
+pub enum PluginCredentialSave {
+    Create {
+        provider: gateway_core::routing::ProviderKind,
+        facts: super::provider_credentials::UnverifiedCredentialFacts,
+    },
+    Replace {
+        account_id: gateway_core::account::ProviderAccountId,
+        credential_revision: super::Revision,
+        facts: super::provider_credentials::UnverifiedCredentialFacts,
+    },
+}
+/// A returned receipt confirms one native account commit, even if a later read fails.
+pub struct PluginCredentialSaved {
+    pub account_id: gateway_core::account::ProviderAccountId,
+    pub credential_revision: Option<super::Revision>,
+}
 #[derive(Debug, thiserror::Error)]
 pub enum PluginCommandError {
     #[error(transparent)]

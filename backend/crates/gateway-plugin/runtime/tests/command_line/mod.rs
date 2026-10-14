@@ -1,3 +1,4 @@
+mod credentials;
 mod duration;
 mod parameters;
 
@@ -826,8 +827,7 @@ async fn command_rpc_timeout_closes_the_native_service_call_without_retry() {
 }
 
 #[tokio::test]
-async fn credential_results_remain_explicitly_incomplete_until_native_account_commit_is_connected()
-{
+async fn credential_results_without_native_authority_never_claim_saved_accounts() {
     let account = json!({"action":"create","provider_id":"openai","facts":{"name":"Fixture","authentication_kind":"oauth","material":{"access_token":"fake-command-fixture-token"}}});
     for (exit, count) in [(0, 1), (7, 1), (0, 33)] {
         let fixture = Fixture::new().await;

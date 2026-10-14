@@ -149,6 +149,7 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
                         Ok(registry.service_factory())
                     }))
                     .with_data(admin.services().plugin_data())
+                    .with_credentials(admin.services().plugin_credentials())
                     .with_resources(admin.services().plugin_resources())
                     .with_quota(admin.services().plugin_quota())
                     .with_models(

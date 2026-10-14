@@ -151,6 +151,21 @@ pub trait ProviderAdmin: Send + Sync {
         command: PrepareCredentialImport,
     ) -> Result<PreparedCredentialImport, ProviderAdminError>;
 
+    async fn prepare_plugin_import(
+        &self,
+        _facts: crate::model::provider_credentials::UnverifiedCredentialFacts,
+    ) -> Result<crate::model::provider_credentials::PreparedCredentialCreate, ProviderAdminError>
+    {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
+    async fn prepare_plugin_rotation(
+        &self,
+        _account: crate::model::accounts::AccountRecord,
+        _facts: crate::model::provider_credentials::UnverifiedCredentialFacts,
+    ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
+
     async fn start_authorization(
         &self,
         pending: PendingAuthorizationMutation,

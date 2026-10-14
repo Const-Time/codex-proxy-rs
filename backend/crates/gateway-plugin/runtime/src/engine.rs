@@ -47,6 +47,7 @@ impl HttpDispatcher {
 }
 
 pub struct PluginEngine {
+    credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     services: Option<gateway_core::engine::middleware::service::Source>,
     outbound: crate::outbound::SharedClient,
     http: Option<Arc<HttpDispatcher>>,
@@ -63,6 +64,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            credentials: None,
             services: None,
             outbound: Arc::default(),
             http: None,
@@ -115,6 +117,13 @@ impl PluginEngine {
         data: Arc<dyn gateway_admin::ports::plugins::PluginDataService>,
     ) -> Self {
         self.data = Some(data);
+        self
+    }
+    pub fn with_credentials(
+        mut self,
+        credentials: Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>,
+    ) -> Self {
+        self.credentials = Some(credentials);
         self
     }
     async fn package(
@@ -567,6 +576,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            credentials: self.credentials.clone(),
             commands,
             services,
             upstream_adapters,
@@ -585,6 +595,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     commands: Vec<CommandDescriptor>,
     services: Arc<crate::services::Registry>,
     outbound: Arc<crate::outbound::Registry>,
@@ -617,6 +628,7 @@ impl PluginProcess for LivePlugin {
             return Err(AdminError::conflict("插件命令代次不可用").into());
         }
         crate::command_line::Executor {
+            credentials: self.credentials.as_ref(),
             session: &self.session,
             commands: &self.commands,
             services: &self.services,

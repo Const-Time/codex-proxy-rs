@@ -203,6 +203,50 @@ pub(crate) async fn append_admin_audit_event_in_transaction(
     Ok(())
 }
 
+/// Account transactions fence the actual installed generation before changing
+/// configuration or credentials. The original plugin row remains the authority.
+pub(crate) async fn lock_plugin_mutation_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &AdminAuditEvent,
+) -> StoreResult<()> {
+    event.validate()?;
+    if event.actor_kind != AdminAuditActorKind::Plugin {
+        return Ok(());
+    }
+    let (instance_id, revision) = event
+        .actor_ref
+        .strip_prefix("plugin:")
+        .and_then(|value| value.rsplit_once('@'))
+        .ok_or_else(|| invalid("invalid plugin actor"))?;
+    let revision = revision
+        .parse::<std::num::NonZeroU64>()
+        .map_err(|_| invalid("invalid plugin revision"))?;
+    let scope = gateway_admin::model::plugins::PluginMutationScope {
+        instance_id: instance_id.to_owned(),
+        revision: revision.get(),
+        actor: gateway_admin::model::MutationContext {
+            actor: gateway_admin::model::MutationActor::Plugin {
+                instance_id: instance_id.to_owned(),
+                revision,
+            },
+            request_id: event.admin_request_id.clone().unwrap_or_default(),
+        },
+    };
+    super::plugins::lock_plugin_resource(transaction, &scope)
+        .await
+        .map_err(|error| {
+            if error.kind() == gateway_admin::ports::store::AdminStoreErrorKind::Conflict {
+                StoreError::Conflict {
+                    entity: "plugin instance",
+                    id: instance_id.to_owned(),
+                    kind: crate::ConflictKind::StaleRevision,
+                }
+            } else {
+                postgres_unavailable("lock plugin credential generation")
+            }
+        })
+}
+
 fn invalid(message: &str) -> StoreError {
     StoreError::InvalidData {
         entity: ENTITY,
