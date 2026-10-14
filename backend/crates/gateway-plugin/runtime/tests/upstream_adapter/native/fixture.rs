@@ -1,7 +1,6 @@
 use super::super::{binding::CandidateRuntime, execution::Server, *};
-use super::environment::connection;
 use crate::models::fixture::Core;
-use crate::support::database::Database;
+use crate::services::upstream_sdk::environment::Environment;
 use chrono::Utc;
 use gateway_admin::model::plugins::*;
 use gateway_core::{
@@ -46,13 +45,11 @@ pub(super) struct Fixture {
     pub provider: &'static str,
     native_model: &'static str,
     pub continuation: Arc<gateway_store::redis::RedisNativeContinuationRepository>,
-    plugin_store: Arc<MemoryStore>,
+    plugin_store: Arc<dyn PluginStore>,
     adapter_url: String,
     adapter_transport: &'static str,
     credential_revision: u64,
-    _store: gateway_store::StoreBundle,
-    _cache: tempfile::TempDir,
-    database: Database,
+    pub env: Environment,
 }
 
 fn snapshot(
@@ -151,27 +148,8 @@ impl Fixture {
             "xai" => "grok-4.5",
             _ => panic!("unsupported native Provider fixture"),
         };
-        let (database, database_url, redis_url) = Database::create().await?;
-        let cache = tempfile::tempdir().unwrap();
-        // Never let deployment environment variables redirect this test fixture.
-        for name in [
-            "CPR_DATABASE_URL",
-            "CPR_REDIS_URL",
-            "CPR_DATABASE_PASSWORD",
-            "CPR_REDIS_PASSWORD",
-        ] {
-            assert!(
-                std::env::var_os(name).is_none(),
-                "native adapter fixture must not use deployment environment overrides"
-            );
-        }
-        let mut config: gateway_store::StoreConfig = serde_json::from_value(json!({
-            "database":connection(&database_url),"redis":connection(&redis_url)
-        }))
-        .unwrap();
-        config.resolve_and_validate(cache.path()).unwrap();
-        let store = gateway_store::initialize(config).await.unwrap();
-        let ports = store.provider_ports();
+        let env = Environment::new().await?;
+        let ports = env.store.provider_ports();
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let account = ProviderAccountId::new(format!("acct_allowed_{suffix}")).unwrap();
         let forbidden = ProviderAccountId::new(format!("acct_forbidden_{suffix}")).unwrap();
@@ -214,16 +192,19 @@ impl Fixture {
         } else {
             let mut provider_config = provider_openai::OpenAiConfig::default();
             provider_config.api.base_url = server.url.clone();
-            provider_config.resolve_and_validate(cache.path()).unwrap();
+            provider_config
+                .resolve_and_validate(env.cache.path())
+                .unwrap();
             provider_openai::initialize(provider_config, ports.clone())
                 .await
                 .unwrap()
                 .core_provider()
         };
-        let connection =
-            redis::aio::ConnectionManager::new(redis::Client::open(redis_url).unwrap())
-                .await
-                .unwrap();
+        let connection = redis::aio::ConnectionManager::new(
+            redis::Client::open(env.redis_url.as_str()).unwrap(),
+        )
+        .await
+        .unwrap();
         let continuation = Arc::new(
             gateway_store::redis::RedisNativeContinuationRepository::new(
                 connection,
@@ -249,12 +230,15 @@ impl Fixture {
             core.clone(),
         )
         .with_budget(core.clone());
-        let plugin_store = Arc::new(MemoryStore::default());
-        let engine = Arc::new(PluginEngine::new(
-            cache.path().join("plugins"),
-            "3.11.2".parse().unwrap(),
-            plugin_store.clone(),
-        ));
+        let plugin_store = env.store.plugin_store();
+        let engine = Arc::new(
+            PluginEngine::new(
+                env.cache.path().join("plugins"),
+                "3.11.2".parse().unwrap(),
+                plugin_store.clone(),
+            )
+            .with_credentials(env.admin.services().plugin_credentials()),
+        );
         let manager = PluginManager::new(plugin_store.clone(), Arc::new(CandidateRuntime(engine)));
         let artifact = manager
             .upload(upstream_archive("1.0.0"), &actor())
@@ -289,9 +273,7 @@ impl Fixture {
             adapter_url,
             adapter_transport,
             credential_revision: 1,
-            _store: store,
-            _cache: cache,
-            database,
+            env,
         })
     }
     pub async fn start(&self, behavior: &str) -> StartedExecution {
@@ -326,6 +308,7 @@ impl Fixture {
             operation: Operation::Generate(GenerateRequest::from_protocol_payload(ProtocolPayload::json_object("openai",
                 serde_json::from_value(json!({"model":"public-model","input":"fixture prompt","service_tier":"default", "behavior":behavior,
                     "fixture_account":self.account.as_str(),"fixture_credential_revision":self.credential_revision,"fixture_model":self.native_model,
+                    "fixture_forbidden":self.forbidden.as_str(), "fixture_provider":self.provider,
                     "previous_response_id":previous,"expect_continuation":previous.is_some()})).unwrap()
             ).unwrap())),
             metadata: ExecutionRequestMetadata { protocol:"openai".into(), endpoint:"/v1/responses".into(), transport, stream:transport==ClientTransport::WebSocket, client_ip:None, user_agent:None, previous_response_id:previous.map(PreviousResponseId::new) },
@@ -383,12 +366,12 @@ impl Fixture {
     }
     pub async fn close(self) {
         self.manager.shutdown().await;
-        let database = self.database;
         drop(self.execution);
         drop(self.ports);
-        drop(self._store);
         drop(self.continuation);
-        database.close().await;
+        drop(self.manager);
+        drop(self.plugin_store);
+        self.env.close().await;
     }
     pub async fn upgrade(&mut self) {
         let artifact = self
@@ -424,11 +407,14 @@ impl Fixture {
     }
     pub async fn restart(&mut self) {
         self.manager.shutdown().await;
-        let engine = Arc::new(PluginEngine::new(
-            self._cache.path().join("plugins"),
-            "3.11.2".parse().unwrap(),
-            self.plugin_store.clone(),
-        ));
+        let engine = Arc::new(
+            PluginEngine::new(
+                self.env.cache.path().join("plugins"),
+                "3.11.2".parse().unwrap(),
+                self.plugin_store.clone(),
+            )
+            .with_credentials(self.env.admin.services().plugin_credentials()),
+        );
         self.manager = PluginManager::new(
             self.plugin_store.clone(),
             Arc::new(CandidateRuntime(engine)),

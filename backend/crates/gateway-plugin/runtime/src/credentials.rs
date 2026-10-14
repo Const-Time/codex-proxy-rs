@@ -69,7 +69,7 @@ pub(crate) fn is_method(method: &str) -> bool {
 fn invalid() -> PluginFault {
     PluginFault::new(ErrorCode::InvalidInput, "invalid native account request")
 }
-fn error(error: AdminError, saving: bool) -> PluginFault {
+pub(crate) fn error(error: AdminError, saving: bool) -> PluginFault {
     PluginFault::new(
         match error.kind() {
             AdminErrorKind::Invalid => ErrorCode::InvalidInput,
@@ -86,7 +86,9 @@ fn error(error: AdminError, saving: bool) -> PluginFault {
         },
     )
 }
-fn runtime(account: &gateway_admin::model::accounts::AccountRecord) -> AuthRuntimeAccount {
+pub(crate) fn runtime(
+    account: &gateway_admin::model::accounts::AccountRecord,
+) -> AuthRuntimeAccount {
     AuthRuntimeAccount {
         account_id: account.id.clone(),
         provider_id: account.provider_kind.as_str().into(),
@@ -106,7 +108,29 @@ fn runtime(account: &gateway_admin::model::accounts::AccountRecord) -> AuthRunti
         next_refresh_at_ms: account.next_refresh_at.map(|t| t.timestamp_millis()),
     }
 }
-fn encode(value: impl serde::Serialize) -> Result<RpcReply, PluginFault> {
+pub(crate) fn export(result: ProviderExportCredentialInput) -> AuthCredential {
+    let account = result.account;
+    AuthCredential {
+        account_id: account.id,
+        provider_id: account.provider_kind.as_str().into(),
+        credential_revision: account.credential_revision.get(),
+        facts: CredentialFacts {
+            name: account.name,
+            authentication_kind: account.authentication_kind,
+            material: result.provider_material.into_provider_data().into_inner(),
+            email: account.email,
+            upstream_user_id: account.upstream_user_id,
+            upstream_account_id: account.upstream_account_id,
+            plan_type: account.plan_type,
+            has_refresh_token: account.has_refresh_token,
+            access_token_expires_at_ms: account
+                .access_token_expires_at
+                .map(|t| t.timestamp_millis()),
+            next_refresh_at_ms: account.next_refresh_at.map(|t| t.timestamp_millis()),
+        },
+    }
+}
+pub(crate) fn encode(value: impl serde::Serialize) -> Result<RpcReply, PluginFault> {
     let payload = serde_json::to_vec(&value).map_err(|_| invalid())?;
     if payload.len() > 1024 * 1024 {
         return Err(PluginFault::new(
@@ -197,26 +221,7 @@ pub(crate) async fn call(
                     )
                     .await
                     .map_err(|e| error(e, false))?;
-                let account = result.account;
-                encode(AuthCredential {
-                    account_id: account.id,
-                    provider_id: account.provider_kind.as_str().into(),
-                    credential_revision: account.credential_revision.get(),
-                    facts: CredentialFacts {
-                        name: account.name,
-                        authentication_kind: account.authentication_kind,
-                        material: result.provider_material.into_provider_data().into_inner(),
-                        email: account.email,
-                        upstream_user_id: account.upstream_user_id,
-                        upstream_account_id: account.upstream_account_id,
-                        plan_type: account.plan_type,
-                        has_refresh_token: account.has_refresh_token,
-                        access_token_expires_at_ms: account
-                            .access_token_expires_at
-                            .map(|t| t.timestamp_millis()),
-                        next_refresh_at_ms: account.next_refresh_at.map(|t| t.timestamp_millis()),
-                    },
-                })
+                encode(export(result))
             }
             "host.auth.save" => {
                 let request: AuthSaveRequest =

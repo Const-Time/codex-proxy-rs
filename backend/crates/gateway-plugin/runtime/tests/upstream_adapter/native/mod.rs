@@ -1,5 +1,5 @@
 mod continuation;
-mod environment;
+mod credentials;
 mod fixture;
 mod lifecycle;
 mod websocket;

@@ -186,6 +186,7 @@ pub(crate) struct Server {
     pub(super) url: String,
     pub(super) requests: Arc<Mutex<Vec<String>>>,
     pub(super) entered: Arc<tokio::sync::Notify>,
+    pub(super) release: Arc<tokio::sync::Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Server {
@@ -201,6 +202,8 @@ impl Server {
         let saved = requests.clone();
         let entered = Arc::new(tokio::sync::Notify::new());
         let signal = entered.clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let resume = release.clone();
         let task = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -224,11 +227,15 @@ impl Server {
                         }
                     }
                 }
+                let credential_barrier = bytes.ends_with(b"credential-barrier");
                 saved
                     .lock()
                     .unwrap()
                     .push(String::from_utf8(bytes).unwrap());
                 signal.notify_one();
+                if credential_barrier {
+                    resume.notified().await;
+                }
                 socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfixture-response").await.unwrap();
             }
         });
@@ -236,6 +243,7 @@ impl Server {
             url,
             requests,
             entered,
+            release,
             task,
         }
     }

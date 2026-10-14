@@ -23,6 +23,7 @@ pub(crate) struct Environment {
     pub pool: PgPool,
     pub published: Arc<Mutex<Vec<ConfigRevision>>>,
     pub cache: tempfile::TempDir,
+    pub redis_url: String,
     database: Database,
 }
 struct ObservedSnapshot {
@@ -118,6 +119,7 @@ impl Environment {
             pool,
             published,
             cache,
+            redis_url,
             database,
         })
     }
