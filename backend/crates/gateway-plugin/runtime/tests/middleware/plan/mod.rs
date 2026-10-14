@@ -17,6 +17,15 @@ impl PluginRuntime for KernelRuntime {
     async fn shutdown(&self) {
         self.0.shutdown().await;
     }
+    fn observer_plan(
+        &self,
+        targets: Vec<gateway_admin::ports::plugins::PluginObserverTarget>,
+        services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<Option<Arc<dyn gateway_core::engine::observation::RequestObserverPlan>>, AdminError>
+    {
+        self.0.observer_plan(targets, services, cancellation)
+    }
     fn contributes_model_catalog(&self, artifact: &PluginArtifact) -> Result<bool, AdminError> {
         self.0.contributes_model_catalog(artifact)
     }

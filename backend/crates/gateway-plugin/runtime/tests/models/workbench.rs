@@ -240,6 +240,172 @@ async fn settled(env: &Environment, count: i64) {
     .expect("original PostgreSQL requests and shared ledger must settle once");
 }
 
+struct ApiServer {
+    address: std::net::SocketAddr,
+    client: reqwest::Client,
+    cancellation: gateway_core::lifecycle::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+    _workers: gateway_host::workers::WorkerSupervisor,
+}
+impl ApiServer {
+    async fn new(env: &Environment, manager: Arc<PluginManager>) -> Self {
+        let cancellation = gateway_core::lifecycle::CancellationToken::new();
+        let connections = Arc::new(gateway_host::serve::ConnectionTracker::new(
+            cancellation.clone(),
+        ));
+        let workers = gateway_host::workers::WorkerSupervisor::new(cancellation.clone());
+        let app = gateway_api::initialize(
+            gateway_api::ApiConfig {
+                asset_directory: env.cache.path().into(),
+                cors_allowed_origins: vec![],
+                request_timeout_seconds: None,
+                request_id_header: "x-request-id".into(),
+            },
+            env.core.execution_service(),
+            env.admin.services().with_plugins(manager),
+            vec![],
+            workers.health_source(),
+            connections,
+        )
+        .unwrap();
+        // Real API routes and Host connection guards; this fixture does not
+        // claim to run the full Host worker/signal supervisor.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = cancellation.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app.router())
+                .with_graceful_shutdown(async move { shutdown.cancelled().await })
+                .await
+                .unwrap();
+        });
+        Self {
+            address,
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+                .unwrap(),
+            cancellation,
+            task,
+            _workers: workers,
+        }
+    }
+    async fn get(&self, path: &str, authorization: &str) -> reqwest::Response {
+        self.client
+            .get(format!("http://{}{path}", self.address))
+            .header("authorization", authorization)
+            .send()
+            .await
+            .unwrap()
+    }
+    async fn model(&self, authorization: &str) -> reqwest::Response {
+        self.client
+            .post(format!("http://{}/v1/responses", self.address))
+            .header("authorization", authorization)
+            .json(&json!({
+                "model":"gpt-5.4", "input":"mixedCase", "stream":false,
+                "metadata":{"capability_workbench":"true","capability_workbench_uppercase":"true"}
+            }))
+            .send()
+            .await
+            .unwrap()
+    }
+    async fn websocket_model(
+        &self,
+        authorization: &str,
+        upstream_websocket: bool,
+    ) -> Result<(), Vec<String>> {
+        use futures::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest as _};
+        let mut handshake = format!("ws://{}/v1/responses", self.address)
+            .into_client_request()
+            .unwrap();
+        handshake
+            .headers_mut()
+            .insert("authorization", authorization.parse().unwrap());
+        let stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
+        let (mut socket, response) = tokio_tungstenite::client_async(handshake, stream)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 101);
+        socket.send(Message::Text(json!({
+            "type":"response.create", "model":"gpt-5.4", "input":"mixedCase",
+            "use_websocket":upstream_websocket,
+            "metadata":{"capability_workbench":"true","capability_workbench_uppercase":"true"}
+        }).to_string().into())).await.unwrap();
+        let mut seen = vec![];
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut started = false;
+            while let Some(message) = socket.next().await {
+                let Message::Text(body) = message.unwrap() else {
+                    continue;
+                };
+                let body: Value = serde_json::from_str(&body).unwrap();
+                seen.push(body["type"].as_str().unwrap_or("missing-type").to_owned());
+                assert_ne!(body["type"], "response.failed", "{body}");
+                assert_ne!(body["type"], "error", "{body}");
+                if body["type"] == "response.created" {
+                    started = true;
+                }
+                if body["type"] == "response.completed" {
+                    assert!(started);
+                    assert_eq!(body["response"]["usage"]["input_tokens"], 10);
+                    socket.close(None).await.unwrap();
+                    return;
+                }
+            }
+            panic!("API WebSocket closed without the native terminal");
+        })
+        .await;
+        if completion.is_ok() {
+            Ok(())
+        } else {
+            Err(seen)
+        }
+    }
+    async fn close(&mut self) {
+        self.cancellation.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut self.task)
+            .await
+            .expect("API connection drain")
+            .unwrap();
+    }
+}
+impl Drop for ApiServer {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        self.task.abort();
+    }
+}
+
+async fn completed_evidence(
+    manager: &PluginManager,
+    installed: &PluginView,
+    context: &MutationContext,
+    count: usize,
+) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (_, snapshot) =
+                request(manager, installed, context, "GET", "api/snapshot", None).await;
+            if snapshot["facts"]["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["event"] == "request_completed")
+                .count()
+                == count
+            {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("original observer must report each completed request once")
+}
+
 #[tokio::test]
 #[ignore = "requires verified original/rebuilt artifacts and isolated PostgreSQL/Redis"]
 async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinity_with_single_shared_charge()
@@ -407,6 +573,28 @@ async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinit
                 ],
                 scope: PluginExecutionScope::All {},
             });
+            command.model_router = Some(PluginModelRouterBinding {
+                order: 1,
+                scope: PluginExecutionScope::All {},
+                failure_policy: PluginPolicyFailurePolicy::Reject,
+            });
+            command.account_scheduler = Some(PluginAccountSchedulerBinding {
+                order: 1,
+                scope: PluginExecutionScope::All {},
+                failure_policy: PluginPolicyFailurePolicy::Reject,
+            });
+            command.observer = Some(PluginObserverBinding {
+                order: 1,
+                request_completed: Some(PluginExecutionScope::All {}),
+                websocket_response: Some(PluginExecutionScope::All {}),
+            });
+            command.frontend_authentication = Some(PluginAuthenticationBinding {
+                failure_policy: PluginAuthenticationPolicy::Delegate,
+                identities: BTreeMap::from([(
+                    "capability-workbench-demo-user".into(),
+                    key_id.clone(),
+                )]),
+            });
             let installed = manager.update(None, command, &actor()).await.unwrap();
             let provider = ProviderKind::new("openai").unwrap();
             let affinity_key = ProviderSessionAffinityKey::try_new("capability-workbench").unwrap();
@@ -466,9 +654,158 @@ async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinit
                 affinity.load(&provider, &affinity_key).await.unwrap(),
                 Some(foreign)
             );
+            let mut api = ApiServer::new(&env, manager.clone()).await;
+            let demo = "CapabilityWorkbench demo";
+            let catalog = api.get("/v1/models", demo).await;
+            assert_eq!(catalog.status(), 200);
+            let catalog: Value = catalog.json().await.unwrap();
+            assert!(
+                catalog["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|model| model["id"] == "gpt-5.4"),
+                "{catalog}"
+            );
+            assert_eq!(
+                api.get("/v1/models", "CapabilityWorkbench invalid")
+                    .await
+                    .status(),
+                401
+            );
+            assert_eq!(
+                api.get(
+                    "/v1/models",
+                    &format!("Bearer {}", key.secret.expose_for_response())
+                )
+                .await
+                .status(),
+                200
+            );
+            assert_eq!(
+                api.get("/api/admin/plugins", demo).await.status(),
+                401,
+                "external model identity cannot become an admin session"
+            );
+            let response = api.model(demo).await;
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()["x-cpr-capability-workbench"], "observed");
+            let response: Value = response.json().await.unwrap();
+            assert_eq!(response["status"], "completed", "{response}");
+            assert_eq!(response["usage"]["input_tokens"], 10);
+            settled(&env, 4).await;
+            // A client WS request asks for its chosen upstream transport. The
+            // HTTP scenario explicitly keeps the client on WS while selecting
+            // HTTP upstream; native HTTP calls above exercise preferred-WS fallback.
+            if let Err(seen) = api.websocket_model(demo, websocket).await {
+                let (_, snapshot) =
+                    request(&manager, &installed, &context, "GET", "api/snapshot", None).await;
+                let requests: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'completed',completed_at IS NOT NULL,'error',error_kind,'attempts',attempt_count,'transport',upstream_transport) FROM model_requests").fetch_all(&env.pool).await.unwrap();
+                panic!(
+                    "native API WebSocket timeout: events={seen:?}; requests={requests:?}; upstream_count={}; facts={snapshot}",
+                    server.requests.lock().unwrap().len()
+                );
+            }
+            settled(&env, 5).await;
+            assert!(
+                manager
+                    .command_help(&installed.id, installed.revision, Some("ping"))
+                    .await
+                    .unwrap()
+                    .contains("ping")
+            );
+            let pong = manager
+                .run_system_command(
+                    &installed.id,
+                    PluginCommandAction::Execute {
+                        name: "ping".into(),
+                        arguments: vec![],
+                    },
+                    gateway_core::lifecycle::CancellationToken::new(),
+                    gateway_core::engine::nested::ExtensionCallScope::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    pong.stdout.as_str(),
+                    pong.stderr.as_str(),
+                    pong.exit_code,
+                    pong.saved_accounts
+                ),
+                ("capability-workbench pong\n", "", 0, 0)
+            );
+            let snapshot = completed_evidence(&manager, &installed, &context, 4).await;
+            let entries = snapshot["facts"]["entries"].as_array().unwrap();
+            let observed: std::collections::BTreeSet<_> = entries
+                .iter()
+                .filter(|entry| entry["event"] == "request_completed")
+                .map(|entry| entry["requestId"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(observed.len(), 4, "{snapshot}");
+            for event in ["route_decided", "account_ordered"] {
+                let decisions: std::collections::BTreeSet<_> = entries
+                    .iter()
+                    .filter(|entry| entry["event"] == event)
+                    .map(|entry| entry["requestId"].as_str().unwrap().to_owned())
+                    .collect();
+                assert_eq!(decisions, observed, "{snapshot}");
+            }
+            for event in [
+                "demo_identity_authenticated",
+                "invalid_demo_identity_rejected",
+                "unrelated_identity_delegated",
+                "ping_executed",
+            ] {
+                assert!(
+                    entries.iter().any(|entry| entry["event"] == event),
+                    "{snapshot}"
+                );
+            }
+            for entry in entries.iter().filter(|entry| {
+                entry["event"] == "account_ordered" || entry["event"] == "request_completed"
+            }) {
+                assert_eq!(entry["accountId"], allowed.as_str(), "{entry}");
+                assert_eq!(entry["provider"], "openai", "{entry}");
+            }
+            let frames: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["event"] == "websocket_response")
+                .collect();
+            if websocket {
+                assert!(
+                    !frames.is_empty(),
+                    "native WebSocket observation must reach the unchanged plugin: {snapshot}"
+                );
+                let mut sequences = std::collections::BTreeMap::<String, u64>::new();
+                for frame in frames {
+                    let id = frame["requestId"].as_str().unwrap();
+                    assert!(observed.contains(id));
+                    assert_eq!(frame["provider"], "openai");
+                    assert_eq!(frame["accountId"], allowed.as_str());
+                    assert_eq!(frame["details"]["payloadIncluded"], true);
+                    let sequence = frame["details"]["sequence"].as_u64().unwrap();
+                    if let Some(previous) = sequences.insert(id.to_owned(), sequence) {
+                        assert!(sequence > previous);
+                    }
+                }
+            } else {
+                assert!(
+                    frames.is_empty(),
+                    "client WebSocket transport cannot invent upstream WebSocket observations: {snapshot}"
+                );
+            }
+            let recorded: std::collections::BTreeSet<String> =
+                sqlx::query_scalar("SELECT id FROM model_requests")
+                    .fetch_all(&env.pool)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .collect();
+            assert!(observed.is_subset(&recorded));
             {
                 let captured = server.requests.lock().unwrap();
-                assert_eq!(captured.len(), 3);
+                assert_eq!(captured.len(), 5);
                 for (index, request) in captured.iter().enumerate() {
                     let (headers, body) = request.split_once("\r\n\r\n").unwrap();
                     assert!(
@@ -502,19 +839,19 @@ async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinit
             let rows: Vec<(String,String,String,String)> = sqlx::query_as("SELECT user_id,account_group_id,client_api_key_ref,amount_usd::text FROM user_group_charge_events ORDER BY completed_at").fetch_all(&env.pool).await.unwrap();
             let metering: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('input',input_tokens,'output',output_tokens,'multiplier',billing_multiplier::text,'cost',cost_amount::text,'billed',billed_cost_amount::text,'transport',upstream_transport) FROM model_requests").fetch_all(&env.pool).await.unwrap();
             let ledger: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('raw',raw_amount_usd::text,'multiplier',billing_multiplier::text,'scope',billing_multiplier_scope,'billed',amount_usd::text) FROM user_group_charge_events ORDER BY completed_at").fetch_all(&env.pool).await.unwrap();
-            assert_eq!(rows.len(), 3);
+            assert_eq!(rows.len(), 5);
             for row in &rows {
                 assert_eq!((&row.0, &row.1, &row.2), (&user, &group.id, &key_id));
                 assert_eq!(row.3, rows[0].3, "requests={metering:?}; ledger={ledger:?}");
             }
             let priced: (i64,Option<bool>) = sqlx::query_as("SELECT count(*),bool_and(input_tokens=10 AND output_tokens=2 AND billing_multiplier=1.5 AND cost_amount>0 AND billed_cost_amount=round(cost_amount*1.5,10)) FROM model_requests").fetch_one(&env.pool).await.unwrap();
-            assert_eq!(priced, (3, Some(true)), "{metering:?}");
+            assert_eq!(priced, (5, Some(true)), "{metering:?}");
             let transports: Vec<String> =
                 sqlx::query_scalar("SELECT upstream_transport FROM model_requests")
                     .fetch_all(&env.pool)
                     .await
                     .unwrap();
-            assert_eq!(transports.len(), 3);
+            assert_eq!(transports.len(), 5);
             assert!(
                 transports
                     .iter()
@@ -523,6 +860,29 @@ async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinit
             );
             let balanced: bool = sqlx::query_scalar("SELECT bool_and(w.daily_used_usd=e.amount AND w.weekly_used_usd=e.amount) FROM user_group_budget_windows w JOIN (SELECT user_id,account_group_id,sum(amount_usd) amount FROM user_group_charge_events GROUP BY user_id,account_group_id) e USING(user_id,account_group_id)").fetch_one(&env.pool).await.unwrap();
             assert!(balanced);
+            let PluginAuthenticationDecision::Authenticated { access, .. } =
+                manager.authenticate(demo.into(), None).await.unwrap()
+            else {
+                panic!("native authentication binding")
+            };
+            manager
+                .update(
+                    Some(&installed.id),
+                    update(&artifact.sha256, installed.revision, false),
+                    &actor(),
+                )
+                .await
+                .unwrap();
+            assert!(access.is_revoked());
+            assert_eq!(api.model(demo).await.status(), 401);
+            assert!(
+                manager
+                    .command_help(&installed.id, installed.revision, Some("ping"))
+                    .await
+                    .is_err()
+            );
+            settled(&env, 5).await;
+            api.close().await;
             manager.shutdown().await;
             drop(manager);
             env.close().await;
