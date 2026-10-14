@@ -16,6 +16,7 @@ use std::{
 
 pub(crate) struct Callbacks {
     inner: Arc<dyn CallbackHandler>,
+    credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     outbound: Arc<crate::outbound::Registry>,
     services: Arc<crate::services::Registry>,
     models: Option<Arc<crate::models::Models>>,
@@ -39,9 +40,11 @@ impl Callbacks {
         models: Option<Arc<crate::models::Models>>,
         outbound: Arc<crate::outbound::Registry>,
         services: Arc<crate::services::Registry>,
+        credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner,
+            credentials,
             outbound,
             services,
             models,
@@ -153,6 +156,7 @@ impl CallbackHandler for Callbacks {
         let client = self.client.clone();
         let models = self.models.clone();
         let inner = self.inner.clone();
+        let credentials = self.credentials.clone();
         Box::pin(async move {
             let call = call.ok_or_else(|| {
                 PluginFault::new(
@@ -161,19 +165,33 @@ impl CallbackHandler for Callbacks {
                 )
             })?;
             if !method.starts_with("host.upstream.") {
-                let callback =
-                    if crate::models::is_method(&method) || method.starts_with("host.http.") {
-                        models
-                            .ok_or_else(|| {
-                                PluginFault::new(
-                                    ErrorCode::Unsupported,
-                                    "host model service is not configured",
-                                )
-                            })?
-                            .call(context, method, params, payload)
-                    } else {
-                        inner.call(context, method, params, payload)
-                    };
+                let callback = if crate::credentials::is_method(&method) {
+                    let service = credentials.ok_or_else(|| {
+                        PluginFault::new(
+                            ErrorCode::Unsupported,
+                            "native account credentials are not configured",
+                        )
+                    })?;
+                    Box::pin(super::credentials::read(
+                        service,
+                        context,
+                        call.account.clone(),
+                        &method,
+                        params,
+                        payload,
+                    )) as BoxFuture<'_, Result<RpcReply, PluginFault>>
+                } else if crate::models::is_method(&method) || method.starts_with("host.http.") {
+                    models
+                        .ok_or_else(|| {
+                            PluginFault::new(
+                                ErrorCode::Unsupported,
+                                "host model service is not configured",
+                            )
+                        })?
+                        .call(context, method, params, payload)
+                } else {
+                    inner.call(context, method, params, payload)
+                };
                 return tokio::select! {biased;
                     ()=call.closed.cancelled()=>Err(call.fault(ErrorCode::Cancelled,"upstream callback scope ended")),
                     ()=call.cancellation.cancelled()=>Err(call.fault(ErrorCode::Cancelled,"upstream invocation cancelled")),

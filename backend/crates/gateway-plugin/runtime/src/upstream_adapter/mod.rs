@@ -1,5 +1,6 @@
 //! Frozen registration facts for a managed adapter; execution keeps Provider ownership.
 pub(crate) mod callbacks;
+mod credentials;
 mod event;
 mod execution;
 mod failure;

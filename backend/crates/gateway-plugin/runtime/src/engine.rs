@@ -451,6 +451,7 @@ impl PluginRuntime for PluginEngine {
             models.clone(),
             outbound.clone(),
             services.clone(),
+            self.credentials.clone(),
         );
         let session = Arc::new(
             RpcSession::start_supervised(

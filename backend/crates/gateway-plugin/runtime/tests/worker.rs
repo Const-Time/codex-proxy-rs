@@ -3,6 +3,239 @@ use gateway_plugin_sdk::{
     client::{CallFuture, CallReply, PluginCall, PluginHandler, PluginSession, SessionConfig},
 };
 use serde_json::json;
+mod worker_credentials {
+    //! SDK subprocess probes for the actual Provider-bound credential callbacks.
+    use gateway_plugin_sdk::{ErrorCode, PluginFault, call::host::*, client::HostClient};
+    use serde::de::DeserializeOwned;
+    use serde_json::{Value, json};
+
+    async fn request(
+        host: &HostClient,
+        method: &str,
+        params: Value,
+        payload: Vec<u8>,
+    ) -> Result<
+        Result<gateway_plugin_sdk::client::HostReply, gateway_plugin_sdk::client::SessionError>,
+        PluginFault,
+    > {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            host.call(method, params, payload),
+        )
+        .await
+        .map_err(|_| {
+            PluginFault::new(
+                ErrorCode::Fault,
+                format!("credential probe timed out: {method}"),
+            )
+        })
+    }
+    async fn read<T: DeserializeOwned>(
+        host: &HostClient,
+        method: &str,
+        input: Value,
+    ) -> Result<T, PluginFault> {
+        let reply = request(host, method, json!({}), serde_json::to_vec(&input).unwrap())
+            .await?
+            .map_err(|e| e.into_plugin_fault())?;
+        if reply.result != json!({}) {
+            return Err(PluginFault::new(
+                ErrorCode::Fault,
+                "credential probe envelope changed",
+            ));
+        }
+        serde_json::from_slice(&reply.payload).map_err(|_| {
+            PluginFault::new(
+                ErrorCode::Fault,
+                "credential probe response could not be decoded",
+            )
+        })
+    }
+    async fn denied(
+        host: &HostClient,
+        method: &str,
+        params: Value,
+        payload: Vec<u8>,
+        expected: ErrorCode,
+    ) -> Result<(), PluginFault> {
+        let result = request(host, method, params, payload).await?;
+        let actual = result
+            .err()
+            .ok_or_else(|| {
+                PluginFault::new(
+                    ErrorCode::Fault,
+                    format!(
+                        "credential probe unexpectedly accepted {method}; expected {expected:?}"
+                    ),
+                )
+            })?
+            .into_plugin_fault()
+            .code;
+        if actual != expected {
+            return Err(PluginFault::new(
+                ErrorCode::Fault,
+                format!("credential probe {method}: expected {expected:?}, received {actual:?}"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn run(host: &HostClient, mode: &str, input: &Value) -> Result<(), PluginFault> {
+        let selected = input["fixture_account"].as_str().unwrap();
+        if mode != "callback-credentials" {
+            host.call(
+                "host.upstream.http.do",
+                json!({"method":"POST","path":"audit","headers":[],"query":[]}),
+                b"credential-barrier".to_vec(),
+            )
+            .await
+            .map_err(|e| e.into_plugin_fault())?;
+            for (method, request) in [
+                ("host.auth.list", json!({"limit":200})),
+                ("host.auth.get_runtime", json!({"account_id":selected})),
+                ("host.auth.get", json!({"account_id":selected})),
+            ] {
+                denied(
+                    host,
+                    method,
+                    json!({}),
+                    serde_json::to_vec(&request).unwrap(),
+                    ErrorCode::Conflict,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+        let provider = input["fixture_provider"].as_str().unwrap();
+        let other = if provider == "openai" {
+            "xai"
+        } else {
+            "openai"
+        };
+        for (filter, cursor, expected) in [
+            (None, None, 1),
+            (Some(provider), None, 1),
+            (Some(other), None, 0),
+            (None, Some(selected), 0),
+        ] {
+            let list: AuthListResult = read(
+                host,
+                "host.auth.list",
+                json!({"provider_id":filter,"cursor":cursor,"limit":200}),
+            )
+            .await?;
+            assert_eq!(list.accounts.len(), expected);
+            assert!(list.next_cursor.is_none());
+            for account in &list.accounts {
+                assert_eq!(account.account_id, selected);
+                assert_eq!(account.provider_id, provider);
+                assert!(
+                    !serde_json::to_string(account)
+                        .unwrap()
+                        .contains("fixture-provider-secret")
+                );
+            }
+        }
+        let runtime: AuthRuntimeAccount = read(
+            host,
+            "host.auth.get_runtime",
+            json!({"account_id":selected}),
+        )
+        .await?;
+        assert_eq!(runtime.account_id, selected);
+        assert_eq!(
+            runtime.credential_revision,
+            input["fixture_credential_revision"].as_u64().unwrap()
+        );
+        let credential: AuthCredential =
+            read(host, "host.auth.get", json!({"account_id":selected})).await?;
+        assert_eq!(credential.account_id, selected);
+        assert_eq!(credential.credential_revision, runtime.credential_revision);
+        // Explicit sensitive export is the sole place the controlled test material is returned.
+        assert!(
+            serde_json::to_string(&credential.facts.material)
+                .unwrap()
+                .contains("fixture-provider-secret")
+        );
+        for method in ["host.auth.get_runtime", "host.auth.get"] {
+            denied(
+                host,
+                method,
+                json!({}),
+                serde_json::to_vec(&json!({"account_id":input["fixture_forbidden"]})).unwrap(),
+                ErrorCode::PermissionDenied,
+            )
+            .await?;
+        }
+        for (method, params, request) in [
+            (
+                "host.auth.get",
+                json!({"actor":"system"}),
+                json!({"account_id":selected}),
+            ),
+            (
+                "host.auth.get",
+                json!({}),
+                json!({"account_id":selected,"actor":"system"}),
+            ),
+            ("host.auth.get_runtime", json!({}), json!({"account_id":""})),
+            ("host.auth.list", json!({}), json!({"limit":0})),
+            ("host.auth.list", json!({}), json!({"limit":201})),
+            ("host.auth.list", json!({}), json!({"limit":1,"cursor":""})),
+            (
+                "host.auth.list",
+                json!({}),
+                json!({"limit":1,"provider_id":""}),
+            ),
+        ] {
+            denied(
+                host,
+                method,
+                params,
+                serde_json::to_vec(&request).unwrap(),
+                ErrorCode::InvalidInput,
+            )
+            .await?;
+        }
+        denied(
+            host,
+            "host.auth.get",
+            json!({}),
+            vec![b' '; 512 * 1024 + 1],
+            ErrorCode::InvalidInput,
+        )
+        .await?;
+        for save in [
+            AuthSaveRequest::Create {
+                provider_id: provider.into(),
+                facts: credential.facts.clone(),
+            },
+            AuthSaveRequest::Replace {
+                account_id: selected.into(),
+                credential_revision: runtime.credential_revision,
+                facts: credential.facts,
+            },
+        ] {
+            denied(
+                host,
+                "host.auth.save",
+                json!({}),
+                serde_json::to_vec(&save).unwrap(),
+                ErrorCode::Unsupported,
+            )
+            .await?;
+        }
+        host.call(
+            "host.upstream.http.do",
+            json!({"method":"POST","path":"responses","headers":[],"query":[]}),
+            b"fixture-bound-auth".to_vec(),
+        )
+        .await
+        .map_err(|e| e.into_plugin_fault())?;
+        Ok(())
+    }
+}
+
 mod worker_models {
     //! Exercise the real SDK host methods and event codec from a separate process.
     use gateway_plugin_sdk::{call::host::*, client::HostClient};
@@ -450,6 +683,9 @@ mod upstream_callbacks {
         mode: &str,
         input: &serde_json::Value,
     ) -> Result<(), PluginFault> {
+        if mode.starts_with("callback-credentials") {
+            return super::worker_credentials::run(host, mode, input).await;
+        }
         if mode.starts_with("callback-external") {
             let result=super::worker_outbound::run(host,&json!({"url":input["external_url"],"body":"fixture-external","omit_auth":input["omit_auth"],"mode":if mode=="callback-external-unary" {"unary"} else {"stream"}})).await?;
             assert_eq!(result["status"], 200);
