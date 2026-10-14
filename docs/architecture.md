@@ -510,6 +510,8 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 
 ## 插件生命周期
 
+静态管理资源的公开性来自当前 LivePlugin 的已验证注册声明，并随原实例 revision 发布。Admin 的公开读取先取得同一活跃进程，再核对精确路径和 `public` 标记；Runtime 只从已校验归档读取资源。API 将匿名静态资源与管理员调用分为两个入口，均用 JSON envelope/base64 传递资源字节；公开资源不创建管理会话或模型调用身份。版本切换和停用沿原发布撤销失效入口。
+
 组合根在 Store 初始化后装配 PluginManager 和 PluginEngine，在 API 启动前恢复启用实例，并在关机时回收插件进程。Admin 是实例配置与版本切换的业务 owner；Store 保存制品、敏感配置和私有状态；Host 负责进程容量与终止回收；Runtime 负责协议和能力适配。数据库 CAS 提交先于新实例发布，旧 revision 的入口和私有状态写入随切换失效。
 
 命令注册和 SDK 参数解析由 Runtime 持有，描述符保存在实际 LivePlugin，不另建命令代次索引。Admin 在原 active 发布和持久化实例 revision 中校验执行资格，候选注册失败不替换旧命令。命令是宿主根调用，不构造模型父执行或管理员会话；本人调用保留原 Key 归属检查，只有宿主绑定的 System、command_line 阶段、无父执行且持有真实根调用图的作用域可查询全局非秘密 Key 投影并按 ID 选择 Key。Store 直接投影原 client_api_keys 的 ID、名称、启用状态，模型授权复用 Core 原 authenticate_bound_key 入口及授权 epoch，不读取明文密钥或增加 Key 索引；管理阶段的 System、管理 API Key、插件 actor 和父执行不会继承全局列表权限。私有状态、服务、模型与 HTTP 沿该次 RPC 的真实实例、调用图和取消链执行。冻结服务显式缺失时不查询新发布；回调、模型流和网络正文随作用域清理。参数和 stdout/stderr 不实现内容型 Debug，错误不回显参数或凭据；已执行后无法确认的结果保持副作用未知，不自动重放。命令行在 apps/gateway 的原组合根选择终端行为，Admin 决定版本、帮助和执行，Host 负责原信号、排空时限和 worker 关闭，不绑定 HTTP listener。Host 与 Runtime 持有同一 Core 根调用图；Core 在原 permit 释放后通知等待者，保留调用次数限制及原结算 owner，不另建清理队列或会话计数。Host 的调用结果与调用图排空事实分开，超时不丢弃已确认结果，Console 以失败退出并说明未确认副作用。命令账号结果沿 Runtime 的 SDK facts 转换、Provider 原生身份与凭据校验、Admin 原导入/轮换提交及 Core 发布执行；Store 在同一事务内锁定实际启用的插件 revision，替换另检查原凭据 revision。RPC 和逐项保存共用总期限，只报告已确认提交数；开始准备的原生账号任务保留原调用图 permit，取消等待后继续完成其事务与发布，不自动重放或重绑身份。该入口仅限实际系统命令，非零退出不保存账号，沿原插件审计及账号设置 owner，不增加账本或命令状态机。完整回调与兼容验收仍待完成，生产 command_line 门禁继续关闭。

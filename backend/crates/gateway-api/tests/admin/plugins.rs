@@ -5,6 +5,66 @@ use axum::{
 };
 use tower::ServiceExt;
 #[tokio::test]
+async fn public_plugin_resources_need_no_session_and_remain_json_with_revision_checks() {
+    use base64::Engine as _;
+    let fixture = AdminTestFixture::new().await;
+    let access = gateway_admin::model::plugins::PluginAccess::default();
+    let service = Arc::new(super::plugin_models::Plugins(access.clone()));
+    let state = AdminTestState(fixture.services.clone().with_plugins(service));
+    let app = gateway_api::admin::plugins::router::<AdminTestState>().with_state(state);
+    let request = |path: &str| {
+        Request::builder()
+            .uri(format!(
+                "/api/plugins/resource?id=plugin&revision=1&path={path}"
+            ))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(request("public.html")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(envelope["data"]["contentType"], "text/html");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(envelope["data"]["body"].as_str().unwrap())
+            .unwrap(),
+        b"<script>fixture-public-resource</script>"
+    );
+    for path in ["private.html", "../plugin.json"] {
+        assert_eq!(
+            app.clone().oneshot(request(path)).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/plugins/resource?id=plugin&revision=2&path=public.html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    access.revoke();
+    assert_eq!(
+        app.oneshot(request("public.html")).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+}
+#[tokio::test]
 async fn plugin_install_configuration_resources_and_calls_all_require_admin_identity() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("admin-session");

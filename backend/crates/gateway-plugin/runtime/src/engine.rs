@@ -541,10 +541,8 @@ impl PluginRuntime for PluginEngine {
             management = serde_json::from_slice(&reply.payload)
                 .map_err(|_| AdminError::invalid("管理声明无效"))?;
             crate::management_validation::registration(&management)?;
-            if !management.callbacks.is_empty() || management.resources.iter().any(|r| r.public) {
-                return Err(AdminError::invalid(
-                    "首版插件入口仅允许管理员访问，不支持公开资源或登录回调",
-                ));
+            if !management.callbacks.is_empty() {
+                return Err(AdminError::invalid("插件登录回调尚未接入"));
             }
             let resource_bytes: usize = management
                 .resources
@@ -961,6 +959,7 @@ impl PluginProcess for LivePlugin {
             .map(|r| PluginResource {
                 path: r.path.clone(),
                 content_type: self.package.package().manifest().resources[&r.path].clone(),
+                public: r.public,
             })
             .collect()
     }

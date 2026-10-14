@@ -86,6 +86,22 @@ impl PluginService for Plugins {
     async fn resource(&self, _: &str, _: u64, _: &str) -> Result<PluginHttpResponse, AdminError> {
         unreachable!()
     }
+    async fn public_resource(
+        &self,
+        id: &str,
+        revision: u64,
+        path: &str,
+    ) -> Result<PluginHttpResponse, AdminError> {
+        self.access(id, revision)?;
+        if path != "public.html" {
+            return Err(AdminError::not_found("private plugin resource"));
+        }
+        Ok(PluginHttpResponse {
+            status: 200,
+            content_type: "text/html".into(),
+            body: b"<script>fixture-public-resource</script>".to_vec(),
+        })
+    }
     async fn handle(
         &self,
         _: &str,

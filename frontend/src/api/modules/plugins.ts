@@ -12,7 +12,7 @@ export interface PluginArtifact {
   versionWarning: string | null
 }
 export interface PluginManagementPage { id: string, title: string, entry: string }
-export interface PluginManagementResource { path: string, contentType: string }
+export interface PluginManagementResource { path: string, contentType: string, public: boolean }
 export interface PluginTarget { instanceId: string, revision: number }
 export interface PluginManagementView {
   name: string

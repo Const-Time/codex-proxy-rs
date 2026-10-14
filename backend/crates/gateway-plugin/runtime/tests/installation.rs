@@ -9,6 +9,214 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[tokio::test]
+async fn public_resources_follow_registered_visibility_and_actual_instance_revision() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Arc::new(PluginEngine::new(
+        cache.path().to_owned(),
+        "3.11.2".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store, runtime);
+    let artifact = manager
+        .upload(archive("1.0.0", false), &actor())
+        .await
+        .unwrap();
+    let mut settings = update(&artifact.sha256, 0, true);
+    settings.configuration = json!({"public_resource":true});
+    let first = manager.update(None, settings, &actor()).await.unwrap();
+    assert!(
+        first
+            .resources
+            .iter()
+            .any(|r| r.path == "index.html" && r.public)
+    );
+    let response = manager
+        .public_resource(&first.id, first.revision, "index.html")
+        .await
+        .unwrap();
+    assert_eq!(response.content_type, "text/html");
+    assert!(!response.body.is_empty());
+    for path in ["plugin.json", "bin/plugin", "../index.html", "missing"] {
+        assert_eq!(
+            manager
+                .public_resource(&first.id, first.revision, path)
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            AdminErrorKind::NotFound
+        );
+    }
+    let private = manager
+        .update(
+            Some(&first.id),
+            update(&artifact.sha256, first.revision, true),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    assert!(private.resources.iter().all(|r| !r.public));
+    assert_eq!(
+        manager
+            .public_resource(&first.id, first.revision, "index.html")
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Conflict
+    );
+    assert_eq!(
+        manager
+            .public_resource(&private.id, private.revision, "index.html")
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::NotFound
+    );
+    assert_eq!(
+        manager
+            .resource(&private.id, private.revision, "index.html")
+            .await
+            .unwrap()
+            .body,
+        response.body
+    );
+    let mut settings = update(&artifact.sha256, private.revision, true);
+    settings.configuration = json!({"public_resource":true});
+    let public = manager
+        .update(Some(&private.id), settings, &actor())
+        .await
+        .unwrap();
+    manager
+        .update(
+            Some(&public.id),
+            update(&artifact.sha256, public.revision, false),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .public_resource(&public.id, public.revision, "index.html")
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Conflict
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the checksum-verified official workbench 0.3.1 Linux x86_64 archive"]
+async fn official_workbench_archive_registers_public_resources_without_rewriting_the_package() {
+    use gateway_admin::model::plugins::PluginRecord;
+    use gateway_admin::ports::plugins::PluginStore;
+    use sha2::{Digest as _, Sha256};
+    assert_eq!(
+        (std::env::consts::OS, std::env::consts::ARCH),
+        ("linux", "x86_64")
+    );
+    let path = std::env::var_os("CPR_PLUGIN_WORKBENCH_ORIGINAL")
+        .expect("provide the official workbench archive");
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes)),
+        "5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0"
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let runtime = PluginEngine::new(
+        cache.path().to_owned(),
+        "3.11.2".parse().unwrap(),
+        store.clone(),
+    );
+    let artifact = runtime.inspect(Arc::from(bytes)).await.unwrap();
+    assert_eq!(artifact.info.plugin_id, "codex-proxy.capability-workbench");
+    assert_eq!(artifact.info.version, "0.3.1");
+    assert!(
+        artifact
+            .info
+            .unsupported_capabilities
+            .contains(&"middleware".into())
+    );
+    assert!(
+        artifact
+            .info
+            .unsupported_capabilities
+            .contains(&"command_line".into())
+    );
+    store
+        .put_artifact(artifact.clone(), &actor())
+        .await
+        .unwrap();
+    let record = PluginRecord {
+        id: "official-workbench".into(),
+        revision: 1,
+        name: "Official workbench".into(),
+        artifact_sha256: artifact.info.sha256.clone(),
+        enabled: true,
+        configuration: json!({}),
+        secrets: Default::default(),
+        frontend_authentication: None,
+        middleware: None,
+        model_router: None,
+        account_scheduler: None,
+        retry_policy: None,
+        upstream_adapter: None,
+        observer: None,
+    };
+    store.save(&record, 0, &actor()).await.unwrap();
+    assert_eq!(
+        runtime
+            .validate(&record, &artifact, None)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Invalid
+    );
+    // Exercise the real runtime kernel while recording that production enablement is still gated.
+    let process = runtime.prepare(&record, artifact).await.unwrap();
+    process.activate();
+    assert!(
+        process
+            .resources()
+            .iter()
+            .any(|r| r.path == "web/app.css" && r.public)
+    );
+    assert!(
+        process
+            .resources()
+            .iter()
+            .any(|r| r.path == "web/index.html" && !r.public)
+    );
+    assert!(
+        !process
+            .resource("web/app.css")
+            .await
+            .unwrap()
+            .body
+            .is_empty()
+    );
+    assert!(
+        process
+            .command_help(Some("ping"))
+            .unwrap()
+            .unwrap()
+            .contains("ping")
+    );
+    process.revoke();
+    assert_eq!(
+        process.resource("web/app.css").await.err().unwrap().kind(),
+        AdminErrorKind::Conflict
+    );
+    process.stop().await;
+}
+
+#[tokio::test]
 async fn installs_runs_callbacks_upgrades_and_revokes_old_revision_without_leaking_secrets() {
     let cache = tempfile::tempdir().unwrap();
     let store = Arc::new(MemoryStore::default());

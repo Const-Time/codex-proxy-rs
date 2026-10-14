@@ -212,6 +212,7 @@ pub struct PluginStateRecord {
 pub struct PluginResource {
     pub path: String,
     pub content_type: String,
+    pub public: bool,
 }
 
 /// Shared generation revocation; the API keeps this lease for the complete model response lifetime.
