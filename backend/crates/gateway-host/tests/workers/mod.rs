@@ -216,7 +216,7 @@ enum RenewStep {
 }
 
 #[derive(Default)]
-struct FakeLeasePort {
+pub(super) struct FakeLeasePort {
     scripts: Mutex<BTreeMap<WorkerId, VecDeque<LeaseStep>>>,
     renew_scripts: Arc<Mutex<BTreeMap<WorkerId, VecDeque<RenewStep>>>>,
     requests: Mutex<Vec<WorkerLeaseRequest>>,
@@ -737,7 +737,7 @@ fn registration_value(
     .expect("valid registration")
 }
 
-fn complete_plan(mut custom: Vec<WorkerContribution>) -> Vec<WorkerContribution> {
+pub(super) fn complete_plan(mut custom: Vec<WorkerContribution>) -> Vec<WorkerContribution> {
     let present = custom
         .iter()
         .map(WorkerContribution::kind)

@@ -129,11 +129,132 @@ fn request(arguments: &[&str]) -> PluginCommandRequest {
         arguments: arguments.iter().map(|s| (*s).into()).collect(),
         actor: actor(),
         cancellation: CancellationToken::new(),
+        call_scope: gateway_core::engine::nested::ExtensionCallScope::default(),
     }
 }
 async fn stop(process: &Arc<dyn PluginProcess>) {
     process.revoke();
     process.stop().await;
+}
+
+#[tokio::test]
+async fn system_command_dispatch_resolves_actual_revision_and_help_without_executing() {
+    let fixture = crate::models::fixture::Fixture::with_command().await;
+    assert_eq!(
+        fixture.manager.command_revision(&fixture.id).await.unwrap(),
+        1
+    );
+    for name in [None, Some("probe".into())] {
+        let result = fixture
+            .manager
+            .run_system_command(
+                &fixture.id,
+                PluginCommandAction::Help(name),
+                CancellationToken::new(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(result.stdout.contains("probe"));
+        assert_eq!(result.exit_code, 0);
+    }
+    let artifact = {
+        let records = fixture.store.records.lock().unwrap();
+        records[&fixture.id].artifact_sha256.clone()
+    };
+    let scope = PluginStateScope {
+        instance_id: fixture.id.clone(),
+        revision: 1,
+        namespace: "counter".into(),
+        schema_version: 1,
+        maximum_records: 10,
+        maximum_bytes: 1024,
+    };
+    assert!(
+        fixture
+            .store
+            .state_get(&scope, "commands")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let disabled = fixture
+        .manager
+        .update(Some(&fixture.id), update(&artifact, 1, false), &actor())
+        .await
+        .unwrap();
+    assert_eq!(disabled.revision, 2);
+    assert!(fixture.manager.command_revision(&fixture.id).await.is_err());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn system_command_dispatch_rejects_borrowed_graphs_before_rpc() {
+    let fixture = crate::models::fixture::Fixture::with_command().await;
+    let root = gateway_core::engine::nested::ExtensionCallScope::default();
+    let borrowed = root.fork_http("command-parent".into()).unwrap();
+    let error = fixture
+        .manager
+        .run_system_command(
+            &fixture.id,
+            PluginCommandAction::Execute {
+                name: "probe".into(),
+                arguments: vec![],
+            },
+            CancellationToken::new(),
+            borrowed,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, PluginCommandError::Invalid(_)));
+    root.wait_until_idle().await;
+    assert!(fixture.core.requests.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn host_command_graph_drain_waits_for_original_fees_after_command_cancellation() {
+    let fixture = crate::models::fixture::Fixture::with_command().await;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    *fixture.core.settle_gate.lock().unwrap() = Some(receiver);
+    let root = gateway_core::engine::nested::ExtensionCallScope::default();
+    let cancellation = CancellationToken::new();
+    let operation = PluginCommandAction::Execute {
+        name: "probe".into(),
+        arguments: vec![
+            "--input".into(),
+            json!({"mode":"unary","key":"key_system"}).to_string(),
+        ],
+    };
+    let mut call = Box::pin(fixture.manager.run_system_command(
+        &fixture.id,
+        operation,
+        cancellation.clone(),
+        root.clone(),
+    ));
+    tokio::select! { _=&mut call=>panic!("fee settlement must wait"), _=async { while fixture.core.finalizations.lock().unwrap().is_empty() { tokio::task::yield_now().await; } }=>{} }
+    cancellation.cancel();
+    assert!(matches!(
+        call.await.err().unwrap(),
+        PluginCommandError::Incomplete { .. }
+    ));
+    let mut drain = Box::pin(root.wait_until_idle());
+    assert!(futures::poll!(drain.as_mut()).is_pending());
+    assert!(fixture.core.charges.lock().unwrap().is_empty());
+    sender.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap();
+    fixture.clean(1).await;
+    assert_eq!(
+        fixture.core.charges.lock().unwrap()[0].amount_usd.scaled(),
+        123
+    );
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.core.finalizations.lock().unwrap().len(), 1);
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
 }
 fn descriptor(parameters: Value) -> Value {
     json!({"commands":[{"name":"probe","description":"Inspect command execution","parameters":parameters}]})

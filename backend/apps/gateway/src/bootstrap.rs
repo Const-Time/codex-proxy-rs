@@ -8,6 +8,27 @@ use serde::Deserialize;
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// Terminal selection only; plugin arguments may contain secrets and have no Debug.
+pub enum Invocation {
+    Serve,
+    Plugin {
+        instance: String,
+        operation: PluginOperation,
+    },
+}
+pub use gateway_admin::model::plugins::PluginCommandAction as PluginOperation;
+pub enum RunOutput {
+    Served,
+    Command(
+        gateway_host::CommandCompletion<
+            Result<
+                gateway_admin::model::plugins::PluginCommandOutput,
+                gateway_admin::model::plugins::PluginCommandError,
+            >,
+        >,
+    ),
+}
+
 /// 顶层配置只组合各包拥有的配置段，不解释任何业务字段。
 /// 各启动配置忽略未知字段，允许升级时保留旧配置；已知字段仍按类型和业务约束校验。
 #[derive(Debug, Deserialize)]
@@ -51,7 +72,7 @@ impl LoadableConfig for GatewayConfig {
 }
 
 /// 按冻结顺序初始化全部 Bundle，并把进程阻塞权交给 Host。
-pub async fn run() -> Result<(), BootstrapError> {
+pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
     let config = gateway_host::load_config::<GatewayConfig>()?;
     let GatewayConfig {
         schema_version: _,
@@ -176,10 +197,24 @@ pub async fn run() -> Result<(), BootstrapError> {
     );
     host.start_workers(plan, store.worker_leader_lease())?;
     host.report_startup_ready("Workers");
-    let result = host.serve(api.router()).await;
+    let result = match invocation {
+        Invocation::Serve => host.serve(api.router()).await.map(|()| RunOutput::Served),
+        Invocation::Plugin {
+            instance,
+            operation,
+        } => {
+            let graph = gateway_core::engine::nested::ExtensionCallScope::default();
+            let command = plugins.run_system_command(
+                &instance,
+                operation,
+                host.cancellation(),
+                graph.clone(),
+            );
+            Ok(RunOutput::Command(host.command(command, graph).await))
+        }
+    };
     plugins.shutdown().await;
-    result?;
-    Ok(())
+    result.map_err(Into::into)
 }
 
 /// 组合根只保留包级错误分类，不展开内部实现或敏感配置。

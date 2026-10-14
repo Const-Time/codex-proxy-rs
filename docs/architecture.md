@@ -432,7 +432,8 @@ HTTP Client 构造失败也不会阻断网关启动。外部解析在已认证�
 不会被错误改写到该 host 不保证支持的 HTTPS 虚拟主机。
 
 关闭分为两段：先停止接收新连接并 drain HTTP/WS，再取消并等待 Worker；两段各有独立预算，Compose 的
-`stop_grace_period` 必须覆盖二者之和。超时后只丢弃仍未落盘的可恢复观测，不执行隐式业务重放。
+`stop_grace_period` 必须覆盖二者之和。WorkerSupervisor 持有自己的关闭信号，HTTP/WS 或命令的请求取消不会
+抢先停止 Store 写入任务；Host 在原连接或调用图排空后发出该信号并 join。超时后只丢弃仍未落盘的可恢复观测，不执行隐式业务重放。
 
 安全边界：
 
@@ -511,7 +512,7 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 
 组合根在 Store 初始化后装配 PluginManager 和 PluginEngine，在 API 启动前恢复启用实例，并在关机时回收插件进程。Admin 是实例配置与版本切换的业务 owner；Store 保存制品、敏感配置和私有状态；Host 负责进程容量与终止回收；Runtime 负责协议和能力适配。数据库 CAS 提交先于新实例发布，旧 revision 的入口和私有状态写入随切换失效。
 
-命令注册和 SDK 参数解析由 Runtime 持有，描述符保存在实际 LivePlugin，不另建命令代次索引。Admin 在原 active 发布和持久化实例 revision 中校验执行资格，候选注册失败不替换旧命令。命令是宿主根调用，不构造模型父执行或管理员会话；本人调用保留原 Key 归属检查，只有宿主绑定的 System、command_line 阶段、无父执行且持有真实根调用图的作用域可查询全局非秘密 Key 投影并按 ID 选择 Key。Store 直接投影原 client_api_keys 的 ID、名称、启用状态，模型授权复用 Core 原 authenticate_bound_key 入口及授权 epoch，不读取明文密钥或增加 Key 索引；管理阶段的 System、管理 API Key、插件 actor 和父执行不会继承全局列表权限。私有状态、服务、模型与 HTTP 沿该次 RPC 的真实实例、调用图和取消链执行。冻结服务显式缺失时不查询新发布；回调、模型流和网络正文随作用域清理。参数和 stdout/stderr 不实现内容型 Debug，错误不回显参数或凭据；已执行后无法确认的结果保持副作用未知，不自动重放。原命令行入口及 Provider 凭据结果校验、Admin 原账号事务尚待接入，生产 command_line 门禁继续关闭。
+命令注册和 SDK 参数解析由 Runtime 持有，描述符保存在实际 LivePlugin，不另建命令代次索引。Admin 在原 active 发布和持久化实例 revision 中校验执行资格，候选注册失败不替换旧命令。命令是宿主根调用，不构造模型父执行或管理员会话；本人调用保留原 Key 归属检查，只有宿主绑定的 System、command_line 阶段、无父执行且持有真实根调用图的作用域可查询全局非秘密 Key 投影并按 ID 选择 Key。Store 直接投影原 client_api_keys 的 ID、名称、启用状态，模型授权复用 Core 原 authenticate_bound_key 入口及授权 epoch，不读取明文密钥或增加 Key 索引；管理阶段的 System、管理 API Key、插件 actor 和父执行不会继承全局列表权限。私有状态、服务、模型与 HTTP 沿该次 RPC 的真实实例、调用图和取消链执行。冻结服务显式缺失时不查询新发布；回调、模型流和网络正文随作用域清理。参数和 stdout/stderr 不实现内容型 Debug，错误不回显参数或凭据；已执行后无法确认的结果保持副作用未知，不自动重放。命令行在 apps/gateway 的原组合根选择终端行为，Admin 决定版本、帮助和执行，Host 负责原信号、排空时限和 worker 关闭，不绑定 HTTP listener。Host 与 Runtime 持有同一 Core 根调用图；Core 在原 permit 释放后通知等待者，保留调用次数限制及原结算 owner，不另建清理队列或会话计数。Host 的调用结果与调用图排空事实分开，超时不丢弃已确认结果，Console 以失败退出并说明未确认副作用。Provider 凭据结果校验及 Admin 原账号事务尚待接入，生产 command_line 门禁继续关闭。
 
 受管上游适配端口只替换 Generate 的业务 wire。Core 将请求冻结计划传入原协调器；Provider 在原生解码前选择适配器，但仍独占账号租约、凭据解释、定价和失败反馈。适配器调用受首次流消费屏障约束，沿原取消、重试和结算链执行。Runtime 在候选进程准备时校验上游适配声明；Host 的受管出站模块统一负责 HTTP/WebSocket、DNS 固定、代理、TLS、容量和资源回收。Core 会话状态保留扩展执行归属与连接范围；无适配器时原生 Provider 拒绝消费扩展私有状态，中间件对归属事实的投影不改变宿主权威。Runtime 的网络回调绑定原请求、attempt、账号和凭据版本，事件经过序列验证，成功终态等待 RPC 正常结束；尾部失败仍保留计量事实。续接由同代连接池独占保管，核对实例、Key、账号与凭据版本，空闲连接不持有账号租约，撤销时关闭。Admin 在原发布快照中冻结实例绑定，按 Provider、公开模型与原 Key/分组范围选择，拒绝重叠发布并排除发起祖先；失效实例保留拒绝门禁，成功选择后撤销加入原取消链。绑定沿原实例 CAS 和恢复流程持久化。其余阶段授权及完整端到端验收尚未完成，生产能力保持关闭。
 

@@ -258,7 +258,7 @@ fn with_logging(config: HostConfig, write: impl FnOnce()) {
     drop(bundle);
 }
 
-fn logging_config(directory: PathBuf, request_dump: bool) -> HostConfig {
+pub(super) fn logging_config(directory: PathBuf, request_dump: bool) -> HostConfig {
     HostConfig {
         listen: ListenConfig {
             host: "127.0.0.1".to_owned(),
