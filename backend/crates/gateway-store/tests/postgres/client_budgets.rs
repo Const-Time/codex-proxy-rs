@@ -30,7 +30,9 @@ fn key_id(key: &str) -> ClientApiKeyId {
 
 fn charge(key: &str, request: &str, amount: &str) -> ClientBudgetCharge {
     ClientBudgetCharge {
+        components_usd: [gateway_core::metering::Decimal::ZERO; 4],
         scope: Some(gateway_core::engine::budget::ClientBudgetScope {
+            billing: Default::default(),
             user_id: "budget-user".into(),
             group_id: group_id(key),
         }),
@@ -131,7 +133,7 @@ async fn subscription_cycle_upgrade_keeps_historical_windows_counters_and_ledger
         "migration is not an unapproved historical repair"
     );
     PgClientBudgetStore::new(db.pool.clone())
-        .admit(key_id("legacy"), Some(group_id("legacy")))
+        .admit(key_id("legacy"), Some(group_id("legacy")), None)
         .await
         .unwrap();
     assert_eq!(
@@ -168,7 +170,7 @@ async fn single_account_expiry_keeps_usage_until_confirmed_upstream_reset() {
     sqlx::query("update subscription_group_cycles set weekly_start=now()-interval '8 days',weekly_end=now()-interval '1 second'").execute(&db.pool).await.unwrap();
     assert_eq!(status(&db, "single").await.weekly_used_usd.canonical(), "9");
     store
-        .admit(key_id("single"), Some(group_id("single")))
+        .admit(key_id("single"), Some(group_id("single")), None)
         .await
         .unwrap();
     store
@@ -181,7 +183,7 @@ async fn single_account_expiry_keeps_usage_until_confirmed_upstream_reset() {
     );
     assert_eq!(
         store
-            .admit(key_id("single"), Some(group_id("single")))
+            .admit(key_id("single"), Some(group_id("single")), None)
             .await
             .unwrap_err()
             .client_error_code(),
@@ -229,7 +231,9 @@ async fn multi_account_groups_ignore_individual_resets_and_roll_all_subscribers_
     second_subscriber(&db, "multi").await;
     store
         .settle(ClientBudgetCharge {
+            components_usd: [gateway_core::metering::Decimal::ZERO; 4],
             scope: Some(gateway_core::engine::budget::ClientBudgetScope {
+                billing: Default::default(),
                 user_id: "second-user".into(),
                 group_id: group_id("multi"),
             }),
@@ -258,12 +262,12 @@ async fn multi_account_groups_ignore_individual_resets_and_roll_all_subscribers_
     .await
     .unwrap();
     store
-        .admit(key_id("multi"), Some(group_id("multi")))
+        .admit(key_id("multi"), Some(group_id("multi")), None)
         .await
         .unwrap();
     store.settle(charge("multi", "after", "2")).await.unwrap();
     store
-        .admit(key_id("multi"), Some(group_id("multi")))
+        .admit(key_id("multi"), Some(group_id("multi")), None)
         .await
         .unwrap();
     let windows: (i64, i64, String) = sqlx::query_as("select count(distinct weekly_end),count(distinct weekly_start),sum(weekly_used_usd)::text from user_group_budget_windows").fetch_one(&db.pool).await.unwrap();
@@ -361,7 +365,7 @@ async fn user_quota_multiplier_changes_limits_without_repricing_consumption() {
     assert_eq!(current.limits.weekly_usd.canonical(), "200");
     assert_eq!(current.daily_used_usd.canonical(), "15");
     store
-        .admit(key_id("factor"), Some(group_id("factor")))
+        .admit(key_id("factor"), Some(group_id("factor")), None)
         .await
         .unwrap();
     sqlx::query(
@@ -372,7 +376,7 @@ async fn user_quota_multiplier_changes_limits_without_repricing_consumption() {
     .unwrap();
     assert_eq!(
         store
-            .admit(key_id("factor"), Some(group_id("factor")))
+            .admit(key_id("factor"), Some(group_id("factor")), None)
             .await
             .unwrap_err()
             .client_error_code(),
@@ -705,6 +709,282 @@ async fn model_billing_freezes_rates_and_charges_exactly_once() {
         model_billing_for_endpoint(endpoint).await;
     }
 }
+
+#[tokio::test]
+async fn admission_billing_does_not_depend_on_observation_rows_or_live_repricing() {
+    let Some(db) = TestDatabase::create("billing_without_observation").await else {
+        return;
+    };
+    for (key, rate, raw, expected) in [
+        ("round", "1.5", "0.0000000001", "0.0000000002"),
+        ("zero", "0", "10", "0"),
+        ("rate", "2", "3", "6"),
+    ] {
+        seed(&db, key, "100", "1000").await;
+        sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
+            .bind(group_id(key).as_str())
+            .bind(serde_json::json!({"test-model":rate}))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let store = PgClientBudgetStore::new(db.pool.clone());
+        let frozen = store
+            .admit(
+                key_id(key),
+                Some(group_id(key)),
+                Some(gateway_core::routing::PublicModelId::new("test-model").unwrap()),
+            )
+            .await
+            .unwrap();
+        sqlx::query("update account_groups set model_multipliers='{}' where id=$1")
+            .bind(group_id(key).as_str())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let charge = ClientBudgetCharge {
+            scope: Some(frozen),
+            ..charge(key, key, raw)
+        };
+        store.settle(charge.clone()).await.unwrap();
+        store.settle(charge).await.unwrap();
+        assert_eq!(status(&db, key).await.daily_used_usd.canonical(), expected);
+        let ledger:(String,String,String)=sqlx::query_as("select raw_amount_usd::text,billing_multiplier::text,amount_usd::text from user_group_charge_events where client_api_key_ref=$1")
+            .bind(key).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(
+            ledger
+                .0
+                .parse::<gateway_core::metering::Decimal>()
+                .unwrap()
+                .canonical(),
+            raw
+        );
+        assert_eq!(
+            ledger
+                .1
+                .parse::<gateway_core::metering::Decimal>()
+                .unwrap()
+                .canonical(),
+            rate
+        );
+        assert_eq!(
+            ledger
+                .2
+                .parse::<gateway_core::metering::Decimal>()
+                .unwrap()
+                .canonical(),
+            expected
+        );
+    }
+    let observations: i64 = sqlx::query_scalar("select count(*) from model_requests")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        observations, 0,
+        "the original ledger must work while observation writes are absent"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn component_billing_keeps_unknown_retry_fees_raw_without_observation_rows() {
+    let Some(db) = TestDatabase::create("component_billing_without_observation").await else {
+        return;
+    };
+    seed(&db, "components", "100", "1000").await;
+    sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
+        .bind(group_id("components").as_str()).bind(serde_json::json!({"test-model":{"multiplier":"3","scope":{"components":["cacheRead","output"]}}})).execute(&db.pool).await.unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    let frozen = store
+        .admit(
+            key_id("components"),
+            Some(group_id("components")),
+            Some(gateway_core::routing::PublicModelId::new("test-model").unwrap()),
+        )
+        .await
+        .unwrap();
+    sqlx::query("update account_groups set model_multipliers='{}'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    // 10 itemized USD and 4 unitemized USD from a prior attempt. Only the
+    // observed output (2) and cache read (1 + image 0.5) receive the multiplier.
+    let amount = ClientBudgetCharge {
+        scope: Some(frozen),
+        components_usd: ["5", "2", "1.5", "1"].map(|v| v.parse().unwrap()),
+        ..charge("components", "components", "14")
+    };
+    store.settle(amount.clone()).await.unwrap();
+    store.settle(amount).await.unwrap();
+    assert_eq!(
+        status(&db, "components").await.daily_used_usd.canonical(),
+        "21"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select count(*) from model_requests")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn delayed_observation_writer_retains_the_admission_rule_for_both_insert_paths() {
+    use gateway_core::{
+        engine::{AttemptRecord, AttemptTrigger, ExecutionStore as _, NewModelRequest},
+        lifecycle::{CancellationToken, Deadline},
+        operation::OperationKind,
+        routing::{
+            AccountRoutingSnapshot, ConfigRevision, ProviderKind, PublicModelId,
+            RoutingGroupSnapshot,
+        },
+        task::DaemonTask as _,
+    };
+    use gateway_store::postgres::{BufferedExecutionStore, PgExecutionStore};
+    use std::{num::NonZeroU32, sync::Arc, time::Duration};
+    let Some(db) = TestDatabase::create("delayed_billing_observation").await else {
+        return;
+    };
+    seed(&db, "delayed", "100", "1000").await;
+    let account = member(&db, "delayed", "billing").await;
+    let budget = PgClientBudgetStore::new(db.pool.clone());
+    for first_attempt in [false, true] {
+        sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
+            .bind(group_id("delayed").as_str())
+            .bind(serde_json::json!({"test-model":"1.5"}))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let frozen = budget
+            .admit(
+                key_id("delayed"),
+                Some(group_id("delayed")),
+                Some(PublicModelId::new("test-model").unwrap()),
+            )
+            .await
+            .unwrap();
+        let id = ModelRequestId::new(format!("req_delayed_{first_attempt}")).unwrap();
+        let started_at = SystemTime::now();
+        let request = NewModelRequest {
+            parent_request_id: None,
+            initiating_plugin_instance_id: None,
+            budget_scope: Some(frozen.clone()),
+            id: id.clone(),
+            client_api_key_id: Some(key_id("delayed")),
+            client_api_key_ref: key_id("delayed"),
+            config_revision: ConfigRevision::new(1).unwrap(),
+            routing: AccountRoutingSnapshot::groups(vec![RoutingGroupSnapshot::new(
+                group_id("delayed"),
+                "Delayed".into(),
+            )]),
+            protocol: "openai".into(),
+            operation: OperationKind::Generate,
+            endpoint: "/v1/responses".into(),
+            client_transport: "http_sse".into(),
+            requested_model: Some(PublicModelId::new("test-model").unwrap()),
+            client_ip: None,
+            user_agent: None,
+            reasoning_effort: None,
+            reasoning_preset: None,
+            request_kind: None,
+            subagent_kind: None,
+            compact: false,
+            continuation: Default::default(),
+            image_generation_requested: false,
+            admission_decision_ms: None,
+            started_at,
+            deadline_at: Deadline::from_timeout(started_at, Some(Duration::from_secs(60))).unwrap(),
+        };
+        let (observations, writer) =
+            BufferedExecutionStore::new(Arc::new(PgExecutionStore::new(db.pool.clone())));
+        if first_attempt {
+            observations
+                .create_model_request_with_attempt(
+                    request,
+                    AttemptRecord {
+                        request_id: id.clone(),
+                        attempt_count: NonZeroU32::new(1).unwrap(),
+                        trigger: AttemptTrigger::Initial,
+                        provider_kind: ProviderKind::new("openai").unwrap(),
+                        provider_account_id: Some(
+                            gateway_core::account::ProviderAccountId::new(account.clone()).unwrap(),
+                        ),
+                        provider_account_ref: Some(
+                            gateway_core::account::ProviderAccountId::new(account.clone()).unwrap(),
+                        ),
+                        upstream_model_id: Some(
+                            gateway_core::routing::UpstreamModelId::new("test-model").unwrap(),
+                        ),
+                        upstream_transport: "http_sse".into(),
+                        http_version: None,
+                        account_selection_wait_ms: None,
+                        capacity_used_slots: None,
+                        capacity_total_slots: None,
+                    },
+                )
+                .await
+                .unwrap();
+        } else {
+            observations.create_model_request(request).await.unwrap();
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("select count(*) from model_requests where id=$1")
+                .bind(id.as_str())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
+            .bind(group_id("delayed").as_str())
+            .bind(serde_json::json!({"test-model":"4"}))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let amount = ClientBudgetCharge {
+            scope: Some(frozen),
+            request_id: id.clone(),
+            ..charge("delayed", "unused", "3")
+        };
+        budget.settle(amount.clone()).await.unwrap();
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let task = tokio::spawn(async move { writer.run(stop).await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let rule: Option<String> = sqlx::query_scalar(
+                    "select billing_multiplier::text from model_requests where id=$1",
+                )
+                .bind(id.as_str())
+                .fetch_optional(&db.pool)
+                .await
+                .unwrap();
+                if let Some(rule) = rule {
+                    assert_eq!(rule, "1.5000000000");
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancellation.cancel();
+        task.await.unwrap();
+        budget.settle(amount).await.unwrap();
+        let ledger: String = sqlx::query_scalar(
+            "select amount_usd::text from user_group_charge_events where request_id=$1",
+        )
+        .bind(id.as_str())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger, "4.5000000000");
+    }
+    assert_eq!(status(&db, "delayed").await.daily_used_usd.canonical(), "9");
+    db.close().await;
+}
 async fn model_billing_for_endpoint(endpoint: &str) {
     let Some(db) = TestDatabase::create("model_billing").await else {
         return;
@@ -732,6 +1012,15 @@ async fn model_billing_for_endpoint(endpoint: &str) {
             .await
             .unwrap();
     }
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    let frozen = store
+        .admit(
+            key_id("priced"),
+            Some(group_id("priced")),
+            Some(gateway_core::routing::PublicModelId::new("test-model").unwrap()),
+        )
+        .await
+        .unwrap();
     sqlx::query(
         "update account_groups set model_multipliers = '{\"test-model\":\"4\"}' where id = $1",
     )
@@ -783,10 +1072,12 @@ async fn model_billing_for_endpoint(endpoint: &str) {
         panic!("original bill missing");
     };
     assert_eq!(total.amount.as_str(), "0.2");
-    let store = PgClientBudgetStore::new(db.pool.clone());
     for _ in 0..2 {
         store
-            .settle(charge("priced", "rate-old", "0.2"))
+            .settle(ClientBudgetCharge {
+                scope: Some(frozen.clone()),
+                ..charge("priced", "rate-old", "0.2")
+            })
             .await
             .unwrap();
     }
@@ -796,7 +1087,7 @@ async fn model_billing_for_endpoint(endpoint: &str) {
     );
     assert_eq!(
         store
-            .admit(key_id("priced"), Some(group_id("priced")))
+            .admit(key_id("priced"), Some(group_id("priced")), None)
             .await
             .unwrap_err()
             .client_error_code(),
@@ -844,7 +1135,10 @@ async fn budgets_settle_exactly_once_and_enforce_each_threshold_across_store_ins
     for (key, prefix, amount) in [("day", "d", "0.1"), ("week", "w", "0.1")] {
         for _ in 0..3 {
             // 已准入请求可完成并超过限额，不预占估算费用。
-            first.admit(key_id(key), Some(group_id(key))).await.unwrap();
+            first
+                .admit(key_id(key), Some(group_id(key)), None)
+                .await
+                .unwrap();
         }
         for index in 0..3 {
             let id = format!("{prefix}-{index}");
@@ -860,7 +1154,7 @@ async fn budgets_settle_exactly_once_and_enforce_each_threshold_across_store_ins
     assert_eq!(day.daily_used_usd.canonical(), "0.3");
     assert_eq!(day.weekly_used_usd.canonical(), "0.3");
     let day_error = second
-        .admit(key_id("day"), Some(group_id("day")))
+        .admit(key_id("day"), Some(group_id("day")), None)
         .await
         .unwrap_err();
     assert_eq!(day_error.kind(), GatewayErrorKind::RateLimited);
@@ -870,7 +1164,7 @@ async fn budgets_settle_exactly_once_and_enforce_each_threshold_across_store_ins
     );
     assert!(day_error.retry_after().is_some());
     let week_error = first
-        .admit(key_id("week"), Some(group_id("week")))
+        .admit(key_id("week"), Some(group_id("week")), None)
         .await
         .unwrap_err();
     assert_eq!(
@@ -893,7 +1187,7 @@ async fn window_rollover_is_shanghai_midnight_and_seven_days_with_late_settlemen
     seed(&database, "key", "1", "2").await;
     let store = PgClientBudgetStore::new(database.pool.clone());
     store
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
     let (day_start, day_end, week_end): (DateTime<Utc>, DateTime<Utc>, DateTime<Utc>) =
@@ -919,6 +1213,7 @@ async fn window_rollover_is_shanghai_midnight_and_seven_days_with_late_settlemen
     );
     store
         .settle(ClientBudgetCharge {
+            components_usd: [gateway_core::metering::Decimal::ZERO; 4],
             completed_at: (day_end + chrono::Duration::seconds(2)).into(),
             ..charge("key", "second", "1")
         })
@@ -931,6 +1226,7 @@ async fn window_rollover_is_shanghai_midnight_and_seven_days_with_late_settlemen
         .await
         .unwrap();
     let old = ClientBudgetCharge {
+        components_usd: [gateway_core::metering::Decimal::ZERO; 4],
         completed_at: (day_start - chrono::Duration::seconds(1)).into(),
         ..charge("key", "after-reset", "0.9")
     };
@@ -950,18 +1246,18 @@ async fn zero_cost_and_interrupted_requests_never_block_limited_keys() {
     seed(&database, "key", "1", "5").await;
     let store = PgClientBudgetStore::new(database.pool.clone());
     store
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
     store.settle(charge("key", "no-cost", "0")).await.unwrap();
     // 模拟准入后进程退出，没有费用可结算；重启后仍应允许同一 Key 使用。
     store
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
     let restarted = PgClientBudgetStore::new(database.pool.clone());
     restarted
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
     let events: i64 = sqlx::query_scalar("select count(*) from user_group_charge_events")
@@ -991,10 +1287,24 @@ async fn transient_settlement_failure_rolls_back_and_retries_exact_cost_before_a
     };
     seed(&database, "key", "1", "5").await;
     let store = PgClientBudgetStore::new(database.pool.clone());
-    store
-        .admit(key_id("key"), Some(group_id("key")))
+    sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
+        .bind(group_id("key").as_str())
+        .bind(serde_json::json!({"test-model":"2"}))
+        .execute(&database.pool)
         .await
         .unwrap();
+    let frozen = store
+        .admit(
+            key_id("key"),
+            Some(group_id("key")),
+            Some(gateway_core::routing::PublicModelId::new("test-model").unwrap()),
+        )
+        .await
+        .unwrap();
+    let pending = ClientBudgetCharge {
+        scope: Some(frozen),
+        ..charge("key", "retry", "1.25")
+    };
     // 在费用事件插入后让窗口写入失败，验证整个事务回滚。
     sqlx::raw_sql(
         "create function reject_budget_update() returns trigger language plpgsql as $$
@@ -1008,7 +1318,7 @@ async fn transient_settlement_failure_rolls_back_and_retries_exact_cost_before_a
     .execute(&database.pool)
     .await
     .unwrap();
-    assert!(store.settle(charge("key", "retry", "1.25")).await.is_err());
+    assert!(store.settle(pending.clone()).await.is_err());
     let events: i64 = sqlx::query_scalar("select count(*) from user_group_charge_events")
         .fetch_one(&database.pool)
         .await
@@ -1022,18 +1332,22 @@ async fn transient_settlement_failure_rolls_back_and_retries_exact_cost_before_a
         .execute(&database.pool)
         .await
         .unwrap();
+    sqlx::query("update account_groups set model_multipliers='{}'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
     let error = store
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap_err();
     assert_eq!(
         error.client_error_code(),
         Some("group_daily_budget_exceeded")
     );
-    store.settle(charge("key", "retry", "1.25")).await.unwrap();
+    store.settle(pending.clone()).await.unwrap();
     assert_eq!(
         status(&database, "key").await.daily_used_usd.canonical(),
-        "1.25"
+        "2.5"
     );
     database.close().await;
 }
@@ -1047,7 +1361,7 @@ async fn group_budget_updates_preserve_usage_and_disable_live_access() {
     let store = PgClientBudgetStore::new(database.pool.clone());
     let admin = PgAccountGroupRepository::new(database.pool.clone());
     store
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
     store
@@ -1074,7 +1388,7 @@ async fn group_budget_updates_preserve_usage_and_disable_live_access() {
     assert_eq!(current.daily_used_usd.canonical(), "2.75");
     assert_eq!(
         store
-            .admit(key_id("key"), Some(group_id("key")))
+            .admit(key_id("key"), Some(group_id("key")), None)
             .await
             .unwrap_err()
             .client_error_code(),
@@ -1086,7 +1400,7 @@ async fn group_budget_updates_preserve_usage_and_disable_live_access() {
         .await
         .unwrap();
     store
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
     sqlx::query("update users set enabled = false where id = 'budget-user'")
@@ -1095,7 +1409,7 @@ async fn group_budget_updates_preserve_usage_and_disable_live_access() {
         .unwrap();
     assert_eq!(
         store
-            .admit(key_id("key"), Some(group_id("key")))
+            .admit(key_id("key"), Some(group_id("key")), None)
             .await
             .unwrap_err()
             .kind(),
@@ -1113,7 +1427,7 @@ async fn budget_database_outage_fails_closed() {
     database.pool.close().await;
     assert_eq!(
         store
-            .admit(key_id("key"), Some(group_id("key")))
+            .admit(key_id("key"), Some(group_id("key")), None)
             .await
             .unwrap_err()
             .client_error_code(),
@@ -1148,12 +1462,13 @@ async fn multiple_keys_share_the_user_group_budget_but_other_users_do_not() {
     }
     let store = PgClientBudgetStore::new(db.pool.clone());
     let scope = store
-        .admit(key_id("second"), Some(group_id("first")))
+        .admit(key_id("second"), Some(group_id("first")), None)
         .await
         .unwrap();
     assert_eq!(scope.user_id, "budget-user");
     store
         .settle(ClientBudgetCharge {
+            components_usd: [gateway_core::metering::Decimal::ZERO; 4],
             scope: Some(scope),
             ..charge("second", "shared", "1")
         })
@@ -1162,7 +1477,7 @@ async fn multiple_keys_share_the_user_group_budget_but_other_users_do_not() {
     for key in ["first", "second"] {
         assert_eq!(
             store
-                .admit(key_id(key), Some(group_id("first")))
+                .admit(key_id(key), Some(group_id("first")), None)
                 .await
                 .unwrap_err()
                 .client_error_code(),
@@ -1172,7 +1487,7 @@ async fn multiple_keys_share_the_user_group_budget_but_other_users_do_not() {
     }
     assert!(
         store
-            .admit(key_id("third"), Some(group_id("first")))
+            .admit(key_id("third"), Some(group_id("first")), None)
             .await
             .is_ok()
     );
@@ -1189,7 +1504,7 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
     seed(&db, "other", "10", "50").await;
     let store = PgClientBudgetStore::new(db.pool.clone());
     let scope = store
-        .admit(key_id("first"), Some(group_id("first")))
+        .admit(key_id("first"), Some(group_id("first")), None)
         .await
         .unwrap();
     sqlx::query(
@@ -1201,7 +1516,7 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
     .unwrap();
     assert!(
         store
-            .admit(key_id("first"), Some(group_id("first")))
+            .admit(key_id("first"), Some(group_id("first")), None)
             .await
             .is_err(),
         "stale routing scope must be rejected"
@@ -1211,6 +1526,7 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
         .await
         .unwrap();
     let charge = ClientBudgetCharge {
+        components_usd: [gateway_core::metering::Decimal::ZERO; 4],
         scope: Some(scope),
         ..charge("first", "deleted", "0.7")
     };
@@ -1252,7 +1568,7 @@ async fn revoked_grants_and_disabled_groups_are_checked_without_snapshot_refresh
     seed(&db, "key", "1", "5").await;
     let store = PgClientBudgetStore::new(db.pool.clone());
     store
-        .admit(key_id("key"), Some(group_id("key")))
+        .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
     sqlx::query("delete from user_account_groups where user_id = 'budget-user'")
@@ -1261,7 +1577,7 @@ async fn revoked_grants_and_disabled_groups_are_checked_without_snapshot_refresh
         .unwrap();
     assert!(
         store
-            .admit(key_id("key"), Some(group_id("key")))
+            .admit(key_id("key"), Some(group_id("key")), None)
             .await
             .is_err()
     );
@@ -1276,11 +1592,11 @@ async fn revoked_grants_and_disabled_groups_are_checked_without_snapshot_refresh
         .unwrap();
     assert!(
         store
-            .admit(key_id("key"), Some(group_id("key")))
+            .admit(key_id("key"), Some(group_id("key")), None)
             .await
             .is_err()
     );
-    assert!(store.admit(key_id("key"), None).await.is_err());
+    assert!(store.admit(key_id("key"), None, None).await.is_err());
     db.close().await;
 }
 
@@ -1293,6 +1609,15 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
     sqlx::query("update account_groups set model_multipliers = $2 where id=$1")
         .bind(group_id("scoped").as_str()).bind(serde_json::json!({"test-model":{"multiplier":"3","scope":{"components":["cacheRead","output"]}}}))
         .execute(&db.pool).await.unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    let frozen = store
+        .admit(
+            key_id("scoped"),
+            Some(group_id("scoped")),
+            Some(gateway_core::routing::PublicModelId::new("test-model").unwrap()),
+        )
+        .await
+        .unwrap();
     let snapshot = serde_json::json!({"version":1,"total":"10","input":"4","output":"2","cacheRead":"1","cacheWrite":"1","image":{"input":"1","cacheRead":"0.5"}});
     sqlx::query("insert into model_requests(id,client_api_key_ref,user_id,config_revision,protocol,operation,endpoint,client_transport,requested_model_id,routing_scope,routing_group_refs,routing_group_names_snapshot,started_at,deadline_at,outcome,completed_at,cost_source,cost_amount,cost_currency,billing_snapshot_json) values('req_scoped','scoped','budget-user',1,'openai','responses','/v1/responses','http_sse','test-model','groups',$1,'[\"scoped\"]',now(),now()+interval '1 hour','failed',now(),'calculated',10,'USD',$2)")
         .bind(vec![group_id("scoped").to_string()]).bind(snapshot.clone()).execute(&db.pool).await.unwrap();
@@ -1307,10 +1632,13 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
         .execute(&db.pool)
         .await
         .unwrap();
-    let store = PgClientBudgetStore::new(db.pool.clone());
     for _ in 0..2 {
         store
-            .settle(charge("scoped", "scoped", "10"))
+            .settle(ClientBudgetCharge {
+                scope: Some(frozen.clone()),
+                components_usd: ["5", "2", "1.5", "1"].map(|amount| amount.parse().unwrap()),
+                ..charge("scoped", "scoped", "10")
+            })
             .await
             .unwrap();
     }
@@ -1319,8 +1647,8 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
     assert_eq!(ledger.0, "17.0000000000");
     assert_eq!(ledger.1, "10.0000000000");
     assert_eq!(
-        ledger.2,
-        serde_json::json!({"components":["cacheRead","output"]})
+        serde_json::from_value::<gateway_core::metering::MultiplierScope>(ledger.2).unwrap(),
+        frozen.billing.scope().clone()
     );
     for (scope, expected) in [
         (serde_json::json!("all"), "30.0000000000"),

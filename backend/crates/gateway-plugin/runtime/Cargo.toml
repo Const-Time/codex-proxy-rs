@@ -39,6 +39,7 @@ tokio = { version = "1.52.3", default-features = false, features = ["macros", "r
 uuid = { version = "1.23.3", features = ["v4"] }
 
 [dev-dependencies]
+zstd = "=0.13.3"
 gateway-store = { path = "../../gateway-store" }
 provider-openai = { path = "../../providers/openai" }
 provider-xai = { path = "../../providers/xai" }

@@ -24,7 +24,19 @@ pub(crate) struct Environment {
     pub published: Arc<Mutex<Vec<ConfigRevision>>>,
     pub cache: tempfile::TempDir,
     pub redis_url: String,
+    store_writers: Option<StoreWriters>,
     database: Database,
+}
+// The native inference fixture uses Store's registered writers, not a direct
+// repository or a second ledger. Other service fixtures do not run inference.
+struct StoreWriters {
+    cancellation: gateway_core::lifecycle::CancellationToken,
+    tasks: tokio::task::JoinSet<()>,
+}
+impl Drop for StoreWriters {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 struct ObservedSnapshot {
     inner: Arc<dyn SnapshotControl>,
@@ -43,12 +55,22 @@ impl Environment {
         Self::with_openai_url(None).await
     }
     pub async fn with_openai_url(url: Option<&str>) -> Option<Self> {
-        Self::with_admin_username(url, "sdk-fixture").await
+        Self::with_admin_username(url, "sdk-fixture", vec![]).await
     }
     pub async fn with_login_admin() -> Option<Self> {
-        Self::with_admin_username(None, "sdk-fixture@fixture.test").await
+        Self::with_admin_username(None, "sdk-fixture@fixture.test", vec![]).await
     }
-    async fn with_admin_username(url: Option<&str>, username: &str) -> Option<Self> {
+    pub async fn with_login_admin_and_openai_accounts(
+        url: &str,
+        accounts: Vec<gateway_core::account::NewProviderAccount>,
+    ) -> Option<Self> {
+        Self::with_admin_username(Some(url), "sdk-fixture@fixture.test", accounts).await
+    }
+    async fn with_admin_username(
+        url: Option<&str>,
+        username: &str,
+        accounts: Vec<gateway_core::account::NewProviderAccount>,
+    ) -> Option<Self> {
         let (database, database_url, redis_url) = Database::create().await?;
         let cache = tempfile::tempdir().unwrap();
         for name in [
@@ -74,6 +96,16 @@ impl Environment {
         .unwrap();
         config.resolve_and_validate(cache.path()).unwrap();
         let store = gateway_store::initialize(config).await.unwrap();
+        // Seed through the original account owner before the real startup
+        // snapshot/catalog barrier, rather than replacing Core with a fake.
+        for account in accounts {
+            store
+                .provider_ports()
+                .accounts()
+                .create_account(account)
+                .await
+                .unwrap();
+        }
         let mut openai_config = provider_openai::OpenAiConfig::default();
         if let Some(url) = url {
             openai_config.api.base_url = url.to_owned();
@@ -132,8 +164,29 @@ impl Environment {
             published,
             cache,
             redis_url,
+            store_writers: None,
             database,
         })
+    }
+    pub fn start_store_writers(&mut self) {
+        use gateway_core::task::{WorkerContribution, WorkerKind, WorkerRunnable};
+        assert!(self.store_writers.is_none());
+        let cancellation = gateway_core::lifecycle::CancellationToken::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        for contribution in self.store.take_worker_contributions() {
+            if let WorkerContribution::Registration(registration) = contribution
+                && let WorkerRunnable::Daemon { task, .. } = registration.runnable
+            {
+                assert_eq!(registration.id.kind(), WorkerKind::OpsFlush);
+                let cancellation = cancellation.clone();
+                tasks.spawn(async move { task.run(cancellation).await.unwrap() });
+            }
+        }
+        assert_eq!(tasks.len(), 3);
+        self.store_writers = Some(StoreWriters {
+            cancellation,
+            tasks,
+        });
     }
     pub async fn close(self) {
         let Self {
@@ -143,8 +196,19 @@ impl Environment {
             core,
             admin,
             cache,
+            mut store_writers,
             ..
         } = self;
+        if let Some(writers) = store_writers.as_mut() {
+            writers.cancellation.cancel();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(result) = writers.tasks.join_next().await {
+                    result.unwrap();
+                }
+            })
+            .await
+            .expect("native Store writers must finish their original drain");
+        }
         drop(admin);
         drop(core);
         drop(store);

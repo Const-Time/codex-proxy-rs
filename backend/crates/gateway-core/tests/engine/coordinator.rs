@@ -2269,6 +2269,123 @@ fn discarded_attempt_cost_never_leaks_into_retry_result() {
 }
 
 #[test]
+fn shared_budget_retains_itemized_retry_fees_and_leaves_unknown_fees_unclassified() {
+    use gateway_core::metering::{
+        CalculatedCostAmounts, CalculatedCostBreakdown, CalculatedCostRates, CurrencyCode, Decimal,
+        ImageCostBreakdown, Money,
+    };
+
+    let money =
+        |amount: &str| Money::new(amount.parse().unwrap(), CurrencyCode::new("USD").unwrap());
+    let rates = || CalculatedCostRates::new(money("0"), money("0"), money("0"), money("0"));
+    let first = CalculatedCostBreakdown::new(
+        CalculatedCostAmounts::new(
+            money("2"),
+            money("3"),
+            money("1"),
+            money("1"),
+            money("12"),
+            money("12"),
+        ),
+        rates(),
+        None,
+        100,
+    )
+    .with_image(ImageCostBreakdown {
+        input_tokens: 10,
+        cached_tokens: 1,
+        input_amount: money("1"),
+        cache_read_amount: money("1"),
+        input_price_per_million: money("0"),
+        cache_read_price_per_million: money("0"),
+    })
+    .calculated_cost();
+    let last = CalculatedCostBreakdown::new(
+        CalculatedCostAmounts::new(
+            money("0.5"),
+            money("1"),
+            money("0.25"),
+            money("0.25"),
+            money("2"),
+            money("2"),
+        ),
+        rates(),
+        None,
+        100,
+    )
+    .calculated_cost();
+    let retry = || {
+        Err(
+            ProviderError::new(ProviderErrorKind::Unavailable, UpstreamSendState::Sent)
+                .with_replay_safe(),
+        )
+    };
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, store, _) = coordinator(vec![
+        Script::Stream {
+            account_id: "acct_first",
+            items: vec![
+                Ok(GatewayEvent::Started(ResponseMeta::new(
+                    "itemized-retry",
+                    "gpt-5",
+                ))),
+                Ok(GatewayEvent::CalculatedCost(first.clone())),
+                Ok(GatewayEvent::CalculatedCost(first)),
+                retry(),
+            ],
+        },
+        Script::Stream {
+            account_id: "acct_second",
+            items: vec![
+                Ok(GatewayEvent::Started(ResponseMeta::new(
+                    "unknown-retry",
+                    "gpt-5",
+                ))),
+                Ok(GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(40_000_000_000).unwrap(),
+                )),
+                retry(),
+            ],
+        },
+        Script::Stream {
+            account_id: "acct_one",
+            items: vec![
+                Ok(GatewayEvent::Started(ResponseMeta::new("winning", "gpt-5"))),
+                Ok(GatewayEvent::CalculatedCost(last)),
+                Ok(GatewayEvent::Completed(ResponseMeta::new(
+                    "winning", "gpt-5",
+                ))),
+            ],
+        },
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("start execution");
+    block_on(session.collect_uncommitted()).expect("retry succeeds");
+    let charge = session.budget_charge();
+    assert_eq!(charge.amount_usd.canonical(), "18");
+    assert_eq!(
+        charge.components_usd.map(Decimal::canonical),
+        ["3.5", "4", "2.25", "1.25"]
+    );
+    block_on(session.commit_downstream(Some(200))).expect("commit response");
+    assert_eq!(session.budget_charge().amount_usd, charge.amount_usd);
+    assert_eq!(
+        session.budget_charge().components_usd,
+        charge.components_usd
+    );
+    let state = store.state.lock().unwrap();
+    assert_eq!(state.finalizations[0].cost_ticks, Some(20_000_000_000));
+}
+
+#[test]
 fn key_budget_accumulates_only_observed_retry_costs() {
     for (first_cost, first_send, expected) in [
         (Some(999), UpstreamSendState::Sent, 1122),

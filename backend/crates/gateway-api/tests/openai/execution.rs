@@ -144,11 +144,13 @@ impl ClientBudgetPort for Effects {
         &self,
         _: ClientApiKeyId,
         _: Option<AccountGroupId>,
+        _requested_model: Option<gateway_core::routing::PublicModelId>,
     ) -> BoxFuture<'_, Result<ClientBudgetScope, GatewayError>> {
         Box::pin(async {
             assert!(self.active.load(Ordering::SeqCst));
             self.pause(PauseAt::Budget).await;
             Ok(ClientBudgetScope {
+                billing: Default::default(),
                 user_id: "user-original".into(),
                 group_id: AccountGroupId::new("grp_00000000000000000000000000000001").unwrap(),
             })
