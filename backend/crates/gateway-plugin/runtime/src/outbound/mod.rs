@@ -105,7 +105,7 @@ pub(crate) struct HttpScope {
     pub(crate) closed: CancellationToken,
     effects: Option<ExtensionCallScope>,
     proxy: Option<OutboundProxy>,
-    pool_scope: String,
+    pool_scope: Mutex<String>,
     deadline: Instant,
     operation_timeout: Duration,
     streaming: AtomicBool,
@@ -130,7 +130,7 @@ impl HttpScope {
             closed: CancellationToken::new(),
             effects,
             proxy,
-            pool_scope,
+            pool_scope: Mutex::new(pool_scope),
             deadline: Instant::now() + timeout,
             operation_timeout: timeout.min(Duration::from_secs(120)),
             streaming: AtomicBool::new(false),
@@ -139,6 +139,9 @@ impl HttpScope {
     }
     pub(crate) fn finish(&self) {
         self.closed.cancel();
+        self.close_streams();
+    }
+    pub(crate) fn close_streams(&self) {
         for (_, stream) in std::mem::take(
             &mut *self
                 .streams
@@ -147,6 +150,13 @@ impl HttpScope {
         ) {
             stream.close();
         }
+    }
+    pub(crate) fn rotate_pool_scope(&self, pool_scope: String) {
+        self.close_streams();
+        *self
+            .pool_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pool_scope;
     }
     pub(crate) fn streaming(&self, streaming: bool) {
         self.streaming.store(streaming, Ordering::Release);
@@ -205,13 +215,18 @@ impl HttpScope {
         }
         let timeout = self.timeout()?;
         let guard = self.start_send(purpose);
+        let pool_scope = self
+            .pool_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let response = client
             .open_scoped(
                 request,
                 self.proxy.as_ref(),
                 &NetworkPolicy::unrestricted(),
                 timeout,
-                Some(&self.pool_scope),
+                Some(&pool_scope),
             )
             .await;
         guard.finish(

@@ -146,6 +146,8 @@ impl UpstreamAccountConnection for SelectedConnection {
     }
 
     fn credential_updates(&self) -> Option<&dyn UpstreamCredentialUpdate> {
+        self.current_session()
+            .filter(|session| session.allows_account_state_mutation())?;
         self.selector
             .credential_updates()
             .map(|_| self as &dyn UpstreamCredentialUpdate)

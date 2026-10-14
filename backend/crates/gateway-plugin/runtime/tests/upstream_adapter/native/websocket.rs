@@ -21,6 +21,61 @@ use tokio_tungstenite::tungstenite::{
 };
 
 #[tokio::test]
+async fn native_bound_save_replaces_the_websocket_handshake_and_retains_only_the_confirmed_epoch() {
+    let server = Socket::new(false, false).await;
+    let Some(mut f) = Fixture::for_websocket("openai", &server.url).await else {
+        return;
+    };
+    let input = super::credential_save::fields(&f);
+    let expected = input["fixture_save_token"].as_str().unwrap().to_owned();
+    let mut started = f
+        .start_with_fields("websocket-credential-save", input, None)
+        .await;
+    let events = tokio::time::timeout(
+        Duration::from_secs(15),
+        started.session.collect_uncommitted(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(events.iter().any(|event| event.session_update().is_some()));
+    assert_eq!(f.in_flight().await, 1);
+    started.session.commit_downstream(Some(200)).await.unwrap();
+    started.session.detach_finalize().await;
+    f.clean(1).await;
+    server.wait_closed(1).await;
+    {
+        let headers = server.headers.lock().unwrap();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(
+            headers[0]["authorization"],
+            "Bearer fixture-provider-secret"
+        );
+        assert_eq!(headers[1]["authorization"], format!("Bearer {expected}"));
+    }
+    f.refresh_expected_revision().await;
+    complete(&f, "websocket", Some("adapter-response"), 2).await;
+    assert_eq!(
+        server.headers.lock().unwrap().len(),
+        2,
+        "continuation must reuse the new handshake"
+    );
+    assert_eq!(server.pings.load(Ordering::SeqCst), 3);
+    assert!(f.server.requests.lock().unwrap().is_empty());
+    assert_eq!(f.env.published.lock().unwrap().len(), 1);
+    assert!(
+        f.core
+            .finalizations
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.attempt_count == 1)
+    );
+    f.close().await;
+    server.wait_closed(2).await;
+}
+
+#[tokio::test]
 async fn real_core_concurrent_websocket_continuations_cannot_claim_the_same_connection_twice() {
     for provider in ["openai", "xai"] {
         let server = Socket::new(false, false).await;

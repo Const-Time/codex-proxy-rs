@@ -169,7 +169,9 @@ impl UpstreamAccountConnection for SelectedConnection {
     }
 
     fn credential_updates(&self) -> Option<&dyn UpstreamCredentialUpdate> {
-        Some(self)
+        self.current_lease()
+            .filter(|lease| lease.allows_account_state_mutation())
+            .map(|_| self as &dyn UpstreamCredentialUpdate)
     }
 
     fn calculate_cost(&self, tier: Option<&str>, usage: &Usage) -> Option<CalculatedCost> {

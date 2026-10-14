@@ -5,6 +5,7 @@ mod event;
 mod execution;
 mod failure;
 mod network;
+mod save;
 mod sessions;
 mod target;
 use crate::RpcSession;

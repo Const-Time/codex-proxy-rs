@@ -53,16 +53,16 @@ pub(super) async fn read(
     if method == "host.auth.save" {
         return Err(PluginFault::new(
             ErrorCode::Unsupported,
-            "bound credential replacement is not enabled",
+            "credential writes require the native bound-save path",
         ));
     }
     if params != json!({}) || payload.len() > 512 * 1024 {
         return Err(invalid());
     }
     // The caller supplies the exact context retrieved from the live managed-call map.
-    if context.account_id.as_deref() != Some(selected.account_id().as_str())
-        || context.credential_revision != Some(selected.credential_revision().get())
-    {
+    // The live map proves the immutable SDK birth context; the native owner
+    // supplies the current epoch after a confirmed bound replacement.
+    if context.account_id.as_deref() != Some(selected.account_id().as_str()) {
         return Err(denied());
     }
     let actor = MutationContext {

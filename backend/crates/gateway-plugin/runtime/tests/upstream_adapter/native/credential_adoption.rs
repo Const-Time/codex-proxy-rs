@@ -1,81 +1,13 @@
-//! Real Core/Provider/SDK leases expose native adoption without adding plugin write authority.
+//! Native adoption uses the actual selected Core/Provider/SDK account lease.
 use super::fixture::Fixture;
-use gateway_admin::ports::plugins::PluginService;
 use gateway_core::{
     account::CredentialRevision,
-    engine::{
-        AttemptContext, execution::StartedExecution, provider::EventStream, upstream_adapter::*,
-    },
-    error::ProviderError,
-    lifecycle::CancellationToken,
-    routing::{ProviderKind, UpstreamModelId},
+    engine::{execution::StartedExecution, upstream_adapter::UpstreamAccountConnection},
 };
-use std::{
-    fmt,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
-type Selected = Arc<Mutex<Option<Arc<dyn UpstreamAccountConnection>>>>;
-struct CapturePlan {
-    inner: Arc<dyn UpstreamAdapterPlan>,
-    selected: Selected,
-}
-struct CaptureAdapter {
-    inner: Arc<dyn UpstreamAdapter>,
-    selected: Selected,
-}
-impl fmt::Debug for CapturePlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("NativeLeaseCapturePlan")
-    }
-}
-impl fmt::Debug for CaptureAdapter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("NativeLeaseCaptureAdapter")
-    }
-}
-impl UpstreamAdapterPlan for CapturePlan {
-    fn cancellation(&self) -> CancellationToken {
-        self.inner.cancellation()
-    }
-    fn select(
-        &self,
-        context: &AttemptContext,
-        provider: &ProviderKind,
-        model: &UpstreamModelId,
-    ) -> Result<Option<Arc<dyn UpstreamAdapter>>, ProviderError> {
-        self.inner.select(context, provider, model).map(|adapter| {
-            adapter.map(|inner| {
-                Arc::new(CaptureAdapter {
-                    inner,
-                    selected: self.selected.clone(),
-                }) as Arc<dyn UpstreamAdapter>
-            })
-        })
-    }
-}
-impl UpstreamAdapter for CaptureAdapter {
-    fn transport(&self) -> &str {
-        self.inner.transport()
-    }
-    fn execute(self: Arc<Self>, invocation: UpstreamAdapterInvocation) -> EventStream {
-        let mut selected = self.selected.lock().unwrap();
-        assert!(
-            selected.is_none(),
-            "only the real selected Provider connection may be captured"
-        );
-        *selected = Some(invocation.account.clone());
-        drop(selected);
-        self.inner.clone().execute(invocation)
-    }
-}
 async fn live(f: &Fixture) -> (StartedExecution, Arc<dyn UpstreamAccountConnection>) {
-    let selected = Arc::new(Mutex::new(None));
-    let plan = Arc::new(CapturePlan {
-        inner: Arc::new(f.manager.middleware_registry().unwrap()),
-        selected: selected.clone(),
-    });
+    let (plan, selected) = super::capture::plan(f);
     let mut started = f.start_with_adapter_plan("wait", plan).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(100), started.session.next_event())
@@ -89,7 +21,8 @@ async fn live(f: &Fixture) -> (StartedExecution, Arc<dyn UpstreamAccountConnecti
         .lock()
         .unwrap()
         .take()
-        .expect("native Provider connection was selected");
+        .expect("native Provider connection was selected")
+        .account;
     assert_eq!(account.account_id(), &f.account);
     assert_eq!(account.credential_revision().get(), 1);
     assert_eq!(f.in_flight().await, 1);

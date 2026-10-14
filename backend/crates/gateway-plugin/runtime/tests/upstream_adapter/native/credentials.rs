@@ -30,7 +30,7 @@ async fn real_core_bound_credentials_sdk_reads_only_native_selected_account_and_
         assert_eq!(f.in_flight().await, 0);
         assert!(
             f.env.published.lock().unwrap().is_empty(),
-            "bound callbacks have no write authority yet"
+            "bound read probes must not write native accounts"
         );
         f.close().await;
     }
