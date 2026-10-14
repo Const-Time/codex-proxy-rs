@@ -365,8 +365,8 @@ impl Drop for Binding {
     }
 }
 impl CallbackHandler for MiddlewareCallbacks {
-    fn begin(&self, context: &CallContext) {
-        self.inner.begin(context);
+    fn begin(&self, context: &CallContext, _deadline: &gateway_plugin_sdk::client::CallDeadline) {
+        self.inner.begin(context, _deadline);
     }
     fn streaming(&self, context: &CallContext) {
         self.inner.streaming(context);

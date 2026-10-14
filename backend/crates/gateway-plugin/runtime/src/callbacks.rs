@@ -118,7 +118,8 @@ fn store_error(error: gateway_admin::model::AdminError) -> PluginFault {
     )
 }
 impl CallbackHandler for Callbacks {
-    fn begin(&self, context: &CallContext) {
+    fn begin(&self, context: &CallContext, _deadline: &gateway_plugin_sdk::client::CallDeadline) {
+        self.calls.bind_budget(context, _deadline);
         if context.stage == Stage::Management
             && let Some(caller) = self.calls.caller(&context.resource_scope_id)
         {

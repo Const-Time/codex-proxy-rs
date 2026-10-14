@@ -6,6 +6,14 @@ mod session;
 pub use session::{CallbackHandler, RpcError, RpcLimits, RpcReply, RpcSession};
 pub(crate) use session::{RpcSessionDiagnostic, RpcSessionLifecycle, Shared};
 
+pub(crate) fn managed_next_stage(stage: gateway_plugin_sdk::Stage) -> bool {
+    use gateway_plugin_sdk::Stage;
+    matches!(
+        stage,
+        Stage::Http | Stage::WebSocket | Stage::Service | Stage::Request | Stage::Attempt
+    )
+}
+
 /// Keep sources for controlled diagnostics without formatting plugin-controlled details.
 #[derive(Clone)]
 pub struct ErrorSource(std::sync::Arc<dyn std::error::Error + Send + Sync>);

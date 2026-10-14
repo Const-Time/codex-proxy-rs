@@ -17,7 +17,7 @@ struct Scope {
     dispatcher: Option<Arc<dyn core::Dispatcher>>,
     failure: Option<PluginFault>,
     cancellation: CancellationToken,
-    deadline: gateway_core::lifecycle::Deadline,
+    deadline: crate::resources::InvocationDeadline,
     closed: CancellationToken,
 }
 pub(crate) struct Registry {
@@ -65,8 +65,13 @@ impl Registry {
     ) -> Result<Binding, PluginFault> {
         self.bind(context, origin.factory, origin.context)
     }
-    fn begin(self: &Arc<Self>, context: &CallContext) {
+    fn begin(
+        self: &Arc<Self>,
+        context: &CallContext,
+        budget: &gateway_plugin_sdk::client::CallDeadline,
+    ) {
         if context.stage != Stage::Registration {
+            self.bind_budget(context, budget);
             return;
         }
         // Registration has no model or administrative parent. Its original RPC
@@ -91,12 +96,36 @@ impl Registry {
                             dispatcher: None,
                             failure: Some(failure),
                             cancellation: self.caller.cancellation(),
-                            deadline: Default::default(),
+                            deadline: crate::resources::InvocationDeadline::new(
+                                Default::default(),
+                                Duration::from_millis(context.timeout_ms),
+                            ),
                             closed: Default::default(),
                         }),
                     );
                 }
             }
+        }
+        self.bind_budget(context, budget);
+    }
+    fn bind_budget(
+        &self,
+        context: &CallContext,
+        budget: &gateway_plugin_sdk::client::CallDeadline,
+    ) {
+        if let Some(scope) = self
+            .scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&context.resource_scope_id)
+            .filter(|scope| {
+                let mut expected = scope.context.clone();
+                expected.call_id = context.call_id;
+                expected.resource_stream = context.resource_stream;
+                expected == *context
+            })
+        {
+            scope.deadline.bind(budget);
         }
     }
     pub(crate) fn caller(&self) -> core::Caller {
@@ -147,9 +176,15 @@ impl Registry {
             self.caller.cancellation(),
             closed.clone(),
         ]);
-        origin.deadline_at = origin
-            .deadline_at
-            .cap(SystemTime::now() + Duration::from_millis(context.timeout_ms));
+        if !crate::rpc::managed_next_stage(context.stage) {
+            origin.deadline_at = origin
+                .deadline_at
+                .cap(SystemTime::now() + Duration::from_millis(context.timeout_ms));
+        }
+        let deadline = crate::resources::InvocationDeadline::new(
+            origin.deadline_at,
+            Duration::from_millis(context.timeout_ms),
+        );
         let dispatcher = factory
             .map(|factory| factory.bind(&origin, self.caller.clone()))
             .transpose()
@@ -161,7 +196,7 @@ impl Registry {
             dispatcher,
             failure: None,
             cancellation: origin.cancellation,
-            deadline: origin.deadline_at,
+            deadline,
             closed,
         });
         let mut scopes = self
@@ -264,9 +299,9 @@ struct Callbacks {
     inner: Arc<dyn CallbackHandler>,
 }
 impl CallbackHandler for Callbacks {
-    fn begin(&self, context: &CallContext) {
-        self.inner.begin(context);
-        self.registry.begin(context);
+    fn begin(&self, context: &CallContext, _deadline: &gateway_plugin_sdk::client::CallDeadline) {
+        self.inner.begin(context, _deadline);
+        self.registry.begin(context, _deadline);
     }
     fn streaming(&self, context: &CallContext) {
         self.inner.streaming(context);

@@ -1,4 +1,5 @@
 mod capabilities;
+mod execution;
 mod http;
 pub(crate) mod plan;
 mod service;
@@ -53,6 +54,9 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_limits(RpcLimits::default()).await
+    }
+    async fn with_limits(limits: RpcLimits) -> Self {
         let cache = tempfile::tempdir().unwrap();
         let package = Arc::new(
             ValidatedPackage::read(
@@ -78,7 +82,7 @@ impl Fixture {
             RpcSession::start(
                 prepared,
                 handshake,
-                RpcLimits::default(),
+                limits,
                 &ProcessSupervisor::default(),
                 callbacks.clone(),
             )
