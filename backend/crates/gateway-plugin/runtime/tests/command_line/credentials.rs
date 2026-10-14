@@ -34,13 +34,22 @@ impl Native {
         archive: Arc<[u8]>,
     ) -> Option<Self> {
         let env = Environment::new().await?;
+        Some(Self::with_environment(configuration, port, archive, env).await)
+    }
+    pub(crate) async fn with_environment(
+        configuration: Value,
+        port: Option<Arc<dyn PluginCredentialService>>,
+        archive: Arc<[u8]>,
+        env: Environment,
+    ) -> Self {
         let store = env.store.plugin_store();
         let engine = PluginEngine::new(
             env.cache.path().join("command-accounts"),
             "3.11.2".parse().unwrap(),
             store.clone(),
         )
-        .with_credentials(port.unwrap_or_else(|| env.admin.services().plugin_credentials()));
+        .with_credentials(port.unwrap_or_else(|| env.admin.services().plugin_credentials()))
+        .with_data(env.admin.services().plugin_data());
         let artifact = engine.inspect(archive).await.unwrap();
         store
             .put_artifact(artifact.clone(), &actor())
@@ -67,13 +76,13 @@ impl Native {
         // the production command gate remains explicit in inspect/validate.
         let process = engine.prepare(&record, artifact.clone()).await.unwrap();
         process.activate();
-        Some(Self {
+        Self {
             env,
             engine,
             record,
             artifact,
             process,
-        })
+        }
     }
     async fn replace_result(&mut self, accounts: Vec<Value>) {
         stop(&self.process).await;

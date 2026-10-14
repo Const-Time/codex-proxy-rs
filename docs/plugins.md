@@ -30,7 +30,7 @@
 | 维护任务 | maintenance v1 的 `plugin.reconcile`，Core 已发布配置与已发布实例驱动，Host 监督周期、重试和关闭 |
 | 账号凭据 | `host.auth.list/get_runtime/get/save`；管理员管理调用、宿主 System 根命令和宿主签发的 maintenance 作用域；upstream 仅开放当前 Provider 租约绑定账号的三项读取 |
 | 观察订阅 | observer v1；请求完成、实际上游 WebSocket 原始帧；冻结 Key/分组范围、有界投递及独立撤销，观察失败不控制业务执行 |
-| 未开放的能力 | middleware、upstream_adapter、command_line、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
+| 未开放的能力 | middleware、upstream_adapter、command_line、公开资源、登录回调、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
 `command_line` v1 的注册、类型化参数、帮助、执行 RPC 与网关命令入口已接入。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图。本人命令按登录用户归属选择 Key；宿主系统命令可分页查询全部 Key 的 ID、名称和启用状态（每页 1–200 项），并按 ID 绑定原 Core 授权，不读取或返回明文密钥。系统权限只属于宿主签发的 command_line 根调用；管理页、管理 API Key 和插件 actor 不会获得该权限。模型推理仍走原权限、准入、额度、费用和实时撤销链；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。Host 复用 Ctrl-C、SIGTERM 和原排空时限，等同一 Core 调用图完成结算与释放后停止 worker；清理超时会保留已确认结果并报告未完整完成。命令账号结果已接入下述原生校验和提交链；完整回调和目标制品兼容尚待验收，该能力仍不可启用。
 
@@ -230,7 +230,7 @@ Core 再次校验目标 Provider、模型能力、原请求输出上限与私有
 
 Key 查询只返回 ID、启用状态和显式分组绑定；账户查询只返回 ID、Provider、名称、邮箱、分组、启用状态及更新时间。账户列表按 ID 升序分页，`limit` 为 1～100，可按 `openai` / `xai` 筛选，继续查询时传入上一页 `next_cursor`；末页为 `null`。空分组表示没有显式绑定，不代表全账户权限。
 
-额度查询只读取 Provider 已有观测，返回观测时间、窗口标识、窗口秒数、使用百分比和重置时间。未知值保持 `null`，不会推断为零；读取不调用上游刷新、不计算宿主预测，也不更新订阅额度或账本。`host.quota_observations.refresh` 仍返回 unsupported。查询 JSON 必须放在 RPC payload 中，params 为 `{}`；查询最多 8 KiB，响应最多 1 MiB。回调绑定当前实例与 revision，停用或换代后不能继续读取。
+额度查询只读取 Provider 已有观测，返回观测时间、窗口标识、窗口秒数、使用百分比和重置时间。未知值保持 `null`，不会推断为零；读取不调用上游刷新、不计算宿主预测，也不更新订阅额度或账本。`host.quota_observations.refresh` 是显式主动刷新，使用相同查询与响应合同。它仅接受真实管理员管理调用、System 根命令或宿主维护作用域；不从 JSON 接受权限声明。Admin 在原用户存储核验角色与启用状态，在原账号元数据事务检查插件的启用 revision；数据库等待后、上游调用前和完成后再次核验。刷新走原生账号额度流程，Provider 保留额度文档与请求 owner，订阅观测和本地归属继续使用原流程，不增加第二份额度或账本。该方法不提供额度重置、购买或重置卡消费接口。已开始的任务保留同一 Core 图的 permit，取消或超时只结束等待，结果不明确时先读当前观测，不自动重放；插件停止等待原任务完成。管理员撤权或插件版本变化后不交付旧结果，旧 revision 不会启动新的上游刷新。真实 SDK、原生 OpenAI HTTP、PostgreSQL/Redis 回归覆盖管理与系统命令、被动读取、角色/输入校验、等待中撤权、版本变化及取消排空；维护和实际第三方制品继续按完整能力矩阵验收。查询 JSON 必须放在 RPC payload 中，params 为 `{}`；查询最多 8 KiB，响应最多 1 MiB。回调绑定当前实例与 revision，停用或换代后不能继续读取。
 
 ## 实例自有资源
 

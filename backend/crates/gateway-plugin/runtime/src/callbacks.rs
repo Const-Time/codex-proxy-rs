@@ -203,7 +203,9 @@ impl CallbackHandler for Callbacks {
                     "background invocation scope ended",
                 ));
             }
-            if crate::credentials::is_method(&method) {
+            if crate::credentials::is_method(&method)
+                || method == gateway_plugin_sdk::call::data::QUOTA_REFRESH
+            {
                 let caller = calls
                     .caller(&context.resource_scope_id)
                     .filter(|caller| caller.authorizes(&context))
@@ -237,12 +239,6 @@ impl CallbackHandler for Callbacks {
                         "this invocation has no account credential authority",
                     ));
                 }
-                let service = credentials.ok_or_else(|| {
-                    PluginFault::new(
-                        ErrorCode::Unsupported,
-                        "native account credentials are not configured",
-                    )
-                })?;
                 let scope = PluginMutationScope {
                     instance_id: id,
                     revision,
@@ -254,6 +250,21 @@ impl CallbackHandler for Callbacks {
                         request_id: caller.actor().request_id.clone(),
                     },
                 };
+                if method == gateway_plugin_sdk::call::data::QUOTA_REFRESH {
+                    let service = data.ok_or_else(|| {
+                        PluginFault::new(
+                            ErrorCode::Unsupported,
+                            "native quota refresh is not configured",
+                        )
+                    })?;
+                    return crate::data::refresh(service, scope, caller, params, payload).await;
+                }
+                let service = credentials.ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::Unsupported,
+                        "native account credentials are not configured",
+                    )
+                })?;
                 return crate::credentials::call(service, scope, caller, &method, params, payload)
                     .await;
             }

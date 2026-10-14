@@ -263,13 +263,22 @@ pub trait PluginService: Send + Sync {
 }
 
 /// Non-secret projections. The runtime authorizes each callback's actual host scope;
-/// global Key listing is reserved for system commands. Reads never refresh quota.
+/// global Key listing is reserved for system commands. Reads never refresh quota; explicit refresh requires native account authority.
 #[async_trait]
 pub trait PluginDataService: Send + Sync {
     async fn keys(&self, query: PluginKeyQuery) -> Result<PluginKeyPage>;
     async fn key(&self, id: &str) -> Result<PluginKeyFacts>;
     async fn accounts(&self, query: PluginAccountQuery) -> Result<PluginAccountPage>;
     async fn quota(&self, id: &str) -> Result<crate::model::provider_credentials::ProviderQuota>;
+    /// Explicit refresh uses the native account pipeline and retains its original graph permit.
+    async fn refresh_quota(
+        &self,
+        scope: PluginMutationScope,
+        initiator: MutationContext,
+        account: gateway_core::account::ProviderAccountId,
+        cleanup: gateway_core::engine::nested::ExtensionCallScope,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<crate::model::provider_credentials::ProviderQuota>;
 }
 
 /// Preparation and native account commit continue after the caller drops its wait.

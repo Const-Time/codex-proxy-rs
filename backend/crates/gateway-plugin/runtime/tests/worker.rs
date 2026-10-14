@@ -335,6 +335,20 @@ mod worker_models {
         input: &Value,
     ) -> Result<Value, gateway_plugin_sdk::PluginFault> {
         let mode = input["mode"].as_str().unwrap_or("unary");
+        if mode == "quota" {
+            let reply = host
+                .call(
+                    input["method"].as_str().unwrap(),
+                    input["params"].clone(),
+                    serde_json::to_vec(&input["request"]).unwrap(),
+                )
+                .await
+                .map_err(|error| error.into_plugin_fault())?;
+            assert_eq!(reply.result, json!({}));
+            let value: gateway_plugin_sdk::call::data::QuotaFacts =
+                serde_json::from_slice(&reply.payload).unwrap();
+            return Ok(serde_json::to_value(value).unwrap());
+        }
         if mode == "credentials" {
             let method = input["method"].as_str().unwrap();
             let reply = host

@@ -40,6 +40,9 @@ impl SnapshotControl for ObservedSnapshot {
 }
 impl Environment {
     pub async fn new() -> Option<Self> {
+        Self::with_openai_url(None).await
+    }
+    pub async fn with_openai_url(url: Option<&str>) -> Option<Self> {
         let (database, database_url, redis_url) = Database::create().await?;
         let cache = tempfile::tempdir().unwrap();
         for name in [
@@ -66,6 +69,9 @@ impl Environment {
         config.resolve_and_validate(cache.path()).unwrap();
         let store = gateway_store::initialize(config).await.unwrap();
         let mut openai_config = provider_openai::OpenAiConfig::default();
+        if let Some(url) = url {
+            openai_config.api.base_url = url.to_owned();
+        }
         openai_config.resolve_and_validate(cache.path()).unwrap();
         let openai = provider_openai::initialize(openai_config, store.provider_ports())
             .await
