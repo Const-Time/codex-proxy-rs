@@ -1,4 +1,4 @@
-//! 所有插件安装和调用均使用现有管理员鉴权；页面由父窗口桥转发，不授予 iframe 管理会话。
+//! 插件管理使用现有管理员鉴权；公开资源只读取当前代次的显式声明。
 use super::{AdminAuth, AdminEnvelope, AdminError, AdminJson, AdminResponse, AdminSessionState};
 use axum::{
     Router,
@@ -28,6 +28,7 @@ pub fn router<S: AdminSessionState + Clone + Send + Sync + 'static>() -> Router<
         .route("/api/admin/plugins/update", post(update::<S>))
         .route("/api/admin/plugins/uninstall", post(uninstall::<S>))
         .route("/api/admin/plugins/resource", get(resource::<S>))
+        .route("/api/plugins/resource", get(public_resource::<S>))
         .route("/api/admin/plugins/invoke", post(invoke::<S>))
 }
 fn error(e: gateway_admin::model::AdminError) -> AdminError {
@@ -203,6 +204,23 @@ async fn resource<S: AdminSessionState + Send + Sync>(
         .await
         .map_err(error)?;
     // JSON envelope prevents plugin HTML from becoming an executable same-origin top-level document.
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(reply(body)),
+    ))
+}
+async fn public_resource<S: AdminSessionState + Send + Sync>(
+    State(state): State<S>,
+    Query(Resource { id, revision, path }): Query<Resource>,
+) -> Result<impl IntoResponse, AdminError> {
+    let body = state
+        .admin_services()
+        .plugins()
+        .map_err(error)?
+        .public_resource(&id, revision, &path)
+        .await
+        .map_err(error)?;
+    // Keep the same JSON envelope: public HTML cannot execute as a host document.
     Ok(AdminResponse::new(
         StatusCode::OK,
         AdminEnvelope::ok(reply(body)),

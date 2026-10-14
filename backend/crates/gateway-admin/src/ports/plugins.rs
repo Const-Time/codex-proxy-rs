@@ -254,6 +254,12 @@ pub trait PluginService: Send + Sync {
     ) -> Result<PluginView>;
     async fn delete(&self, id: &str, revision: u64, actor: &MutationContext) -> Result<()>;
     async fn resource(&self, id: &str, revision: u64, path: &str) -> Result<PluginHttpResponse>;
+    async fn public_resource(
+        &self,
+        id: &str,
+        revision: u64,
+        path: &str,
+    ) -> Result<PluginHttpResponse>;
     async fn handle(
         &self,
         id: &str,

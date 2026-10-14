@@ -620,6 +620,22 @@ impl PluginService for PluginManager {
     ) -> Result<PluginHttpResponse, AdminError> {
         self.process(id, revision)?.resource(path).await
     }
+    async fn public_resource(
+        &self,
+        id: &str,
+        revision: u64,
+        path: &str,
+    ) -> Result<PluginHttpResponse, AdminError> {
+        let process = self.process(id, revision)?;
+        if !process
+            .resources()
+            .iter()
+            .any(|r| r.path == path && r.public)
+        {
+            return Err(AdminError::not_found("插件公开资源不存在"));
+        }
+        process.resource(path).await
+    }
     async fn handle(
         &self,
         id: &str,

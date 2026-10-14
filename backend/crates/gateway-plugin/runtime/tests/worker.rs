@@ -901,6 +901,7 @@ mod upstream_callbacks {
 }
 
 struct Worker {
+    public_resource: bool,
     command_registration: serde_json::Value,
     command_result: serde_json::Value,
     adapter_models: serde_json::Value,
@@ -1227,7 +1228,7 @@ impl PluginHandler for Worker {
             },
             "management.register"=>Ok(CallReply::unary(json!({}),serde_json::to_vec(&json!({
                 "routes":[{"method":"POST","path":"echo","request_content_types":["application/json"],"response_content_types":["application/json"]}],
-                "resources":[{"path":"index.html","public":false}],"pages":[{"id":"home","title":"Counter","entry":"index.html","icon":null}],"callbacks":[]
+                "resources":[{"path":"index.html","public":self.public_resource}],"pages":[{"id":"home","title":"Counter","entry":"index.html","icon":null}],"callbacks":[]
             })).unwrap())),
             "management.handle"=>{
                 let input:serde_json::Value=serde_json::from_slice(&call.payload).unwrap();
@@ -1312,6 +1313,9 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        public_resource: session.handshake().configuration["public_resource"]
+            .as_bool()
+            .unwrap_or(false),
         command_registration: session.handshake().configuration["command_registration"].clone(),
         command_result: session.handshake().configuration["command_result"].clone(),
         adapter_models: session.handshake().configuration["adapter_models"].clone(),
