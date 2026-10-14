@@ -6,6 +6,31 @@ use gateway_core::engine::{execution::ExecutionService, middleware::*};
 use serde_json::json;
 use std::{sync::atomic::Ordering, time::Duration};
 
+#[tokio::test]
+async fn management_system_api_key_and_plugin_actors_do_not_obtain_system_command_key_authority() {
+    use gateway_admin::model::MutationActor;
+    let fixture = Fixture::new().await;
+    for actor in [
+        MutationActor::System,
+        MutationActor::AdminApiKey,
+        MutationActor::Plugin {
+            instance_id: fixture.id.clone(),
+            revision: std::num::NonZeroU64::new(1).unwrap(),
+        },
+    ] {
+        for input in [
+            json!({"mode":"raw","method":"host.keys.list","params":{"limit":1}}),
+            json!({"mode":"unary","key":"key_system"}),
+        ] {
+            let output = fixture.call_as(input, actor.clone()).await;
+            assert_eq!(output["error"]["code"], "permission_denied");
+        }
+    }
+    assert_eq!(fixture.key_data.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 0);
+    fixture.manager.shutdown().await;
+}
+
 fn native_context(
     parent: &gateway_core::engine::execution::PreparedRootExecution,
 ) -> MiddlewareContext {

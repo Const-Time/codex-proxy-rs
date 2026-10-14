@@ -18,6 +18,11 @@ struct Facts {
 }
 #[async_trait]
 impl PluginDataService for Facts {
+    async fn keys(&self, _: PluginKeyQuery) -> Result<PluginKeyPage, AdminError> {
+        Err(AdminError::unavailable(
+            "global Key listing is not configured",
+        ))
+    }
     async fn key(&self, id: &str) -> Result<PluginKeyFacts, AdminError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if id != "key_test" {

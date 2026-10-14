@@ -406,6 +406,16 @@ pub trait ClientKeyStore: Send + Sync {
             "not configured",
         ))
     }
+    async fn plugin_keys(
+        &self,
+        _query: crate::model::plugins::PluginKeyQuery,
+    ) -> AdminStoreResult<crate::model::plugins::PluginKeyPage> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin key listing",
+            "not configured",
+        ))
+    }
     async fn plugin_key_facts(
         &self,
         _id: &gateway_core::policy::ClientApiKeyId,

@@ -410,7 +410,12 @@ impl PluginRuntime for PluginEngine {
             self.services.clone(),
         );
         let models = self.models.clone().map(|services| {
-            crate::models::Models::new(services, access.cancellation(), self.http.clone())
+            crate::models::Models::new(
+                services,
+                access.cancellation(),
+                self.http.clone(),
+                self.data.clone(),
+            )
         });
         let callbacks = Arc::new(
             crate::callbacks::Callbacks::new(

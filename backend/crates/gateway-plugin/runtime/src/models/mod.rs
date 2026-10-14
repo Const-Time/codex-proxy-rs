@@ -6,7 +6,8 @@ use crate::RpcReply;
 use futures::future::BoxFuture;
 use gateway_admin::{
     ClientKeyService,
-    model::{MutationActor, MutationContext, client_keys::*},
+    model::{MutationActor, MutationContext, client_keys::*, plugins::PluginKeyQuery},
+    ports::plugins::PluginDataService,
 };
 use gateway_core::{
     engine::{
@@ -19,7 +20,7 @@ use gateway_core::{
     policy::ClientApiKeyId,
     routing::PublicModelDescriptor,
 };
-use gateway_plugin_sdk::{CallContext, ErrorCode, PluginFault, SendState, call::host::*};
+use gateway_plugin_sdk::{CallContext, ErrorCode, PluginFault, SendState, Stage, call::host::*};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -50,10 +51,16 @@ impl ModelServices {
         Arc::new(Self { execution, keys })
     }
 }
+enum KeyAuthority {
+    Personal(String),
+    Parent,
+    SystemCommand,
+    Unavailable,
+}
 struct Scope {
     http: Arc<crate::middleware::http::Invocation>,
     context: CallContext,
-    owner: Option<String>,
+    keys: KeyAuthority,
     parent: Option<NestedExecutionContext>,
     graph: ExtensionCallScope,
     cancellation: CancellationToken,
@@ -91,6 +98,7 @@ impl Scope {
 pub(crate) struct Models {
     http: Option<Arc<crate::HttpDispatcher>>,
     services: Arc<ModelServices>,
+    data: Option<Arc<dyn PluginDataService>>,
     cancellation: CancellationToken,
     scopes: Mutex<BTreeMap<String, Arc<Scope>>>,
 }
@@ -99,10 +107,12 @@ impl Models {
         services: Arc<ModelServices>,
         cancellation: CancellationToken,
         http: Option<Arc<crate::HttpDispatcher>>,
+        data: Option<Arc<dyn PluginDataService>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             http,
             services,
+            data,
             cancellation,
             scopes: Mutex::default(),
         })
@@ -128,10 +138,24 @@ impl Models {
         if scopes.len() >= 32 || scopes.contains_key(&context.resource_scope_id) {
             return Err(capacity());
         }
-        let owner = actor.and_then(|a| match a.actor {
-            MutationActor::AdminSession { admin_user_id } => Some(admin_user_id),
-            _ => None,
-        });
+        // Both actor and root_scope come from the host binding, never the wire.
+        // A System actor in management, maintenance or another callback does not
+        // receive CLI authority, and a parent keeps its existing Core contract.
+        let keys = match actor.map(|a| a.actor) {
+            Some(MutationActor::AdminSession { admin_user_id }) => {
+                KeyAuthority::Personal(admin_user_id)
+            }
+            Some(MutationActor::System)
+                if context.stage == Stage::CommandLine
+                    && root_scope.is_some()
+                    && parent.is_none()
+                    && invocation.is_none() =>
+            {
+                KeyAuthority::SystemCommand
+            }
+            _ if parent.is_some() => KeyAuthority::Parent,
+            _ => KeyAuthority::Unavailable,
+        };
         let cancellation = CancellationToken::linked([
             self.cancellation.clone(),
             revocation,
@@ -190,7 +214,7 @@ impl Models {
             Arc::new(Scope {
                 http,
                 context: context.clone(),
-                owner,
+                keys,
                 parent,
                 graph,
                 cancellation,
@@ -232,6 +256,7 @@ impl Models {
             })
             .cloned();
         let services = self.services.clone();
+        let data = self.data.clone();
         Box::pin(async move {
             let scope = scope.ok_or_else(|| {
                 PluginFault::new(
@@ -252,7 +277,7 @@ impl Models {
                     result = scope.http.clone().call(method.clone(), params, payload, MAXIMUM_BYTES) => result?,
                 }
             } else {
-                call(services, &scope, &method, params, payload).await?
+                call(services, data, &scope, &method, params, payload).await?
             };
             scope.validate().map_err(|mut fault| {
                 if matches!(
@@ -335,22 +360,27 @@ async fn client(
     key: &str,
 ) -> Result<AuthenticatedClient, PluginFault> {
     let key = ClientApiKeyId::new(key).map_err(|_| invalid())?;
-    if let Some(owner) = &scope.owner {
-        let secret = services.keys.reveal(owner, &key).await.map_err(|_| {
-            PluginFault::new(
+    match &scope.keys {
+        KeyAuthority::Personal(owner) => {
+            let secret = services.keys.reveal(owner, &key).await.map_err(|_| {
+                PluginFault::new(
+                    ErrorCode::PermissionDenied,
+                    "selected Key is not available to the caller",
+                )
+            })?;
+            scope.validate()?;
+            execution
+                .authenticate_revocable(secret.expose_for_response(), scope.cancellation.clone())
+        }
+        KeyAuthority::Parent | KeyAuthority::SystemCommand => {
+            execution.authenticate_bound_key(&key, scope.cancellation.clone())
+        }
+        KeyAuthority::Unavailable => {
+            return Err(PluginFault::new(
                 ErrorCode::PermissionDenied,
-                "selected Key is not available to the caller",
-            )
-        })?;
-        scope.validate()?;
-        execution.authenticate_revocable(secret.expose_for_response(), scope.cancellation.clone())
-    } else if scope.parent.is_some() {
-        execution.authenticate_bound_key(&key, scope.cancellation.clone())
-    } else {
-        return Err(PluginFault::new(
-            ErrorCode::PermissionDenied,
-            "model callbacks require a personally authenticated caller",
-        ));
+                "model callbacks require host-authorized Key selection",
+            ));
+        }
     }
     .map_err(|_| {
         PluginFault::new(
@@ -361,6 +391,7 @@ async fn client(
 }
 async fn call(
     services: Arc<ModelServices>,
+    data: Option<Arc<dyn PluginDataService>>,
     scope: &Arc<Scope>,
     method: &str,
     params: Value,
@@ -375,12 +406,55 @@ async fn call(
     match method {
         "host.keys.list" => {
             let request: KeyListRequest = parse(params)?;
-            let owner = scope.owner.as_deref().ok_or_else(|| {
-                PluginFault::new(
-                    ErrorCode::PermissionDenied,
-                    "Key listing requires a personally authenticated caller",
-                )
-            })?;
+            let owner = match &scope.keys {
+                KeyAuthority::Personal(owner) => owner.as_str(),
+                KeyAuthority::SystemCommand => {
+                    gateway_admin::model::PageSize::new(request.limit).map_err(|_| invalid())?;
+                    let cursor = request
+                        .cursor
+                        .map(|cursor| {
+                            if cursor.len() > 4096 {
+                                return Err(invalid());
+                            }
+                            let id = String::from_utf8(hex::decode(cursor).map_err(|_| invalid())?)
+                                .map_err(|_| invalid())?;
+                            ClientApiKeyId::new(&id).map_err(|_| invalid())?;
+                            Ok(id)
+                        })
+                        .transpose()?;
+                    let service = data.ok_or_else(|| {
+                        PluginFault::new(
+                            ErrorCode::Unsupported,
+                            "system Key listing is unavailable",
+                        )
+                    })?;
+                    let page = service
+                        .keys(PluginKeyQuery {
+                            cursor,
+                            limit: request.limit,
+                        })
+                        .await
+                        .map_err(|_| PluginFault::new(ErrorCode::Fault, "Key listing failed"))?;
+                    return encode(KeyListResult {
+                        keys: page
+                            .keys
+                            .into_iter()
+                            .map(|key| ClientKey {
+                                id: key.id,
+                                name: key.name,
+                                enabled: key.enabled,
+                            })
+                            .collect(),
+                        next_cursor: page.next_cursor.map(hex::encode),
+                    });
+                }
+                KeyAuthority::Parent | KeyAuthority::Unavailable => {
+                    return Err(PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "Key listing requires host-authorized selection",
+                    ));
+                }
+            };
             let sort = ClientKeySort {
                 field: ClientKeySortField::Name,
                 direction: SortDirection::Asc,

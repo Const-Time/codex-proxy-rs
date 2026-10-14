@@ -2957,12 +2957,34 @@ async fn plugin_facts_read_cached_quota_without_forecast_or_subscription_mutatio
 
 #[tokio::test]
 async fn plugin_facts_validate_inputs_before_querying_stores() {
-    use gateway_admin::model::{AdminErrorKind, plugins::PluginAccountQuery};
+    use gateway_admin::model::{
+        AdminErrorKind,
+        plugins::{PluginAccountQuery, PluginKeyQuery},
+    };
     let events = events();
     let provider = FakeProviderAdmin::new("openai", events.clone());
     let store = FakeAccountStore::new("openai", events);
     let services = accounts_service(provider.clone(), store).await;
     let data = services.plugin_data();
+    for query in [
+        PluginKeyQuery {
+            cursor: None,
+            limit: 0,
+        },
+        PluginKeyQuery {
+            cursor: None,
+            limit: 201,
+        },
+        PluginKeyQuery {
+            cursor: Some("".into()),
+            limit: 1,
+        },
+    ] {
+        assert_eq!(
+            data.keys(query).await.unwrap_err().kind(),
+            AdminErrorKind::Invalid
+        );
+    }
     for query in [
         PluginAccountQuery {
             provider: None,

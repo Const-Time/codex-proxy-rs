@@ -409,12 +409,9 @@ async fn command_model_calls_reuse_native_personal_keys_costs_and_stream_cleanup
     assert_eq!(fixture.core.finalizations.lock().unwrap().len(), 3);
     assert_eq!(fixture.core.charges.lock().unwrap().len(), 3);
     assert!(fixture.core.leases.lock().unwrap().is_empty());
-    for identity in [
-        MutationActor::System,
-        MutationActor::AdminSession {
-            admin_user_id: "bob".into(),
-        },
-    ] {
+    for identity in [MutationActor::AdminSession {
+        admin_user_id: "bob".into(),
+    }] {
         let mut call = request(&["--input", r#"{"mode":"unary","key":"key_alice"}"#]);
         call.actor.actor = identity;
         let output = fixture
@@ -432,8 +429,158 @@ async fn command_model_calls_reuse_native_personal_keys_costs_and_stream_cleanup
     assert_eq!(
         fixture.core.starts.load(Ordering::SeqCst),
         2,
-        "CLI/system authority cannot mint a personal Key owner"
+        "a personal command cannot select another user's Key"
     );
+    fixture.manager.shutdown().await;
+}
+
+async fn system_command(fixture: &crate::models::fixture::Fixture, input: Value) -> Value {
+    let input = input.to_string();
+    let mut call = request(&["--input", &input]);
+    call.actor.actor = MutationActor::System;
+    let result = fixture
+        .manager
+        .execute_command(&fixture.id, 1, call)
+        .await
+        .unwrap();
+    serde_json::from_str(&result.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn system_commands_bind_native_key_ids_and_keep_original_costs_and_cleanup() {
+    let fixture = crate::models::fixture::Fixture::with_command().await;
+    for (index, mode) in ["unary", "stream", "leak"].into_iter().enumerate() {
+        let output = system_command(&fixture, json!({"mode":mode,"key":"key_system"})).await;
+        assert!(output.get("error").is_none(), "{output}");
+        fixture.clean(index + 1).await;
+    }
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.core.finalizations.lock().unwrap().len(), 3);
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+    for row in fixture.core.requests.lock().unwrap().iter() {
+        assert_eq!(row.client_api_key_ref.as_str(), "key_system");
+        assert!(row.parent_request_id.is_none());
+        assert!(row.initiating_plugin_instance_id.is_none());
+    }
+    for key in ["missing", "key_disabled"] {
+        let output = system_command(&fixture, json!({"mode":"unary","key":key})).await;
+        assert_eq!(output["error"]["code"], "permission_denied");
+    }
+    let output = system_command(&fixture, json!({"mode":"unary"})).await;
+    assert_eq!(output["error"]["code"], "invalid_input");
+    let input = json!({"mode":"unary","key":"key_system"}).to_string();
+    let mut personal = request(&["--input", &input]);
+    personal.actor.actor = MutationActor::AdminSession {
+        admin_user_id: "alice".into(),
+    };
+    let output = fixture
+        .manager
+        .execute_command(&fixture.id, 1, personal)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.stdout).unwrap()["error"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(fixture.core.requests.lock().unwrap().len(), 3);
+    assert_eq!(fixture.key_data.reads.load(Ordering::SeqCst), 0);
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn system_command_key_listing_is_paged_non_secret_and_validated_before_store_reads() {
+    let fixture = crate::models::fixture::Fixture::with_command().await;
+    let mut cursor = Value::Null;
+    for (id, enabled) in [
+        ("key_alice", true),
+        ("key_disabled", false),
+        ("key_system", true),
+    ] {
+        let output = system_command(
+            &fixture,
+            json!({"mode":"raw","method":"host.keys.list","params":{"cursor":cursor,"limit":1}}),
+        )
+        .await;
+        assert_eq!(
+            output["result"]["keys"],
+            json!([{"id":id,"name":id,"enabled":enabled}])
+        );
+        cursor = output["result"]["next_cursor"].clone();
+        if id != "key_system" {
+            assert!(!cursor.is_null());
+        }
+    }
+    assert!(cursor.is_null());
+    assert_eq!(fixture.key_data.reads.load(Ordering::SeqCst), 3);
+    for limit in [101, 200] {
+        let output = system_command(
+            &fixture,
+            json!({"mode":"raw","method":"host.keys.list","params":{"limit":limit}}),
+        )
+        .await;
+        assert_eq!(output["result"]["keys"].as_array().unwrap().len(), 3);
+        assert!(output["result"]["next_cursor"].is_null());
+    }
+    for params in [
+        json!({"limit":0}),
+        json!({"limit":201}),
+        json!({"limit":1,"cursor":"private-token"}),
+        json!({"limit":1,"cursor":""}),
+        json!({"limit":1,"cursor":"ff"}),
+        json!({"limit":1,"cursor":"00".repeat(2049)}),
+    ] {
+        let output = system_command(
+            &fixture,
+            json!({"mode":"raw","method":"host.keys.list","params":params}),
+        )
+        .await;
+        assert_eq!(output["error"]["code"], "invalid_input");
+        assert!(!output.to_string().contains("private-token"));
+    }
+    assert_eq!(fixture.key_data.reads.load(Ordering::SeqCst), 5);
+    for actor in [
+        MutationActor::AdminApiKey,
+        MutationActor::Plugin {
+            instance_id: fixture.id.clone(),
+            revision: std::num::NonZeroU64::new(1).unwrap(),
+        },
+    ] {
+        let input =
+            json!({"mode":"raw","method":"host.keys.list","params":{"limit":1}}).to_string();
+        let mut call = request(&["--input", &input]);
+        call.actor.actor = actor;
+        let output = fixture
+            .manager
+            .execute_command(&fixture.id, 1, call)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.stdout).unwrap()["error"]["code"],
+            "permission_denied"
+        );
+    }
+    assert_eq!(fixture.key_data.reads.load(Ordering::SeqCst), 5);
+    assert!(fixture.core.requests.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn system_command_key_authorization_is_revoked_during_catalog_lookup() {
+    let fixture = crate::models::fixture::Fixture::with_command().await;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    *fixture.core.catalog_gate.lock().unwrap() = Some(receiver);
+    let call = system_command(
+        &fixture,
+        json!({"mode":"raw","method":"host.models.list","params":{"client_key_id":"key_system","protocol":"openai","client_version":"fixture"}}),
+    );
+    tokio::pin!(call);
+    tokio::select! { _=&mut call => panic!("catalog should wait"), _=async { while fixture.core.catalogs.load(Ordering::SeqCst)==0 { tokio::task::yield_now().await; } }=>{} }
+    fixture
+        .snapshot
+        .publish(crate::models::fixture::snapshot(2, false));
+    sender.send(()).unwrap();
+    assert_eq!(call.await["error"]["code"], "permission_denied");
+    assert_eq!(fixture.core.active.load(Ordering::SeqCst), 0);
     fixture.manager.shutdown().await;
 }
 

@@ -8,6 +8,66 @@ use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[tokio::test]
+async fn system_command_key_projection_reads_all_owners_without_secrets_or_mutations() {
+    use gateway_admin::ports::store::ClientKeyStore as _;
+    use gateway_store::postgres::PgAdminClientKeyStore;
+    let Some(db) = TestDatabase::create("command_key_list").await else {
+        return;
+    };
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    let query = |cursor, limit| PluginKeyQuery { cursor, limit };
+    let empty = keys.plugin_keys(query(None, 1)).await.unwrap();
+    assert!(empty.keys.is_empty());
+    assert!(empty.next_cursor.is_none());
+    for user in ["command-user-a", "command-user-b"] {
+        sqlx::query("insert into users(id,username,password_hash,created_at,updated_at) values($1,$1,'unused',now(),now())")
+            .bind(user).execute(&db.pool).await.unwrap();
+    }
+    for (id, owner, name, enabled) in [
+        ("key_001", "command-user-a", "重复名称", true),
+        ("key_002", "command-user-b", "重复名称", false),
+        ("key_003", "command-user-a", "Another Key", true),
+    ] {
+        sqlx::query("insert into client_api_keys(id,owner_user_id,name,key,enabled,created_at,updated_at) values($1,$2,$3,$4,$5,now(),now())")
+            .bind(id).bind(owner).bind(name).bind(format!("sk_{}{}", id, "x".repeat(36)))
+            .bind(enabled).execute(&db.pool).await.unwrap();
+    }
+    let mut cursor = None;
+    for (id, enabled) in [("key_001", true), ("key_002", false), ("key_003", true)] {
+        let page = keys.plugin_keys(query(cursor, 1)).await.unwrap();
+        assert_eq!(page.keys.len(), 1);
+        assert_eq!(page.keys[0].id, id);
+        assert_eq!(page.keys[0].enabled, enabled);
+        assert!(!format!("{page:?}").contains("sk_"));
+        assert!(!format!("{page:?}").contains("command-user"));
+        cursor = page.next_cursor;
+        assert_eq!(cursor.is_none(), id == "key_003");
+    }
+    let all = keys.plugin_keys(query(None, 100)).await.unwrap();
+    assert_eq!(all.keys.len(), 3);
+    assert!(all.next_cursor.is_none());
+    assert_eq!(all.keys[0].name, "重复名称");
+    assert_eq!(all.keys[1].name, "重复名称");
+    for limit in [101, 200] {
+        assert_eq!(keys.plugin_keys(query(None, limit)).await.unwrap(), all);
+    }
+    for query in [query(None, 0), query(None, 201), query(Some("".into()), 1)] {
+        assert!(keys.plugin_keys(query).await.is_err());
+    }
+    let count: i64 = sqlx::query_scalar("select count(*) from client_api_keys")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let audits: i64 = sqlx::query_scalar("select count(*) from admin_audit_events")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 3);
+    assert_eq!(audits, 0);
+    db.close().await;
+}
+
+#[tokio::test]
 async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_commit() {
     let Some(db) = TestDatabase::create("plugin_authentication").await else {
         return;

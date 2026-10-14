@@ -810,6 +810,47 @@ impl ClientKeyStore for PgAdminClientKeyStore {
         })
     }
 
+    async fn plugin_keys(
+        &self,
+        query: gateway_admin::model::plugins::PluginKeyQuery,
+    ) -> AdminStoreResult<gateway_admin::model::plugins::PluginKeyPage> {
+        use gateway_admin::model::plugins::{PluginKeyPage, PluginListedKey};
+        if gateway_admin::model::PageSize::new(query.limit).is_err()
+            || query
+                .cursor
+                .as_deref()
+                .is_some_and(|id| ClientApiKeyId::new(id).is_err())
+        {
+            return Err(admin_store_error(
+                ENTITY,
+                invalid("plugin Key query is invalid"),
+            ));
+        }
+        let failure = || admin_store_error(ENTITY, postgres_unavailable("list plugin keys"));
+        // Project directly from the original Key table. Never fetch plaintext,
+        // owner details, budgets or a second catalog for host command selection.
+        let rows = sqlx::query("select id,name,enabled from client_api_keys where ($1::text is null or id > $1) order by id limit $2")
+            .bind(query.cursor).bind(i64::from(query.limit) + 1)
+            .fetch_all(&self.keys.pool).await.map_err(|_| failure())?;
+        let more = rows.len() > usize::from(query.limit);
+        let keys = rows
+            .into_iter()
+            .take(usize::from(query.limit))
+            .map(|row| {
+                Ok(PluginListedKey {
+                    id: row.try_get("id").map_err(|_| failure())?,
+                    name: row.try_get("name").map_err(|_| failure())?,
+                    enabled: row.try_get("enabled").map_err(|_| failure())?,
+                })
+            })
+            .collect::<AdminStoreResult<Vec<_>>>()?;
+        let next_cursor = if more {
+            keys.last().map(|key| key.id.clone())
+        } else {
+            None
+        };
+        Ok(PluginKeyPage { keys, next_cursor })
+    }
     async fn plugin_key_facts(
         &self,
         id: &ClientApiKeyId,

@@ -31,7 +31,7 @@
 | 观察订阅 | observer v1；请求完成、实际上游 WebSocket 原始帧；冻结 Key/分组范围、有界投递及独立撤销，观察失败不控制业务执行 |
 | 未开放的能力 | middleware、upstream_adapter、command_line、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
-`command_line` v1 的注册、类型化参数、帮助与执行 RPC 内核已接入实际插件进程。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图，模型推理继续使用真实本人 Key 与原 Core 结算；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。该能力仍不可启用：网关命令入口、系统命令的原生 Key 授权、登录账号结果的 Provider 校验和 Admin 提交尚未完成。当前内核收到需要保存账号的成功结果会明确返回未完整完成，不报告账号已保存；非零退出不提交账号。
+`command_line` v1 的注册、类型化参数、帮助与执行 RPC 内核已接入实际插件进程。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图。本人命令按登录用户归属选择 Key；宿主系统命令可分页查询全部 Key 的 ID、名称和启用状态（每页 1–200 项），并按 ID 绑定原 Core 授权，不读取或返回明文密钥。系统权限只属于宿主签发的 command_line 根调用；管理页、管理 API Key 和插件 actor 不会获得该权限。模型推理仍走原权限、准入、额度、费用和实时撤销链；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。该能力仍不可启用：网关命令入口、登录账号结果的 Provider 校验和 Admin 提交尚未完成。当前内核收到需要保存账号的成功结果会明确返回未完整完成，不报告账号已保存；非零退出不提交账号。
 
 声明 `observer` v1、`observation` 阶段的制品可以启用观察订阅。实例字段 `observer` 为 null 或 `{order, requestCompleted, websocketResponse}`；两种事件分别选择全部请求、指定 Key 或分组，至少启用一种。顺序为 -10000～10000 的整数，指定范围最多 256 个唯一有效 ID；省略/null 清除绑定。订阅随原实例 revision、迁移 `0040_plugin_observer.sql` 及完整备份恢复，升级候选失败保留旧发布。管理页展示两种事件和独立作用范围，实际上游 WebSocket 原始响应可能包含请求的业务内容，应按所需范围授权。
 
@@ -357,7 +357,7 @@ Core 已提供宿主签发的父请求上下文，request/attempt 协议桥传�
 
 每个根调用最多产生 64 个子调用，同时最多 16 个活动子调用，最多 8 层插件祖先；发起插件及全部祖先从子请求的 request/attempt 计划中排除。并发占用保留至原结算和清理完成，保留旧上下文不会锁住已结束的占用。子调用使用自己的请求 ID、原账本和准入链，历史记录保存父请求与发起实例；父记录尚未创建也可记录子调用。观察到子调用上游发送或不确定发送后，父请求不再自动重试。
 
-原生 `host.keys.list`、`host.models.list`、`host.model.execute`、`host.model.execute_stream`、`host.model.stream_read` 和 `host.model.stream_close` 已接通。管理调用必须由本人管理员会话发起并显式选 Key；Key 列表只返回本人非秘密信息，部署级管理 API Key 或 System 没有个人推理身份。request/attempt 内核中的子调用可以继承宿主签发的父身份；显式 Key 继续由 Core 检查其当前授权，父身份结束或撤销同样终止子调用。
+原生 `host.keys.list`、`host.models.list`、`host.model.execute`、`host.model.execute_stream`、`host.model.stream_read` 和 `host.model.stream_close` 已接通。管理调用必须由本人管理员会话发起并显式选 Key；Key 列表只返回本人非秘密信息，部署级管理 API Key 或管理阶段的 System 没有个人推理身份。宿主系统命令使用独立的全局非秘密 Key 投影，并以显式 Key ID 绑定原 Core 授权；客户端或插件声明 stage/actor 不能签发此权限。request/attempt 内核中的子调用可以继承宿主签发的父身份；显式 Key 继续由 Core 检查其当前授权，父身份结束或撤销同样终止子调用。
 
 管理调用中的推理没有虚构的模型父请求，仍共用调用图限额并排除发起实例；其管理调用上下文保留真实实例与操作者。显式 Provider/账号不得超出 Key 范围，子调用排除父 attempt 已持有的账号；没有其他授权账号时立即失败。续接账号与显式目标冲突时拒绝，不能换号发送原生续接。
 

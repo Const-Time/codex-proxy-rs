@@ -188,6 +188,23 @@ pub struct PluginKeyFacts {
     pub enabled: bool,
     pub group_ids: Vec<String>,
 }
+/// Global non-secret Key projection, available only to a host CLI invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginKeyQuery {
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginListedKey {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginKeyPage {
+    pub keys: Vec<PluginListedKey>,
+    pub next_cursor: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginAccountQuery {
     pub provider: Option<String>,

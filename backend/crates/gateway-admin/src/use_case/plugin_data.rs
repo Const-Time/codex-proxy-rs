@@ -1,7 +1,7 @@
 //! Read-only plugin projections. Provider owns quota decoding; reads never trigger refresh or billing side effects.
 use crate::{
     model::{
-        AdminError,
+        AdminError, PageSize,
         plugins::*,
         provider_credentials::{ProviderQuota, ProviderQuotaRequest},
     },
@@ -36,6 +36,20 @@ impl DefaultPluginDataService {
 }
 #[async_trait]
 impl PluginDataService for DefaultPluginDataService {
+    async fn keys(&self, query: PluginKeyQuery) -> Result<PluginKeyPage, AdminError> {
+        if PageSize::new(query.limit).is_err()
+            || query
+                .cursor
+                .as_deref()
+                .is_some_and(|id| ClientApiKeyId::new(id).is_err())
+        {
+            return Err(AdminError::invalid("Key 查询参数无效"));
+        }
+        self.keys
+            .plugin_keys(query)
+            .await
+            .map_err(|e| map_store_error(e, "plugin key listing"))
+    }
     async fn key(&self, id: &str) -> Result<PluginKeyFacts, AdminError> {
         let id = ClientApiKeyId::new(id).map_err(|_| AdminError::invalid("Key ID 无效"))?;
         self.keys
