@@ -147,7 +147,7 @@ impl Models {
             }
             Some(MutationActor::System)
                 if context.stage == Stage::CommandLine
-                    && root_scope.is_some()
+                    && root_scope.as_ref().is_some_and(ExtensionCallScope::is_root)
                     && parent.is_none()
                     && invocation.is_none() =>
             {

@@ -32,7 +32,10 @@ struct GraphState {
     active: usize,
 }
 #[derive(Debug, Default)]
-struct Graph(Mutex<GraphState>);
+struct Graph {
+    state: Mutex<GraphState>,
+    changed: event_listener::Event,
+}
 #[derive(Debug)]
 struct ActiveChild {
     graph: Arc<Graph>,
@@ -42,10 +45,11 @@ impl ActiveChild {
     fn release(&self) {
         if !self.released.swap(true, Ordering::AcqRel) {
             self.graph
-                .0
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .active -= 1;
+            self.graph.changed.notify(usize::MAX);
         }
     }
 }
@@ -88,6 +92,28 @@ impl Default for ExtensionCallScope {
     }
 }
 impl ExtensionCallScope {
+    /// A command root owns its graph; it cannot borrow a model/HTTP child's authority.
+    pub fn is_root(&self) -> bool {
+        self.permit.is_none() && self.parent_request_id.is_none() && self.ancestors.is_empty()
+    }
+    /// Wait on the original permits through Core settlement and resource release.
+    /// The host must first revoke admission of new callbacks and apply its own drain deadline.
+    pub async fn wait_until_idle(&self) {
+        loop {
+            let changed = self.graph.changed.listen();
+            if self
+                .graph
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active
+                == 0
+            {
+                return;
+            }
+            changed.await;
+        }
+    }
     /// Independent transport events start a fresh graph. Borrowed model/HTTP
     /// graphs keep every parent permit, ancestor and cumulative budget.
     pub(crate) fn transport_root(ancestors: BTreeSet<String>) -> Self {
@@ -97,7 +123,7 @@ impl ExtensionCallScope {
         }
     }
     pub(crate) fn transport_event(&self) -> Self {
-        if self.permit.is_none() && self.parent_request_id.is_none() && self.ancestors.is_empty() {
+        if self.is_root() {
             Self::default()
         } else {
             self.clone()
@@ -189,7 +215,7 @@ impl ExtensionCallScope {
         {
             let mut graph = self
                 .graph
-                .0
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if graph.total >= MAX_CHILDREN || graph.active >= MAX_ACTIVE {

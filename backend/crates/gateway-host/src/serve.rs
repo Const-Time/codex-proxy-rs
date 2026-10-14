@@ -194,7 +194,7 @@ pub(crate) async fn serve_router(
     Ok(())
 }
 
-async fn wait_for_shutdown(cancellation: &CancellationToken) {
+pub(crate) async fn wait_for_shutdown(cancellation: &CancellationToken) {
     #[cfg(unix)]
     {
         let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());

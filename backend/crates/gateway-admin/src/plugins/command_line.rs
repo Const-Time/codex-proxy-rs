@@ -2,6 +2,52 @@
 use super::*;
 
 impl PluginManager {
+    pub async fn run_system_command(
+        &self,
+        id: &str,
+        action: PluginCommandAction,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+        graph: gateway_core::engine::nested::ExtensionCallScope,
+    ) -> Result<PluginCommandOutput, PluginCommandError> {
+        if cancellation.is_cancelled() || !graph.is_root() {
+            return Err(AdminError::conflict("命令根调用已取消或无效").into());
+        }
+        let revision = self.command_revision(id).await?;
+        match action {
+            PluginCommandAction::Help(name) => {
+                let help = self.command_help(id, revision, name.as_deref()).await?;
+                if cancellation.is_cancelled() {
+                    return Err(AdminError::conflict("命令帮助调用已取消").into());
+                }
+                Ok(PluginCommandOutput {
+                    stdout: help,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    saved_accounts: 0,
+                })
+            }
+            PluginCommandAction::Execute { name, arguments } => {
+                self.execute_command(
+                    id,
+                    revision,
+                    PluginCommandRequest::system(name, arguments, cancellation, graph),
+                )
+                .await
+            }
+        }
+    }
+    /// Resolve the original active publication and recheck its persisted revision.
+    pub async fn command_revision(&self, id: &str) -> Result<u64, AdminError> {
+        let revision = self
+            .active
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .map(|(revision, _)| *revision)
+            .ok_or_else(|| AdminError::not_found("插件实例没有可用命令"))?;
+        self.command_process(id, revision).await?;
+        Ok(revision)
+    }
     async fn command_process(
         &self,
         id: &str,

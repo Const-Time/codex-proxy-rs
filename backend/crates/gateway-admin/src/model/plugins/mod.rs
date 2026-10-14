@@ -102,11 +102,38 @@ pub struct PluginHttpRequest {
 }
 
 /// Host-issued authority and cancellation; command arguments may contain credentials.
+pub enum PluginCommandAction {
+    Help(Option<String>),
+    Execute {
+        name: String,
+        arguments: Vec<String>,
+    },
+}
 pub struct PluginCommandRequest {
     pub name: String,
     pub arguments: Vec<String>,
     pub actor: super::MutationContext,
     pub cancellation: gateway_core::lifecycle::CancellationToken,
+    pub call_scope: gateway_core::engine::nested::ExtensionCallScope,
+}
+impl PluginCommandRequest {
+    pub fn system(
+        name: String,
+        arguments: Vec<String>,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+        call_scope: gateway_core::engine::nested::ExtensionCallScope,
+    ) -> Self {
+        Self {
+            name,
+            arguments,
+            actor: super::MutationContext {
+                actor: super::MutationActor::System,
+                request_id: uuid::Uuid::now_v7().to_string(),
+            },
+            cancellation,
+            call_scope,
+        }
+    }
 }
 pub struct PluginCommandOutput {
     pub stdout: String,

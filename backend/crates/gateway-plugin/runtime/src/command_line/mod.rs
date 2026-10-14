@@ -104,7 +104,10 @@ impl Executor<'_> {
             parameters::parse(find(self.commands, &request.name)?, &request.arguments)?;
         let payload = serde_json::to_vec(&invocation)
             .map_err(|_| AdminError::invalid("插件命令参数无法编码"))?;
-        if request.actor.request_id.is_empty() || request.cancellation.is_cancelled() {
+        if request.actor.request_id.is_empty()
+            || request.cancellation.is_cancelled()
+            || !request.call_scope.is_root()
+        {
             return Err(AdminError::conflict("插件命令调用已取消或关联无效").into());
         }
         let mut context = self
@@ -113,7 +116,7 @@ impl Executor<'_> {
         context.request_id = Some(request.actor.request_id.clone());
         let caller = self.services.caller();
         let cancellation = CancellationToken::linked([request.cancellation, caller.cancellation()]);
-        let graph = gateway_core::engine::nested::ExtensionCallScope::default();
+        let graph = request.call_scope;
         // A CLI command is a host root. It has no model parent or HTTP principal;
         // all host callbacks share this RPC's actual graph and frozen publication.
         let service_context = core::Context {

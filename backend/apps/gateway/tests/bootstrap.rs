@@ -9,6 +9,62 @@ const REDIS_PASSWORD: &str = "222222222222222222222222222222222222222222222222";
 const ADMIN_PASSWORD: &str = "test-admin-password";
 const TOPOLOGY_CHILD_ENV: &str = "CPR_TEST_TOPOLOGY_CHILD";
 
+#[test]
+fn cli_help_does_not_require_configuration_or_initialize_services() {
+    let directory = tempfile::tempdir().unwrap();
+    for args in [vec!["--help"], vec!["plugin", "--help"], vec!["-h"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_codex-proxy-rs"))
+            .args(args)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("plugin <实例 ID>"));
+        assert!(!stdout.contains("服务启动正常"));
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn cli_rejects_invalid_arguments_without_echoing_sensitive_input() {
+    let directory = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["private-test-token"],
+        vec!["serve", "private-test-token"],
+        vec!["plugin"],
+        vec!["plugin", ""],
+        vec!["plugin", "instance", "--help", "private-test-token"],
+        vec!["--help", "private-test-token"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_codex-proxy-rs"))
+            .args(args)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-test-token"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("服务启动正常"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_rejects_non_utf8_command_instead_of_falling_back_to_serve() {
+    use std::os::unix::ffi::OsStringExt;
+    let output = Command::new(env!("CARGO_BIN_EXE_codex-proxy-rs"))
+        .arg(std::ffi::OsString::from_vec(vec![b's', 255, b'e']))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("valid UTF-8"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("服务启动正常"));
+}
+
 #[tokio::test]
 async fn proxy_probe_should_use_provider_custom_ca_for_https_proxies() {
     use gateway_admin::ports::proxy::ProxyProbe;

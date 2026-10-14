@@ -19,6 +19,51 @@ pub(super) struct Admissions {
     pub(super) releases: AtomicUsize,
 }
 
+#[test]
+fn extension_graph_idle_wait_tracks_original_http_permits_and_does_not_reset_call_budget() {
+    use gateway_core::engine::nested::ExtensionCallScope;
+    block_on(async {
+        let root = ExtensionCallScope::default();
+        assert!(root.is_root());
+        root.wait_until_idle().await;
+        let child = root.fork_http("graph-idle".into()).unwrap();
+        assert!(!child.is_root());
+        let held = child.clone();
+        let mut wait = Box::pin(root.wait_until_idle());
+        assert!(futures::poll!(wait.as_mut()).is_pending());
+        drop(child);
+        assert!(futures::poll!(wait.as_mut()).is_pending());
+        drop(held);
+        wait.await;
+        for _ in 1..64 {
+            drop(root.fork_http("graph-idle".into()).unwrap());
+        }
+        root.wait_until_idle().await;
+        assert!(root.fork_http("graph-idle".into()).is_err());
+    });
+}
+
+#[test]
+fn extension_graph_idle_wait_wakes_all_waiters_when_release_races_registration() {
+    use gateway_core::engine::nested::ExtensionCallScope;
+    for _ in 0..128 {
+        let root = ExtensionCallScope::default();
+        let child = root.fork_http("graph-race".into()).unwrap();
+        let dropper = std::thread::spawn(move || drop(child));
+        block_on(async {
+            let wait = futures::future::join(root.wait_until_idle(), root.wait_until_idle());
+            futures::pin_mut!(wait);
+            let timeout = futures_timer::Delay::new(Duration::from_secs(2));
+            futures::pin_mut!(timeout);
+            assert!(matches!(
+                futures::future::select(wait, timeout).await,
+                futures::future::Either::Left(_)
+            ));
+        });
+        dropper.join().unwrap();
+    }
+}
+
 impl ClientAdmissionPort for Admissions {
     fn maintain(
         &self,

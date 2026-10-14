@@ -41,12 +41,21 @@ pub struct HostBundle {
     client_distribution: Arc<RgAdguardClientDistribution>,
 }
 
+/// Keep the operation result separate from the original execution graph's drain fact.
+/// T may contain sensitive output, so this completion does not implement Debug.
+pub struct CommandCompletion<T> {
+    pub result: Option<T>,
+    pub graph_drained: bool,
+}
+
 /// 在启动其他包之前初始化进程级能力。
 pub async fn initialize(config: HostConfig) -> Result<HostBundle, HostError> {
     let log_guard = initialize_logging(&config.logging)?;
     let cancellation = CancellationToken::new();
     let connections = Arc::new(ConnectionTracker::new(cancellation.clone()));
-    let workers = WorkerSupervisor::new(cancellation.clone());
+    // Request cancellation begins drain. Keep Store writers and cleanup workers
+    // alive until the terminal calls shutdown after its original graph drains.
+    let workers = WorkerSupervisor::new(CancellationToken::new());
     let system = Arc::new(ProcessSystemOperations::new(
         cancellation.clone(),
         config.system_update.clone(),
@@ -64,6 +73,40 @@ pub async fn initialize(config: HostConfig) -> Result<HostBundle, HostError> {
 }
 
 impl HostBundle {
+    /// A CLI terminal owns signal handling and worker shutdown without binding HTTP.
+    /// The operation must use this bundle's cancellation token and the same root graph.
+    pub async fn command<T>(
+        self,
+        operation: impl std::future::Future<Output = T>,
+        graph: gateway_core::engine::nested::ExtensionCallScope,
+    ) -> CommandCompletion<T> {
+        let mut operation = Box::pin(operation);
+        let mut deadline = None;
+        let result = tokio::select! { biased;
+            result = &mut operation => Some(result),
+            () = serve::wait_for_shutdown(&self.cancellation) => {
+                let drain_at = tokio::time::Instant::now() + self.config.drain_timeout();
+                deadline = Some(drain_at);
+                tokio::time::timeout_at(drain_at, &mut operation).await.ok()
+            },
+        };
+        // Native command guards revoke callbacks on return/drop. Retain the
+        // same Core graph until settlement releases its real permits.
+        self.cancellation.cancel();
+        drop(operation);
+        let drain_at =
+            deadline.unwrap_or_else(|| tokio::time::Instant::now() + self.config.drain_timeout());
+        let graph_drained = tokio::time::timeout_at(drain_at, graph.wait_until_idle())
+            .await
+            .is_ok();
+        self.workers
+            .shutdown(self.config.worker_shutdown_timeout())
+            .await;
+        CommandCompletion {
+            result,
+            graph_drained,
+        }
+    }
     /// 向启动控制台报告一个组装阶段已就绪。
     pub fn report_startup_ready(&self, service: &'static str) {
         tracing::info!(target: "gateway_startup", service, "服务启动正常");
