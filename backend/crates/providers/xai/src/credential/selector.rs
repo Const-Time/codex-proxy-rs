@@ -494,6 +494,10 @@ impl GrokSessionSelector for GrokAccountSessionSelector {
         Box::pin(self.select_one(request))
     }
 
+    fn credential_updates(&self) -> Option<&dyn crate::GrokCredentialUpdate> {
+        Some(self)
+    }
+
     fn record_failure<'a>(
         &'a self,
         session: &'a SelectedGrokSession,
@@ -673,5 +677,49 @@ fn insert_runtime_cooldown(
         .is_none_or(|current| current.until < until)
     {
         cooldowns.insert(account_id.clone(), replacement);
+    }
+}
+
+impl crate::GrokCredentialUpdate for GrokAccountSessionSelector {
+    fn reload<'a>(
+        &'a self,
+        session: &'a SelectedGrokSession,
+        revision: gateway_core::account::CredentialRevision,
+    ) -> GrokSessionSelectorFuture<'a> {
+        Box::pin(async move {
+            if revision <= session.credential_revision() || !session.allows_account_state_mutation()
+            {
+                return Err(GrokSessionSelectorError::InvalidSession);
+            }
+            let loaded = self
+                .repository
+                .load(session.account_id(), revision)
+                .await
+                .map_err(|_| GrokSessionSelectorError::InvalidSession)?;
+            if loaded.account.id() != session.account_id()
+                || loaded.account.revision() != revision
+                || !loaded.account.enabled()
+                || loaded.account.authentication_kind()
+                    != crate::credential::XAI_AUTHENTICATION_KIND_OAUTH
+                || loaded.account.credential_state() != CredentialState::Ready
+                || loaded.account.upstream_user_id() != Some(session.user_id().expose())
+                || loaded.account.outbound_proxy() != session.binding().outbound_proxy()
+                || loaded
+                    .refresh_token_expires_at
+                    .is_some_and(|expires| expires <= Utc::now())
+            {
+                return Err(GrokSessionSelectorError::InvalidSession);
+            }
+            session
+                .with_credential_revision(
+                    revision,
+                    loaded.access_token,
+                    loaded
+                        .account
+                        .email()
+                        .map(|email| SecretValue::new(email.to_owned())),
+                )
+                .map_err(|_| GrokSessionSelectorError::InvalidSession)
+        })
     }
 }

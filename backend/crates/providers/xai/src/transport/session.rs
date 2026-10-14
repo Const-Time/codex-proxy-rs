@@ -104,7 +104,7 @@ pub struct SelectedGrokSession {
     binding: GrokSessionBinding,
     allows_account_state_mutation: bool,
     capacity: Option<AccountCapacitySnapshot>,
-    _guard: Box<dyn GrokSessionLeaseGuard>,
+    _guard: Arc<dyn GrokSessionLeaseGuard>,
 }
 
 impl SelectedGrokSession {
@@ -139,7 +139,7 @@ impl SelectedGrokSession {
             binding,
             allows_account_state_mutation: true,
             capacity: None,
-            _guard: Box::new(guard),
+            _guard: Arc::new(guard),
         })
     }
 
@@ -163,6 +163,33 @@ impl SelectedGrokSession {
     #[must_use]
     pub const fn account_id(&self) -> &ProviderAccountId {
         &self.account_id
+    }
+
+    pub(crate) fn with_credential_revision(
+        &self,
+        revision: CredentialRevision,
+        access_token: SecretValue,
+        email: Option<SecretValue>,
+    ) -> Result<Self, GrokSessionDataError> {
+        if revision <= self.credential_revision
+            || !valid_secret_header(&access_token, 64 * 1024)
+            || email
+                .as_ref()
+                .is_some_and(|value| !valid_secret_header(value, 1_024))
+        {
+            return Err(GrokSessionDataError::InvalidSecretValue);
+        }
+        Ok(Self {
+            account_id: self.account_id.clone(),
+            credential_revision: revision,
+            access_token,
+            user_id: self.user_id.clone(),
+            email,
+            binding: self.binding.clone(),
+            allows_account_state_mutation: self.allows_account_state_mutation,
+            capacity: self.capacity,
+            _guard: self._guard.clone(),
+        })
     }
 
     /// 返回 selector 冻结的凭据 revision。
@@ -410,6 +437,9 @@ pub trait GrokSessionSelector: Send + Sync {
     /// 执行一次选择，不做 Provider 内部回退。
     fn select(&self, request: GrokSessionSelection) -> GrokSessionSelectorFuture<'_>;
 
+    /// Native reload is issued only by a selector that owns the credential repository.
+    fn credential_updates(&self) -> Option<&dyn GrokCredentialUpdate>;
+
     /// 记录一条已分类的失败反馈，不重试也不替换原错误。
     fn record_failure<'a>(
         &'a self,
@@ -426,6 +456,16 @@ pub trait GrokSessionSelector: Send + Sync {
     ) -> GrokCredentialFeedbackFuture<'a> {
         Box::pin(async {})
     }
+}
+
+/// Exact native credential reads reuse the selected session's existing lease.
+pub trait GrokCredentialUpdate: Send + Sync {
+    /// Reload a committed revision without scheduling or acquiring capacity.
+    fn reload<'a>(
+        &'a self,
+        session: &'a SelectedGrokSession,
+        revision: CredentialRevision,
+    ) -> GrokSessionSelectorFuture<'a>;
 }
 
 /// 不含密钥的选择器失败。

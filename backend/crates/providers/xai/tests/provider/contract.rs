@@ -345,6 +345,9 @@ impl StubSelector {
 }
 
 impl GrokSessionSelector for StubSelector {
+    fn credential_updates(&self) -> Option<&dyn provider_xai::GrokCredentialUpdate> {
+        None
+    }
     fn select(&self, request: GrokSessionSelection) -> GrokSessionSelectorFuture<'_> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.upstream_models
@@ -408,6 +411,9 @@ impl SequencedAccountSelector {
 }
 
 impl GrokSessionSelector for SequencedAccountSelector {
+    fn credential_updates(&self) -> Option<&dyn provider_xai::GrokCredentialUpdate> {
+        None
+    }
     fn select(&self, request: GrokSessionSelection) -> GrokSessionSelectorFuture<'_> {
         let selected = self.accounts.lock().expect("account sequence").pop_front();
         Box::pin(async move {
@@ -3662,6 +3668,9 @@ mod upstream_adapter {
     }
     struct LeaseSelector(Arc<AtomicUsize>);
     impl GrokSessionSelector for LeaseSelector {
+        fn credential_updates(&self) -> Option<&dyn provider_xai::GrokCredentialUpdate> {
+            None
+        }
         fn select(&self, _: GrokSessionSelection) -> GrokSessionSelectorFuture<'_> {
             Box::pin(async {
                 self.0.fetch_add(1, Ordering::SeqCst);
