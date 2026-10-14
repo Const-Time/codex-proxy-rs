@@ -12,8 +12,13 @@ use std::{
 };
 
 #[derive(Default)]
-pub(crate) struct InvocationCalls(Mutex<BTreeMap<String, Arc<InvocationCaller>>>);
+pub(crate) struct InvocationCalls(Mutex<BTreeMap<String, InvocationEntry>>);
+struct InvocationEntry {
+    caller: Option<Arc<InvocationCaller>>,
+    pending: Vec<gateway_core::engine::nested::ExtensionCallCompletion>,
+}
 pub(crate) struct InvocationCaller {
+    calls: std::sync::Weak<InvocationCalls>,
     actor: MutationContext,
     context: gateway_plugin_sdk::CallContext,
     pub(crate) graph: gateway_core::engine::nested::ExtensionCallScope,
@@ -29,7 +34,7 @@ impl InvocationCalls {
         mut invocation: Option<PluginInvocationContext>,
         revocation: gateway_core::lifecycle::CancellationToken,
         graph: Option<gateway_core::engine::nested::ExtensionCallScope>,
-    ) -> InvocationCall {
+    ) -> Result<InvocationCall, PluginFault> {
         let scope = context.resource_scope_id.clone();
         let graph = invocation
             .as_ref()
@@ -67,24 +72,38 @@ impl InvocationCalls {
                 })
             });
         }
-        self.0
+        let mut entries = self
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                scope.clone(),
-                Arc::new(InvocationCaller {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.retain(|_, entry| {
+            entry.caller.is_some() || entry.pending.iter().any(|pending| !pending.is_complete())
+        });
+        if entries.len() >= 32 || entries.contains_key(&scope) {
+            return Err(PluginFault::new(
+                ErrorCode::Capacity,
+                "native invocation capacity exhausted",
+            ));
+        }
+        entries.insert(
+            scope.clone(),
+            InvocationEntry {
+                caller: Some(Arc::new(InvocationCaller {
+                    calls: Arc::downgrade(self),
                     actor,
                     context,
                     graph,
                     deadline,
                     invocation,
                     cancellation,
-                }),
-            );
-        InvocationCall {
+                })),
+                pending: vec![],
+            },
+        );
+        Ok(InvocationCall {
             calls: self.clone(),
             scope,
-        }
+        })
     }
     pub(crate) fn actor(&self, scope: &str) -> Option<MutationContext> {
         self.caller(scope).map(|caller| caller.actor.clone())
@@ -94,10 +113,73 @@ impl InvocationCalls {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(scope)
-            .cloned()
+            .and_then(|entry| entry.caller.clone())
+    }
+    pub(crate) fn revoke(&self) {
+        for caller in self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter_map(|entry| entry.caller.as_ref())
+        {
+            caller.cancellation.cancel();
+        }
+    }
+    pub(crate) async fn drain(&self) {
+        // RPC shutdown must first prevent callbacks from starting new native work.
+        let pending: Vec<_> = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values_mut()
+            .flat_map(|entry| {
+                if let Some(caller) = entry.caller.take() {
+                    caller.cancellation.cancel();
+                }
+                entry.pending.clone()
+            })
+            .collect();
+        futures::future::join_all(pending.iter().map(|pending| pending.wait())).await;
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 impl InvocationCaller {
+    pub(crate) fn track(
+        self: &Arc<Self>,
+        cleanup: &gateway_core::engine::nested::ExtensionCallScope,
+    ) -> Result<(), PluginFault> {
+        let pending = cleanup.completion().ok_or_else(|| {
+            PluginFault::new(
+                ErrorCode::PermissionDenied,
+                "native cleanup must own a child permit",
+            )
+        })?;
+        let calls = self
+            .calls
+            .upgrade()
+            .ok_or_else(|| PluginFault::new(ErrorCode::Cancelled, "native invocation ended"))?;
+        let mut entries = calls
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries
+            .get_mut(&self.context.resource_scope_id)
+            .filter(|entry| {
+                entry
+                    .caller
+                    .as_ref()
+                    .is_some_and(|caller| Arc::ptr_eq(caller, self))
+                    && !self.cancellation.is_cancelled()
+            })
+            .ok_or_else(|| PluginFault::new(ErrorCode::Cancelled, "native invocation ended"))?;
+        entry.pending.retain(|pending| !pending.is_complete());
+        entry.pending.push(pending);
+        Ok(())
+    }
     pub(crate) fn actor(&self) -> &MutationContext {
         &self.actor
     }
@@ -114,15 +196,42 @@ pub(crate) struct InvocationCall {
 }
 impl Drop for InvocationCall {
     fn drop(&mut self) {
-        if let Some(caller) = self
-            .calls
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.scope)
-        {
-            caller.cancellation.cancel();
-        }
+        let pending = {
+            let mut entries = self
+                .calls
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(entry) = entries.get_mut(&self.scope) else {
+                return;
+            };
+            if let Some(caller) = entry.caller.take() {
+                caller.cancellation.cancel();
+            }
+            entry.pending.retain(|pending| !pending.is_complete());
+            if entry.pending.is_empty() {
+                entries.remove(&self.scope);
+                return;
+            }
+            entry.pending.clone()
+        };
+        let calls = Arc::downgrade(&self.calls);
+        let scope = self.scope.clone();
+        tokio::spawn(async move {
+            futures::future::join_all(pending.iter().map(|pending| pending.wait())).await;
+            if let Some(calls) = calls.upgrade() {
+                let mut entries = calls
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if entries.get(&scope).is_some_and(|entry| {
+                    entry.caller.is_none()
+                        && entry.pending.iter().all(|pending| pending.is_complete())
+                }) {
+                    entries.remove(&scope);
+                }
+            }
+        });
     }
 }
 pub(crate) async fn call(

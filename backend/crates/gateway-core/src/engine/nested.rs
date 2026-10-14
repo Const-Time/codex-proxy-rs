@@ -59,6 +59,30 @@ impl Drop for ActiveChild {
     }
 }
 
+/// Read-only completion of one original child permit; does not retain its lease
+/// or grant an execution scope. Unrelated children cannot delay this completion.
+#[derive(Debug, Clone)]
+pub struct ExtensionCallCompletion {
+    graph: Arc<Graph>,
+    child: std::sync::Weak<ActiveChild>,
+}
+impl ExtensionCallCompletion {
+    pub fn is_complete(&self) -> bool {
+        self.child
+            .upgrade()
+            .is_none_or(|child| child.released.load(Ordering::Acquire))
+    }
+    pub async fn wait(&self) {
+        loop {
+            let changed = self.graph.changed.listen();
+            if self.is_complete() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
 /// One execution owns its own effects marker; descendants notify only their ancestors.
 #[derive(Debug, Clone, Copy)]
 enum PermitLifetime {
@@ -92,6 +116,14 @@ impl Default for ExtensionCallScope {
     }
 }
 impl ExtensionCallScope {
+    /// Observe this child's native settlement without holding its permit alive.
+    /// Roots have no individual permit and therefore no completion handle.
+    pub fn completion(&self) -> Option<ExtensionCallCompletion> {
+        self.permit.as_ref().map(|child| ExtensionCallCompletion {
+            graph: self.graph.clone(),
+            child: Arc::downgrade(child),
+        })
+    }
     /// A command root owns its graph; it cannot borrow a model/HTTP child's authority.
     pub fn is_root(&self) -> bool {
         self.permit.is_none() && self.parent_request_id.is_none() && self.ancestors.is_empty()

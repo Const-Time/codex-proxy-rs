@@ -145,13 +145,20 @@ impl Executor<'_> {
             .bind(&context, cancellation.clone(), Some(graph.clone()))
             .map_err(|_| AdminError::unavailable("命令网络作用域不可用"))?;
         let _network = self.outbound.guard(&context);
-        let _caller = self.calls.enter(
-            context.clone(),
-            request.actor.clone(),
-            None,
-            cancellation.clone(),
-            Some(graph.clone()),
-        );
+        let _caller = self
+            .calls
+            .enter(
+                context.clone(),
+                request.actor.clone(),
+                None,
+                cancellation.clone(),
+                Some(graph.clone()),
+            )
+            .map_err(|_| AdminError::unavailable("命令调用容量已耗尽"))?;
+        let invocation = self
+            .calls
+            .caller(&context.resource_scope_id)
+            .ok_or_else(|| AdminError::unavailable("命令调用关联已失效"))?;
         if let Some(models) = &self.models {
             models
                 .bind(
@@ -200,9 +207,7 @@ impl Executor<'_> {
                 self.credentials,
                 result.accounts,
                 caller,
-                request.actor,
-                graph,
-                cancellation.clone(),
+                invocation,
                 deadline,
             )
             .await?

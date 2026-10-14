@@ -420,3 +420,178 @@ async fn credentials_callback_cancel_and_deadline_retain_inflight_native_commit_
         fixture.close().await;
     }
 }
+
+async fn wait_for_blocked_commit(fixture: &Native, lock_pid: i32) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname=current_database() and query like 'update runtime_settings%' and $1=any(pg_blocking_pids(pid)))")
+                .bind(lock_pid).fetch_one(&fixture.env.pool).await.unwrap();
+            if blocked {return;}
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn credentials_management_drop_and_process_stop_drain_own_commit_without_holding_parent_permits()
+ {
+    use gateway_admin::model::plugins::PluginInvocationContext;
+    use gateway_core::engine::middleware::http::Context;
+    use std::time::Duration;
+    let Some(fixture) = Native::with_configuration(json!({}), None).await else {
+        return;
+    };
+    let root = ExtensionCallScope::default();
+    let parent = root.fork_http("native-parent".into()).unwrap();
+    let sibling = root.fork_http("native-sibling".into()).unwrap();
+    let parent_cancellation = CancellationToken::new();
+    let mut request = support::request("models");
+    request.actor.actor = MutationActor::AdminApiKey;
+    request.body = serde_json::to_vec(&input("host.auth.save", create("parent-drain"))).unwrap();
+    request.invocation = Some(PluginInvocationContext {
+        context: Context {
+            request_id: request.actor.request_id.clone(),
+            call_id: "native-http-parent".into(),
+            parent_call_id: None,
+            call_scope: parent.clone(),
+            model_parent: None,
+            cancellation: parent_cancellation.clone(),
+            deadline_at: Default::default(),
+        },
+        services: None,
+        http: None,
+    });
+    let mut lock = fixture.env.pool.begin().await.unwrap();
+    let lock_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    sqlx::query("select id from runtime_settings where id=1 for update")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let mut invocation = Box::pin(fixture.process.handle(request));
+    tokio::select! {
+        _=&mut invocation=>panic!("native save must be blocked"),
+        ()=wait_for_blocked_commit(&fixture,lock_pid)=>{},
+    }
+    drop(invocation);
+    let mut stopping = Box::pin(fixture.process.stop());
+    assert!(futures::poll!(stopping.as_mut()).is_pending());
+    assert_eq!(fixture.count().await, 0);
+    lock.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), stopping)
+        .await
+        .unwrap();
+    assert_eq!(fixture.count().await, 1);
+    assert_eq!(fixture.env.published.lock().unwrap().len(), 1);
+    assert!(
+        !parent_cancellation.is_cancelled(),
+        "plugin shutdown must not cancel the original parent"
+    );
+    let mut parent_drain = Box::pin(root.wait_until_idle());
+    assert!(
+        futures::poll!(parent_drain.as_mut()).is_pending(),
+        "parent and sibling remain independently alive after plugin shutdown"
+    );
+    drop(parent);
+    drop(sibling);
+    tokio::time::timeout(Duration::from_secs(5), parent_drain)
+        .await
+        .unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn credentials_maintenance_cancel_and_active_stop_wait_for_original_native_commit() {
+    use std::time::Duration;
+    for cancel in [false, true] {
+        let Some(fixture)=Native::with_archive(json!({"adapter_mode":"maintenance-credentials","command_result":create("maintenance-drain")}),None,support::maintenance_archive("1.0.0")).await else {return;};
+        let mut lock = fixture.env.pool.begin().await.unwrap();
+        let lock_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+        sqlx::query("select id from runtime_settings where id=1 for update")
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        let mut invocation = Box::pin(fixture.process.reconcile(cancellation.clone()));
+        tokio::select! {
+            _=&mut invocation=>panic!("native maintenance save must be blocked"),
+            ()=wait_for_blocked_commit(&fixture,lock_pid)=>{},
+        }
+        if cancel {
+            cancellation.cancel();
+            assert!(invocation.await.is_err());
+        } else {
+            fixture.process.revoke();
+            assert!(invocation.await.is_err());
+        }
+        let mut stopping = Box::pin(fixture.process.stop());
+        assert!(futures::poll!(stopping.as_mut()).is_pending());
+        assert_eq!(fixture.count().await, 0);
+        lock.commit().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stopping)
+            .await
+            .unwrap();
+        assert_eq!(fixture.count().await, 1);
+        assert_eq!(fixture.env.published.lock().unwrap().len(), 1);
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn credentials_manager_shutdown_waits_for_detached_management_account_commit() {
+    use gateway_admin::{plugins::PluginManager, ports::plugins::PluginService};
+    use gateway_plugin_runtime::PluginEngine;
+    use std::{sync::Arc, time::Duration};
+    let Some(fixture) =
+        Native::with_archive(json!({}), None, support::maintenance_archive("1.0.0")).await
+    else {
+        return;
+    };
+    let manager = PluginManager::new(
+        fixture.env.store.plugin_store(),
+        Arc::new(
+            PluginEngine::new(
+                fixture.env.cache.path().join("manager-drain"),
+                "3.11.2".parse().unwrap(),
+                fixture.env.store.plugin_store(),
+            )
+            .with_credentials(fixture.env.admin.services().plugin_credentials()),
+        ),
+    );
+    manager.restore().await.unwrap();
+    let mut request = support::request("models");
+    request.actor.actor = MutationActor::AdminApiKey;
+    request.body = serde_json::to_vec(&input("host.auth.save", create("manager-drain"))).unwrap();
+    let mut lock = fixture.env.pool.begin().await.unwrap();
+    let lock_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    sqlx::query("select id from runtime_settings where id=1 for update")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let mut invocation =
+        Box::pin(manager.handle(&fixture.record.id, fixture.record.revision, request));
+    tokio::select! {
+        _=&mut invocation=>panic!("native managed save must be blocked"),
+        ()=wait_for_blocked_commit(&fixture,lock_pid)=>{},
+    }
+    drop(invocation);
+    let mut stopping = Box::pin(manager.shutdown());
+    assert!(futures::poll!(stopping.as_mut()).is_pending());
+    assert_eq!(fixture.count().await, 0);
+    lock.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), stopping)
+        .await
+        .unwrap();
+    assert_eq!(fixture.count().await, 1);
+    assert_eq!(fixture.env.published.lock().unwrap().len(), 1);
+    drop(manager);
+    fixture.close().await;
+}
