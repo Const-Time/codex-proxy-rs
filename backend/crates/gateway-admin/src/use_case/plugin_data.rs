@@ -1,4 +1,4 @@
-//! Read-only plugin projections. Provider owns quota decoding; reads never trigger refresh or billing side effects.
+//! Plugin fact reads remain passive; explicit refresh uses the original native account pipeline.
 use crate::{
     model::{
         AdminError, PageSize,
@@ -8,7 +8,7 @@ use crate::{
     ports::{
         plugins::PluginDataService,
         provider::ProviderAdminRegistry,
-        store::{AccountStore, ClientKeyStore},
+        store::{AccountStore, AuthStore, ClientKeyStore},
     },
     use_case::{map_provider_error, map_store_error},
 };
@@ -20,17 +20,23 @@ pub(crate) struct DefaultPluginDataService {
     accounts: Arc<dyn AccountStore>,
     keys: Arc<dyn ClientKeyStore>,
     providers: ProviderAdminRegistry,
+    auth: Arc<dyn AuthStore>,
+    native: Arc<dyn super::accounts::AccountsService>,
 }
 impl DefaultPluginDataService {
     pub(crate) fn new(
         accounts: Arc<dyn AccountStore>,
         keys: Arc<dyn ClientKeyStore>,
         providers: ProviderAdminRegistry,
+        auth: Arc<dyn AuthStore>,
+        native: Arc<dyn super::accounts::AccountsService>,
     ) -> Self {
         Self {
             accounts,
             keys,
             providers,
+            auth,
+            native,
         }
     }
 }
@@ -97,4 +103,61 @@ impl PluginDataService for DefaultPluginDataService {
             .await
             .map_err(|e| map_provider_error(e, "plugin quota"))
     }
+    async fn refresh_quota(
+        &self,
+        scope: PluginMutationScope,
+        initiator: crate::model::MutationContext,
+        account: ProviderAccountId,
+        cleanup: gateway_core::engine::nested::ExtensionCallScope,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<ProviderQuota, AdminError> {
+        if cleanup.is_root() || cancellation.is_cancelled() {
+            return Err(AdminError::conflict("插件额度刷新作用域已失效"));
+        }
+        super::plugin_account_authority::authorize(self.auth.as_ref(), &scope, &initiator).await?;
+        let accounts = self.accounts.clone();
+        let auth = self.auth.clone();
+        let native = self.native.clone();
+        tokio::spawn(async move {
+            let _cleanup = cleanup;
+            verify_account(accounts.as_ref(), &scope, &account).await?;
+            super::plugin_account_authority::authorize(auth.as_ref(), &scope, &initiator).await?;
+            if cancellation.is_cancelled() {
+                return Err(AdminError::conflict("插件额度刷新已取消"));
+            }
+            _cleanup.observe_upstream_effect();
+            // Provider refresh, subscription observations and local attribution
+            // keep their original native owners even when the RPC waiter leaves.
+            let result = native.quota(&account, true).await?.quota;
+            super::plugin_account_authority::authorize(auth.as_ref(), &scope, &initiator).await?;
+            verify_account(accounts.as_ref(), &scope, &account).await?;
+            Ok(result)
+        })
+        .await
+        .map_err(|_| AdminError::internal("额度刷新结果未确认，请重新查询额度"))?
+    }
+}
+
+async fn verify_account(
+    accounts: &dyn AccountStore,
+    scope: &PluginMutationScope,
+    account: &ProviderAccountId,
+) -> Result<(), AdminError> {
+    let page = accounts
+        .plugin_credential_accounts(
+            scope.clone(),
+            PluginCredentialQuery {
+                provider: None,
+                cursor: None,
+                account_id: Some(account.clone()),
+                limit: PageSize::new(1)
+                    .map_err(|_| AdminError::internal("额度刷新查询范围无效"))?,
+            },
+        )
+        .await
+        .map_err(|e| map_store_error(e, "plugin quota authority"))?;
+    if page.accounts.len() != 1 || page.accounts[0].id != account.as_str() {
+        return Err(AdminError::not_found("账号不存在"));
+    }
+    Ok(())
 }

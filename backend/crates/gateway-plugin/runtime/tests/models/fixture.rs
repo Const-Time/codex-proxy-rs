@@ -595,6 +595,16 @@ pub struct KeyData {
 }
 #[async_trait]
 impl gateway_admin::ports::plugins::PluginDataService for KeyData {
+    async fn refresh_quota(
+        &self,
+        _: gateway_admin::model::plugins::PluginMutationScope,
+        _: gateway_admin::model::MutationContext,
+        _: gateway_core::account::ProviderAccountId,
+        _: gateway_core::engine::nested::ExtensionCallScope,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<gateway_admin::model::provider_credentials::ProviderQuota, AdminError> {
+        Err(AdminError::unavailable("unused"))
+    }
     async fn keys(
         &self,
         query: gateway_admin::model::plugins::PluginKeyQuery,

@@ -384,6 +384,8 @@ pub async fn initialize(
             store.accounts(),
             store.client_keys(),
             registry.clone(),
+            store.auth(),
+            accounts.clone(),
         )),
         plugins: None,
         turn_state: None,
