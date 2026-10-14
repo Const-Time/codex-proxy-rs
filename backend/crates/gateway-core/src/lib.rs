@@ -53,6 +53,7 @@ pub struct CoreStorePorts {
     snapshot_subscriptions: Arc<dyn SnapshotSubscriptionPort>,
     client_api_key_usage: Arc<dyn ClientApiKeyUsageSink>,
     budget: Option<Arc<dyn engine::budget::ClientBudgetPort>>,
+    session_affinity: Option<Arc<dyn provider_ports::ProviderSessionAffinityPort>>,
 }
 
 impl CoreStorePorts {
@@ -79,12 +80,21 @@ impl CoreStorePorts {
             snapshot_subscriptions,
             client_api_key_usage,
             budget: None,
+            session_affinity: None,
         }
     }
 
     #[must_use]
     pub fn with_budget(mut self, budget: Arc<dyn engine::budget::ClientBudgetPort>) -> Self {
         self.budget = Some(budget);
+        self
+    }
+    #[must_use]
+    pub fn with_session_affinity(
+        mut self,
+        affinity: Arc<dyn provider_ports::ProviderSessionAffinityPort>,
+    ) -> Self {
+        self.session_affinity = Some(affinity);
         self
     }
 }
@@ -171,6 +181,9 @@ pub async fn initialize(
     );
     if let Some(budget) = ports.budget {
         service = service.with_budget(budget);
+    }
+    if let Some(affinity) = ports.session_affinity {
+        service = service.with_session_affinity(affinity);
     }
     let service = Arc::new(service);
     let execution: Arc<dyn ExecutionService> = service.clone();

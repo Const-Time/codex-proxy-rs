@@ -32,6 +32,7 @@ pub(crate) fn is_method(method: &str) -> bool {
     matches!(
         method,
         "host.keys.list"
+            | "host.affinity.lookup"
             | "host.models.list"
             | "host.model.execute"
             | "host.model.execute_stream"
@@ -404,6 +405,27 @@ async fn call(
         return Err(invalid());
     }
     match method {
+        "host.affinity.lookup" => {
+            let request: AffinityLookupRequest = parse(params)?;
+            let parent = scope.parent.as_ref().ok_or_else(|| {
+                PluginFault::new(
+                    ErrorCode::PermissionDenied,
+                    "affinity lookup requires a live model parent",
+                )
+            })?;
+            let provider = gateway_core::identity::ProviderKind::new(request.provider)
+                .map_err(|_| invalid())?;
+            let key =
+                gateway_core::provider_ports::ProviderSessionAffinityKey::try_new(request.key)
+                    .map_err(|_| invalid())?;
+            let account = tokio::select! { biased;
+                () = scope.cancellation.cancelled() => return Err(PluginFault::new(ErrorCode::Cancelled, "affinity callback scope ended")),
+                result = services.execution.lookup_session_affinity(parent, &provider, &key) => result.map_err(gateway_fault)?,
+            };
+            encode(AffinityLookupResult {
+                account_id: account.map(|account| account.as_str().to_owned()),
+            })
+        }
         "host.keys.list" => {
             let request: KeyListRequest = parse(params)?;
             let owner = match &scope.keys {

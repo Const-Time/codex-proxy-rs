@@ -7,7 +7,6 @@ use gateway_admin::{
 use gateway_plugin_runtime::{PackageLimits, PluginEngine, ValidatedPackage};
 use serde_json::json;
 use std::sync::Arc;
-mod workbench;
 
 #[tokio::test]
 async fn public_resources_follow_registered_visibility_and_actual_instance_revision() {

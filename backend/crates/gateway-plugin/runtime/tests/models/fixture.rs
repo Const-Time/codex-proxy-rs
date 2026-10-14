@@ -829,35 +829,47 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new() -> Self {
-        Self::build(false, false, &["acct_allowed"]).await
+        Self::build(false, false, &["acct_allowed"], None).await
     }
     pub async fn with_middleware() -> Self {
-        Self::build(true, false, &["acct_allowed"]).await
+        Self::build(true, false, &["acct_allowed"], None).await
     }
     pub async fn with_command() -> Self {
-        Self::build(false, true, &["acct_allowed"]).await
+        Self::build(false, true, &["acct_allowed"], None).await
     }
     pub async fn with_accounts(accounts: &[&str]) -> Self {
-        Self::build(true, false, accounts).await
+        Self::build(true, false, accounts, None).await
     }
-    async fn build(middleware: bool, command_line: bool, accounts: &[&str]) -> Self {
+    pub async fn with_affinity(
+        affinity: Arc<dyn gateway_core::provider_ports::ProviderSessionAffinityPort>,
+    ) -> Self {
+        Self::build(false, false, &["acct_allowed"], Some(affinity)).await
+    }
+    async fn build(
+        middleware: bool,
+        command_line: bool,
+        accounts: &[&str],
+        affinity: Option<Arc<dyn gateway_core::provider_ports::ProviderSessionAffinityPort>>,
+    ) -> Self {
         let core = Arc::new(Core::default());
         let mut providers: Vec<Arc<dyn Provider>> = vec![core.clone()];
         if accounts.contains(&"acct_fallback") {
             providers.push(Arc::new(FallbackProvider(core.clone())));
         }
         let snapshot = RuntimeSnapshotHandle::new(snapshot_with_accounts(1, true, accounts));
-        let execution = Arc::new(
-            DefaultExecutionService::new(
-                snapshot.clone(),
-                core.clone(),
-                ProviderRegistry::new(providers).unwrap(),
-                core.clone(),
-                core.clone(),
-                core.clone(),
-            )
-            .with_budget(core.clone()),
-        );
+        let mut execution = DefaultExecutionService::new(
+            snapshot.clone(),
+            core.clone(),
+            ProviderRegistry::new(providers).unwrap(),
+            core.clone(),
+            core.clone(),
+            core.clone(),
+        )
+        .with_budget(core.clone());
+        if let Some(affinity) = affinity {
+            execution = execution.with_session_affinity(affinity);
+        }
+        let execution = Arc::new(execution);
         let store = Arc::new(MemoryStore::default());
         let key_data = Arc::new(KeyData::default());
         let cache = tempfile::tempdir().unwrap();

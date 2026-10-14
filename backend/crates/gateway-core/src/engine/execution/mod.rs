@@ -1,4 +1,5 @@
 //! 数据面执行用例：认证、准入、路由、continuation、circuit 与会话生命周期。
+mod affinity;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -589,6 +590,21 @@ pub trait ExecutionService: Send + Sync {
         Box::pin(async { Err(ProviderCatalogUnavailable) })
     }
     fn contains_public_model(&self, client: &AuthenticatedClient, model: &PublicModelId) -> bool;
+    /// Read only existing Provider affinity within a live host-issued model parent.
+    /// This hint neither grants account access nor changes the original binding.
+    fn lookup_session_affinity<'a>(
+        &'a self,
+        _parent: &'a super::nested::NestedExecutionContext,
+        _provider: &'a ProviderKind,
+        _key: &'a crate::provider_ports::ProviderSessionAffinityKey,
+    ) -> BoxFuture<'a, Result<Option<ProviderAccountId>, GatewayError>> {
+        Box::pin(async {
+            Err(GatewayError::new(
+                GatewayErrorKind::Unsupported,
+                "provider session affinity is unavailable",
+            ))
+        })
+    }
     /// Freeze current authorization, a single request ID, deadline and cancellation
     /// before invoking extensions. Preparation does not acquire quota or admission.
     fn prepare_execution(
@@ -706,6 +722,7 @@ pub struct DefaultExecutionService {
     continuation: Arc<dyn NativeContinuationPort>,
     client_api_key_usage: Arc<dyn ClientApiKeyUsageSink>,
     budget: Option<Arc<dyn ClientBudgetPort>>,
+    session_affinity: Option<Arc<dyn crate::provider_ports::ProviderSessionAffinityPort>>,
 }
 
 impl DefaultExecutionService {
@@ -732,12 +749,21 @@ impl DefaultExecutionService {
             continuation,
             client_api_key_usage,
             budget: None,
+            session_affinity: None,
         }
     }
 
     #[must_use]
     pub fn with_budget(mut self, budget: Arc<dyn ClientBudgetPort>) -> Self {
         self.budget = Some(budget);
+        self
+    }
+    #[must_use]
+    pub fn with_session_affinity(
+        mut self,
+        affinity: Arc<dyn crate::provider_ports::ProviderSessionAffinityPort>,
+    ) -> Self {
+        self.session_affinity = Some(affinity);
         self
     }
 
@@ -1655,6 +1681,14 @@ impl ExecutionService for DefaultExecutionService {
         client
             .snapshot
             .public_models_for_scope(client.policy.account_scope())
+    }
+    fn lookup_session_affinity<'a>(
+        &'a self,
+        parent: &'a super::nested::NestedExecutionContext,
+        provider: &'a ProviderKind,
+        key: &'a crate::provider_ports::ProviderSessionAffinityKey,
+    ) -> BoxFuture<'a, Result<Option<ProviderAccountId>, GatewayError>> {
+        Box::pin(self.lookup_affinity(parent, provider, key))
     }
 
     fn client_model_catalog<'a>(
