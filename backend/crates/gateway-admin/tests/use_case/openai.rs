@@ -59,7 +59,7 @@ async fn file_reauthorization_rotates_existing_account_without_importing_setting
         .expect("reauthorize existing account");
     await_quota_requests(&provider, 1).await;
     assert_eq!(
-        result.credential_ids,
+        result.credential_ids(),
         [ProviderAccountId::new("acct_test").unwrap()]
     );
     assert_eq!(
@@ -185,7 +185,7 @@ async fn openai_import_should_refresh_quota_for_every_imported_account() {
     await_quota_requests(&provider, 2).await;
 
     assert_eq!(
-        result.credential_ids,
+        result.credential_ids(),
         [
             ProviderAccountId::new("acct_first").expect("first account ID"),
             ProviderAccountId::new("acct_second").expect("second account ID"),
@@ -231,7 +231,7 @@ async fn openai_import_should_remain_successful_when_quota_refresh_fails() {
     await_quota_requests(&provider, 1).await;
 
     assert_eq!(
-        result.credential_ids,
+        result.credential_ids(),
         [ProviderAccountId::new("acct_prepared").expect("account ID")]
     );
     assert_eq!(provider.quota_requests().len(), 1);

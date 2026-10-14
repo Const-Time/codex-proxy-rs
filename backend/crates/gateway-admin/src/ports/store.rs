@@ -87,6 +87,28 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
+    async fn plugin_credential_accounts(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _query: crate::model::plugins::PluginCredentialQuery,
+    ) -> AdminStoreResult<crate::model::plugins::PluginCredentialPage> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin credentials",
+            "not configured",
+        ))
+    }
+    async fn plugin_credential(
+        &self,
+        _scope: crate::model::plugins::PluginMutationScope,
+        _account: gateway_core::account::ProviderAccountId,
+    ) -> AdminStoreResult<ProviderExportCredentialInput> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "plugin credentials",
+            "not configured",
+        ))
+    }
     async fn plugin_account_facts(
         &self,
         _query: crate::model::plugins::PluginAccountQuery,

@@ -659,7 +659,12 @@ mod actions {
     fn account_import_response_should_emit_account_ids() {
         let response = AccountImportData::from_result(CredentialImportResult {
             config_revision: Revision::new(8).expect("revision"),
-            credential_ids: vec![ProviderAccountId::new("acct_imported").expect("account ID")],
+            credentials: vec![
+                gateway_admin::model::provider_credentials::CredentialImportReceipt {
+                    account_id: ProviderAccountId::new("acct_imported").expect("account ID"),
+                    credential_revision: Some(Revision::new(1).unwrap()),
+                },
+            ],
         });
         assert_eq!(
             serde_json::to_value(response).expect("serialize account import"),

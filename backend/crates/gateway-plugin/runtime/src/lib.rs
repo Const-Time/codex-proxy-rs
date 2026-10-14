@@ -3,6 +3,7 @@ mod account_scheduling;
 mod callbacks;
 mod catalog;
 mod command_line;
+mod credentials;
 mod data;
 mod engine;
 mod management_validation;

@@ -159,6 +159,17 @@ pub struct PluginCredentialSaved {
     pub account_id: gateway_core::account::ProviderAccountId,
     pub credential_revision: Option<super::Revision>,
 }
+/// Native account query; SDK cursors are stable account IDs, not page offsets.
+pub struct PluginCredentialQuery {
+    pub provider: Option<gateway_core::routing::ProviderKind>,
+    pub cursor: Option<gateway_core::account::ProviderAccountId>,
+    pub account_id: Option<gateway_core::account::ProviderAccountId>,
+    pub limit: super::PageSize,
+}
+pub struct PluginCredentialPage {
+    pub accounts: Vec<super::accounts::AccountRecord>,
+    pub next_cursor: Option<gateway_core::account::ProviderAccountId>,
+}
 #[derive(Debug, thiserror::Error)]
 pub enum PluginCommandError {
     #[error(transparent)]

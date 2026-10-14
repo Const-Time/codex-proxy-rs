@@ -244,7 +244,22 @@ pub struct ImportProviderAccounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAccountAdminImport {
     pub config_revision: Revision,
-    pub account_ids: Vec<String>,
+    pub accounts: Vec<ProviderAccountImportReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAccountImportReceipt {
+    pub account_id: String,
+    pub credential_revision: Revision,
+}
+
+impl ProviderAccountAdminImport {
+    pub fn account_ids(&self) -> Vec<String> {
+        self.accounts
+            .iter()
+            .map(|receipt| receipt.account_id.clone())
+            .collect()
+    }
 }
 
 impl fmt::Debug for ImportProviderAccounts {

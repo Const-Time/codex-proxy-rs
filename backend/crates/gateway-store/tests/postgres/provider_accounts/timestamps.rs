@@ -231,7 +231,7 @@ async fn credential_and_admin_writes_preserve_existing_update_time_after_clock_r
         })
         .await
         .expect("reimport account after rollback");
-    assert_eq!(imported.account_ids, [account_id.as_str()]);
+    assert_eq!(imported.account_ids(), [account_id.as_str()]);
     let stored = repository
         .load_provider_account(account_id.as_str())
         .await

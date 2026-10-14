@@ -1,4 +1,4 @@
-mod credentials;
+pub(crate) mod credentials;
 mod duration;
 mod parameters;
 

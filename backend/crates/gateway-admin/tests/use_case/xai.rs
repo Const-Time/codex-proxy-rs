@@ -109,7 +109,7 @@ async fn xai_import_should_remain_successful_when_quota_refresh_fails() {
         .await
         .expect("committed import remains successful");
 
-    assert_eq!(result.credential_ids.len(), 1);
+    assert_eq!(result.credential_ids().len(), 1);
     assert_eq!(provider.quota_requests().len(), 1);
 }
 

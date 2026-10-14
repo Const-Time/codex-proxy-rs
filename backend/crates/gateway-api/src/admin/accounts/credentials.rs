@@ -367,9 +367,9 @@ pub struct AccountImportData {
 impl AccountImportData {
     pub fn from_result(result: CredentialImportResult) -> Self {
         let account_ids = result
-            .credential_ids
+            .credentials
             .into_iter()
-            .map(|account_id| account_id.to_string())
+            .map(|receipt| receipt.account_id.to_string())
             .collect::<Vec<_>>();
         Self {
             imported_count: account_ids.len(),

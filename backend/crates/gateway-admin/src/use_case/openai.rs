@@ -139,10 +139,10 @@ impl OpenAiService for DefaultOpenAiService {
             )
             .await?;
             self.provider
-                .account_facts_changed(&result.credential_ids)
+                .account_facts_changed(&result.credential_ids())
                 .await;
             publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-            self.observe_initial_quotas(&result.credential_ids, &request_id);
+            self.observe_initial_quotas(&result.credential_ids(), &request_id);
             return Ok(result);
         }
         let context = command.context;
@@ -183,11 +183,11 @@ impl OpenAiService for DefaultOpenAiService {
             .map_err(|error| map_store_error(error, "OpenAI credential import"))?;
         drop(proxy_reservation);
         self.provider
-            .account_facts_changed(&result.credential_ids)
+            .account_facts_changed(&result.credential_ids())
             .await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         // 导入完成后立即做一次观察；失败不回滚已经提交的 credential。
-        self.observe_initial_quotas(&result.credential_ids, &context.request_id);
+        self.observe_initial_quotas(&result.credential_ids(), &context.request_id);
         Ok(result)
     }
 

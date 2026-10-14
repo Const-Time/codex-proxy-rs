@@ -436,6 +436,7 @@ impl PluginRuntime for PluginEngine {
                 outbound.clone(),
             )?
             .with_resources(self.resources.clone())
+            .with_credentials(self.credentials.clone())
             .with_quota(self.quota.clone())
             .with_models(models.clone()),
         );
@@ -709,12 +710,12 @@ impl PluginProcess for LivePlugin {
             .bind_origin(&context, origin)
             .map_err(|_| AdminError::unavailable("维护服务作用域不可用"))?;
         self.outbound
-            .bind(&context, cancellation.clone(), Some(effects))
+            .bind(&context, cancellation.clone(), Some(effects.clone()))
             .map_err(|_| AdminError::unavailable("维护网络作用域不可用"))?;
         let _outbound = self.outbound.guard(&context);
         let caller = self.services.caller();
         let _caller = self.calls.enter(
-            context.resource_scope_id.clone(),
+            context.clone(),
             MutationContext {
                 actor: MutationActor::Plugin {
                     instance_id: caller.instance_id().into(),
@@ -724,6 +725,7 @@ impl PluginProcess for LivePlugin {
             },
             None,
             cancellation.clone(),
+            Some(effects),
         );
         let reply = tokio::select! { biased;
             () = cancellation.cancelled() => return Err(AdminError::unavailable("插件维护已取消")),
@@ -1034,10 +1036,11 @@ impl PluginProcess for LivePlugin {
         );
         context.request_id = Some(request.actor.request_id.clone());
         let _caller = self.calls.enter(
-            context.resource_scope_id.clone(),
+            context.clone(),
             request.actor,
             request.invocation,
             self.access.cancellation(),
+            None,
         );
         let reply = self
             .session

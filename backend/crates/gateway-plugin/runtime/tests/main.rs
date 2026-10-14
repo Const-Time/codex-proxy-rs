@@ -20,4 +20,5 @@ mod outbound;
 mod services;
 
 mod command_line;
+mod credentials;
 mod observation;

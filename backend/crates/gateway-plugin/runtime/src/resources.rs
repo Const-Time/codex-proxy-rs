@@ -15,17 +15,34 @@ use std::{
 pub(crate) struct InvocationCalls(Mutex<BTreeMap<String, Arc<InvocationCaller>>>);
 pub(crate) struct InvocationCaller {
     actor: MutationContext,
+    context: gateway_plugin_sdk::CallContext,
+    pub(crate) graph: gateway_core::engine::nested::ExtensionCallScope,
+    pub(crate) deadline: gateway_core::lifecycle::Deadline,
     pub(crate) invocation: Option<PluginInvocationContext>,
     pub(crate) cancellation: gateway_core::lifecycle::CancellationToken,
 }
 impl InvocationCalls {
     pub(crate) fn enter(
         self: &Arc<Self>,
-        scope: String,
+        context: gateway_plugin_sdk::CallContext,
         actor: MutationContext,
         mut invocation: Option<PluginInvocationContext>,
         revocation: gateway_core::lifecycle::CancellationToken,
+        graph: Option<gateway_core::engine::nested::ExtensionCallScope>,
     ) -> InvocationCall {
+        let scope = context.resource_scope_id.clone();
+        let graph = invocation
+            .as_ref()
+            .map(|origin| origin.context.call_scope.clone())
+            .or(graph)
+            .unwrap_or_default();
+        let deadline = invocation
+            .as_ref()
+            .map(|origin| origin.context.deadline_at)
+            .unwrap_or_default()
+            .cap(
+                std::time::SystemTime::now() + std::time::Duration::from_millis(context.timeout_ms),
+            );
         let cancellation = gateway_core::lifecycle::CancellationToken::linked(
             std::iter::once(revocation)
                 .chain(invocation.iter().map(|i| i.context.cancellation.clone())),
@@ -57,6 +74,9 @@ impl InvocationCalls {
                 scope.clone(),
                 Arc::new(InvocationCaller {
                     actor,
+                    context,
+                    graph,
+                    deadline,
                     invocation,
                     cancellation,
                 }),
@@ -75,6 +95,17 @@ impl InvocationCalls {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(scope)
             .cloned()
+    }
+}
+impl InvocationCaller {
+    pub(crate) fn actor(&self) -> &MutationContext {
+        &self.actor
+    }
+    pub(crate) fn authorizes(&self, context: &gateway_plugin_sdk::CallContext) -> bool {
+        let mut expected = self.context.clone();
+        expected.call_id = context.call_id;
+        expected.resource_stream = context.resource_stream;
+        expected == *context && !self.cancellation.is_cancelled() && !self.deadline.is_elapsed()
     }
 }
 pub(crate) struct InvocationCall {

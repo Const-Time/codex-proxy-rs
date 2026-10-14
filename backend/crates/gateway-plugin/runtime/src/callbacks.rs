@@ -22,6 +22,7 @@ struct Namespace {
     schema: jsonschema::Validator,
 }
 pub(crate) struct Callbacks {
+    credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     outbound: Arc<crate::outbound::Registry>,
     models: Option<Arc<crate::models::Models>>,
     quota: Option<Arc<dyn gateway_admin::ports::plugins::PluginQuotaService>>,
@@ -35,6 +36,13 @@ pub(crate) struct Callbacks {
     data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
 impl Callbacks {
+    pub(crate) fn with_credentials(
+        mut self,
+        credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
+    ) -> Self {
+        self.credentials = credentials;
+        self
+    }
     pub(crate) fn with_models(mut self, models: Option<Arc<crate::models::Models>>) -> Self {
         self.models = models;
         self
@@ -75,6 +83,7 @@ impl Callbacks {
             })
             .collect::<Result<_, gateway_admin::model::AdminError>>()?;
         Ok(Self {
+            credentials: None,
             outbound,
             models: None,
             quota: None,
@@ -116,10 +125,7 @@ impl CallbackHandler for Callbacks {
             let _ = self.outbound.bind(
                 context,
                 caller.cancellation.clone(),
-                caller
-                    .invocation
-                    .as_ref()
-                    .map(|origin| origin.context.call_scope.clone()),
+                Some(caller.graph.clone()),
             );
         }
         if context.stage == Stage::Management
@@ -134,7 +140,9 @@ impl CallbackHandler for Callbacks {
                 self.calls
                     .caller(&context.resource_scope_id)
                     .and_then(|caller| caller.invocation.clone()),
-                None,
+                self.calls
+                    .caller(&context.resource_scope_id)
+                    .map(|caller| caller.graph.clone()),
             );
         }
     }
@@ -159,6 +167,7 @@ impl CallbackHandler for Callbacks {
         let resources = self.resources.clone();
         let calls = self.calls.clone();
         let quota = self.quota.clone();
+        let credentials = self.credentials.clone();
         let models = self.models.clone();
         Box::pin(async move {
             if !active.load(Ordering::Acquire)
@@ -193,6 +202,60 @@ impl CallbackHandler for Callbacks {
                     ErrorCode::Cancelled,
                     "background invocation scope ended",
                 ));
+            }
+            if crate::credentials::is_method(&method) {
+                let caller = calls
+                    .caller(&context.resource_scope_id)
+                    .filter(|caller| caller.authorizes(&context))
+                    .ok_or_else(|| {
+                        PluginFault::new(
+                            ErrorCode::PermissionDenied,
+                            "credential invocation is not active",
+                        )
+                    })?;
+                let permitted = match context.stage {
+                    Stage::Management => matches!(
+                        caller.actor().actor,
+                        gateway_admin::model::MutationActor::AdminSession { .. }
+                            | gateway_admin::model::MutationActor::AdminApiKey
+                    ),
+                    Stage::CommandLine => {
+                        caller.graph.is_root()
+                            && matches!(
+                                caller.actor().actor,
+                                gateway_admin::model::MutationActor::System
+                            )
+                    }
+                    Stage::Maintenance => {
+                        matches!(&caller.actor().actor, gateway_admin::model::MutationActor::Plugin { instance_id, revision: actual } if instance_id == &id && actual.get() == revision)
+                    }
+                    _ => false,
+                };
+                if !permitted {
+                    return Err(PluginFault::new(
+                        ErrorCode::PermissionDenied,
+                        "this invocation has no account credential authority",
+                    ));
+                }
+                let service = credentials.ok_or_else(|| {
+                    PluginFault::new(
+                        ErrorCode::Unsupported,
+                        "native account credentials are not configured",
+                    )
+                })?;
+                let scope = PluginMutationScope {
+                    instance_id: id,
+                    revision,
+                    actor: gateway_admin::model::MutationContext {
+                        actor: gateway_admin::model::MutationActor::Plugin {
+                            instance_id: context.instance_id,
+                            revision: std::num::NonZeroU64::new(revision).ok_or_else(invalid)?,
+                        },
+                        request_id: caller.actor().request_id.clone(),
+                    },
+                };
+                return crate::credentials::call(service, scope, caller, &method, params, payload)
+                    .await;
             }
             if matches!(context.stage, Stage::Routing | Stage::Scheduling)
                 && !crate::models::is_method(&method)
