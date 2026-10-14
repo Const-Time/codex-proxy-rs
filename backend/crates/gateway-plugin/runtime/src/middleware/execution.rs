@@ -92,6 +92,7 @@ pub(super) async fn invoke(
     let stream = tokio::select! {
         biased;
         () = context.cancellation.cancelled() => return Err(MiddlewareError::Fault),
+        () = context.deadline_at.wait() => return Err(MiddlewareError::Fault),
         result = session.call_stream(HANDLE_METHOD, call, serde_json::to_value(head).map_err(|_| MiddlewareError::InvalidState)?, payload) => {
             result.map_err(|e| invocation.take_downstream_error().unwrap_or_else(|| rpc_error(e)))?
         }

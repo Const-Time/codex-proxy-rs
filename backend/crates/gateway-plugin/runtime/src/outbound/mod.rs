@@ -21,7 +21,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{sync::Mutex as AsyncMutex, time::Instant};
+use tokio::sync::Mutex as AsyncMutex;
 pub(crate) type SharedClient = Arc<OnceLock<Result<HttpClient, HttpError>>>;
 pub(crate) const MAX_PAYLOAD: usize = 8 * 1024 * 1024;
 pub(crate) fn is_method(method: &str) -> bool {
@@ -106,7 +106,7 @@ pub(crate) struct HttpScope {
     effects: Option<ExtensionCallScope>,
     proxy: Option<OutboundProxy>,
     pool_scope: Mutex<String>,
-    deadline: Instant,
+    deadline: crate::resources::InvocationDeadline,
     operation_timeout: Duration,
     streaming: AtomicBool,
     streams: Mutex<BTreeMap<String, Arc<HttpStream>>>,
@@ -131,7 +131,7 @@ impl HttpScope {
             effects,
             proxy,
             pool_scope: Mutex::new(pool_scope),
-            deadline: Instant::now() + timeout,
+            deadline: crate::resources::InvocationDeadline::new(Default::default(), timeout),
             operation_timeout: timeout.min(Duration::from_secs(120)),
             streaming: AtomicBool::new(false),
             streams: Mutex::default(),
@@ -169,10 +169,7 @@ impl HttpScope {
         if self.streaming.load(Ordering::Acquire) {
             return Ok(self.operation_timeout);
         }
-        let left = self
-            .deadline
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_secs(120));
+        let left = self.deadline.at().bounded(Duration::from_secs(120));
         if left.is_zero() {
             Err(self.fault(ErrorCode::Timeout, "network callback deadline"))
         } else {

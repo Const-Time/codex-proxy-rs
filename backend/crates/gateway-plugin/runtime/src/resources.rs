@@ -17,12 +17,68 @@ struct InvocationEntry {
     caller: Option<Arc<InvocationCaller>>,
     pending: Vec<gateway_core::engine::nested::ExtensionCallCompletion>,
 }
+/// Keeps the original owner deadline while observing the actual RPC processing budget.
+#[derive(Clone)]
+pub(crate) struct InvocationDeadline {
+    owner: gateway_core::lifecycle::Deadline,
+    initial: gateway_core::lifecycle::Deadline,
+    budget: Arc<Mutex<Option<gateway_plugin_sdk::client::CallDeadline>>>,
+}
+impl InvocationDeadline {
+    pub(crate) fn new(
+        owner: gateway_core::lifecycle::Deadline,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            owner,
+            initial: owner.cap(std::time::SystemTime::now() + timeout),
+            budget: Arc::new(Mutex::new(None)),
+        }
+    }
+    pub(crate) fn bind(&self, budget: &gateway_plugin_sdk::client::CallDeadline) {
+        *self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(budget.clone());
+    }
+    pub(crate) fn at(&self) -> gateway_core::lifecycle::Deadline {
+        let budget = self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match budget {
+            Some(budget) => budget.remaining().map_or(self.owner, |remaining| {
+                self.owner.cap(std::time::SystemTime::now() + remaining)
+            }),
+            None => self.initial,
+        }
+    }
+    pub(crate) fn is_elapsed(&self) -> bool {
+        self.at().is_elapsed()
+    }
+    pub(crate) async fn wait(&self) {
+        let budget = self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(budget) = budget {
+            tokio::select! { biased;
+                () = self.owner.wait() => {},
+                () = budget.wait() => {},
+            }
+        } else {
+            self.initial.wait().await;
+        }
+    }
+}
 pub(crate) struct InvocationCaller {
     calls: std::sync::Weak<InvocationCalls>,
     actor: MutationContext,
     context: gateway_plugin_sdk::CallContext,
     pub(crate) graph: gateway_core::engine::nested::ExtensionCallScope,
-    pub(crate) deadline: gateway_core::lifecycle::Deadline,
+    pub(crate) deadline: InvocationDeadline,
     pub(crate) invocation: Option<PluginInvocationContext>,
     pub(crate) cancellation: gateway_core::lifecycle::CancellationToken,
 }
@@ -41,13 +97,13 @@ impl InvocationCalls {
             .map(|origin| origin.context.call_scope.clone())
             .or(graph)
             .unwrap_or_default();
-        let deadline = invocation
-            .as_ref()
-            .map(|origin| origin.context.deadline_at)
-            .unwrap_or_default()
-            .cap(
-                std::time::SystemTime::now() + std::time::Duration::from_millis(context.timeout_ms),
-            );
+        let deadline = InvocationDeadline::new(
+            invocation
+                .as_ref()
+                .map(|origin| origin.context.deadline_at)
+                .unwrap_or_default(),
+            std::time::Duration::from_millis(context.timeout_ms),
+        );
         let cancellation = gateway_core::lifecycle::CancellationToken::linked(
             std::iter::once(revocation)
                 .chain(invocation.iter().map(|i| i.context.cancellation.clone())),
@@ -104,6 +160,18 @@ impl InvocationCalls {
             calls: self.clone(),
             scope,
         })
+    }
+    pub(crate) fn bind_budget(
+        &self,
+        context: &gateway_plugin_sdk::CallContext,
+        budget: &gateway_plugin_sdk::client::CallDeadline,
+    ) {
+        if let Some(caller) = self
+            .caller(&context.resource_scope_id)
+            .filter(|caller| caller.authorizes(context))
+        {
+            caller.deadline.bind(budget);
+        }
     }
     pub(crate) fn actor(&self, scope: &str) -> Option<MutationContext> {
         self.caller(scope).map(|caller| caller.actor.clone())

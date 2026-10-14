@@ -75,7 +75,7 @@ impl Registry {
         scopes.insert(context.resource_scope_id.clone(), (context.clone(), scope));
         Ok(())
     }
-    fn begin(&self, context: &CallContext) {
+    fn begin(&self, context: &CallContext, budget: &gateway_plugin_sdk::client::CallDeadline) {
         let mut scopes = self
             .scopes
             .lock()
@@ -98,6 +98,17 @@ impl Registry {
                         ),
                     )
                 });
+        }
+        if let Some((_, scope)) = scopes
+            .get(&context.resource_scope_id)
+            .filter(|(expected, _)| {
+                let mut expected = expected.clone();
+                expected.call_id = context.call_id;
+                expected.resource_stream = context.resource_stream;
+                expected == *context
+            })
+        {
+            scope.deadline.bind(budget);
         }
     }
     fn streaming(&self, context: &CallContext) {
@@ -165,9 +176,9 @@ struct Callbacks {
     inner: Arc<dyn CallbackHandler>,
 }
 impl CallbackHandler for Callbacks {
-    fn begin(&self, context: &CallContext) {
-        self.inner.begin(context);
-        self.registry.begin(context);
+    fn begin(&self, context: &CallContext, _deadline: &gateway_plugin_sdk::client::CallDeadline) {
+        self.inner.begin(context, _deadline);
+        self.registry.begin(context, _deadline);
     }
     fn streaming(&self, context: &CallContext) {
         self.inner.streaming(context);

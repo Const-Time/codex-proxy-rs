@@ -2,10 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::{
-    sync::{OwnedSemaphorePermit, mpsc, oneshot},
-    time::Instant,
-};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 
 use crate::{RpcError, RpcReply, RpcSession, rpc::Shared};
 
@@ -60,7 +57,7 @@ pub struct RpcStream {
     pub initial: RpcReply,
     pub(crate) chunks: mpsc::Receiver<Vec<u8>>,
     pub(crate) terminal: Option<oneshot::Receiver<Result<(), RpcError>>>,
-    pub(crate) deadline: Option<Instant>,
+    pub(crate) deadline: gateway_plugin_sdk::client::CallDeadline,
     pub(crate) id: u64,
     pub(crate) shared: Arc<Shared>,
     pub(crate) _slot: OwnedSemaphorePermit,
@@ -72,9 +69,9 @@ impl RpcStream {
         if self.terminal.is_none() {
             return Ok(None);
         }
-        let result = match self.deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline, self.chunks.recv()).await,
-            None => Ok(self.chunks.recv().await),
+        let result = tokio::select! { biased;
+            () = self.deadline.wait() => Err(()),
+            result = self.chunks.recv() => Ok(result),
         };
         match result {
             Ok(Some(chunk)) => {
