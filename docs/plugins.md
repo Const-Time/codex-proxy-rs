@@ -12,7 +12,8 @@
 | 安装与运行 | 本地上传、摘要与路径校验、配置 schema 校验、独立可信进程、启停与重启恢复 |
 | 管理能力 | management v1 的私有资源、页面、已注册路由；仅管理员可访问 |
 | 管理请求 | method/path/query/contentType 与二进制正文；不转发浏览器 Cookie 或请求头；响应必须没有自定义头 |
-| 页面桥 | 上游 v2 桥的管理请求、Responses JSON/SSE 模型调用与高度调整；本地父页面代为鉴权，iframe 使用独立的 opaque origin |
+| 页面桥 | 上游 v2 桥的管理请求、一次性登录回调地址、Responses JSON/SSE 模型调用与高度调整；本地父页面代为鉴权，iframe 使用独立的 opaque origin |
+| 登录回调 | 已注册的 `management.callback` / public_management；复用 OAuth pending-flow 一次性消费，绑定管理员、实例 revision、实际进程 incarnation 和路径 |
 | 通用外部 HTTP | `host.http.do/do_stream/stream_read/stream_close`，宿主签发的调用范围内使用；沿原取消与资源清理链，不需要配置模型服务 |
 | 插件诊断日志 | `host.log`；原宿主诊断脱敏与 tracing 输出，按进程代次限流并共享写入容量 |
 | Provider 亲和查询 | `host.affinity.lookup`；只读既有记录，必须绑定存活的原生模型父请求及其冻结账号范围 |
@@ -32,7 +33,7 @@
 | 维护任务 | maintenance v1 的 `plugin.reconcile`，Core 已发布配置与已发布实例驱动，Host 监督周期、重试和关闭 |
 | 账号凭据 | `host.auth.list/get_runtime/get/save`；管理员管理调用、宿主 System 根命令和宿主签发的 maintenance 作用域；upstream 仅开放当前 Provider 租约绑定账号的三项读取 |
 | 观察订阅 | observer v1；请求完成、实际上游 WebSocket 原始帧；冻结 Key/分组范围、有界投递及独立撤销，观察失败不控制业务执行 |
-| 未开放的能力 | middleware、upstream_adapter、command_line、登录回调、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
+| 未开放的能力 | middleware、upstream_adapter、command_line、Key 预算写入、状态迁移；非 management/public_management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
 第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。生产启用仍因 middleware/command_line 门禁被拒绝；其余贡献能力、完整业务与目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
 

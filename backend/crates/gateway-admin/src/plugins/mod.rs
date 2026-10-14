@@ -2,6 +2,7 @@
 mod command_line;
 pub mod http;
 mod maintenance;
+mod management;
 pub mod middleware;
 pub mod service;
 mod upstream_adapter;
@@ -37,6 +38,7 @@ struct AuthenticationPublication {
     epoch: PluginAccess,
 }
 pub struct PluginManager {
+    callbacks: Option<management::Callbacks>,
     services: Option<service::settings::Service>,
     model_catalog: Option<Arc<dyn gateway_core::routing::ModelCatalogValidator>>,
     middleware: RwLock<middleware::Publication>,
@@ -52,6 +54,7 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new(store: Arc<dyn PluginStore>, runtime: Arc<dyn PluginRuntime>) -> Self {
         Self {
+            callbacks: None,
             services: None,
             model_catalog: None,
             middleware: RwLock::default(),
@@ -67,6 +70,14 @@ impl PluginManager {
     }
     pub fn with_services(mut self, services: service::settings::Service) -> Self {
         self.services = Some(services);
+        self
+    }
+    pub fn with_management_callbacks(
+        mut self,
+        pending: Arc<dyn gateway_core::provider_ports::OAuthPendingFlowPort>,
+        auth: Arc<dyn crate::ports::store::AuthStore>,
+    ) -> Self {
+        self.callbacks = Some(management::Callbacks { pending, auth });
         self
     }
     pub fn with_model_catalog(
@@ -662,6 +673,28 @@ impl PluginService for PluginManager {
             return Err(AdminError::not_found("插件公开资源不存在"));
         }
         process.resource(path).await
+    }
+    async fn callback_ticket(
+        &self,
+        id: &str,
+        revision: u64,
+        path: &str,
+        ttl_seconds: u32,
+        actor: &MutationContext,
+    ) -> Result<PluginCallbackTicket, AdminError> {
+        self.start_callback(id, revision, path, ttl_seconds, actor)
+            .await
+    }
+    async fn callback(
+        &self,
+        id: &str,
+        revision: u64,
+        path: &str,
+        state: &str,
+        request: PluginCallbackRequest,
+    ) -> Result<PluginCallbackResponse, AdminError> {
+        self.complete_callback(id, revision, path, state, request)
+            .await
     }
     async fn handle(
         &self,

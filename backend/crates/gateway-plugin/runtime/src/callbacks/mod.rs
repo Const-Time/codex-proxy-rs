@@ -125,7 +125,7 @@ fn store_error(error: gateway_admin::model::AdminError) -> PluginFault {
 impl CallbackHandler for Callbacks {
     fn begin(&self, context: &CallContext, _deadline: &gateway_plugin_sdk::client::CallDeadline) {
         self.calls.bind_budget(context, _deadline);
-        if context.stage == Stage::Management
+        if matches!(context.stage, Stage::Management | Stage::PublicManagement)
             && let Some(caller) = self.calls.caller(&context.resource_scope_id)
         {
             let _ = self.outbound.bind(
@@ -134,7 +134,7 @@ impl CallbackHandler for Callbacks {
                 Some(caller.graph.clone()),
             );
         }
-        if context.stage == Stage::Management
+        if matches!(context.stage, Stage::Management | Stage::PublicManagement)
             && let Some(models) = &self.models
         {
             // LivePlugin registers the authenticated actor before the RPC begins.
@@ -198,6 +198,7 @@ impl CallbackHandler for Callbacks {
                 || !matches!(
                     context.stage,
                     Stage::Management
+                        | Stage::PublicManagement
                         | Stage::CommandLine
                         | Stage::Maintenance
                         | Stage::Observation
@@ -215,7 +216,10 @@ impl CallbackHandler for Callbacks {
             }
             if matches!(
                 context.stage,
-                Stage::Maintenance | Stage::Observation | Stage::CommandLine
+                Stage::Maintenance
+                    | Stage::Observation
+                    | Stage::CommandLine
+                    | Stage::PublicManagement
             ) && calls
                 .caller(&context.resource_scope_id)
                 .is_none_or(|caller| caller.cancellation.is_cancelled())
@@ -238,7 +242,7 @@ impl CallbackHandler for Callbacks {
                         )
                     })?;
                 let permitted = match context.stage {
-                    Stage::Management => matches!(
+                    Stage::Management | Stage::PublicManagement => matches!(
                         caller.actor().actor,
                         gateway_admin::model::MutationActor::AdminSession { .. }
                             | gateway_admin::model::MutationActor::AdminApiKey
@@ -343,8 +347,10 @@ impl CallbackHandler for Callbacks {
                 };
             }
             if crate::models::is_method(&method)
-                || (matches!(context.stage, Stage::Management | Stage::CommandLine)
-                    && method.starts_with("host.http."))
+                || (matches!(
+                    context.stage,
+                    Stage::Management | Stage::PublicManagement | Stage::CommandLine
+                ) && method.starts_with("host.http."))
             {
                 let models = models.ok_or_else(|| {
                     PluginFault::new(

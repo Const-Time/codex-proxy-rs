@@ -1,6 +1,7 @@
 mod callbacks;
 mod data;
 mod installation;
+mod management;
 mod resources;
 mod support;
 mod upstream_adapter;

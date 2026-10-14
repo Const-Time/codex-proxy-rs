@@ -548,9 +548,6 @@ impl PluginRuntime for PluginEngine {
             management = serde_json::from_slice(&reply.payload)
                 .map_err(|_| AdminError::invalid("管理声明无效"))?;
             crate::management_validation::registration(&management)?;
-            if !management.callbacks.is_empty() {
-                return Err(AdminError::invalid("插件登录回调尚未接入"));
-            }
             let resource_bytes: usize = management
                 .resources
                 .iter()
@@ -1013,6 +1010,34 @@ impl PluginProcess for LivePlugin {
             content_type,
             body,
         })
+    }
+    fn management_callback(&self, path: &str) -> Option<PluginCallbackDescriptor> {
+        (self.status() == "ready"
+            && !self.access.is_revoked()
+            && self
+                .management
+                .callbacks
+                .iter()
+                .any(|callback| callback.path == path))
+        .then(|| PluginCallbackDescriptor {
+            incarnation: self.session.incarnation().into(),
+        })
+    }
+    async fn callback(
+        &self,
+        call: PluginCallbackCall,
+    ) -> Result<PluginCallbackResponse, AdminError> {
+        if self.management_callback(&call.request.path).is_none() {
+            return Err(AdminError::conflict("插件登录回调已失效"));
+        }
+        crate::management::invoke(
+            &self.session,
+            &self.calls,
+            &self.access,
+            &self.management,
+            call,
+        )
+        .await
     }
     async fn handle(&self, request: PluginHttpRequest) -> Result<PluginHttpResponse, AdminError> {
         if self.status() != "ready" {

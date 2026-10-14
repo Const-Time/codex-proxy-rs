@@ -44,32 +44,44 @@ pub(crate) fn service_origin(
     services: &gateway_admin::AdminServices,
     actor: &gateway_admin::model::MutationContext,
 ) -> Option<gateway_admin::plugins::service::Origin> {
-    current().map(|origin| {
-        let mut origin = gateway_admin::plugins::service::Origin {
-            // Admin's audit boundary issues its own request ID after HTTP placement.
-            registry: origin.registry,
-            request_id: actor.request_id.clone(),
-            call_id: origin.context.call_id,
-            cancellation: origin.context.cancellation,
-            deadline_at: origin.context.deadline_at,
-            call_scope: origin.context.call_scope,
-            dispatcher: None,
-        };
-        origin.dispatcher = Some(
-            services
-                .service_settings()
-                .dispatcher(origin.clone(), actor.clone()),
-        );
-        origin
-    })
+    current().map(|origin| service_origin_from(origin, services, actor))
+}
+fn service_origin_from(
+    origin: Origin,
+    services: &gateway_admin::AdminServices,
+    actor: &gateway_admin::model::MutationContext,
+) -> gateway_admin::plugins::service::Origin {
+    let mut origin = gateway_admin::plugins::service::Origin {
+        // Admin's audit boundary issues its own request ID after HTTP placement.
+        registry: origin.registry,
+        request_id: actor.request_id.clone(),
+        call_id: origin.context.call_id,
+        cancellation: origin.context.cancellation,
+        deadline_at: origin.context.deadline_at,
+        call_scope: origin.context.call_scope,
+        dispatcher: None,
+    };
+    origin.dispatcher = Some(
+        services
+            .service_settings()
+            .dispatcher(origin.clone(), actor.clone()),
+    );
+    origin
 }
 pub(crate) fn plugin_invocation(
     services: &gateway_admin::AdminServices,
     actor: &gateway_admin::model::MutationContext,
 ) -> Option<gateway_admin::model::plugins::PluginInvocationContext> {
-    current().map(
+    plugin_invocation_from(current(), services, actor)
+}
+pub(crate) fn plugin_invocation_from(
+    origin: Option<Origin>,
+    services: &gateway_admin::AdminServices,
+    actor: &gateway_admin::model::MutationContext,
+) -> Option<gateway_admin::model::plugins::PluginInvocationContext> {
+    origin.map(
         |origin| gateway_admin::model::plugins::PluginInvocationContext {
-            services: service_origin(services, actor).and_then(|origin| origin.dispatcher),
+            services: service_origin_from(origin.clone(), services, actor).dispatcher,
             context: origin.context,
             http: Some(origin.dispatcher),
         },

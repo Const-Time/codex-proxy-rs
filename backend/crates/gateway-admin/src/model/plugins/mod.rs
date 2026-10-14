@@ -1,6 +1,8 @@
 //! 插件持久化事实和管理视图；配置与私有状态不实现内容型 Debug。
+pub mod management;
 pub mod middleware;
 pub mod policy;
+pub use management::*;
 pub use middleware::*;
 pub use policy::*;
 use serde::{Deserialize, Serialize};

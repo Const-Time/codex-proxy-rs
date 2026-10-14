@@ -95,3 +95,6 @@ export async function callPluginRoute(target: PluginTarget, payload: { method: s
 export function callPluginModel(target: PluginTarget, input: { clientKeyId: string, body: Record<string, unknown> }, signal: AbortSignal) {
   return fetch(`${API_BASE_URL}/api/admin/plugins/models/responses`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: target.instanceId, revision: target.revision, ...input }), signal })
 }
+export function getPluginCallbackTicket(target: PluginTarget, input: { path: string, ttlSeconds: number }, signal: AbortSignal) {
+  return request<{ state: string, expiresAtMs: number }>({ url: '/api/admin/plugins/callback-ticket', method: 'POST', data: { id: target.instanceId, revision: target.revision, ...input }, signal, timeout: PLUGIN_MANAGEMENT_TIMEOUT_MS })
+}

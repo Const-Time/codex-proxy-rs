@@ -962,7 +962,15 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 | POST | `/api/admin/plugins/artifacts/remove` | `sha256`，只能删除没有实例引用的制品 |
 | GET | `/api/admin/plugins/resource` | query `id, revision, path` |
 | POST | `/api/admin/plugins/invoke` | `id, revision, method, path, query, contentType, body` |
+| POST | `/api/admin/plugins/callback-ticket` | `id, revision, path, ttlSeconds`；管理员签发 1–600 秒一次性回调票据 |
+| GET | `/api/plugins/callback` | query `id, revision, path` 和唯一 `state`，可附带上游 `code` 等字段 |
 | POST | `/api/admin/plugins/models/responses` | `id, revision, clientKeyId, body`；必须本人管理员会话与本人 Key |
+
+回调票据返回 `{state, expiresAtMs}`；页面桥 v2 的 `callbackTicket` 将它组合为当前实例与版本的一次性绝对地址。公开回调无需管理员 Cookie，仅接受无正文、无 Content-Type、最多 8192 字节且无控制字符的 GET 查询。票据使用现有 OAuth pending-flow 原子 claim/consume，并在任何插件执行前消费；同时绑定相对路径、实例 revision、实际进程 incarnation 和发起管理员。停用、更新、同版本重启或发起用户被禁用/失去管理员角色均拒绝继续执行。回调失败、取消或响应丢失不自动重放，必须重新签发。
+
+插件页面允许用户发起登录弹窗，外部授权页可在弹窗中使用正常表单；插件 iframe 自身仍没有 same-origin 权限、父页面导航权限或直接网络访问。回调文档另外应用宿主 sandbox CSP。
+
+公开回调执行 `management.callback` 的 `public_management` 阶段。业务宿主调用继承票据中经重新授权的操作者和原 API 调用图，不从查询或请求头构造管理员。回调原始请求头及插件显式响应头保留重复项和非 UTF-8 值，受 HTTP 语法、256 项及 64 KiB 限制；响应内容类型须已注册，正文最多 1 MiB。响应直接交付，宿主固定追加 sandbox CSP、no-store、no-referrer 与 nosniff，保持公开 HTML 的独立 origin；插件不能覆盖这些隔离头。
 
 实例配置包括 `revision, name, artifactSha256, enabled, trustedProcess, configuration, secrets`。创建 revision 为 0；修改必须提交读取时的 revision。启用必须显式信任所选制品。secrets 是字段名到字符串或 null 的对象：省略保留，null 清除；响应仅含 configuredSecrets 字段名，不返回敏感值。
 

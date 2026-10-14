@@ -5,7 +5,7 @@ use crate::{
     ports::store::AuthStore,
 };
 
-pub(super) async fn authorize(
+pub(crate) async fn authorize(
     auth: &dyn AuthStore,
     scope: &PluginMutationScope,
     initiator: &MutationContext,
