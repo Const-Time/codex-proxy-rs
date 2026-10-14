@@ -495,6 +495,7 @@ impl PluginRuntime for PluginEngine {
             })
             .collect();
         let model_aliases = crate::catalog::register(&session, &record.id).await?;
+        let commands = crate::command_line::register(&session).await?;
         let authentication = session
             .capability_version(Capability::FrontendAuthentication)
             .is_some();
@@ -561,6 +562,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            commands,
             services,
             upstream_adapters,
             model_aliases,
@@ -578,6 +580,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    commands: Vec<CommandDescriptor>,
     services: Arc<crate::services::Registry>,
     outbound: Arc<crate::outbound::Registry>,
     upstream_adapters: Vec<Arc<crate::upstream_adapter::PluginUpstreamAdapter>>,
@@ -594,6 +597,31 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    fn command_help(&self, name: Option<&str>) -> Result<Option<String>, AdminError> {
+        crate::command_line::help(&self.commands, self.services.caller().instance_id(), name)
+    }
+    async fn command(
+        &self,
+        request: PluginCommandRequest,
+        factory: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+    ) -> Result<PluginCommandOutput, PluginCommandError> {
+        if !self.active.load(Ordering::Acquire)
+            || self.status() != "ready"
+            || self.access.is_revoked()
+        {
+            return Err(AdminError::conflict("插件命令代次不可用").into());
+        }
+        crate::command_line::Executor {
+            session: &self.session,
+            commands: &self.commands,
+            services: &self.services,
+            outbound: &self.outbound,
+            models: self.models.clone(),
+            calls: &self.calls,
+        }
+        .invoke(request, factory)
+        .await
+    }
     fn observer_identity(&self) -> Option<gateway_admin::ports::plugins::PluginObserverIdentity> {
         if !self.active.load(Ordering::Acquire)
             || self.status() != "ready"

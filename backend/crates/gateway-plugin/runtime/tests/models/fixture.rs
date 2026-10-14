@@ -1,4 +1,4 @@
-use crate::support::{MemoryStore, actor, archive, update};
+use crate::support::{MemoryStore, actor, archive, command_archive, update};
 use async_trait::async_trait;
 use futures::{StreamExt as _, future::BoxFuture};
 use gateway_admin::ports::plugins::{PluginRuntime, PluginService};
@@ -757,15 +757,18 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new() -> Self {
-        Self::build(false, &["acct_allowed"]).await
+        Self::build(false, false, &["acct_allowed"]).await
     }
     pub async fn with_middleware() -> Self {
-        Self::build(true, &["acct_allowed"]).await
+        Self::build(true, false, &["acct_allowed"]).await
+    }
+    pub async fn with_command() -> Self {
+        Self::build(false, true, &["acct_allowed"]).await
     }
     pub async fn with_accounts(accounts: &[&str]) -> Self {
-        Self::build(true, accounts).await
+        Self::build(true, false, accounts).await
     }
-    async fn build(middleware: bool, accounts: &[&str]) -> Self {
+    async fn build(middleware: bool, command_line: bool, accounts: &[&str]) -> Self {
         let core = Arc::new(Core::default());
         let mut providers: Vec<Arc<dyn Provider>> = vec![core.clone()];
         if accounts.contains(&"acct_fallback") {
@@ -800,7 +803,7 @@ impl Fixture {
                 )),
                 Arc::new(Keys),
             );
-            let runtime: Arc<dyn PluginRuntime> = if middleware {
+            let runtime: Arc<dyn PluginRuntime> = if middleware || command_line {
                 Arc::new(crate::middleware::plan::KernelRuntime(engine))
             } else {
                 Arc::new(engine)
@@ -809,7 +812,14 @@ impl Fixture {
                 .with_model_catalog(Arc::new(snapshot.clone()))
         });
         let artifact = manager
-            .upload(archive("1.0.0", middleware), &actor())
+            .upload(
+                if command_line {
+                    command_archive("1.0.0")
+                } else {
+                    archive("1.0.0", middleware)
+                },
+                &actor(),
+            )
             .await
             .unwrap();
         let mut command = update(&artifact.sha256, 0, true);

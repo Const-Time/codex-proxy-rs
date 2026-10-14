@@ -134,6 +134,7 @@ impl CallbackHandler for Callbacks {
                 self.calls
                     .caller(&context.resource_scope_id)
                     .and_then(|caller| caller.invocation.clone()),
+                None,
             );
         }
     }
@@ -166,6 +167,7 @@ impl CallbackHandler for Callbacks {
                 || !matches!(
                     context.stage,
                     Stage::Management
+                        | Stage::CommandLine
                         | Stage::Maintenance
                         | Stage::Observation
                         | Stage::Authentication
@@ -180,10 +182,12 @@ impl CallbackHandler for Callbacks {
                     "plugin generation is not active",
                 ));
             }
-            if matches!(context.stage, Stage::Maintenance | Stage::Observation)
-                && calls
-                    .caller(&context.resource_scope_id)
-                    .is_none_or(|caller| caller.cancellation.is_cancelled())
+            if matches!(
+                context.stage,
+                Stage::Maintenance | Stage::Observation | Stage::CommandLine
+            ) && calls
+                .caller(&context.resource_scope_id)
+                .is_none_or(|caller| caller.cancellation.is_cancelled())
             {
                 return Err(PluginFault::new(
                     ErrorCode::Cancelled,
@@ -243,7 +247,8 @@ impl CallbackHandler for Callbacks {
                 };
             }
             if crate::models::is_method(&method)
-                || (context.stage == Stage::Management && method.starts_with("host.http."))
+                || (matches!(context.stage, Stage::Management | Stage::CommandLine)
+                    && method.starts_with("host.http."))
             {
                 let models = models.ok_or_else(|| {
                     PluginFault::new(

@@ -3,7 +3,7 @@ use gateway_core::engine::middleware::http as core;
 use http_body_util::BodyExt;
 use std::sync::{Arc, atomic::AtomicUsize};
 
-struct GraphServices(gateway_core::engine::nested::ExtensionCallScope);
+pub(crate) struct GraphServices(pub(crate) gateway_core::engine::nested::ExtensionCallScope);
 impl gateway_core::engine::middleware::service::Dispatcher for GraphServices {
     fn scoped(
         &self,
@@ -118,7 +118,7 @@ impl core::Dispatcher for Echo {
         })
     }
 }
-fn attach(
+pub(crate) fn attach(
     f: &Fixture,
     parent: Option<gateway_core::engine::ModelRequestId>,
     pending: bool,

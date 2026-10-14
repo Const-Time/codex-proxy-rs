@@ -19,4 +19,5 @@ mod catalog;
 mod outbound;
 mod services;
 
+mod command_line;
 mod observation;

@@ -84,6 +84,7 @@ impl Callbacks {
                     None,
                     CancellationToken::linked([call.cancellation.clone(), call.closed.clone()]),
                     None,
+                    None,
                 )
                 .map_err(|error| super::failure::fault_error(error, UpstreamSendState::NotSent))?;
         }

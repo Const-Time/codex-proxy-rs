@@ -536,6 +536,8 @@ mod upstream_callbacks {
 }
 
 struct Worker {
+    command_registration: serde_json::Value,
+    command_result: serde_json::Value,
     adapter_models: serde_json::Value,
     adapter_provider: String,
     adapter_mode: String,
@@ -551,6 +553,36 @@ impl PluginHandler for Worker {
     fn call(&self, call: PluginCall) -> CallFuture<'_> {
         Box::pin(async move {
             match call.method.as_str() {
+            "command_line.register" => {
+                assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Registration);
+                assert_eq!(call.params, json!({}));
+                assert!(call.payload.is_empty());
+                let registration = if self.command_registration.is_null() {
+                    json!({"commands":[{"name":"probe","description":"Inspect command execution","parameters":[{"name":"input","description":"Callback input","value_type":"string","required":false,"sensitive":true}]}]})
+                } else { self.command_registration.clone() };
+                let payload = if self.adapter_mode=="command-register-size" {vec![b' ';65537]} else {serde_json::to_vec(&registration).unwrap()};
+                Ok(CallReply::unary(if self.adapter_mode=="command-register-envelope" {json!({"extra":true})} else {json!({})}, payload))
+            }
+            "command_line.execute" => {
+                use gateway_plugin_sdk::call::management::{CommandInvocation,CommandValue};
+                assert_eq!(call.context.stage,gateway_plugin_sdk::Stage::CommandLine);
+                assert_eq!(call.params,json!({}));
+                let invocation:CommandInvocation=serde_json::from_slice(&call.payload).unwrap();
+                let record=call.host.call("host.state.get",json!({"namespace":"counter","key":"commands"}),vec![]).await.map_err(|e|e.into_plugin_fault())?.result["record"].clone();
+                call.host.call("host.state.put",json!({"namespace":"counter","key":"commands","value":record["value"].as_u64().unwrap_or(0)+1,"expected_version":record["version"]}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                if self.adapter_mode=="command-fault" {return Err(PluginFault::new(ErrorCode::Rejected,"private command failure"));}
+                if self.adapter_mode=="command-crash" {std::process::exit(2);}
+                let output=if let Some(CommandValue::String(input))=invocation.arguments.get("input") {
+                    let input:serde_json::Value=serde_json::from_str(input).unwrap();
+                    if input["mode"]=="external" {
+                        worker_outbound::run(&call.host,&json!({"url":self.adapter_url,"mode":"stream"})).await?
+                    } else { worker_models::handle(&call.host,&input).await }
+                } else {serde_json::to_value(invocation).unwrap()};
+                let mut result=if self.command_result.is_null() {json!({"stdout":serde_json::to_string(&output).unwrap(),"stderr":"","exit_code":0,"accounts":[]})} else {self.command_result.clone()};
+                if self.adapter_mode=="command-size" {result["stdout"]=json!("x".repeat(65537));}
+                if self.adapter_mode=="command-unknown" {result["unexpected"]=json!(true);}
+                Ok(CallReply::unary(if self.adapter_mode=="command-envelope" {json!({"extra":true})} else {json!({})}, if self.adapter_mode=="command-invalid" {vec![255]} else {serde_json::to_vec(&result).unwrap()}))
+            }
             "upstream_adapter.execute" => upstream_execution(call).await,
             "upstream_adapter.register" => {
                 assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Registration);
@@ -902,6 +934,8 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        command_registration: session.handshake().configuration["command_registration"].clone(),
+        command_result: session.handshake().configuration["command_result"].clone(),
         adapter_models: session.handshake().configuration["adapter_models"].clone(),
         adapter_provider: session.handshake().configuration["adapter_provider"]
             .as_str()

@@ -54,6 +54,16 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    fn command_help(&self, _name: Option<&str>) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn command(
+        &self,
+        _request: PluginCommandRequest,
+        _services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
+    ) -> std::result::Result<PluginCommandOutput, PluginCommandError> {
+        Err(AdminError::unavailable("插件命令执行入口未接入").into())
+    }
     fn observer_identity(&self) -> Option<PluginObserverIdentity> {
         None
     }

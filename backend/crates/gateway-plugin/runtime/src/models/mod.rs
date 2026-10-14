@@ -114,6 +114,7 @@ impl Models {
         actor: Option<MutationContext>,
         revocation: CancellationToken,
         invocation: Option<gateway_admin::model::plugins::PluginInvocationContext>,
+        root_scope: Option<ExtensionCallScope>,
     ) -> Result<(), PluginFault> {
         let parent = parent.or_else(|| {
             invocation
@@ -149,7 +150,9 @@ impl Models {
             .unwrap_or_else(|| {
                 parent
                     .as_ref()
-                    .map_or_else(ExtensionCallScope::default, |parent| parent.scope().clone())
+                    .map(|parent| parent.scope().clone())
+                    .or(root_scope)
+                    .unwrap_or_default()
             });
         let mut http_context = invocation.as_ref().map_or_else(
             || gateway_core::engine::middleware::http::Context {
