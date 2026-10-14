@@ -272,6 +272,19 @@ pub trait PluginDataService: Send + Sync {
     async fn quota(&self, id: &str) -> Result<crate::model::provider_credentials::ProviderQuota>;
 }
 
+/// Preparation and native account commit continue after the caller drops its wait.
+/// The original graph permit keeps Host drain attached to that work.
+#[async_trait]
+pub trait PluginCredentialService: Send + Sync {
+    async fn save(
+        &self,
+        scope: PluginMutationScope,
+        command: PluginCredentialSave,
+        cleanup: gateway_core::engine::nested::ExtensionCallScope,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> Result<PluginCredentialSaved>;
+}
+
 #[async_trait]
 pub trait PluginResourceService: Send + Sync {
     async fn ensure_key(

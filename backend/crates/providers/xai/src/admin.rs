@@ -544,6 +544,82 @@ impl ProviderAdmin for XaiAdminProvider {
         })
     }
 
+    async fn prepare_plugin_import(
+        &self,
+        facts: gateway_admin::model::provider_credentials::UnverifiedCredentialFacts,
+    ) -> Result<PreparedCredentialCreate, ProviderAdminError> {
+        let candidate = plugin_credential_candidate(&facts)?;
+        let oauth = self.oauth.with_outbound_proxy(None);
+        let discovery = oauth.discover().await.map_err(map_oauth_error)?;
+        let tokens = oauth
+            .verify_imported_credential(&discovery, candidate)
+            .await
+            .map_err(|e| map_failure_class(e.class()))?;
+        if facts
+            .upstream_user_id
+            .as_deref()
+            .is_some_and(|id| id != tokens.evidence().subject())
+        {
+            return Err(provider_error(ProviderAdminErrorKind::Invalid));
+        }
+        let prepared = GrokCredentialAdmin
+            .prepare_verified_account(&VerifiedGrokAccount {
+                account_id: ProviderAccountId::new(format!("acct_{}", Uuid::now_v7().simple()))
+                    .map_err(|_| provider_error(ProviderAdminErrorKind::Internal))?,
+                name: facts.name,
+                email: facts.email,
+                upstream_account_id: None,
+                plan_type: None,
+                tokens,
+                enabled: true,
+            })
+            .map_err(map_repository_error)?;
+        prepared_create(prepared, Utc::now())
+    }
+
+    async fn prepare_plugin_rotation(
+        &self,
+        account: AccountRecord,
+        facts: gateway_admin::model::provider_credentials::UnverifiedCredentialFacts,
+    ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        validate_account_record(&account, &self.provider_kind)?;
+        if facts
+            .upstream_user_id
+            .as_deref()
+            .is_some_and(|id| Some(id) != account.upstream_user_id.as_deref())
+        {
+            return Err(provider_error(ProviderAdminErrorKind::Conflict));
+        }
+        let candidate = plugin_credential_candidate(&facts)?;
+        let id = ProviderAccountId::new(account.id.clone())
+            .map_err(|_| provider_error(ProviderAdminErrorKind::Invalid))?;
+        let current = self
+            .accounts
+            .load_current_credential(&id)
+            .await
+            .map_err(map_store_error)?;
+        if current.account.revision().get() != account.credential_revision.get()
+            || !account_matches_record(&current.account, &account)
+        {
+            return Err(provider_error(ProviderAdminErrorKind::Conflict));
+        }
+        let oauth = self
+            .oauth
+            .with_outbound_proxy(current.account.outbound_proxy().cloned());
+        let discovery = oauth.discover().await.map_err(map_oauth_error)?;
+        let tokens = oauth
+            .verify_imported_credential(&discovery, candidate)
+            .await
+            .map_err(|e| map_failure_class(e.class()))?;
+        if current.account.upstream_user_id() != Some(tokens.evidence().subject()) {
+            return Err(provider_error(ProviderAdminErrorKind::Conflict));
+        }
+        prepared_rotation(
+            verified_rotation(current, tokens)?,
+            self.provider_kind.clone(),
+        )
+    }
+
     async fn start_authorization(
         &self,
         pending: PendingAuthorizationMutation,
@@ -1055,6 +1131,33 @@ fn validate_account_record(
     ProviderAccountId::new(account.id.clone())
         .map_err(|_| provider_error(ProviderAdminErrorKind::Invalid))?;
     Ok(())
+}
+
+fn plugin_credential_candidate(
+    facts: &gateway_admin::model::provider_credentials::UnverifiedCredentialFacts,
+) -> Result<GrokOAuthImportCandidate, ProviderAdminError> {
+    facts
+        .validate()
+        .map_err(|_| provider_error(ProviderAdminErrorKind::Invalid))?;
+    if facts.authentication_kind != "oauth"
+        || !facts.has_refresh_token
+        || facts.upstream_account_id.is_some()
+    {
+        return Err(provider_error(ProviderAdminErrorKind::Invalid));
+    }
+    let expiry = facts
+        .access_token_expires_at
+        .ok_or_else(|| provider_error(ProviderAdminErrorKind::Invalid))?;
+    let material = PlaintextCredential::new(
+        facts
+            .material
+            .expose_to_provider()
+            .expose_to_provider()
+            .clone(),
+    );
+    GrokCredentialAdmin
+        .plugin_import_candidate(&material, expiry)
+        .map_err(map_repository_error)
 }
 
 fn dashboard_cli_release(

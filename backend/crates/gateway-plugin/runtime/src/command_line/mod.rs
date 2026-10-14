@@ -1,4 +1,5 @@
 //! SDK command registration and invocation stay with the actual prepared process.
+mod credentials;
 mod duration;
 mod parameters;
 
@@ -87,6 +88,8 @@ impl Drop for ModelScope {
 }
 
 pub(crate) struct Executor<'a> {
+    pub(crate) credentials:
+        Option<&'a Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     pub(crate) session: &'a RpcSession,
     pub(crate) commands: &'a [CommandDescriptor],
     pub(crate) services: &'a Arc<crate::services::Registry>,
@@ -110,6 +113,11 @@ impl Executor<'_> {
         {
             return Err(AdminError::conflict("插件命令调用已取消或关联无效").into());
         }
+        let may_save_accounts = matches!(
+            &request.actor.actor,
+            gateway_admin::model::MutationActor::System
+        );
+        let deadline = tokio::time::Instant::now() + self.session.maximum_call_timeout();
         let mut context = self
             .session
             .context(Stage::CommandLine, self.session.maximum_call_timeout());
@@ -148,10 +156,10 @@ impl Executor<'_> {
                 .bind(
                     &context,
                     None,
-                    Some(request.actor),
+                    Some(request.actor.clone()),
                     cancellation.clone(),
                     None,
-                    Some(graph),
+                    Some(graph.clone()),
                 )
                 .map_err(|_| AdminError::unavailable("命令模型作用域不可用"))?;
         }
@@ -165,8 +173,8 @@ impl Executor<'_> {
         };
         let reply = tokio::select! { biased;
             () = cancellation.cancelled() => return Err(incomplete("调用已取消")),
-            result = self.session.call("command_line.execute", context, json!({}), payload) =>
-                result.map_err(|_| incomplete("插件响应未确认"))?,
+            result = tokio::time::timeout_at(deadline, self.session.call("command_line.execute", context, json!({}), payload)) =>
+                result.map_err(|_| incomplete("超过命令总期限"))?.map_err(|_| incomplete("插件响应未确认"))?,
         };
         if reply.result != json!({}) {
             self.session.invalid_response(Stage::CommandLine);
@@ -183,14 +191,34 @@ impl Executor<'_> {
             self.session.invalid_response(Stage::CommandLine);
             return Err(incomplete("结果大小或账号范围无效"));
         }
-        if result.exit_code == 0 && !result.accounts.is_empty() {
-            return Err(incomplete("账号提交入口尚未接入"));
+        let saved_accounts = if result.exit_code == 0 && !result.accounts.is_empty() {
+            if !may_save_accounts {
+                return Err(incomplete("当前命令操作者无账号提交权限"));
+            }
+            credentials::save_all(
+                self.credentials,
+                result.accounts,
+                caller,
+                &request.actor.request_id,
+                graph,
+                cancellation.clone(),
+                deadline,
+            )
+            .await?
+        } else {
+            0
+        };
+        if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            return Err(PluginCommandError::Incomplete {
+                saved_accounts,
+                reason: "调用已取消或超过命令总期限",
+            });
         }
         Ok(PluginCommandOutput {
             stdout: result.stdout,
             stderr: result.stderr,
             exit_code: result.exit_code,
-            saved_accounts: 0,
+            saved_accounts,
         })
     }
 }

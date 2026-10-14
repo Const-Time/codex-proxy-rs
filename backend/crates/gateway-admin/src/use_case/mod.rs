@@ -8,6 +8,7 @@ pub mod client_distribution;
 pub mod client_keys;
 pub mod observability;
 pub mod openai;
+pub(crate) mod plugin_credentials;
 pub(crate) mod plugin_data;
 pub(crate) mod plugin_quota;
 pub(crate) mod plugin_resources;

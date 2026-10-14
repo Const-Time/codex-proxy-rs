@@ -465,6 +465,11 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
             .await
             .map_err(|_| postgres_unavailable("begin provider account admin import"))?;
         let result = async {
+            super::super::admin_security_audit::lock_plugin_mutation_in_transaction(
+                &mut transaction,
+                &command.audit,
+            )
+            .await?;
             let revision = bump_config_revision_in_transaction(&mut transaction).await?;
             if let Some(binding) = &command.outbound_proxy {
                 let (_, current) = super::super::proxies::resolve_proxy_selection(
@@ -545,6 +550,11 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
             .await
             .map_err(|_| postgres_unavailable("begin provider account admin rotation"))?;
         let result = async {
+            super::super::admin_security_audit::lock_plugin_mutation_in_transaction(
+                &mut transaction,
+                &command.audit,
+            )
+            .await?;
             let config_revision = bump_config_revision_in_transaction(&mut transaction).await?;
             let credential_revision = rotate_provider_account_in_transaction(
                 &mut transaction,

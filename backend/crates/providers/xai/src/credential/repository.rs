@@ -143,6 +143,35 @@ impl std::fmt::Debug for LoadedGrokCredential {
 pub struct GrokCredentialAdmin;
 
 impl GrokCredentialAdmin {
+    /// Native stored material is decoded here before the original OAuth verifier
+    /// sees it. The original import policy validates the supplied expiry hint;
+    /// a refresh response replaces that hint with the native token lifetime.
+    pub(crate) fn plugin_import_candidate(
+        &self,
+        credential: &PlaintextCredential,
+        expires_at: DateTime<Utc>,
+    ) -> Result<super::GrokOAuthImportCandidate, GrokCredentialRepositoryError> {
+        let mut secret = decode_secret(credential)?;
+        let access = crate::SecretValue::new(std::mem::take(&mut secret.access_token));
+        let refresh = crate::SecretValue::new(std::mem::take(&mut secret.refresh_token));
+        let tokens = match secret.id_token.take() {
+            Some(id) => {
+                super::GrokOAuthImportTokens::new(access, refresh, crate::SecretValue::new(id))
+            }
+            None => super::GrokOAuthImportTokens::without_id_token(access, refresh),
+        };
+        Ok(super::GrokOAuthImportCandidate::new(
+            tokens,
+            super::GrokOAuthImportMetadata::new(
+                "Bearer".into(),
+                OFFICIAL_CLIENT_ID.into(),
+                std::mem::take(&mut secret.scope),
+                GROK_CLI_BASE_URL.into(),
+                Utc::now(),
+                expires_at,
+            ),
+        ))
+    }
     /// 验证官方 OAuth account 并生成一次性 Core 创建命令。
     pub fn prepare_import(
         &self,

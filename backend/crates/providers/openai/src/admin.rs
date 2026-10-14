@@ -336,6 +336,67 @@ impl ProviderAdmin for OpenAiAdminProvider {
         })
     }
 
+    async fn prepare_plugin_import(
+        &self,
+        facts: gateway_admin::model::provider_credentials::UnverifiedCredentialFacts,
+    ) -> Result<PreparedCredentialCreate, ProviderAdminError> {
+        let document = plugin_credential_document(&facts)?;
+        let prepared = self
+            .prepare_import(PrepareCredentialImport {
+                document,
+                default_outbound_proxy: None,
+            })
+            .await?;
+        let [prepared]: [_; 1] = prepared
+            .credentials
+            .try_into()
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Internal))?;
+        if facts
+            .upstream_user_id
+            .as_deref()
+            .is_some_and(|value| Some(value) != prepared.upstream_user_id.as_deref())
+            || facts
+                .upstream_account_id
+                .as_deref()
+                .is_some_and(|value| Some(value) != prepared.upstream_account_id.as_deref())
+            || facts.has_refresh_token != prepared.has_refresh_token
+        {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
+        }
+        Ok(prepared)
+    }
+
+    async fn prepare_plugin_rotation(
+        &self,
+        account: AccountRecord,
+        facts: gateway_admin::model::provider_credentials::UnverifiedCredentialFacts,
+    ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        if facts
+            .upstream_user_id
+            .as_deref()
+            .is_some_and(|value| Some(value) != account.upstream_user_id.as_deref())
+            || facts
+                .upstream_account_id
+                .as_deref()
+                .is_some_and(|value| Some(value) != account.upstream_account_id.as_deref())
+        {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Conflict));
+        }
+        let document = plugin_credential_document(&facts)?;
+        // Plugin-supplied tokens are an import, not a trusted refresh endpoint
+        // response. File reauthorization checks the actual new identity.
+        let prepared = self
+            .prepare_file_reauthorization(PrepareCredentialRotation {
+                account,
+                provider_material: document,
+            })
+            .await?;
+        if facts.has_refresh_token != prepared.facts().has_refresh_token {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
+        }
+        Ok(prepared)
+    }
+
     async fn start_authorization(
         &self,
         pending: PendingAuthorizationMutation,
@@ -767,6 +828,42 @@ struct RotationDocument {
     access_token: String,
     refresh_token: Option<String>,
     id_token: Option<String>,
+}
+
+fn plugin_credential_document(
+    facts: &gateway_admin::model::provider_credentials::UnverifiedCredentialFacts,
+) -> Result<ProviderDocument, ProviderAdminError> {
+    facts
+        .validate()
+        .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+    if facts.authentication_kind != "oauth" {
+        return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
+    }
+    let credential = PlaintextCredential::new(
+        facts
+            .material
+            .expose_to_provider()
+            .expose_to_provider()
+            .clone(),
+    );
+    let decoded = CodexCredentialCodec::decode(&credential)
+        .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+    let secret = decoded
+        .authentication
+        .oauth()
+        .ok_or_else(|| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+    let document = serde_json::json!({
+        "name": facts.name,
+        "access_token": secret.access_token.expose_secret(),
+        "refresh_token": secret.refresh_token.as_ref().map(|token| token.expose_secret()),
+        "id_token": secret.id_token.as_ref().map(|token| token.expose_secret()),
+    });
+    Ok(ProviderDocument::new(OpaqueProviderData::new(
+        document
+            .as_object()
+            .cloned()
+            .ok_or_else(|| provider_admin_error(ProviderAdminErrorKind::Internal))?,
+    )))
 }
 
 fn rotation_secret(document: ProviderDocument) -> Result<CodexOAuthSecret, ProviderAdminError> {
