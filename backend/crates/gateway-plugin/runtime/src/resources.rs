@@ -117,7 +117,11 @@ impl InvocationCalls {
             invocation.context.cancellation = cancellation.clone();
             invocation.services = invocation.services.as_ref().map(|dispatcher| {
                 dispatcher.scoped(&gateway_core::engine::middleware::service::Context {
-                    operation: "management.handle",
+                    operation: if context.stage == gateway_plugin_sdk::Stage::PublicManagement {
+                        "management.callback"
+                    } else {
+                        "management.handle"
+                    },
                     request_id: actor.request_id.clone(),
                     call_id: scope.clone(),
                     parent_call_id: invocation.context.parent_call_id.clone(),

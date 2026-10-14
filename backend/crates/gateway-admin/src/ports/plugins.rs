@@ -179,6 +179,12 @@ pub trait PluginProcess: Send + Sync {
         Err(AdminError::unavailable("认证器不可用"))
     }
 
+    fn management_callback(&self, _path: &str) -> Option<PluginCallbackDescriptor> {
+        None
+    }
+    async fn callback(&self, _call: PluginCallbackCall) -> Result<PluginCallbackResponse> {
+        Err(AdminError::unavailable("插件登录回调不可用"))
+    }
     fn access(&self) -> PluginAccess;
     fn status(&self) -> &'static str;
     fn pages(&self) -> Vec<PluginPage>;
@@ -240,6 +246,26 @@ pub trait PluginService: Send + Sync {
         Err(AdminError::unavailable("认证器不可用"))
     }
 
+    async fn callback_ticket(
+        &self,
+        _id: &str,
+        _revision: u64,
+        _path: &str,
+        _ttl_seconds: u32,
+        _actor: &MutationContext,
+    ) -> Result<PluginCallbackTicket> {
+        Err(AdminError::unavailable("插件登录回调不可用"))
+    }
+    async fn callback(
+        &self,
+        _id: &str,
+        _revision: u64,
+        _path: &str,
+        _state: &str,
+        _request: PluginCallbackRequest,
+    ) -> Result<PluginCallbackResponse> {
+        Err(AdminError::unavailable("插件登录回调不可用"))
+    }
     fn access(&self, id: &str, revision: u64) -> Result<PluginAccess>;
     async fn artifacts(&self) -> Result<Vec<PluginArtifactInfo>>;
     async fn delete_artifact(&self, digest: &str, actor: &MutationContext) -> Result<()>;

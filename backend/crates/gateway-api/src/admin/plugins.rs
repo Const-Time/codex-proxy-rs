@@ -3,8 +3,8 @@ use super::{AdminAuth, AdminEnvelope, AdminError, AdminJson, AdminResponse, Admi
 use axum::{
     Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Query, State},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, Query, RawQuery, State},
+    http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -30,9 +30,158 @@ pub fn router<S: AdminSessionState + Clone + Send + Sync + 'static>() -> Router<
         .route("/api/admin/plugins/resource", get(resource::<S>))
         .route("/api/plugins/resource", get(public_resource::<S>))
         .route("/api/admin/plugins/invoke", post(invoke::<S>))
+        .route(
+            "/api/admin/plugins/callback-ticket",
+            post(callback_ticket::<S>),
+        )
+        .route(
+            "/api/plugins/callback",
+            get(callback::<S>).layer(DefaultBodyLimit::max(0)),
+        )
 }
 fn error(e: gateway_admin::model::AdminError) -> AdminError {
     super::wire::map_admin_service_error(e)
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CallbackTicket {
+    id: String,
+    revision: u64,
+    path: String,
+    ttl_seconds: u32,
+}
+async fn callback_ticket<S: AdminSessionState + Send + Sync>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(input): AdminJson<CallbackTicket>,
+) -> Result<impl IntoResponse, AdminError> {
+    let ticket = state
+        .admin_services()
+        .plugins()
+        .map_err(error)?
+        .callback_ticket(
+            &input.id,
+            input.revision,
+            &input.path,
+            input.ttl_seconds,
+            &auth.context().mutation_context(),
+        )
+        .await
+        .map_err(error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(ticket),
+    ))
+}
+#[derive(Deserialize)]
+struct CallbackTarget {
+    id: String,
+    revision: u64,
+    path: String,
+}
+async fn callback<S: AdminSessionState + Send + Sync>(
+    State(state): State<S>,
+    Query(CallbackTarget { id, revision, path }): Query<CallbackTarget>,
+    RawQuery(query): RawQuery,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<axum::response::Response, AdminError> {
+    let query = query.unwrap_or_default();
+    if method != Method::GET
+        || !body.is_empty()
+        || headers.contains_key("content-type")
+        || query.len() > 8192
+        || query.bytes().any(|b| b.is_ascii_control())
+    {
+        return Err(AdminError::bad_request("插件登录回调只接受有界 GET 查询"));
+    }
+    let states = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "state")
+        .map(|(_, value)| value.into_owned())
+        .collect::<Vec<_>>();
+    if states.len() != 1 {
+        return Err(AdminError::bad_request("插件登录票据缺失或重复"));
+    }
+    let origin = crate::middleware::current();
+    let request_id = uuid::Uuid::now_v7().simple().to_string();
+    let services = state.admin_services().clone();
+    let invocation_services = services.clone();
+    let response = services
+        .plugins()
+        .map_err(error)?
+        .callback(
+            &id,
+            revision,
+            &path,
+            &states[0],
+            PluginCallbackRequest {
+                request_id,
+                query,
+                headers: headers
+                    .iter()
+                    .map(|(name, value)| {
+                        gateway_core::engine::middleware::MiddlewareHeader::new(
+                            name.as_str(),
+                            value.as_bytes().to_vec().into(),
+                        )
+                    })
+                    .collect(),
+                invocation: Arc::new(move |actor| {
+                    crate::middleware::plugin_invocation_from(
+                        origin.clone(),
+                        &invocation_services,
+                        actor,
+                    )
+                }),
+            },
+        )
+        .await
+        .map_err(error)?;
+    let mut output = (
+        StatusCode::from_u16(response.response.status).map_err(|_| AdminError::internal())?,
+        response.response.body,
+    )
+        .into_response();
+    output.headers_mut().insert(
+        "content-type",
+        response
+            .response
+            .content_type
+            .parse()
+            .map_err(|_| AdminError::internal())?,
+    );
+    let mut replaced = std::collections::HashSet::new();
+    for header in response.headers {
+        let name = axum::http::HeaderName::from_bytes(header.name().as_bytes())
+            .map_err(|_| AdminError::internal())?;
+        let value = axum::http::HeaderValue::from_bytes(header.value())
+            .map_err(|_| AdminError::internal())?;
+        if replaced.insert(name.clone()) {
+            output.headers_mut().remove(&name);
+        }
+        output.headers_mut().append(name, value);
+    }
+    // A callback is a public plugin document, never an administrator same-origin page.
+    output.headers_mut().insert(
+        "content-security-policy",
+        "sandbox allow-scripts allow-popups"
+            .parse()
+            .expect("constant CSP"),
+    );
+    output.headers_mut().insert(
+        "cache-control",
+        "no-store".parse().expect("constant cache policy"),
+    );
+    output.headers_mut().insert(
+        "referrer-policy",
+        "no-referrer".parse().expect("constant referrer policy"),
+    );
+    output.headers_mut().insert(
+        "x-content-type-options",
+        "nosniff".parse().expect("constant content policy"),
+    );
+    Ok(output)
 }
 async fn list<S: AdminSessionState + Send + Sync>(
     _: AdminAuth,

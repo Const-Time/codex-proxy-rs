@@ -1,4 +1,114 @@
 use super::*;
+
+#[tokio::test]
+async fn plugin_management_login_tickets_require_admin_and_callbacks_are_bounded_public_documents()
+{
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("admin-session");
+    let service = Arc::new(super::plugin_models::Plugins(
+        gateway_admin::model::plugins::PluginAccess::default(),
+    ));
+    let state = AdminTestState(fixture.services.clone().with_plugins(service));
+    let app = gateway_api::admin::plugins::router::<AdminTestState>().with_state(state);
+    let ticket_request = |session: bool, forged: bool| {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/admin/plugins/callback-ticket")
+            .header("content-type", "application/json")
+            .header("x-request-id", "ticket-fixture");
+        if session {
+            builder = builder.header("cookie", "cpr_admin_session=admin-session");
+        }
+        let mut body =
+            serde_json::json!({"id":"plugin","revision":1,"path":"oauth","ttlSeconds":60});
+        if forged {
+            body["actor"] = serde_json::json!({"admin_user_id":"forged"});
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(ticket_request(false, false))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(ticket_request(true, true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let response = app
+        .clone()
+        .oneshot(ticket_request(true, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(envelope["data"]["state"], "opaque-ticket");
+    assert_eq!(envelope["data"]["expiresAtMs"], 123);
+    let callback = |query: &str, method: &str, content_type: bool, body: &'static str| {
+        let mut builder = Request::builder().method(method).uri(format!(
+            "/api/plugins/callback?id=plugin&revision=1&path=oauth&{query}"
+        ));
+        if content_type {
+            builder = builder.header("content-type", "text/plain");
+        }
+        builder.body(Body::from(body)).unwrap()
+    };
+    let response = app
+        .clone()
+        .oneshot(callback(
+            "state=opaque-ticket&code=synthetic",
+            "GET",
+            false,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/plain");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "sandbox allow-scripts allow-popups"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(response.headers().get_all("x-callback").iter().count(), 2);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+        "id=plugin&revision=1&path=oauth&state=opaque-ticket&code=synthetic"
+    );
+    for (query, method, content_type, body) in [
+        ("code=synthetic", "GET", false, ""),
+        ("state=opaque-ticket&state=forged", "GET", false, ""),
+        ("state=opaque-ticket", "HEAD", false, ""),
+        ("state=opaque-ticket", "GET", true, ""),
+        ("state=opaque-ticket", "GET", false, "body"),
+    ] {
+        assert!(
+            app.clone()
+                .oneshot(callback(query, method, content_type, body))
+                .await
+                .unwrap()
+                .status()
+                .is_client_error()
+        );
+    }
+}
 use axum::{
     body::Body,
     http::{Request, StatusCode},

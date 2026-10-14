@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import type { PluginInstance, PluginManagementPage } from '@/api/modules/plugins'
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { callPluginModel, callPluginRoute } from '@/api/modules/plugins'
+import { API_BASE_URL } from '@/api/constants'
+import { callPluginModel, callPluginRoute, getPluginCallbackTicket } from '@/api/modules/plugins'
 import { PLUGIN_MANAGEMENT_BRIDGE, PLUGIN_MANAGEMENT_BRIDGE_VERSION } from './management/bridge-contract'
+import { callbackTicketInput, pluginCallbackUrl } from './management/callbacks'
 import { assemblePluginManagementPage, readPluginFrameTheme } from './management/frame'
 import { PluginModelBridge } from './management/models'
 
@@ -87,6 +89,27 @@ async function receive(event: MessageEvent) {
       height.value = Math.min(16000, Math.max(300, value))
     return
   }
+  if (message.type === 'callback-ticket') {
+    const p = callbackTicketInput(message.payload)
+    if (!p || inFlight >= 8) {
+      reply(false, undefined, '插件回调路径、期限无效或并发已满')
+      return
+    }
+    inFlight++
+    try {
+      const target = { instanceId: props.plugin.id, revision: props.plugin.revision }
+      const ticket = await getPluginCallbackTicket(target, { path: p.path, ttlSeconds: p.ttlSeconds }, current.signal)
+      reply(true, pluginCallbackUrl(API_BASE_URL, window.location.origin, target, p.path, ticket.state))
+    }
+    catch (error) {
+      reply(false, undefined, error instanceof Error ? error.message : '插件登录票据签发失败')
+    }
+    finally {
+      if (current === controller)
+        inFlight--
+    }
+    return
+  }
   if (message.type !== 'request') {
     reply(false, undefined, '此宿主尚未开放该页面桥能力')
     return
@@ -123,7 +146,7 @@ onBeforeUnmount(() => {
   <p v-if="failure" role="alert" class="text-red-600">
     {{ failure }}
   </p>
-  <iframe v-else-if="source" ref="frame" :srcdoc="source" sandbox="allow-scripts" :title="page.title" :style="{ height: `${height}px` }" class="w-full border-0" />
+  <iframe v-else-if="source" ref="frame" :srcdoc="source" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" :title="page.title" :style="{ height: `${height}px` }" class="w-full border-0" />
   <p v-else class="text-cp-text-secondary">
     正在加载插件页面…
   </p>

@@ -755,6 +755,9 @@ impl RpcSession {
             credential_revision: None,
         }
     }
+    pub(crate) fn incarnation(&self) -> &str {
+        &self.handshake.incarnation
+    }
 
     fn call_deadline(
         &self,

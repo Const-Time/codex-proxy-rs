@@ -24,6 +24,58 @@ use tower::ServiceExt;
 pub(super) struct Plugins(pub(super) PluginAccess);
 #[async_trait]
 impl PluginService for Plugins {
+    async fn callback_ticket(
+        &self,
+        id: &str,
+        revision: u64,
+        path: &str,
+        ttl_seconds: u32,
+        actor: &MutationContext,
+    ) -> Result<PluginCallbackTicket, AdminError> {
+        self.access(id, revision)?;
+        assert_eq!(path, "oauth");
+        assert_eq!(ttl_seconds, 60);
+        assert!(
+            matches!(&actor.actor, gateway_admin::model::MutationActor::AdminSession { admin_user_id } if admin_user_id == "admin_1")
+        );
+        Ok(PluginCallbackTicket {
+            state: "opaque-ticket".into(),
+            expires_at_ms: 123,
+        })
+    }
+    async fn callback(
+        &self,
+        id: &str,
+        revision: u64,
+        path: &str,
+        state: &str,
+        request: PluginCallbackRequest,
+    ) -> Result<PluginCallbackResponse, AdminError> {
+        self.access(id, revision)?;
+        if path != "oauth" || state != "opaque-ticket" {
+            return Err(AdminError::invalid("bad ticket"));
+        }
+        assert!(!request.request_id.is_empty());
+        Ok(PluginCallbackResponse {
+            response: PluginHttpResponse {
+                status: 200,
+                content_type: "text/html".into(),
+                body: request.query.into_bytes(),
+            },
+            headers: vec![
+                gateway_core::engine::middleware::MiddlewareHeader::new(
+                    "content-type",
+                    "text/plain".into(),
+                ),
+                gateway_core::engine::middleware::MiddlewareHeader::new("x-callback", "one".into()),
+                gateway_core::engine::middleware::MiddlewareHeader::new("x-callback", "two".into()),
+                gateway_core::engine::middleware::MiddlewareHeader::new(
+                    "content-security-policy",
+                    "unsafe-fixture".into(),
+                ),
+            ],
+        })
+    }
     async fn authenticate(
         &self,
         authorization: String,

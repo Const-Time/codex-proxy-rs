@@ -6,6 +6,7 @@ mod command_line;
 mod credentials;
 mod data;
 mod engine;
+mod management;
 mod management_validation;
 pub mod middleware;
 mod model_routing;

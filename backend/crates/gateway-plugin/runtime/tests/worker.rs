@@ -901,6 +901,7 @@ mod upstream_callbacks {
 }
 
 struct Worker {
+    public_callbacks: bool,
     public_resource: bool,
     command_registration: serde_json::Value,
     command_result: serde_json::Value,
@@ -1236,8 +1237,24 @@ impl PluginHandler for Worker {
             },
             "management.register"=>Ok(CallReply::unary(json!({}),serde_json::to_vec(&json!({
                 "routes":[{"method":"POST","path":"echo","request_content_types":["application/json"],"response_content_types":["application/json"]}],
-                "resources":[{"path":"index.html","public":self.public_resource}],"pages":[{"id":"home","title":"Counter","entry":"index.html","icon":null}],"callbacks":[]
+                "resources":[{"path":"index.html","public":self.public_resource}],"pages":[{"id":"home","title":"Counter","entry":"index.html","icon":null}],"callbacks":if self.public_callbacks {json!([{"path":"oauth","response_content_types":["application/json"]}])} else {json!([])}
             })).unwrap())),
+            "management.callback" => {
+                assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::PublicManagement);
+                assert!(call.payload.is_empty());
+                assert_eq!(call.params["method"], "GET");
+                assert_eq!(call.params["path"], "oauth");
+                let record = call.host.call("host.state.get", json!({"namespace":"counter","key":"callbacks"}), vec![]).await.map_err(|e| e.into_plugin_fault())?;
+                let count = record.result["record"]["value"].as_u64().unwrap_or(0) + 1;
+                call.host.call("host.state.put", json!({"namespace":"counter","key":"callbacks","value":count,"expected_version":record.result["record"]["version"].as_u64()}), vec![]).await.map_err(|e| e.into_plugin_fault())?;
+                if call.params["query"].as_str().unwrap().contains("fail=1") {
+                    return Err(PluginFault::new(ErrorCode::Fault, "fixture fault after callback write"));
+                }
+                if call.params["query"].as_str().unwrap().contains("wait=1") {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+                Ok(CallReply::unary(json!({"status":200,"content_type":"application/json","headers":[{"name":"x-plugin-callback","value":[111,107]}]}), serde_json::to_vec(&json!({"count":count,"query":call.params["query"],"headers":call.params["headers"]})).unwrap()))
+            },
             "management.handle"=>{
                 let input:serde_json::Value=serde_json::from_slice(&call.payload).unwrap();
                 let result=if input["operation"]=="state" {
@@ -1326,6 +1343,9 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        public_callbacks: session.handshake().configuration["public_callbacks"]
+            .as_bool()
+            .unwrap_or(false),
         public_resource: session.handshake().configuration["public_resource"]
             .as_bool()
             .unwrap_or(false),

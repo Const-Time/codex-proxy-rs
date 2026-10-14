@@ -163,6 +163,10 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
             )
             .with_model_catalog(core.model_catalog_validator())
             .with_services(admin.services().service_settings())
+            .with_management_callbacks(
+                store.provider_ports().oauth_pending(),
+                store.admin_ports().auth(),
+            )
         },
     );
     plugins.restore().await?;
