@@ -186,7 +186,7 @@ pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false, false, false),
+        (false, false, false, false, false, false, false),
     )
 }
 pub fn authentication_archive(version: &str) -> Arc<[u8]> {
@@ -196,7 +196,7 @@ pub fn authentication_archive(version: &str) -> Arc<[u8]> {
         true,
         false,
         false,
-        (false, false, false, false, false, false),
+        (false, false, false, false, false, false, false),
     )
 }
 pub fn routing_archive(version: &str) -> Arc<[u8]> {
@@ -206,7 +206,7 @@ pub fn routing_archive(version: &str) -> Arc<[u8]> {
         false,
         true,
         false,
-        (false, false, false, false, false, false),
+        (false, false, false, false, false, false, false),
     )
 }
 pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
@@ -216,7 +216,7 @@ pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         true,
-        (false, false, false, false, false, false),
+        (false, false, false, false, false, false, false),
     )
 }
 pub fn retry_archive(version: &str) -> Arc<[u8]> {
@@ -226,7 +226,7 @@ pub fn retry_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (true, false, false, false, false, false),
+        (true, false, false, false, false, false, false),
     )
 }
 pub fn http_archive(version: &str) -> Arc<[u8]> {
@@ -236,7 +236,7 @@ pub fn http_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, true, false, false, false, false),
+        (false, true, false, false, false, false, false),
     )
 }
 pub fn catalog_archive(version: &str) -> Arc<[u8]> {
@@ -246,7 +246,7 @@ pub fn catalog_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, true, false, false, false),
+        (false, false, true, false, false, false, false),
     )
 }
 pub fn upstream_archive(version: &str) -> Arc<[u8]> {
@@ -256,7 +256,7 @@ pub fn upstream_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, true, false, false),
+        (false, false, false, true, false, false, false),
     )
 }
 pub fn maintenance_archive(version: &str) -> Arc<[u8]> {
@@ -266,7 +266,7 @@ pub fn maintenance_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false, true, false),
+        (false, false, false, false, true, false, false),
     )
 }
 pub fn observer_archive(version: &str) -> Arc<[u8]> {
@@ -276,7 +276,17 @@ pub fn observer_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false, false, true),
+        (false, false, false, false, false, true, false),
+    )
+}
+pub fn command_archive(version: &str) -> Arc<[u8]> {
+    build_archive(
+        version,
+        false,
+        false,
+        false,
+        false,
+        (false, false, false, false, false, false, true),
     )
 }
 fn build_archive(
@@ -285,13 +295,17 @@ fn build_archive(
     authentication: bool,
     routing: bool,
     scheduling: bool,
-    modes: (bool, bool, bool, bool, bool, bool),
+    modes: (bool, bool, bool, bool, bool, bool, bool),
 ) -> Arc<[u8]> {
-    let (retry, http, catalog, upstream, maintenance, observer) = modes;
+    let (retry, http, catalog, upstream, maintenance, observer, command_line) = modes;
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
     let page = b"<!doctype html><html><body>Plugin fixture</body></html>";
     let mut contributes =
         json!({"management":{"id":"local.fixture.management","version":1,"stages":["management"]}});
+    if command_line {
+        contributes["command_line"] =
+            json!({"id":"local.fixture.command","version":1,"stages":["command_line"]});
+    }
     if observer {
         contributes["observer"] =
             json!({"id":"local.fixture.observer","version":1,"stages":["observation"]});
@@ -333,7 +347,7 @@ fn build_archive(
     }
     let mut manifest = json!({"manifestVersion":2,"name":"fixture","displayName":"Fixture","publisher":"local","version":version,"description":"Lifecycle fixture","license":"MIT",
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,
-        "configurationSchema":{"type":"object","properties":{"adapter_models":{"type":"array","items":{"type":"string"}},"adapter_provider":{"type":"string"},"adapter_mode":{"type":"string"},"adapter_url":{"type":"string"},"adapter_transport":{"type":"string"},"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
+        "configurationSchema":{"type":"object","properties":{"command_registration":{"type":"object"},"command_result":{"type":"object"},"adapter_models":{"type":"array","items":{"type":"string"}},"adapter_provider":{"type":"string"},"adapter_mode":{"type":"string"},"adapter_url":{"type":"string"},"adapter_transport":{"type":"string"},"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
         "state":[{"namespace":"counter","schemaVersion":1,"schema":{"type":"integer"},"maximumRecords":10,"maximumBytes":1024,"maximumValueBytes":128}],
         "resources":{"index.html":"text/html"},"package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},
         "files":{"bin/plugin":hex::encode(Sha256::digest(&executable)),"index.html":hex::encode(Sha256::digest(page))}}});

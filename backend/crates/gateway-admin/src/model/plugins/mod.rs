@@ -100,6 +100,32 @@ pub struct PluginHttpRequest {
     pub content_type: Option<String>,
     pub body: Vec<u8>,
 }
+
+/// Host-issued authority and cancellation; command arguments may contain credentials.
+pub struct PluginCommandRequest {
+    pub name: String,
+    pub arguments: Vec<String>,
+    pub actor: super::MutationContext,
+    pub cancellation: gateway_core::lifecycle::CancellationToken,
+}
+pub struct PluginCommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: u8,
+    pub saved_accounts: usize,
+}
+#[derive(Debug, thiserror::Error)]
+pub enum PluginCommandError {
+    #[error(transparent)]
+    Invalid(#[from] super::AdminError),
+    #[error(
+        "插件命令未完整完成（{reason}），已确认保存 {saved_accounts} 个账号，其余副作用结果未知；请核对后再决定是否重试"
+    )]
+    Incomplete {
+        saved_accounts: usize,
+        reason: &'static str,
+    },
+}
 #[derive(Clone)]
 pub struct PluginInvocationContext {
     pub context: gateway_core::engine::middleware::http::Context,

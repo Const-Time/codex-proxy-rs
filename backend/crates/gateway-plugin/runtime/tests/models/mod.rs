@@ -1,5 +1,5 @@
 pub(crate) mod fixture;
-mod http;
+pub(crate) mod http;
 use fixture::*;
 use gateway_admin::ports::plugins::PluginService;
 use gateway_core::engine::{execution::ExecutionService, middleware::*};

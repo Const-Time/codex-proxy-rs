@@ -310,6 +310,7 @@ impl MiddlewareCallbacks {
                     None,
                     invocation.cancellation.clone(),
                     None,
+                    None,
                 )
                 .is_err()
             {

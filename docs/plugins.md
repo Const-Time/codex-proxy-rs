@@ -31,6 +31,8 @@
 | 观察订阅 | observer v1；请求完成、实际上游 WebSocket 原始帧；冻结 Key/分组范围、有界投递及独立撤销，观察失败不控制业务执行 |
 | 未开放的能力 | middleware、upstream_adapter、command_line、公开资源、登录回调、主动额度刷新、Key 预算写入、状态迁移；非 management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
+`command_line` v1 的注册、类型化参数、帮助与执行 RPC 内核已接入实际插件进程。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图，模型推理继续使用真实本人 Key 与原 Core 结算；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。该能力仍不可启用：网关命令入口、系统命令的原生 Key 授权、登录账号结果的 Provider 校验和 Admin 提交尚未完成。当前内核收到需要保存账号的成功结果会明确返回未完整完成，不报告账号已保存；非零退出不提交账号。
+
 声明 `observer` v1、`observation` 阶段的制品可以启用观察订阅。实例字段 `observer` 为 null 或 `{order, requestCompleted, websocketResponse}`；两种事件分别选择全部请求、指定 Key 或分组，至少启用一种。顺序为 -10000～10000 的整数，指定范围最多 256 个唯一有效 ID；省略/null 清除绑定。订阅随原实例 revision、迁移 `0040_plugin_observer.sql` 及完整备份恢复，升级候选失败保留旧发布。管理页展示两种事件和独立作用范围，实际上游 WebSocket 原始响应可能包含请求的业务内容，应按所需范围授权。
 
 Core 从同一份请求准备结果冻结订阅；Responses JSON/SSE/WS、Images、standalone Search 和原生模型子调用共用原计划，子调用排除全部发起插件祖先。终态只从原会话完成写入、费用结算和准入释放后的事实投影一次，未知费用保持 unknown 和空金额；不提供原始错误、凭据或诊断正文。实际上游 WebSocket 原始帧在中间件改写和重试丢弃前观察，序号跨 attempt 连续；客户端传输不会代替实际上游 transport。

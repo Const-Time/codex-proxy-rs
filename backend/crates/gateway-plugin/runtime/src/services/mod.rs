@@ -297,6 +297,7 @@ impl CallbackHandler for Callbacks {
                     | Stage::Upstream
                     | Stage::Maintenance
                     | Stage::Observation
+                    | Stage::CommandLine
             )
         {
             self.registry.call(context, params, payload)

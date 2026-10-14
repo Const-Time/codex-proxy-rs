@@ -1,4 +1,5 @@
 //! 插件实例是唯一配置权威；候选进程完成准备后才提交并替换旧代。
+mod command_line;
 pub mod http;
 mod maintenance;
 pub mod middleware;
