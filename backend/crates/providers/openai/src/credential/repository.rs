@@ -164,6 +164,19 @@ impl CodexCredentialRepository {
         self.decode_runtime_credential(&loaded)
     }
 
+    pub(crate) async fn load_runtime_revision(
+        &self,
+        account_id: &gateway_core::account::ProviderAccountId,
+        revision: CredentialRevision,
+    ) -> Result<(ProviderAccount, CodexRuntimeCredential), CredentialRepositoryError> {
+        let loaded = self.store.load_credential(account_id, revision).await?;
+        if loaded.account.id() != account_id || loaded.account.revision() != revision {
+            return Err(CredentialRepositoryError::RevisionConflict);
+        }
+        let runtime = self.decode_runtime_credential(&loaded)?;
+        Ok((loaded.account, runtime))
+    }
+
     pub async fn load_complete_data(
         &self,
         account: &ProviderAccount,

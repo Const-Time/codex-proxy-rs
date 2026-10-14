@@ -65,11 +65,28 @@ pub trait UpstreamAccountConnection: Send + Sync {
     fn outbound_proxy(&self) -> Option<&OutboundProxy>;
     fn authorization(&self) -> Result<Vec<MiddlewareHeader>, ProviderError>;
 
+    /// Native credential adoption is available only from the selected Provider owner.
+    /// This capability does not prepare or persist plugin-supplied credential material.
+    fn credential_updates(&self) -> Option<&dyn UpstreamCredentialUpdate>;
+
     /// 复用 Provider 的价格来源；未知用量、模型或档位不构造零费用
     fn calculate_cost(&self, service_tier: Option<&str>, usage: &Usage) -> Option<CalculatedCost>;
 
     /// 失败的刷新、账号状态和冷却反馈仍由 Provider 处理，不由 Runtime 写账号
     fn record_failure(&self, error: ProviderError) -> BoxFuture<'_, ProviderError>;
+}
+
+/// Adopt the exact committed native revision on the existing account lease.
+/// Implementations must not select another account or acquire another capacity lease.
+pub trait UpstreamCredentialUpdate: Send + Sync {
+    /// Fence authorization while loading the committed revision. Once adoption
+    /// starts, failure leaves the connection unusable at its last confirmed epoch.
+    /// A stale expectation must not revoke a newer confirmed epoch.
+    fn adopt(
+        &self,
+        expected: CredentialRevision,
+        committed: CredentialRevision,
+    ) -> BoxFuture<'_, Result<(), ProviderError>>;
 }
 
 impl AttemptContext {

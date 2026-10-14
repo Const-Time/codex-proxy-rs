@@ -48,6 +48,11 @@ impl UpstreamAccountConnection for Connection {
     fn authorization(&self) -> Result<Vec<MiddlewareHeader>, ProviderError> {
         Ok(vec![])
     }
+    fn credential_updates(
+        &self,
+    ) -> Option<&dyn gateway_core::engine::upstream_adapter::UpstreamCredentialUpdate> {
+        None
+    }
     fn calculate_cost(&self, tier: Option<&str>, usage: &Usage) -> Option<CalculatedCost> {
         assert_eq!(tier, Some("priority"));
         assert_eq!(usage.input_tokens, Some(10));

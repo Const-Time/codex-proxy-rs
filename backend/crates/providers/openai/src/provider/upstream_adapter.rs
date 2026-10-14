@@ -8,14 +8,22 @@ use gateway_core::{
     account::{CredentialRevision, OutboundProxy, ProviderAccountId},
     engine::upstream_adapter::{
         UpstreamAccountConnection, UpstreamAdapter, UpstreamAdapterInvocation,
+        UpstreamCredentialUpdate,
     },
     metering::{CalculatedCost, Usage},
 };
 
+struct CurrentCredential {
+    lease: Arc<CodexCredentialLease>,
+    usable: bool,
+}
+
 struct SelectedConnection {
     selector: Arc<CodexCredentialSelector>,
     quota: Arc<CodexCredentialQuotaService>,
-    lease: Arc<CodexCredentialLease>,
+    bound: gateway_core::account::ProviderAccount,
+    current: std::sync::RwLock<CurrentCredential>,
+    request_url: Url,
     context: AttemptContext,
     model: UpstreamModelId,
     requested_service_tier: Option<String>,
@@ -90,7 +98,12 @@ impl CodexProvider {
         let account = Arc::new(SelectedConnection {
             selector: Arc::clone(&self.selector),
             quota: Arc::clone(&self.quota),
-            lease: Arc::clone(&lease),
+            bound: lease.account().clone(),
+            current: std::sync::RwLock::new(CurrentCredential {
+                lease: Arc::clone(&lease),
+                usable: true,
+            }),
+            request_url: self.responses_url.clone(),
             context: context.clone(),
             model,
             requested_service_tier,
@@ -117,31 +130,35 @@ impl CodexProvider {
 
 impl UpstreamAccountConnection for SelectedConnection {
     fn account_id(&self) -> &ProviderAccountId {
-        self.lease.account_id()
+        self.bound.id()
     }
     fn credential_revision(&self) -> CredentialRevision {
-        self.lease.account().revision()
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lease
+            .account()
+            .revision()
     }
     fn authentication_kind(&self) -> &str {
-        self.lease.account().authentication_kind()
+        self.bound.authentication_kind()
     }
     fn outbound_proxy(&self) -> Option<&OutboundProxy> {
-        self.lease.account().outbound_proxy()
+        self.bound.outbound_proxy()
     }
 
     fn authorization(&self) -> Result<Vec<MiddlewareHeader>, ProviderError> {
-        let authorization = self
-            .lease
-            .authentication()
-            .authorization_header()
-            .map_err(|_| {
-                provider_error(ProviderErrorKind::Unauthorized, UpstreamSendState::NotSent)
-            })?;
+        let lease = self.current_lease().ok_or_else(|| {
+            provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
+        })?;
+        let authorization = lease.authentication().authorization_header().map_err(|_| {
+            provider_error(ProviderErrorKind::Unauthorized, UpstreamSendState::NotSent)
+        })?;
         let mut headers = vec![MiddlewareHeader::new(
             "authorization",
             bytes::Bytes::copy_from_slice(authorization.expose_secret().as_bytes()),
         )];
-        if let Some(account_id) = self.lease.account().upstream_account_id() {
+        if let Some(account_id) = lease.account().upstream_account_id() {
             headers.push(MiddlewareHeader::new(
                 "chatgpt-account-id",
                 bytes::Bytes::copy_from_slice(account_id.as_bytes()),
@@ -149,6 +166,10 @@ impl UpstreamAccountConnection for SelectedConnection {
         }
         // 业务目标可能与原生 Responses 不同，不能把原域名的 Cookie 带到新目标
         Ok(headers)
+    }
+
+    fn credential_updates(&self) -> Option<&dyn UpstreamCredentialUpdate> {
+        Some(self)
     }
 
     fn calculate_cost(&self, tier: Option<&str>, usage: &Usage) -> Option<CalculatedCost> {
@@ -178,7 +199,10 @@ impl UpstreamAccountConnection for SelectedConnection {
 
     fn record_failure(&self, error: ProviderError) -> BoxFuture<'_, ProviderError> {
         Box::pin(async move {
-            if !self.lease.allows_account_state_mutation()
+            let Some(lease) = self.current_lease() else {
+                return error;
+            };
+            if !lease.allows_account_state_mutation()
                 || error.send_state() == UpstreamSendState::NotSent
             {
                 return error;
@@ -194,16 +218,65 @@ impl UpstreamAccountConnection for SelectedConnection {
             if let Some(failure) = failure {
                 let _ = self
                     .selector
-                    .record_failure(self.lease.account(), failure, None)
+                    .record_failure(lease.account(), failure, None)
                     .await;
                 if error.kind() == ProviderErrorKind::QuotaExhausted {
                     schedule_authoritative_quota_refresh_after_failure(
                         &self.quota,
-                        self.lease.account(),
+                        lease.account(),
                     );
                 }
             }
             error
+        })
+    }
+}
+
+impl SelectedConnection {
+    fn current_lease(&self) -> Option<Arc<CodexCredentialLease>> {
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current.usable.then(|| current.lease.clone())
+    }
+}
+impl UpstreamCredentialUpdate for SelectedConnection {
+    fn adopt(
+        &self,
+        expected: CredentialRevision,
+        committed: CredentialRevision,
+    ) -> BoxFuture<'_, Result<(), ProviderError>> {
+        Box::pin(async move {
+            let lease = {
+                let mut current = self
+                    .current
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !current.usable
+                    || current.lease.account().revision() != expected
+                    || committed <= expected
+                {
+                    return Err(provider_error(
+                        ProviderErrorKind::Protocol,
+                        UpstreamSendState::NotSent,
+                    ));
+                }
+                current.usable = false;
+                current.lease.clone()
+            };
+            let lease = self
+                .selector
+                .reload_credential(&lease, committed, &self.request_url)
+                .await
+                .map_err(map_selection_error)?;
+            let mut current = self
+                .current
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            current.lease = Arc::new(lease);
+            current.usable = true;
+            Ok(())
         })
     }
 }

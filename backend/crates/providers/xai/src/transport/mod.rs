@@ -49,9 +49,10 @@ pub use network::{
 pub use profile::XaiWireProfileState;
 pub use request::{GrokRequestEncodeError, GrokResponsesRequest};
 pub use session::{
-    GrokCredentialFailure, GrokCredentialFeedbackFuture, GrokSessionAffinityKey,
-    GrokSessionBinding, GrokSessionDataError, GrokSessionLeaseGuard, GrokSessionSelection,
-    GrokSessionSelector, GrokSessionSelectorError, GrokSessionSelectorFuture, SelectedGrokSession,
+    GrokCredentialFailure, GrokCredentialFeedbackFuture, GrokCredentialUpdate,
+    GrokSessionAffinityKey, GrokSessionBinding, GrokSessionDataError, GrokSessionLeaseGuard,
+    GrokSessionSelection, GrokSessionSelector, GrokSessionSelectorError, GrokSessionSelectorFuture,
+    SelectedGrokSession,
 };
 
 const UUID_TEXT_LEN: usize = 36;

@@ -737,17 +737,79 @@ impl CodexCredentialSelector {
                         installation_id: runtime.installation_id,
                         account,
                         authentication: runtime.authentication,
+                        principal: runtime.principal,
                         cookies,
                         cyber_policy_scope,
                         allows_account_state_mutation,
                         affinity_telemetry,
                         affinity_expected_account_id,
                         capacity: capacity.map(AccountCapacitySnapshot::with_acquired_request),
-                        _guard: guard,
+                        _guard: Arc::from(guard),
                     });
                 }
             }
         }
+    }
+
+    pub(crate) async fn reload_credential(
+        &self,
+        lease: &CodexCredentialLease,
+        revision: gateway_core::account::CredentialRevision,
+        request_url: &Url,
+    ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        if revision <= lease.account().revision() || !lease.allows_account_state_mutation {
+            return Err(CredentialSelectionError::AccountSnapshotChanged);
+        }
+        let (account, runtime) = self
+            .repository
+            .load_runtime_revision(lease.account_id(), revision)
+            .await?;
+        if !account.enabled()
+            || account.credential_state() != CredentialState::Ready
+            || account.authentication_kind() != lease.account.authentication_kind()
+            || account.upstream_user_id() != lease.account.upstream_user_id()
+            || account.upstream_account_id() != lease.account.upstream_account_id()
+            || account.outbound_proxy() != lease.account.outbound_proxy()
+            || runtime.principal != lease.principal
+            || account
+                .access_token_expires_at()
+                .is_some_and(|expires| expires <= SystemTime::now())
+        {
+            return Err(CredentialSelectionError::AccountSnapshotChanged);
+        }
+        runtime
+            .authentication
+            .authorization_header()
+            .map_err(|_| CredentialSelectionError::InvalidCredential)?;
+        let cookies = runtime
+            .cookies
+            .into_iter()
+            .filter(|cookie| {
+                cookie
+                    .expires_at
+                    .is_none_or(|expires| expires > chrono::Utc::now())
+                    && self.cookie_policy.may_replay(
+                        request_url,
+                        &cookie.domain,
+                        &cookie.path,
+                        cookie.host_only,
+                        cookie.secure,
+                    )
+            })
+            .collect();
+        Ok(CodexCredentialLease {
+            account,
+            authentication: runtime.authentication,
+            principal: runtime.principal,
+            cookies,
+            installation_id: runtime.installation_id,
+            cyber_policy_scope: lease.cyber_policy_scope.clone(),
+            allows_account_state_mutation: lease.allows_account_state_mutation,
+            affinity_telemetry: lease.affinity_telemetry,
+            affinity_expected_account_id: lease.affinity_expected_account_id.clone(),
+            capacity: lease.capacity,
+            _guard: lease._guard.clone(),
+        })
     }
 
     async fn resolve_session_affinity(
@@ -1367,6 +1429,7 @@ impl fmt::Debug for CodexCredentialSelector {
 pub struct CodexCredentialLease {
     account: ProviderAccount,
     authentication: CodexRuntimeAuthentication,
+    principal: Option<super::types::CodexCredentialPrincipal>,
     cookies: Vec<RuntimeCodexCookie>,
     installation_id: String,
     cyber_policy_scope: Option<CodexCyberPolicyScope>,
@@ -1374,7 +1437,7 @@ pub struct CodexCredentialLease {
     affinity_telemetry: AffinityTelemetry,
     affinity_expected_account_id: ProviderAccountId,
     capacity: Option<AccountCapacitySnapshot>,
-    _guard: Box<dyn ProviderLeaseGuard>,
+    _guard: Arc<dyn ProviderLeaseGuard>,
 }
 
 impl CodexCredentialLease {

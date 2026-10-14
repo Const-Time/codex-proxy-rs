@@ -297,12 +297,40 @@ impl Fixture {
         previous: Option<&str>,
         transport: ClientTransport,
     ) -> Result<StartedExecution, GatewayError> {
+        self.start_with_plan(key, behavior, previous, transport, None)
+            .await
+    }
+    pub async fn start_with_adapter_plan(
+        &self,
+        behavior: &str,
+        plan: Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapterPlan>,
+    ) -> StartedExecution {
+        self.start_with_plan(
+            "sk_native_fixture",
+            behavior,
+            None,
+            ClientTransport::HttpJson,
+            Some(plan),
+        )
+        .await
+        .unwrap()
+    }
+    async fn start_with_plan(
+        &self,
+        key: &str,
+        behavior: &str,
+        previous: Option<&str>,
+        transport: ClientTransport,
+        plan: Option<Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapterPlan>>,
+    ) -> Result<StartedExecution, GatewayError> {
         let client = self.execution.authenticate(key).unwrap();
         let prepared = self
             .execution
             .prepare_execution(client)
             .unwrap()
-            .with_upstream_adapters(Arc::new(self.manager.middleware_registry().unwrap()));
+            .with_upstream_adapters(
+                plan.unwrap_or_else(|| Arc::new(self.manager.middleware_registry().unwrap())),
+            );
         self.execution.start_prepared(prepared, PreparedExecutionRequest {
             public_model: PublicModelId::new("public-model").unwrap(),
             operation: Operation::Generate(GenerateRequest::from_protocol_payload(ProtocolPayload::json_object("openai",
@@ -422,6 +450,12 @@ impl Fixture {
         self.manager.restore().await.unwrap();
     }
     pub async fn advance_credential(&mut self) {
+        self.advance_credential_with(|_| {}).await;
+    }
+    pub async fn advance_credential_with(
+        &mut self,
+        mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) -> gateway_core::account::CredentialRevision {
         let account_store = self.ports.accounts();
         let current = account_store
             .load_current_credential(&self.account)
@@ -433,11 +467,13 @@ impl Fixture {
             email: current.account.email().map(str::to_owned),
             plan_type: current.account.plan_type().map(str::to_owned),
         };
+        let mut material = current.credential.into_inner();
+        mutate(&mut material);
         let update = CredentialCasUpdate::new(
             self.account.clone(),
             current.account.revision(),
             profile,
-            current.credential,
+            gateway_core::account::PlaintextCredential::new(material),
             current.account.has_refresh_token(),
             current.account.access_token_expires_at(),
             current.account.next_refresh_at(),
@@ -452,5 +488,6 @@ impl Fixture {
             panic!("isolated credential CAS must succeed")
         };
         self.credential_revision = revision.get();
+        revision
     }
 }
