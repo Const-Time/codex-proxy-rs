@@ -7,6 +7,7 @@ mod fixture;
 mod lifecycle;
 mod websocket;
 mod xai;
+mod xai_save;
 use fixture::Fixture;
 use gateway_core::{engine::ExecutionOutcome, upstream::UpstreamSendState};
 use std::{sync::atomic::Ordering, time::Duration};

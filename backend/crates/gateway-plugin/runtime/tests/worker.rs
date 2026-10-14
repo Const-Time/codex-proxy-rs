@@ -249,6 +249,9 @@ mod worker_credentials {
             facts
                 .material
                 .insert("access_token".into(), input["fixture_save_token"].clone());
+            if let Some(expiry) = input["fixture_save_expiry_ms"].as_i64() {
+                facts.access_token_expires_at_ms = Some(expiry);
+            }
         }
         let request = AuthSaveRequest::Replace {
             account_id: selected.into(),
