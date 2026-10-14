@@ -240,7 +240,12 @@ async fn reauthorize_account_file(
             .await?;
     Ok(crate::model::provider_credentials::CredentialImportResult {
         config_revision: result.config_revision,
-        credential_ids: vec![result.account_id],
+        credentials: vec![
+            crate::model::provider_credentials::CredentialImportReceipt {
+                account_id: result.account_id,
+                credential_revision: result.credential_revision,
+            },
+        ],
     })
 }
 

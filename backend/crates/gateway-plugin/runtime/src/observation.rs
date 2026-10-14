@@ -439,11 +439,15 @@ pub(crate) async fn invoke(
         .bind_origin(&context, origin)
         .map_err(|_| AdminError::unavailable("观察服务作用域不可用"))?;
     outbound
-        .bind(&context, cancellation.clone(), Some(observation.call_scope))
+        .bind(
+            &context,
+            cancellation.clone(),
+            Some(observation.call_scope.clone()),
+        )
         .map_err(|_| AdminError::unavailable("观察网络作用域不可用"))?;
     let _outbound = outbound.guard(&context);
     let _caller = calls.enter(
-        context.resource_scope_id.clone(),
+        context.clone(),
         MutationContext {
             actor: MutationActor::Plugin {
                 instance_id: caller.instance_id().into(),
@@ -453,6 +457,7 @@ pub(crate) async fn invoke(
         },
         None,
         cancellation.clone(),
+        Some(observation.call_scope),
     );
     let reply = tokio::select! { biased;
         () = cancellation.cancelled() => return Err(AdminError::unavailable("插件观察已取消")),

@@ -3,7 +3,9 @@ use super::{commit_credential_rotation, map_provider_error, map_store_error, pub
 use crate::{
     model::{AdminError, MutationActor, plugins::*, provider_credentials::*},
     ports::{
-        plugins::PluginCredentialService, provider::ProviderAdminRegistry, store::AccountStore,
+        plugins::PluginCredentialService,
+        provider::ProviderAdminRegistry,
+        store::{AccountStore, AuthStore},
     },
 };
 use async_trait::async_trait;
@@ -14,27 +16,90 @@ use std::sync::Arc;
 
 pub(crate) struct DefaultPluginCredentialService {
     accounts: Arc<dyn AccountStore>,
+    auth: Arc<dyn AuthStore>,
     providers: ProviderAdminRegistry,
     snapshot: Arc<dyn SnapshotControl>,
 }
 impl DefaultPluginCredentialService {
     pub(crate) fn new(
         accounts: Arc<dyn AccountStore>,
+        auth: Arc<dyn AuthStore>,
         providers: ProviderAdminRegistry,
         snapshot: Arc<dyn SnapshotControl>,
     ) -> Self {
         Self {
             accounts,
+            auth,
             providers,
             snapshot,
         }
     }
+    async fn authorize(
+        &self,
+        scope: &PluginMutationScope,
+        initiator: &crate::model::MutationContext,
+    ) -> Result<(), AdminError> {
+        let valid = matches!(&scope.actor.actor, MutationActor::Plugin { instance_id, revision } if instance_id == &scope.instance_id && revision.get() == scope.revision);
+        if !valid
+            || initiator.request_id.is_empty()
+            || initiator.request_id != scope.actor.request_id
+        {
+            return Err(AdminError::conflict("插件凭据身份关联无效"));
+        }
+        let permitted = match &initiator.actor {
+            MutationActor::AdminSession { admin_user_id } => self
+                .auth
+                .load_user(admin_user_id)
+                .await
+                .map_err(|e| map_store_error(e, "plugin credential administrator"))?
+                .is_some_and(|user| {
+                    user.enabled && user.role == crate::model::users::UserRole::Admin
+                }),
+            MutationActor::System | MutationActor::AdminApiKey => true,
+            MutationActor::Plugin {
+                instance_id,
+                revision,
+            } => instance_id == &scope.instance_id && revision.get() == scope.revision,
+        };
+        if !permitted {
+            return Err(AdminError::new(
+                crate::model::AdminErrorKind::Forbidden,
+                "当前操作者无账号凭据权限",
+            ));
+        }
+        Ok(())
+    }
 }
 #[async_trait]
 impl PluginCredentialService for DefaultPluginCredentialService {
+    async fn accounts(
+        &self,
+        scope: PluginMutationScope,
+        initiator: crate::model::MutationContext,
+        query: PluginCredentialQuery,
+    ) -> Result<PluginCredentialPage, AdminError> {
+        self.authorize(&scope, &initiator).await?;
+        self.accounts
+            .plugin_credential_accounts(scope, query)
+            .await
+            .map_err(|e| map_store_error(e, "plugin credential accounts"))
+    }
+    async fn credential(
+        &self,
+        scope: PluginMutationScope,
+        initiator: crate::model::MutationContext,
+        account: gateway_core::account::ProviderAccountId,
+    ) -> Result<ProviderExportCredentialInput, AdminError> {
+        self.authorize(&scope, &initiator).await?;
+        self.accounts
+            .plugin_credential(scope, account)
+            .await
+            .map_err(|e| map_store_error(e, "plugin credential export"))
+    }
     async fn save(
         &self,
         scope: PluginMutationScope,
+        initiator: crate::model::MutationContext,
         command: PluginCredentialSave,
         cleanup: ExtensionCallScope,
         cancellation: CancellationToken,
@@ -48,6 +113,7 @@ impl PluginCredentialService for DefaultPluginCredentialService {
         {
             return Err(AdminError::conflict("插件凭据提交作用域已失效"));
         }
+        self.authorize(&scope, &initiator).await?;
         match &command {
             PluginCredentialSave::Create { facts, .. }
             | PluginCredentialSave::Replace { facts, .. } => facts.validate()?,
@@ -68,6 +134,7 @@ impl PluginCredentialService for DefaultPluginCredentialService {
                     let provider = providers
                         .require(&provider)
                         .map_err(|e| map_provider_error(e, "plugin credential provider"))?;
+                    _cleanup.observe_upstream_effect();
                     let prepared = provider
                         .prepare_plugin_import(facts)
                         .await
@@ -89,18 +156,16 @@ impl PluginCredentialService for DefaultPluginCredentialService {
                         )
                         .await
                         .map_err(|e| map_store_error(e, "plugin credential commit"))?;
-                    let [account_id]: [_; 1] = result
-                        .credential_ids
+                    let [receipt]: [_; 1] = result
+                        .credentials
                         .try_into()
                         .map_err(|_| AdminError::internal("账号提交已完成，但结果数量未确认"))?;
-                    // Import may upsert an existing identity; never assume revision 1.
-                    let revision = accounts
-                        .credential_details(provider.provider_kind(), &account_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|details| details.credential.credential_revision);
-                    (provider, account_id, revision, result.config_revision)
+                    (
+                        provider,
+                        receipt.account_id,
+                        receipt.credential_revision,
+                        result.config_revision,
+                    )
                 }
                 PluginCredentialSave::Replace {
                     account_id,
@@ -119,6 +184,7 @@ impl PluginCredentialService for DefaultPluginCredentialService {
                     let provider = providers
                         .require(&account.provider_kind)
                         .map_err(|e| map_provider_error(e, "plugin credential provider"))?;
+                    _cleanup.observe_upstream_effect();
                     let prepared = provider
                         .prepare_plugin_rotation(account.clone(), facts)
                         .await

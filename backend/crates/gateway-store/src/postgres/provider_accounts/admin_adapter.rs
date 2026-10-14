@@ -256,18 +256,24 @@ impl PgAdminAccountStore {
             .map_err(|error| admin_store_error(ENTITY, error))?;
         Ok(CredentialImportResult {
             config_revision: admin_revision(imported.config_revision)?,
-            credential_ids: imported
-                .account_ids
+            credentials: imported
+                .accounts
                 .into_iter()
-                .map(CoreProviderAccountId::new)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| {
-                    AdminStoreError::new(
-                        AdminStoreErrorKind::Unavailable,
-                        ENTITY,
-                        "provider account import returned an invalid account ID",
-                    )
-                })?,
+                .map(|receipt| {
+                    Ok(CredentialImportReceipt {
+                        account_id: CoreProviderAccountId::new(receipt.account_id).map_err(
+                            |_| {
+                                AdminStoreError::new(
+                                    AdminStoreErrorKind::Unavailable,
+                                    ENTITY,
+                                    "provider account import returned an invalid account ID",
+                                )
+                            },
+                        )?,
+                        credential_revision: Some(admin_revision(receipt.credential_revision)?),
+                    })
+                })
+                .collect::<AdminStoreResult<Vec<_>>>()?,
         })
     }
 
@@ -371,6 +377,87 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn plugin_credential_accounts(
+        &self,
+        scope: gateway_admin::model::plugins::PluginMutationScope,
+        query: gateway_admin::model::plugins::PluginCredentialQuery,
+    ) -> AdminStoreResult<gateway_admin::model::plugins::PluginCredentialPage> {
+        use gateway_admin::model::plugins::PluginCredentialPage;
+        let failure = || {
+            admin_store_error(
+                "plugin credentials",
+                postgres_unavailable("read scoped plugin accounts"),
+            )
+        };
+        let mut tx = self.pool.begin().await.map_err(|_| failure())?;
+        super::super::plugins::lock_plugin_resource(&mut tx, &scope).await?;
+        // The native summary decoder owns these fields. This projection never
+        // selects credential or quota documents and uses stable IDs, not offsets.
+        let rows = sqlx::query("select outbound_proxy_request_context(a.outbound_proxy_id) as request_context, a.outbound_proxy_url, a.id,a.provider_kind,a.name,a.email,a.upstream_user_id,a.upstream_account_id,a.plan_type,a.authentication_kind,a.credential_revision,a.has_refresh_token,a.access_token_expires_at,a.next_refresh_at,a.enabled,a.concurrency_limit,a.weight,a.model_access_json,a.credential_state,a.quota_access_state,a.quota_evidence,a.quota_access_observed_at,a.quota_reset_at,a.last_error_reason,a.last_error_message,a.credential_observed_at,a.created_at,a.updated_at from provider_accounts a where ($1::text is null or a.provider_kind=$1) and ($2::text is null or a.id>$2) and ($3::text is null or a.id=$3) order by a.id limit $4")
+            .bind(query.provider.as_ref().map(ProviderKind::as_str)).bind(query.cursor.as_ref().map(CoreProviderAccountId::as_str)).bind(query.account_id.as_ref().map(CoreProviderAccountId::as_str)).bind(i64::from(query.limit.get())+1)
+            .fetch_all(&mut *tx).await.map_err(|_| failure())?;
+        let more = rows.len() > usize::from(query.limit.get());
+        let accounts = rows
+            .into_iter()
+            .take(usize::from(query.limit.get()))
+            .map(|row| {
+                let summary = account_summary_from_row(row)
+                    .map_err(|e| admin_store_error("plugin credentials", e))?;
+                admin_account_record(summary)
+            })
+            .collect::<AdminStoreResult<Vec<_>>>()?;
+        let next_cursor = if more {
+            accounts
+                .last()
+                .map(|account| {
+                    CoreProviderAccountId::new(account.id.clone()).map_err(|_| failure())
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        tx.commit().await.map_err(|_| failure())?;
+        Ok(PluginCredentialPage {
+            accounts,
+            next_cursor,
+        })
+    }
+    async fn plugin_credential(
+        &self,
+        scope: gateway_admin::model::plugins::PluginMutationScope,
+        account: CoreProviderAccountId,
+    ) -> AdminStoreResult<ProviderExportCredentialInput> {
+        let failure = || {
+            admin_store_error(
+                "plugin credentials",
+                postgres_unavailable("read scoped plugin credential"),
+            )
+        };
+        let mut tx = self.pool.begin().await.map_err(|_| failure())?;
+        super::super::plugins::lock_plugin_resource(&mut tx, &scope).await?;
+        let row = sqlx::query(ACCOUNT_SELECT)
+            .bind(account.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| failure())?
+            .ok_or_else(|| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::NotFound,
+                    "plugin credentials",
+                    "account not found",
+                )
+            })?;
+        let record =
+            account_record_from_row(row).map_err(|e| admin_store_error("plugin credentials", e))?;
+        let result = ProviderExportCredentialInput {
+            account: admin_account_record(record.summary)?,
+            provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                record.provider_credentials_json.fields().clone(),
+            )),
+        };
+        tx.commit().await.map_err(|_| failure())?;
+        Ok(result)
+    }
     async fn plugin_account_facts(
         &self,
         query: gateway_admin::model::plugins::PluginAccountQuery,
@@ -711,7 +798,7 @@ impl AccountStore for PgAdminAccountStore {
             AuthorizationCredentialCommit::Create(credential) => {
                 let CredentialImportResult {
                     config_revision,
-                    credential_ids,
+                    credentials,
                 } = self
                     .commit_prepared_import(
                         PreparedCredentialImport {
@@ -733,30 +820,18 @@ impl AccountStore for PgAdminAccountStore {
                             ),
                     )
                     .await?;
-                let [account_id]: [CoreProviderAccountId; 1] =
-                    credential_ids.try_into().map_err(|_| {
+                let [receipt]: [CredentialImportReceipt; 1] =
+                    credentials.try_into().map_err(|_| {
                         AdminStoreError::new(
                             AdminStoreErrorKind::Unavailable,
                             ENTITY,
                             "authorization import returned an unexpected account count",
                         )
                     })?;
-                let details = self
-                    .accounts
-                    .load_provider_account(account_id.as_str())
-                    .await
-                    .map_err(|error| admin_store_error(ENTITY, error))?
-                    .ok_or_else(|| {
-                        AdminStoreError::new(
-                            AdminStoreErrorKind::Unavailable,
-                            ENTITY,
-                            "authorized credential was not visible after commit",
-                        )
-                    })?;
                 Ok(CredentialMutationResult {
                     config_revision,
-                    account_id,
-                    credential_revision: Some(admin_revision(details.summary.credential_revision)?),
+                    account_id: receipt.account_id,
+                    credential_revision: receipt.credential_revision,
                 })
             }
             AuthorizationCredentialCommit::Reauthorize(prepared) => {

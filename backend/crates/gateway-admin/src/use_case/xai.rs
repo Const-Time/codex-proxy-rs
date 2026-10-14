@@ -91,7 +91,7 @@ impl XaiService for DefaultXaiService {
             )
             .await?;
             self.provider
-                .account_facts_changed(&result.credential_ids)
+                .account_facts_changed(&result.credential_ids())
                 .await;
             publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
             return Ok(result);
@@ -135,7 +135,7 @@ impl XaiService for DefaultXaiService {
         drop(proxy_reservation);
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         // 导入已经提交，额度属于可重建观察事实；单个账号查询失败由周期任务重试。
-        for account_id in &result.credential_ids {
+        for account_id in &result.credential_ids() {
             let _ = self
                 .provider
                 .quota(ProviderQuotaRequest {

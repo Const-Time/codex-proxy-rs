@@ -33,10 +33,10 @@ use gateway_admin::{
             AuthorizationCommit, AuthorizationCommitGuard, AuthorizationCredentialCommit,
             AuthorizationMutationTarget, AuthorizationStarted, CompleteAuthorization,
             ConsumeProviderResetCredit, CredentialCommitGuard, CredentialDetails,
-            CredentialImportCommit, CredentialImportResult, CredentialListQuery,
-            CredentialMutationResult, CredentialPage, CredentialRotationCommit,
-            PendingAuthorizationMutation, PrepareCredentialImport, PrepareCredentialRefresh,
-            PrepareCredentialRotation, PreparedAuthorizationCommit,
+            CredentialImportCommit, CredentialImportReceipt, CredentialImportResult,
+            CredentialListQuery, CredentialMutationResult, CredentialPage,
+            CredentialRotationCommit, PendingAuthorizationMutation, PrepareCredentialImport,
+            PrepareCredentialRefresh, PrepareCredentialRotation, PreparedAuthorizationCommit,
             PreparedAuthorizationCredential, PreparedCredentialCreate, PreparedCredentialImport,
             PreparedCredentialRotation, PreparedCredentialRotationFacts, ProviderDocument,
             ProviderExport, ProviderExportCredentialInput, ProviderModels, ProviderQuota,
@@ -763,11 +763,14 @@ impl AccountStore for FakeAccountStore {
         self.require_commit()?;
         Ok(CredentialImportResult {
             config_revision: revision(2),
-            credential_ids: command
+            credentials: command
                 .prepared
                 .credentials
                 .into_iter()
-                .map(|credential| credential.account_id)
+                .map(|credential| CredentialImportReceipt {
+                    account_id: credential.account_id,
+                    credential_revision: Some(revision(1)),
+                })
                 .collect(),
         })
     }

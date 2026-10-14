@@ -8,17 +8,30 @@ use sqlx::Row as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::Notify;
 
-struct Native {
-    env: Environment,
+pub(crate) struct Native {
+    pub(crate) env: Environment,
     engine: PluginEngine,
-    record: PluginRecord,
+    pub(crate) record: PluginRecord,
     artifact: PluginArtifact,
-    process: Arc<dyn PluginProcess>,
+    pub(crate) process: Arc<dyn PluginProcess>,
 }
 impl Native {
     async fn new(
         accounts: Vec<Value>,
         port: Option<Arc<dyn PluginCredentialService>>,
+    ) -> Option<Self> {
+        Self::with_configuration(configuration(accounts), port).await
+    }
+    pub(crate) async fn with_configuration(
+        configuration: Value,
+        port: Option<Arc<dyn PluginCredentialService>>,
+    ) -> Option<Self> {
+        Self::with_archive(configuration, port, command_archive("1.0.0")).await
+    }
+    pub(crate) async fn with_archive(
+        configuration: Value,
+        port: Option<Arc<dyn PluginCredentialService>>,
+        archive: Arc<[u8]>,
     ) -> Option<Self> {
         let env = Environment::new().await?;
         let store = env.store.plugin_store();
@@ -28,7 +41,7 @@ impl Native {
             store.clone(),
         )
         .with_credentials(port.unwrap_or_else(|| env.admin.services().plugin_credentials()));
-        let artifact = engine.inspect(command_archive("1.0.0")).await.unwrap();
+        let artifact = engine.inspect(archive).await.unwrap();
         store
             .put_artifact(artifact.clone(), &actor())
             .await
@@ -39,7 +52,7 @@ impl Native {
             name: "Native command".into(),
             artifact_sha256: artifact.info.sha256.clone(),
             enabled: true,
-            configuration: configuration(accounts),
+            configuration,
             secrets: Default::default(),
             frontend_authentication: None,
             middleware: None,
@@ -80,13 +93,13 @@ impl Native {
             .unwrap();
         self.process.activate();
     }
-    async fn count(&self) -> i64 {
+    pub(crate) async fn count(&self) -> i64 {
         sqlx::query_scalar("select count(*) from provider_accounts")
             .fetch_one(&self.env.pool)
             .await
             .unwrap()
     }
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         stop(&self.process).await;
         drop(self.process);
         drop(self.engine);
@@ -106,7 +119,7 @@ fn facts(identity: &str) -> Value {
             "access_token":format!("e30.{}.fixture",URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())),
             "refresh_token":format!("controlled-fixture-refresh-{identity}"), "id_token":null, "cookies":[]}})
 }
-fn create(identity: &str) -> Value {
+pub(crate) fn create(identity: &str) -> Value {
     json!({"action":"create", "provider_id":"openai", "facts":facts(identity)})
 }
 fn call(root: &ExtensionCallScope, cancellation: CancellationToken) -> PluginCommandRequest {
@@ -324,9 +337,28 @@ struct Observed {
 }
 #[async_trait]
 impl PluginCredentialService for Observed {
+    async fn accounts(
+        &self,
+        scope: PluginMutationScope,
+        initiator: gateway_admin::model::MutationContext,
+        query: PluginCredentialQuery,
+    ) -> Result<PluginCredentialPage, AdminError> {
+        self.inner.accounts(scope, initiator, query).await
+    }
+    async fn credential(
+        &self,
+        scope: PluginMutationScope,
+        initiator: gateway_admin::model::MutationContext,
+        account: gateway_core::account::ProviderAccountId,
+    ) -> Result<gateway_admin::model::provider_credentials::ProviderExportCredentialInput, AdminError>
+    {
+        self.inner.credential(scope, initiator, account).await
+    }
+
     async fn save(
         &self,
         scope: PluginMutationScope,
+        initiator: gateway_admin::model::MutationContext,
         command: PluginCredentialSave,
         cleanup: ExtensionCallScope,
         cancellation: CancellationToken,
@@ -336,7 +368,11 @@ impl PluginCredentialService for Observed {
             self.second.notify_one();
             self.proceed.notified().await;
         }
-        let mut saving = Box::pin(self.inner.save(scope, command, cleanup, cancellation));
+        let mut saving =
+            Box::pin(
+                self.inner
+                    .save(scope, initiator, command, cleanup, cancellation),
+            );
         if index == 1 && !self.hold_before_start.load(Ordering::SeqCst) {
             assert!(futures::poll!(saving.as_mut()).is_pending());
             self.second.notify_one();

@@ -363,6 +363,7 @@ pub async fn initialize(
         plugin_credentials: Arc::new(
             use_case::plugin_credentials::DefaultPluginCredentialService::new(
                 store.accounts(),
+                store.auth(),
                 registry.clone(),
                 snapshot.clone(),
             ),

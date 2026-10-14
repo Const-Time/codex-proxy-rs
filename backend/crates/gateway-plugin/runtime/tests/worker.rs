@@ -19,6 +19,38 @@ mod worker_models {
         input: &Value,
     ) -> Result<Value, gateway_plugin_sdk::PluginFault> {
         let mode = input["mode"].as_str().unwrap_or("unary");
+        if mode == "credentials" {
+            let method = input["method"].as_str().unwrap();
+            let reply = host
+                .call(
+                    method,
+                    input.get("params").cloned().unwrap_or_else(|| json!({})),
+                    serde_json::to_vec(&input["request"]).unwrap(),
+                )
+                .await
+                .map_err(|error| error.into_plugin_fault())?;
+            assert_eq!(reply.result, json!({}));
+            let value = match method {
+                "host.auth.list" => serde_json::to_value(
+                    serde_json::from_slice::<AuthListResult>(&reply.payload).unwrap(),
+                )
+                .unwrap(),
+                "host.auth.get_runtime" => serde_json::to_value(
+                    serde_json::from_slice::<AuthRuntimeAccount>(&reply.payload).unwrap(),
+                )
+                .unwrap(),
+                "host.auth.get" => serde_json::to_value(
+                    serde_json::from_slice::<AuthCredential>(&reply.payload).unwrap(),
+                )
+                .unwrap(),
+                "host.auth.save" => serde_json::to_value(
+                    serde_json::from_slice::<AuthSaveResult>(&reply.payload).unwrap(),
+                )
+                .unwrap(),
+                _ => panic!("unknown fixture credential method"),
+            };
+            return Ok(value);
+        }
         if mode == "service" {
             return Ok(
                 json!({"exists":host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e| gateway_plugin_sdk::PluginFault::new(gateway_plugin_sdk::ErrorCode::Fault,e.message))?}),
@@ -787,6 +819,19 @@ impl PluginHandler for Worker {
                 assert_eq!(call.params, json!({}));
                 assert!(call.payload.is_empty());
                 assert_eq!(call.context.request_id.as_deref(), Some(call.context.resource_scope_id.as_str()));
+                if self.adapter_mode == "maintenance-credentials" {
+                    use gateway_plugin_sdk::call::host::{AuthSaveResult,AuthGetRequest};
+                    let reply=call.host.call("host.auth.save",json!({}),serde_json::to_vec(&self.command_result).unwrap()).await.map_err(|error|error.into_plugin_fault())?;
+                    assert_eq!(reply.result,json!({}));
+                    let saved:AuthSaveResult=serde_json::from_slice(&reply.payload).unwrap();
+                    for method in ["host.auth.get_runtime","host.auth.get"] {
+                        let reply=call.host.call(method,json!({}),serde_json::to_vec(&AuthGetRequest{account_id:saved.account_id.clone()}).unwrap()).await.map_err(|error|error.into_plugin_fault())?;
+                        assert_eq!(reply.result,json!({}));
+                        let value:serde_json::Value=serde_json::from_slice(&reply.payload).unwrap();
+                        assert_eq!(value["credential_revision"],saved.credential_revision);
+                    }
+                    call.host.call("host.auth.list",json!({}),serde_json::to_vec(&json!({"limit":1})).unwrap()).await.map_err(|error|error.into_plugin_fault())?;
+                }
                 if self.adapter_mode == "maintenance-service" || self.adapter_mode == "maintenance-wait" {
                     assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e|PluginFault::new(ErrorCode::Fault,e.message))?);
                 }

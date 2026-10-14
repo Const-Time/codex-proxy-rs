@@ -146,10 +146,11 @@ impl Executor<'_> {
             .map_err(|_| AdminError::unavailable("命令网络作用域不可用"))?;
         let _network = self.outbound.guard(&context);
         let _caller = self.calls.enter(
-            context.resource_scope_id.clone(),
+            context.clone(),
             request.actor.clone(),
             None,
             cancellation.clone(),
+            Some(graph.clone()),
         );
         if let Some(models) = &self.models {
             models
@@ -199,7 +200,7 @@ impl Executor<'_> {
                 self.credentials,
                 result.accounts,
                 caller,
-                &request.actor.request_id,
+                request.actor,
                 graph,
                 cancellation.clone(),
                 deadline,

@@ -276,9 +276,22 @@ pub trait PluginDataService: Send + Sync {
 /// The original graph permit keeps Host drain attached to that work.
 #[async_trait]
 pub trait PluginCredentialService: Send + Sync {
+    async fn accounts(
+        &self,
+        scope: PluginMutationScope,
+        initiator: MutationContext,
+        query: PluginCredentialQuery,
+    ) -> Result<PluginCredentialPage>;
+    async fn credential(
+        &self,
+        scope: PluginMutationScope,
+        initiator: MutationContext,
+        account: gateway_core::account::ProviderAccountId,
+    ) -> Result<crate::model::provider_credentials::ProviderExportCredentialInput>;
     async fn save(
         &self,
         scope: PluginMutationScope,
+        initiator: MutationContext,
         command: PluginCredentialSave,
         cleanup: gateway_core::engine::nested::ExtensionCallScope,
         cancellation: gateway_core::lifecycle::CancellationToken,

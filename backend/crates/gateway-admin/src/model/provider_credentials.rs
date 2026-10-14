@@ -176,7 +176,23 @@ impl fmt::Debug for ImportCredentials {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialImportResult {
     pub config_revision: Revision,
-    pub credential_ids: Vec<ProviderAccountId>,
+    pub credentials: Vec<CredentialImportReceipt>,
+}
+
+/// Identity and credential version returned by the committing transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialImportReceipt {
+    pub account_id: ProviderAccountId,
+    pub credential_revision: Option<Revision>,
+}
+
+impl CredentialImportResult {
+    pub fn credential_ids(&self) -> Vec<ProviderAccountId> {
+        self.credentials
+            .iter()
+            .map(|receipt| receipt.account_id.clone())
+            .collect()
+    }
 }
 
 /// Provider 解析导入文档时只接收不透明文档，不接触 revision 或审计上下文。
