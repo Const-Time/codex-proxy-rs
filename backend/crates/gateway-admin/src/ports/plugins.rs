@@ -262,9 +262,11 @@ pub trait PluginService: Send + Sync {
     ) -> Result<PluginHttpResponse>;
 }
 
-/// Only management callbacks can currently obtain this capability. It never refreshes upstream quota.
+/// Non-secret projections. The runtime authorizes each callback's actual host scope;
+/// global Key listing is reserved for system commands. Reads never refresh quota.
 #[async_trait]
 pub trait PluginDataService: Send + Sync {
+    async fn keys(&self, query: PluginKeyQuery) -> Result<PluginKeyPage>;
     async fn key(&self, id: &str) -> Result<PluginKeyFacts>;
     async fn accounts(&self, query: PluginAccountQuery) -> Result<PluginAccountPage>;
     async fn quota(&self, id: &str) -> Result<crate::model::provider_credentials::ProviderQuota>;

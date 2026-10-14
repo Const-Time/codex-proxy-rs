@@ -270,7 +270,10 @@ impl Provider for Core {
                 .unwrap()
                 .push(generate.protocol_payload().body().clone().into());
         }
-        assert_eq!(context.client_api_key_ref().as_str(), "key_alice");
+        assert!(matches!(
+            context.client_api_key_ref().as_str(),
+            "key_alice" | "key_system"
+        ));
         let adapter = match request.candidate().upstream_model() {
             Some(model) => context.upstream_adapter(request.candidate().provider(), model)?,
             None => None,
@@ -586,6 +589,56 @@ fn key_record(id: &str, enabled: bool) -> ClientKeyRecord {
     }
 }
 pub struct Keys;
+#[derive(Default)]
+pub struct KeyData {
+    pub reads: AtomicUsize,
+}
+#[async_trait]
+impl gateway_admin::ports::plugins::PluginDataService for KeyData {
+    async fn keys(
+        &self,
+        query: gateway_admin::model::plugins::PluginKeyQuery,
+    ) -> Result<gateway_admin::model::plugins::PluginKeyPage, AdminError> {
+        use gateway_admin::model::plugins::{PluginKeyPage, PluginListedKey};
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        assert!(gateway_admin::model::PageSize::new(query.limit).is_ok());
+        let mut keys = ["key_alice", "key_disabled", "key_system"]
+            .into_iter()
+            .filter(|id| query.cursor.as_deref().is_none_or(|cursor| *id > cursor))
+            .map(|id| PluginListedKey {
+                id: id.into(),
+                name: id.into(),
+                enabled: id != "key_disabled",
+            })
+            .collect::<Vec<_>>();
+        let more = keys.len() > usize::from(query.limit);
+        keys.truncate(usize::from(query.limit));
+        let next_cursor = if more {
+            keys.last().map(|key| key.id.clone())
+        } else {
+            None
+        };
+        Ok(PluginKeyPage { keys, next_cursor })
+    }
+    async fn key(
+        &self,
+        _: &str,
+    ) -> Result<gateway_admin::model::plugins::PluginKeyFacts, AdminError> {
+        Err(AdminError::unavailable("unused"))
+    }
+    async fn accounts(
+        &self,
+        _: gateway_admin::model::plugins::PluginAccountQuery,
+    ) -> Result<gateway_admin::model::plugins::PluginAccountPage, AdminError> {
+        Err(AdminError::unavailable("unused"))
+    }
+    async fn quota(
+        &self,
+        _: &str,
+    ) -> Result<gateway_admin::model::provider_credentials::ProviderQuota, AdminError> {
+        Err(AdminError::unavailable("unused"))
+    }
+}
 #[async_trait]
 impl ClientKeyService for Keys {
     async fn list(
@@ -736,8 +789,16 @@ pub fn snapshot_with_attempts(
             ClientPolicy::new(
                 ClientApiKeyId::new("key_disabled").unwrap(),
                 PlaintextClientApiKey::new("sk_disabled_fixture").unwrap(),
-                scope,
+                scope.clone(),
                 false,
+                RateLimits::unlimited(),
+            ),
+            // This Key cannot be revealed by the personal Keys service.
+            ClientPolicy::new(
+                ClientApiKeyId::new("key_system").unwrap(),
+                PlaintextClientApiKey::new("sk_system_fixture").unwrap(),
+                scope,
+                enabled,
                 RateLimits::unlimited(),
             ),
         ],
@@ -749,6 +810,7 @@ pub struct Fixture {
     pub http: Arc<gateway_plugin_runtime::HttpDispatcher>,
     pub core: Arc<Core>,
     pub store: Arc<MemoryStore>,
+    pub key_data: Arc<KeyData>,
     pub execution: Arc<DefaultExecutionService>,
     pub snapshot: RuntimeSnapshotHandle,
     pub manager: Arc<PluginManager>,
@@ -787,6 +849,7 @@ impl Fixture {
             .with_budget(core.clone()),
         );
         let store = Arc::new(MemoryStore::default());
+        let key_data = Arc::new(KeyData::default());
         let cache = tempfile::tempdir().unwrap();
         let http = Arc::new(gateway_plugin_runtime::HttpDispatcher::default());
         let manager = Arc::new_cyclic(|plugins| {
@@ -796,6 +859,7 @@ impl Fixture {
                 store.clone(),
             )
             .with_http(http.clone())
+            .with_data(key_data.clone())
             .with_models(
                 Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
                     execution.clone(),
@@ -834,6 +898,7 @@ impl Fixture {
         Self {
             http,
             store,
+            key_data,
             core,
             execution,
             snapshot,
