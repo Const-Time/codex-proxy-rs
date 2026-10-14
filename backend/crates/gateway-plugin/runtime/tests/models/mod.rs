@@ -1,5 +1,7 @@
+mod affinity;
 pub(crate) mod fixture;
 pub(crate) mod http;
+mod workbench;
 use fixture::*;
 use gateway_admin::ports::plugins::PluginService;
 use gateway_core::engine::{execution::ExecutionService, middleware::*};

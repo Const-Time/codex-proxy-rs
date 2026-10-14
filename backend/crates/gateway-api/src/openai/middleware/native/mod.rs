@@ -230,6 +230,15 @@ impl ExecutionService for PluginModelExecution {
     fn contains_public_model(&self, client: &AuthenticatedClient, model: &PublicModelId) -> bool {
         self.execution.contains_public_model(client, model)
     }
+    fn lookup_session_affinity<'a>(
+        &'a self,
+        parent: &'a gateway_core::engine::nested::NestedExecutionContext,
+        provider: &'a ProviderKind,
+        key: &'a gateway_core::provider_ports::ProviderSessionAffinityKey,
+    ) -> BoxFuture<'a, Result<Option<gateway_core::account::ProviderAccountId>, GatewayError>> {
+        self.execution
+            .lookup_session_affinity(parent, provider, key)
+    }
     fn prepare_execution(
         &self,
         client: AuthenticatedClient,

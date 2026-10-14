@@ -9,6 +9,7 @@ use std::{
 
 use gateway_core::engine::budget::{ClientBudgetCharge, ClientBudgetError, ClientBudgetPort};
 use gateway_core::error::GatewayError;
+mod affinity;
 
 #[derive(Default)]
 pub(super) struct Admissions {

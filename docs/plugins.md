@@ -15,6 +15,7 @@
 | 页面桥 | 上游 v2 桥的管理请求、Responses JSON/SSE 模型调用与高度调整；本地父页面代为鉴权，iframe 使用独立的 opaque origin |
 | 通用外部 HTTP | `host.http.do/do_stream/stream_read/stream_close`，宿主签发的调用范围内使用；沿原取消与资源清理链，不需要配置模型服务 |
 | 插件诊断日志 | `host.log`；原宿主诊断脱敏与 tracing 输出，按进程代次限流并共享写入容量 |
+| Provider 亲和查询 | `host.affinity.lookup`；只读既有记录，必须绑定存活的原生模型父请求及其冻结账号范围 |
 | 主动服务调用 | 管理及已有授权 service 层保留原操作者；HTTP、WebSocket、注册、认证及 request/attempt、routing/scheduling/retry/upstream/maintenance 使用原上下文和实例 revision 调用设置服务 |
 | 私有状态 | `host.state.get/put/delete`，实例和命名空间隔离，版本比较交换、schema 和配额校验 |
 | 只读事实 | management、maintenance 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`；不含密钥或凭据 |
@@ -39,7 +40,9 @@
 
 `host.log` 使用 SDK `LogRequest`，不接受二进制载荷或额外身份字段。事件名限 1–64 个 ASCII 字母、数字或 `._-`，字段至多 32 项，JSON 输入至多 8 KiB。宿主对事件名生成指纹，对字段使用原 `diagnostic_json` 脱敏，并从实际调用上下文补充插件、实例、generation、incarnation 和请求关联；插件不能自报这些身份。每个进程 incarnation 每秒最多接受 64 条日志，同一个 PluginEngine 的所有实例和版本共享 8 个异步写入槽位。限流或容量耗尽立即返回 `{recorded:false}`，不排队重试；下次成功写入携带抑制条数。`recorded:true` 表示宿主已接受，实际输出仍由原 tracing 过滤和后端决定。停用会封闭新日志接收并等待已接受写入完成，日志后端失败不改变已确认的业务结果。
 
-官方原包及仅替换 SDK 依赖重建的 workbench 0.3.1 Linux x86_64 包，已在真实 PostgreSQL/Redis 和原 Admin/Core/Store 组合中验证七个管理路由：Key 快照、echo、模型目录、任务读取/保存、日志与本地测试服务器上的文本读取。验收使用真实管理员登录及本人 Key，验证状态 CAS 冲突、持久化、停用撤销和重新启用后的恢复。重建包 SHA-256 为 `f24f5d999e703e320272566bbbc3c655b22831c82571161c901f83a4c8720b1b`，版本、能力声明、业务代码和页面资源保持原样。这些内核验收保留生产能力门禁，不代表模型推理、所有贡献能力或其他平台已完整兼容。显式设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 和 `CPR_PLUGIN_WORKBENCH_REBUILT` 后可运行 `cargo test -p gateway-plugin-runtime --all-features --test main --locked installation::workbench::official_and_rebuilt -- --ignored`。
+`host.affinity.lookup` 使用 SDK `AffinityLookupRequest {provider,key}`，只返回 `{account_id}`，不接受二进制载荷、客户端自报的请求身份或账号。宿主从已绑定调用中取得不可由插件构造的 Core 模型父上下文；独立管理调用、无模型父请求或失效作用域均不取得查询权限。Core 使用父请求的冻结 Provider/账号范围，复用 Provider 的同一 Redis 亲和仓库。未命中、账号不在范围内或账号实际 Provider 不匹配时返回 `account_id:null`；范围外 Provider 明确拒绝。查询保留原父期限、Key 撤权、插件取消及现有 100 ms 协调上限，不写入、续期或清除绑定，不取得账号租约，不发起推理或计费；返回的账号始终只是偏好，后续执行仍须通过原 Core 授权和选号。
+
+官方原包及仅替换 SDK 依赖重建的 workbench 0.3.1 Linux x86_64 包，已在真实 PostgreSQL/Redis 和原 Admin/Core/Store 组合中验证七个管理路由：Key 快照、echo、模型目录、任务读取/保存、日志与本地测试服务器上的文本读取。验收使用真实管理员登录及本人 Key，验证状态 CAS 冲突、持久化、停用撤销和重新启用后的恢复。重建包 SHA-256 为 `f24f5d999e703e320272566bbbc3c655b22831c82571161c901f83a4c8720b1b`，版本、能力声明、业务代码和页面资源保持原样。这些内核验收保留生产能力门禁，不代表模型推理、所有贡献能力或其他平台已完整兼容。显式设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 和 `CPR_PLUGIN_WORKBENCH_REBUILT` 后可运行 `cargo test -p gateway-plugin-runtime --all-features --test main --locked models::workbench::official_and_rebuilt -- --ignored`。
 
 `command_line` v1 的注册、类型化参数、帮助、执行 RPC 与网关命令入口已接入。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图。本人命令按登录用户归属选择 Key；宿主系统命令可分页查询全部 Key 的 ID、名称和启用状态（每页 1–200 项），并按 ID 绑定原 Core 授权，不读取或返回明文密钥。系统权限只属于宿主签发的 command_line 根调用；管理页、管理 API Key 和插件 actor 不会获得该权限。模型推理仍走原权限、准入、额度、费用和实时撤销链；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。Host 复用 Ctrl-C、SIGTERM 和原排空时限，等同一 Core 调用图完成结算与释放后停止 worker；清理超时会保留已确认结果并报告未完整完成。命令账号结果已接入下述原生校验和提交链；完整回调和目标制品兼容尚待验收，该能力仍不可启用。
 
