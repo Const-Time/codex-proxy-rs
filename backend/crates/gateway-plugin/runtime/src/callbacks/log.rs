@@ -1,15 +1,16 @@
 //! Bounded plugin diagnostics use the original redaction and tracing owners.
 use crate::RpcReply;
+use futures::{
+    FutureExt,
+    future::{BoxFuture, Shared},
+};
 use gateway_core::diagnostics::{body_fingerprint, diagnostic_json};
 use gateway_plugin_sdk::{
     CallContext, ErrorCode, Manifest, PluginFault,
     call::host::{LogLevel, LogRequest, LogResult},
 };
 use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 use tokio::{sync::Semaphore, task::JoinHandle, time::Instant};
@@ -18,14 +19,84 @@ const WINDOW: Duration = Duration::from_secs(1);
 const MAXIMUM_EVENTS: u32 = 64;
 const MAXIMUM_INPUT_BYTES: usize = 8 * 1024;
 const MAXIMUM_FIELDS: usize = 32;
+type Drain = Shared<BoxFuture<'static, ()>>;
+
+/// Tracks only lifecycle ownership; the original tracing backend owns output.
+pub(crate) struct LogRegistry {
+    slots: Arc<Semaphore>,
+    state: Mutex<RegistryState>,
+}
+#[derive(Default)]
+struct RegistryState {
+    live: Vec<Weak<PluginLog>>,
+    draining: Option<Drain>,
+}
+impl Default for LogRegistry {
+    fn default() -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(8)),
+            state: Mutex::default(),
+        }
+    }
+}
+impl LogRegistry {
+    pub(crate) fn register(
+        &self,
+        manifest: &Manifest,
+    ) -> Result<Arc<PluginLog>, gateway_admin::model::AdminError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.draining.is_some() {
+            return Err(gateway_admin::model::AdminError::unavailable(
+                "插件运行时已关闭",
+            ));
+        }
+        let log = Arc::new(
+            PluginLog::new(manifest, self.slots.clone())
+                .map_err(|_| gateway_admin::model::AdminError::invalid("插件日志身份无效"))?,
+        );
+        state.live.retain(|log| log.strong_count() != 0);
+        state.live.push(Arc::downgrade(&log));
+        Ok(log)
+    }
+    pub(crate) fn drain(&self) -> Drain {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.draining.is_none() {
+            self.slots.close();
+            let drains: Vec<_> = std::mem::take(&mut state.live)
+                .into_iter()
+                .filter_map(|log| log.upgrade())
+                .map(|log| log.drain())
+                .collect();
+            state.draining = Some(
+                async move {
+                    let _ = futures::future::join_all(drains).await;
+                }
+                .boxed()
+                .shared(),
+            );
+        }
+        state.draining.as_ref().unwrap().clone()
+    }
+}
+
+#[derive(Default)]
+struct Writes {
+    tasks: Vec<JoinHandle<()>>,
+    draining: Option<Drain>,
+}
 
 pub(crate) struct PluginLog {
     plugin_id: String,
     plugin_version: String,
     budget: Mutex<Budget>,
     slots: Arc<Semaphore>,
-    closed: AtomicBool,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    writes: Mutex<Writes>,
 }
 struct Budget {
     started: Instant,
@@ -33,7 +104,7 @@ struct Budget {
     suppressed: u64,
 }
 impl PluginLog {
-    pub(crate) fn new(
+    fn new(
         manifest: &Manifest,
         slots: Arc<Semaphore>,
     ) -> Result<Self, gateway_plugin_sdk::ManifestError> {
@@ -46,12 +117,11 @@ impl PluginLog {
                 suppressed: 0,
             }),
             slots,
-            closed: AtomicBool::new(false),
-            tasks: Mutex::default(),
+            writes: Mutex::default(),
         })
     }
     pub(crate) fn record(
-        &self,
+        self: &Arc<Self>,
         context: &CallContext,
         params: serde_json::Value,
         payload: &[u8],
@@ -74,17 +144,17 @@ impl PluginLog {
         }
         // Stop holds this same lock while sealing admission and taking ownership
         // of every accepted write, including writes whose RPC waiter has exited.
-        let mut tasks = self
-            .tasks
+        let mut writes = self
+            .writes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.closed.load(Ordering::Acquire) {
+        if writes.draining.is_some() {
             return Err(PluginFault::new(
                 ErrorCode::Cancelled,
                 "plugin logging ended",
             ));
         }
-        tasks.retain(|task| !task.is_finished());
+        writes.tasks.retain(|task| !task.is_finished());
         let (suppressed, slot) = {
             let mut budget = self
                 .budget
@@ -111,7 +181,11 @@ impl PluginLog {
         let plugin_version = self.plugin_version.clone();
         let context = context.clone();
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        tasks.push(tokio::task::spawn_blocking(move || {
+        let owner = self.clone();
+        writes.tasks.push(tokio::task::spawn_blocking(move || {
+            // Failed or cancelled preparation has no LivePlugin. Keep its logger
+            // discoverable by Runtime shutdown until the accepted write finishes.
+            let _owner = owner;
             let _slot = slot;
             tracing::dispatcher::with_default(&dispatch, || {
                 macro_rules! record {
@@ -142,17 +216,25 @@ impl PluginLog {
         }));
         reply(true)
     }
-    pub(crate) async fn drain(&self) {
-        let tasks = {
-            let mut tasks = self
-                .tasks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.closed.store(true, Ordering::Release);
-            std::mem::take(&mut *tasks)
-        };
-        // Telemetry backend failure does not change confirmed business results.
-        let _ = futures::future::join_all(tasks).await;
+    pub(crate) fn drain(&self) -> Drain {
+        let mut writes = self
+            .writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if writes.draining.is_none() {
+            let tasks = std::mem::take(&mut writes.tasks);
+            // Store the same wait in the lifecycle owner, so cancelled/repeated
+            // callers cannot detach accepted writes or report completion early.
+            writes.draining = Some(
+                async move {
+                    // Telemetry backend failure does not change business results.
+                    let _ = futures::future::join_all(tasks).await;
+                }
+                .boxed()
+                .shared(),
+            );
+        }
+        writes.draining.as_ref().unwrap().clone()
     }
 }
 fn reply(recorded: bool) -> Result<RpcReply, PluginFault> {

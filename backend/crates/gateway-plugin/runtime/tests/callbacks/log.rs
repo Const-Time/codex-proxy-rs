@@ -1,6 +1,9 @@
 //! Real SDK callbacks verify host diagnostics, saturation and accepted-write ownership.
 use crate::support::{MemoryStore, actor, archive, request, update};
-use gateway_admin::{plugins::PluginManager, ports::plugins::PluginService};
+use gateway_admin::{
+    plugins::PluginManager,
+    ports::plugins::{PluginRuntime, PluginService, PluginStore},
+};
 use gateway_plugin_runtime::PluginEngine;
 use serde_json::{Value, json};
 use std::{
@@ -140,6 +143,8 @@ impl Drop for Block {
 }
 struct Fixture {
     manager: Arc<PluginManager>,
+    runtime: Arc<PluginEngine>,
+    store: Arc<MemoryStore>,
     digest: String,
     id: String,
     _cache: tempfile::TempDir,
@@ -148,14 +153,12 @@ impl Fixture {
     async fn new() -> Self {
         let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(MemoryStore::default());
-        let manager = Arc::new(PluginManager::new(
+        let runtime = Arc::new(PluginEngine::new(
+            cache.path().into(),
+            "3.11.2".parse().unwrap(),
             store.clone(),
-            Arc::new(PluginEngine::new(
-                cache.path().into(),
-                "3.11.2".parse().unwrap(),
-                store,
-            )),
         ));
+        let manager = Arc::new(PluginManager::new(store.clone(), runtime.clone()));
         let digest = manager
             .upload(archive("1.0.0", false), &actor())
             .await
@@ -167,6 +170,8 @@ impl Fixture {
             .unwrap();
         Self {
             manager,
+            runtime,
+            store,
             digest,
             id: installed.id,
             _cache: cache,
@@ -319,4 +324,155 @@ async fn blocked_writes_share_capacity_across_instances_and_shutdown_keeps_their
         .unwrap();
     assert_eq!(capture.records(&f.id).len(), 8);
     assert!(capture.records(&second.id).is_empty());
+}
+
+#[tokio::test]
+async fn repeated_process_stop_waits_for_the_same_write_after_a_waiter_is_cancelled() {
+    let capture = capture();
+    let f = Fixture::new().await;
+    let record = f.store.records.lock().unwrap()[&f.id].clone();
+    let process = f
+        .runtime
+        .prepare(&record, f.store.artifact(&f.digest).await.unwrap())
+        .await
+        .unwrap();
+    process.activate();
+    let block = Block::new(capture.clone(), f.id.clone());
+    let mut input = request("host-log");
+    input.body = serde_json::to_vec(
+        &json!({"operation":"host-log","params":{"event":"fixture.stop"},"binary":false}),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&process.handle(input).await.unwrap().body).unwrap(),
+        json!({"recorded":true})
+    );
+    capture.wait_for(&f.id, 1, true).await;
+    let first_process = process.clone();
+    let first = tokio::spawn(async move {
+        first_process.stop().await;
+    });
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!first.is_finished());
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let second_process = process.clone();
+    let second = tokio::spawn(async move {
+        second_process.stop().await;
+    });
+    let third_process = process.clone();
+    let third = tokio::spawn(async move {
+        third_process.stop().await;
+    });
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!second.is_finished());
+    assert!(!third.is_finished());
+    drop(block);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        second.await.unwrap();
+        third.await.unwrap();
+    })
+    .await
+    .unwrap();
+    assert_eq!(capture.records(&f.id).len(), 1);
+    process.stop().await;
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_manager_shutdown_keeps_active_processes_and_resumes_the_same_drain() {
+    let capture = capture();
+    let f = Fixture::new().await;
+    let block = Block::new(capture.clone(), f.id.clone());
+    assert_eq!(f.log("info").await, json!({"recorded":true}));
+    capture.wait_for(&f.id, 1, true).await;
+    let manager = f.manager.clone();
+    let first = tokio::spawn(async move {
+        manager.shutdown().await;
+    });
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!first.is_finished());
+    assert!(f.manager.access(&f.id, 1).is_err());
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let manager = f.manager.clone();
+    let second = tokio::spawn(async move {
+        manager.shutdown().await;
+    });
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!second.is_finished());
+    drop(block);
+    tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(capture.records(&f.id).len(), 1);
+    f.manager.shutdown().await;
+    // Runtime registration stays closed after successful or repeated Host exit.
+    let record = f.store.records.lock().unwrap()[&f.id].clone();
+    assert!(
+        f.runtime
+            .prepare(&record, f.store.artifact(&f.digest).await.unwrap())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn host_shutdown_waits_for_failed_and_cancelled_candidate_registration_logs() {
+    for cancelled in [false, true] {
+        let capture = capture();
+        let f = Fixture::new().await;
+        let candidate = f
+            .manager
+            .update(None, update(&f.digest, 0, false), &actor())
+            .await
+            .unwrap();
+        let block = Block::new(capture.clone(), candidate.id.clone());
+        let mut settings = update(&f.digest, candidate.revision, true);
+        settings.configuration = json!({"adapter_mode": if cancelled { "registration-log-pending" } else { "registration-log-fault" }});
+        let manager = f.manager.clone();
+        let id = candidate.id.clone();
+        let preparing =
+            tokio::spawn(async move { manager.update(Some(&id), settings, &actor()).await });
+        capture.wait_for(&candidate.id, 1, true).await;
+        if cancelled {
+            assert!(!preparing.is_finished());
+            preparing.abort();
+            assert!(preparing.await.err().unwrap().is_cancelled());
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), preparing)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+        }
+        // The failed candidate was never published into active instances.
+        assert!(f.manager.access(&candidate.id, candidate.revision).is_err());
+        if cancelled {
+            let runtime = f.runtime.clone();
+            let first = tokio::spawn(async move {
+                runtime.shutdown().await;
+            });
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            assert!(!first.is_finished());
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+        }
+        let manager = f.manager.clone();
+        let shutdown = tokio::spawn(async move {
+            manager.shutdown().await;
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(!shutdown.is_finished());
+        drop(block);
+        tokio::time::timeout(Duration::from_secs(5), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(capture.records(&candidate.id).len(), 1);
+        assert!(capture.records(&f.id).is_empty());
+    }
 }

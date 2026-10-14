@@ -38,7 +38,7 @@
 
 管理资源声明的 `public` 随实际插件代次保留。匿名读取使用 `GET /api/plugins/resource?id=…&revision=…&path=…`，只返回当前启用实例在 `management.register` 中明确登记为公开、且归档清单声明的静态资源；私有或未登记路径返回 404，失效代次返回 409。返回格式沿用 `{status, contentType, body}` 的 JSON envelope 和 base64 正文，公开 HTML 不作为宿主同源页面执行。管理资源读取及插件业务调用继续使用现有管理员入口。改变公开声明、停用或升级均通过原实例代次生效。
 
-`host.log` 使用 SDK `LogRequest`，不接受二进制载荷或额外身份字段。事件名限 1–64 个 ASCII 字母、数字或 `._-`，字段至多 32 项，JSON 输入至多 8 KiB。宿主对事件名生成指纹，对字段使用原 `diagnostic_json` 脱敏，并从实际调用上下文补充插件、实例、generation、incarnation 和请求关联；插件不能自报这些身份。每个进程 incarnation 每秒最多接受 64 条日志，同一个 PluginEngine 的所有实例和版本共享 8 个异步写入槽位。限流或容量耗尽立即返回 `{recorded:false}`，不排队重试；下次成功写入携带抑制条数。`recorded:true` 表示宿主已接受，实际输出仍由原 tracing 过滤和后端决定。停用会封闭新日志接收并等待已接受写入完成，日志后端失败不改变已确认的业务结果。
+`host.log` 使用 SDK `LogRequest`，不接受二进制载荷或额外身份字段。事件名限 1–64 个 ASCII 字母、数字或 `._-`，字段至多 32 项，JSON 输入至多 8 KiB。宿主对事件名生成指纹，对字段使用原 `diagnostic_json` 脱敏，并从实际调用上下文补充插件、实例、generation、incarnation 和请求关联；插件不能自报这些身份。每个进程 incarnation 每秒最多接受 64 条日志，同一个 PluginEngine 的所有实例和版本共享 8 个异步写入槽位。限流或容量耗尽立即返回 `{recorded:false}`，不排队重试；下次成功写入携带抑制条数。`recorded:true` 表示宿主已接受，实际输出仍由原 tracing 过滤和后端决定。停用会封闭新日志接收并等待已接受写入完成；取消等待或重复停止继续等待原有写入。宿主退出还等待注册失败或准备被取消的候选已经接受的日志，并关闭新候选注册；取消退出等待后可继续同一次排空。日志后端失败不改变已确认的业务结果。
 
 `host.affinity.lookup` 使用 SDK `AffinityLookupRequest {provider,key}`，只返回 `{account_id}`，不接受二进制载荷、客户端自报的请求身份或账号。宿主从已绑定调用中取得不可由插件构造的 Core 模型父上下文；独立管理调用、无模型父请求或失效作用域均不取得查询权限。Core 使用父请求的冻结 Provider/账号范围，复用 Provider 的同一 Redis 亲和仓库。未命中、账号不在范围内或账号实际 Provider 不匹配时返回 `account_id:null`；范围外 Provider 明确拒绝。查询保留原父期限、Key 撤权、插件取消及现有 100 ms 协调上限，不写入、续期或清除绑定，不取得账号租约，不发起推理或计费；返回的账号始终只是偏好，后续执行仍须通过原 Core 授权和选号。
 

@@ -820,7 +820,6 @@ async fn websocket_queue_overflow_keeps_order_and_does_not_block_later_frames() 
 struct Published {
     manager: gateway_admin::plugins::PluginManager,
     store: Arc<MemoryStore>,
-    engine: Arc<PluginEngine>,
     id: String,
     digest: String,
     _cache: tempfile::TempDir,
@@ -851,11 +850,17 @@ impl Published {
         Self {
             manager,
             store,
-            engine,
             id: installed.id,
             digest: artifact.sha256,
             _cache: cache,
         }
+    }
+    fn restart_runtime(&self) -> Arc<PluginEngine> {
+        Arc::new(PluginEngine::new(
+            self._cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            self.store.clone(),
+        ))
     }
     fn registry(&self) -> gateway_admin::plugins::middleware::PluginMiddlewareRegistry {
         use gateway_admin::ports::plugins::PluginService;
@@ -950,7 +955,7 @@ async fn frozen_observation_scope_survives_failed_upgrade_and_restores_actual_re
     plan.dispatch_websocket_response(json_frame("req_upgrade_old", 1));
     f.wait("req_upgrade_old:websocket:1:1", 1).await;
     f.manager.shutdown().await;
-    let restored = gateway_admin::plugins::PluginManager::new(f.store.clone(), f.engine.clone());
+    let restored = gateway_admin::plugins::PluginManager::new(f.store.clone(), f.restart_runtime());
     restored.restore().await.unwrap();
     let restored_plan = restored
         .middleware_registry()
@@ -975,7 +980,7 @@ async fn failed_observer_restore_does_not_gate_model_catalog_or_other_instances(
         .get_mut(&f.id)
         .unwrap()
         .configuration = json!({"fail":true});
-    let manager = gateway_admin::plugins::PluginManager::new(f.store.clone(), f.engine.clone());
+    let manager = gateway_admin::plugins::PluginManager::new(f.store.clone(), f.restart_runtime());
     manager.restore().await.unwrap();
     let registry = manager.middleware_registry().unwrap();
     assert!(registry.model_catalog().is_ok());

@@ -28,6 +28,9 @@ use std::{
 pub(super) struct CandidateRuntime(pub(super) Arc<PluginEngine>);
 #[async_trait]
 impl PluginRuntime for CandidateRuntime {
+    async fn shutdown(&self) {
+        self.0.shutdown().await;
+    }
     fn describe(&self, info: PluginArtifactInfo) -> Result<PluginArtifactInfo, AdminError> {
         self.0.describe(info)
     }
@@ -54,7 +57,6 @@ impl PluginRuntime for CandidateRuntime {
 }
 struct Fixture {
     manager: PluginManager,
-    runtime: Arc<CandidateRuntime>,
     store: Arc<MemoryStore>,
     digest: String,
     _cache: tempfile::TempDir,
@@ -76,11 +78,17 @@ impl Fixture {
             .sha256;
         Self {
             manager,
-            runtime,
             store,
             digest,
             _cache: cache,
         }
+    }
+    fn restart_runtime(&self) -> Arc<CandidateRuntime> {
+        Arc::new(CandidateRuntime(Arc::new(PluginEngine::new(
+            self._cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            self.store.clone(),
+        ))))
     }
     fn command(&self, revision: u64, scope: PluginExecutionScope) -> PluginUpdate {
         let mut command = update(&self.digest, revision, true);
@@ -276,7 +284,7 @@ async fn upstream_binding_matches_frozen_groups_and_rejects_failed_restore_in_it
         .get_mut(&view.id)
         .unwrap()
         .configuration = json!({"adapter_mode":"models"});
-    f.manager = PluginManager::new(f.store.clone(), f.runtime.clone());
+    f.manager = PluginManager::new(f.store.clone(), f.restart_runtime());
     f.manager.restore().await.unwrap();
     assert_eq!(f.manager.list().await.unwrap()[0].status, "failed");
     let registry = f.manager.middleware_registry().unwrap();

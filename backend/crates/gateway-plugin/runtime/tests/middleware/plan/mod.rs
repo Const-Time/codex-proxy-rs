@@ -14,6 +14,9 @@ use gateway_plugin_runtime::PluginEngine;
 pub(crate) struct KernelRuntime(pub(crate) PluginEngine);
 #[async_trait]
 impl PluginRuntime for KernelRuntime {
+    async fn shutdown(&self) {
+        self.0.shutdown().await;
+    }
     fn contributes_model_catalog(&self, artifact: &PluginArtifact) -> Result<bool, AdminError> {
         self.0.contributes_model_catalog(artifact)
     }
@@ -43,7 +46,6 @@ impl PluginRuntime for KernelRuntime {
 }
 struct Installation {
     store: Arc<MemoryStore>,
-    runtime: Arc<KernelRuntime>,
     manager: PluginManager,
     digest: String,
     _cache: tempfile::TempDir,
@@ -65,11 +67,17 @@ impl Installation {
             .sha256;
         Self {
             store,
-            runtime,
             manager,
             digest,
             _cache: cache,
         }
+    }
+    fn restart_runtime(&self) -> Arc<KernelRuntime> {
+        Arc::new(KernelRuntime(PluginEngine::new(
+            self._cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            self.store.clone(),
+        )))
     }
     fn command(&self, revision: u64, order: i32) -> PluginUpdate {
         let mut command = update(&self.digest, revision, true);
@@ -366,7 +374,7 @@ async fn unknown_commit_blocks_plans_until_repair_and_failed_restore_retains_gat
         .get_mut(&installed.id)
         .unwrap()
         .configuration = json!({"fail":true});
-    let restored = PluginManager::new(f.store.clone(), f.runtime.clone());
+    let restored = PluginManager::new(f.store.clone(), f.restart_runtime());
     restored.restore().await.unwrap();
     assert!(restored.freeze_middleware(context(false)).is_err());
     restored.shutdown().await;
@@ -381,7 +389,7 @@ async fn unknown_commit_blocks_plans_until_repair_and_failed_restore_retains_gat
         .unwrap()
         .mounts
         .clear();
-    let restored = PluginManager::new(f.store.clone(), f.runtime.clone());
+    let restored = PluginManager::new(f.store.clone(), f.restart_runtime());
     restored.restore().await.unwrap();
     assert!(
         restored.freeze_middleware(context(false)).is_err(),
