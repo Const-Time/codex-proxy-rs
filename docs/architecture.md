@@ -510,6 +510,8 @@ API 的 response.interrupt 只引用该目标，Provider 向原有活动 WS 发�
 
 ## 插件生命周期
 
+插件 `host.log` 复用 Core 的诊断脱敏和宿主 tracing，不建立独立日志存储。Runtime 从真实 RPC 调用绑定日志身份，按 incarnation 维护每秒 64 条预算，所有实例共享 8 个写入槽位；输入限 8 KiB、32 个字段，事件名只输出指纹。耗尽时同步返回未接受，阻塞后端不占用协议读取任务。LivePlugin 拥有已接受写入任务，停止进程及排空原业务提交后，封闭日志接收并等待这些任务完成。
+
 静态管理资源的公开性来自当前 LivePlugin 的已验证注册声明，并随原实例 revision 发布。Admin 的公开读取先取得同一活跃进程，再核对精确路径和 `public` 标记；Runtime 只从已校验归档读取资源。API 将匿名静态资源与管理员调用分为两个入口，均用 JSON envelope/base64 传递资源字节；公开资源不创建管理会话或模型调用身份。版本切换和停用沿原发布撤销失效入口。
 
 组合根在 Store 初始化后装配 PluginManager 和 PluginEngine，在 API 启动前恢复启用实例，并在关机时回收插件进程。Admin 是实例配置与版本切换的业务 owner；Store 保存制品、敏感配置和私有状态；Host 负责进程容量与终止回收；Runtime 负责协议和能力适配。数据库 CAS 提交先于新实例发布，旧 revision 的入口和私有状态写入随切换失效。
