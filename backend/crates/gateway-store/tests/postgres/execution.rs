@@ -30,6 +30,7 @@ fn postgres_execution_adapter_implements_core_port() {
 fn model_request_rejects_mismatched_client_key_live_id() {
     let started_at = Utc::now();
     let request = NewModelRequest {
+        billing: None,
         parent_request_id: None,
         initiating_plugin_instance_id: None,
         user_id: None,
@@ -86,6 +87,7 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
     .await
     .expect("seed provider account");
     let request = NewModelRequest {
+        billing: None,
         parent_request_id: Some("req_parent_not_yet_written".into()),
         initiating_plugin_instance_id: Some("plugin-fixture".into()),
         user_id: None,
@@ -223,6 +225,7 @@ async fn model_request_persists_group_routing_snapshot_without_live_group_foreig
     let started_at = Utc::now();
     repository
         .insert_model_request(NewModelRequest {
+            billing: None,
             parent_request_id: Some("req_unwritten_parent".into()),
             initiating_plugin_instance_id: Some("plugin-nested".into()),
             user_id: None,

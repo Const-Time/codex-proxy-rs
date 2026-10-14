@@ -129,6 +129,7 @@ impl ClientBudgetPort for Budget {
         &self,
         _: ClientApiKeyId,
         _: Option<gateway_core::routing::AccountGroupId>,
+        _requested_model: Option<gateway_core::routing::PublicModelId>,
     ) -> BoxFuture<'_, Result<gateway_core::engine::budget::ClientBudgetScope, GatewayError>> {
         Box::pin(async {
             assert!(self.active.load(Ordering::SeqCst));
@@ -139,6 +140,7 @@ impl ClientBudgetPort for Budget {
                 )
             } else {
                 Ok(gateway_core::engine::budget::ClientBudgetScope {
+                    billing: Default::default(),
                     user_id: "user-1".into(),
                     group_id: gateway_core::routing::AccountGroupId::new(
                         "grp_00000000000000000000000000000001",

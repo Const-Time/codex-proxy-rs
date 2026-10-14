@@ -277,6 +277,7 @@ where
             websocket_sequence: 0,
             budget_scope: request.budget_scope.clone(),
             budget_prior_attempts_usd: Decimal::ZERO,
+            budget_prior_components_usd: [Decimal::ZERO; 4],
             budget_attempt_already_counted: false,
             trace,
             deadline,
@@ -406,6 +407,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     websocket_sequence: u64,
     budget_scope: Option<super::budget::ClientBudgetScope>,
     budget_prior_attempts_usd: Decimal,
+    budget_prior_components_usd: [Decimal; 4],
     budget_attempt_already_counted: bool,
     trace: TraceContext,
     deadline: crate::lifecycle::Deadline,
@@ -690,6 +692,7 @@ where
             key_id: self.client_api_key_ref.clone(),
             request_id: self.request_id.clone(),
             amount_usd,
+            components_usd: self.budget_total_components(),
             completed_at: self.finalized_at.unwrap_or_else(SystemTime::now),
         }
     }
@@ -706,6 +709,19 @@ where
             .filter(|money| money.currency().as_str() == "USD")
             .map(crate::metering::Money::amount)
             .unwrap_or(Decimal::ZERO)
+    }
+
+    fn budget_total_components(&self) -> [Decimal; 4] {
+        let current = if self.budget_attempt_already_counted {
+            [Decimal::ZERO; 4]
+        } else {
+            super::budget::budget_components(&self.observation.cost)
+        };
+        std::array::from_fn(|index| {
+            self.budget_prior_components_usd[index]
+                .checked_add(current[index])
+                .unwrap_or(Decimal::MAX)
+        })
     }
 
     /// 返回截至当前已完成的实际上游调用结果。
@@ -2324,6 +2340,7 @@ where
             .budget_prior_attempts_usd
             .checked_add(self.budget_attempt_usd())
             .unwrap_or(Decimal::MAX);
+        self.budget_prior_components_usd = self.budget_total_components();
         self.budget_attempt_already_counted = false;
         self.observation.reset_for_attempt();
         self.upstream_complete = false;
