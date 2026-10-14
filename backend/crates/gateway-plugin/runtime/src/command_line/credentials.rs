@@ -4,10 +4,7 @@ use gateway_admin::{
     model::{AdminErrorKind, MutationActor, MutationContext, plugins::*},
     ports::plugins::PluginCredentialService,
 };
-use gateway_core::{
-    engine::{middleware::service::Caller, nested::ExtensionCallScope},
-    lifecycle::CancellationToken,
-};
+use gateway_core::engine::middleware::service::Caller;
 use gateway_plugin_sdk::call::host::AuthSaveRequest;
 use std::sync::Arc;
 
@@ -15,11 +12,12 @@ pub(super) async fn save_all(
     service: Option<&Arc<dyn PluginCredentialService>>,
     accounts: Vec<AuthSaveRequest>,
     caller: Caller,
-    initiator: MutationContext,
-    graph: ExtensionCallScope,
-    cancellation: CancellationToken,
+    invocation: Arc<crate::resources::InvocationCaller>,
     deadline: tokio::time::Instant,
 ) -> Result<usize, PluginCommandError> {
+    let initiator = invocation.actor().clone();
+    let graph = &invocation.graph;
+    let cancellation = &invocation.cancellation;
     let incomplete = |saved_accounts, reason| PluginCommandError::Incomplete {
         saved_accounts,
         reason,
@@ -45,6 +43,9 @@ pub(super) async fn save_all(
         let cleanup = graph
             .fork_http(caller.instance_id().to_owned())
             .map_err(|_| incomplete(saved, "账号提交超过原调用图限制"))?;
+        invocation
+            .track(&cleanup)
+            .map_err(|_| incomplete(saved, "账号提交调用已失效"))?;
         let result = tokio::select! { biased;
             () = cancellation.cancelled() => return Err(incomplete(saved, "账号提交已取消，进行中结果未确认")),
             result = tokio::time::timeout_at(deadline, service.save(scope.clone(), initiator.clone(), command, cleanup, cancellation.clone())) =>

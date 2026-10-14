@@ -222,6 +222,7 @@ pub(crate) async fn call(
                 let request: AuthSaveRequest =
                     serde_json::from_slice(&payload).map_err(|_| invalid())?;
                 let command = convert(request).map_err(|e| error(e, true))?;
+                caller.track(&cleanup)?;
                 let result = service
                     .save(
                         scope,

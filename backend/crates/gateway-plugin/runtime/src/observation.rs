@@ -446,19 +446,21 @@ pub(crate) async fn invoke(
         )
         .map_err(|_| AdminError::unavailable("观察网络作用域不可用"))?;
     let _outbound = outbound.guard(&context);
-    let _caller = calls.enter(
-        context.clone(),
-        MutationContext {
-            actor: MutationActor::Plugin {
-                instance_id: caller.instance_id().into(),
-                revision: caller.revision(),
+    let _caller = calls
+        .enter(
+            context.clone(),
+            MutationContext {
+                actor: MutationActor::Plugin {
+                    instance_id: caller.instance_id().into(),
+                    revision: caller.revision(),
+                },
+                request_id: observation.request_id,
             },
-            request_id: observation.request_id,
-        },
-        None,
-        cancellation.clone(),
-        Some(observation.call_scope),
-    );
+            None,
+            cancellation.clone(),
+            Some(observation.call_scope),
+        )
+        .map_err(|_| AdminError::unavailable("观察调用容量已耗尽"))?;
     let reply = tokio::select! { biased;
         () = cancellation.cancelled() => return Err(AdminError::unavailable("插件观察已取消")),
         result = session.call("observer.observe", context, observation.metadata, observation.payload.to_vec()) =>

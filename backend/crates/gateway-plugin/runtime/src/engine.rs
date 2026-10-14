@@ -714,19 +714,22 @@ impl PluginProcess for LivePlugin {
             .map_err(|_| AdminError::unavailable("维护网络作用域不可用"))?;
         let _outbound = self.outbound.guard(&context);
         let caller = self.services.caller();
-        let _caller = self.calls.enter(
-            context.clone(),
-            MutationContext {
-                actor: MutationActor::Plugin {
-                    instance_id: caller.instance_id().into(),
-                    revision: caller.revision(),
+        let _caller = self
+            .calls
+            .enter(
+                context.clone(),
+                MutationContext {
+                    actor: MutationActor::Plugin {
+                        instance_id: caller.instance_id().into(),
+                        revision: caller.revision(),
+                    },
+                    request_id: context.resource_scope_id.clone(),
                 },
-                request_id: context.resource_scope_id.clone(),
-            },
-            None,
-            cancellation.clone(),
-            Some(effects),
-        );
+                None,
+                cancellation.clone(),
+                Some(effects),
+            )
+            .map_err(|_| AdminError::unavailable("维护调用容量已耗尽"))?;
         let reply = tokio::select! { biased;
             () = cancellation.cancelled() => return Err(AdminError::unavailable("插件维护已取消")),
             result = self.session.call("plugin.reconcile", context, json!({}), vec![]) =>
@@ -964,13 +967,14 @@ impl PluginProcess for LivePlugin {
     }
     fn revoke(&self) {
         self.access.revoke();
+        self.calls.revoke();
         self.active.store(false, Ordering::Release);
         self.session.quiesce();
     }
     async fn stop(&self) {
-        self.access.revoke();
-        self.active.store(false, Ordering::Release);
+        self.revoke();
         self.session.shutdown(Duration::from_secs(5)).await;
+        self.calls.drain().await;
     }
     async fn resource(&self, path: &str) -> Result<PluginHttpResponse, AdminError> {
         if self.status() != "ready" {
@@ -1035,13 +1039,16 @@ impl PluginProcess for LivePlugin {
                 .min(Duration::from_secs(30)),
         );
         context.request_id = Some(request.actor.request_id.clone());
-        let _caller = self.calls.enter(
-            context.clone(),
-            request.actor,
-            request.invocation,
-            self.access.cancellation(),
-            None,
-        );
+        let _caller = self
+            .calls
+            .enter(
+                context.clone(),
+                request.actor,
+                request.invocation,
+                self.access.cancellation(),
+                None,
+            )
+            .map_err(|_| AdminError::unavailable("管理调用容量已耗尽"))?;
         let reply = self
             .session
             .call("management.handle", context, params, request.body)
