@@ -72,6 +72,24 @@ impl Environment {
         accounts: Vec<gateway_core::account::NewProviderAccount>,
     ) -> Option<Self> {
         let (database, database_url, redis_url) = Database::create().await?;
+        Some(Self::initialize(database, database_url, redis_url, url, username, accounts).await)
+    }
+    pub(crate) async fn from_database(
+        database: Database,
+        database_url: String,
+        redis_url: String,
+        username: &str,
+    ) -> Self {
+        Self::initialize(database, database_url, redis_url, None, username, vec![]).await
+    }
+    async fn initialize(
+        database: Database,
+        database_url: String,
+        redis_url: String,
+        url: Option<&str>,
+        username: &str,
+        accounts: Vec<gateway_core::account::NewProviderAccount>,
+    ) -> Self {
         let cache = tempfile::tempdir().unwrap();
         for name in [
             "CPR_DATABASE_URL",
@@ -156,7 +174,7 @@ impl Environment {
             .connect(&database_url)
             .await
             .unwrap();
-        Some(Self {
+        Self {
             store,
             core,
             admin,
@@ -166,7 +184,7 @@ impl Environment {
             redis_url,
             store_writers: None,
             database,
-        })
+        }
     }
     pub fn start_store_writers(&mut self) {
         use gateway_core::task::{WorkerContribution, WorkerKind, WorkerRunnable};
