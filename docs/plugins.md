@@ -40,7 +40,7 @@
 | 本地预算差异 | 用户＋分组共享额度使用 `host.cpr.shared_budgets.v1.*`；上游独立 Key 预算接口保持 unsupported，不能将单 Key 操作隐式扩大为共享额度操作 |
 | 未开放的能力 | 未绑定宿主模型调用权限的阶段回调 |
 
-第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。middleware v4 已开放正常启用；该原包及仅替换 SDK 的重建包通过生产校验器、七项声明能力的基本联合调用和原生模型验收。完整业务变体及其他目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
+第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。middleware v4 已开放正常启用；该原包及仅替换 SDK 的重建包通过生产校验器、七项声明能力的基本联合调用和原生模型验收。原包与重建包还已通过管理业务、原生文本 JSON/SSE/WebSocket、Images 上传转换，以及真实页面图片生成和续聊的联合验收。该证据限定 Linux x86_64 和受控上游，不能推广为任意第三方插件、后续版本或其他平台原包均已兼容。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
 
 管理资源声明的 `public` 随实际插件代次保留。匿名读取使用 `GET /api/plugins/resource?id=…&revision=…&path=…`，只返回当前启用实例在 `management.register` 中明确登记为公开、且归档清单声明的静态资源；私有或未登记路径返回 404，失效代次返回 409。返回格式沿用 `{status, contentType, body}` 的 JSON envelope 和 base64 正文，公开 HTML 不作为宿主同源页面执行。管理资源读取及插件业务调用继续使用现有管理员入口。改变公开声明、停用或升级均通过原实例代次生效。
 
@@ -88,7 +88,7 @@ Core 从同一份请求准备结果冻结订阅；Responses JSON/SSE/WS、Images
 观察计划仍属于原发布 owner，使用独立观察撤销信号：订阅变更、停用、不可确认提交或宿主关闭撤销旧观察投递，不给模型请求增加业务取消源。观察进程恢复失败会跳过该订阅，不阻止其他观察实例或原模型目录；同时提供路由/中间件等业务能力的实例继续受原业务故障门禁约束。worker 对队列表仅持弱引用，实际匹配订阅者全部撤销会释放空闲队列。调用使用真实实例/revision、原请求关联、原调用图和冻结 service 发布；私有状态、外部 HTTP 与已授权 service 回调沿原作用域清理，显式缺失服务工厂不会读取后来发布。观察阶段尚不提供管理员会话或原生模型父执行；相应回调仍明确拒绝。
 
 
-声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
+声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；workbench 已验证的制品与业务见本文验收记录，其他插件仍需按实际使用的合同验证。
 
 中间件 v4 已开放正常安装启用，单次 `next`、正文透传/改写、事实快照和取消使用原宿主执行链。管理页可保存实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层，以及原 Core 的 request/attempt、routing/scheduling/retry/upstream 阶段可主动调用这些业务；HTTP、独立 WebSocket、注册和认证阶段的主动调用也已接入；命令、观察与维护阶段也沿各自冻结服务作用域调用。五个中间件阶段的私有状态回调复用原实例存储、schema、配额和 CAS；沿实际调用的取消与结束信号清理，不提供额外管理权限。
 
@@ -344,13 +344,13 @@ SDK `ensure_key` 已开放，每个实例最多登记 256 个 Key 资源，只�
 
 CI 单独执行真实备份恢复验收：使用与测试 PostgreSQL 服务相同的镜像提供 `pg_dump` / `pg_restore`，通过原 Store 导出器创建归档，删除源数据库和解包缓存后恢复到新库，逐表核对行数与内容摘要。验收覆盖原生用户、分组和 Key、插件制品归档与秘密配置、已迁移数据及 CAS 序列、公开资源，以及停用期间换包后等待启用的迁移；恢复已提交版本不会重新转换数据。该用例需要匹配服务版本的客户端，可在设置 `CPR_TEST_DATABASE_URL` 和 `CPR_TEST_REDIS_URL` 后执行 `cargo test -p gateway-plugin-runtime --all-features --test main --locked state::native_archive_restores_plugin_data_secrets_and_pending_upgrade_without_original_cache -- --ignored`。普通测试将其标记为 ignored，不代表已完成归档恢复验收。
 
-## 后续改造边界
+## 验收与兼容边界
 
 完整网关进程的 SIGTERM 用例已验证管理员 HTTP 管理调用发起的 SDK 原生账号提交：原事务被锁阻塞期间，Host 进入扩展收尾仍保持进程存活；解锁后只提交一次、保留原配置版本推进和插件审计，随后退出并回收 SDK 子进程。Host 外置用例另覆盖命令完成、取消、信号、监听失败与启动收尾时，原写入任务和日志均保留至扩展收尾结束。这不替代其他回调、实际第三方业务或所有传输的完整 Host 验收。
 
 只读事实、实例自有分组/Key、显式共享额度管理和 management 原生模型回调已接入。共享额度管理界面与操作编排已有独立业务插件；用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
 
-发布平台检查从 `release/platforms.yaml` 读取目标，在 Linux x86_64、Linux aarch64 和 macOS aarch64 原生运行器上执行 SDK、打包工具及安装生命周期测试，构建网关与 `cpr-plugin` release 二进制并执行帮助命令。Linux 使用与发布一致的固定 Rust/Bookworm 镜像；结果保留提交、版本、日志和二进制摘要。三个平台已通过[提交 a4ac4436 的检查](https://github.com/Const-Time/codex-proxy-rs/actions/runs/38694166117)。这证明所列原生进程与构建合同；数据库和第三方 workbench 的完整业务验收仍以各自记录的平台为准，不提供 Windows 插件制品兼容保证。
+发布平台检查从 `release/platforms.yaml` 读取目标，在 Linux x86_64、Linux aarch64 和 macOS aarch64 原生运行器上执行 SDK、打包工具及安装生命周期测试，构建网关与 `cpr-plugin` release 二进制并执行帮助命令。Linux 使用与发布一致的固定 Rust/Bookworm 镜像；结果保留提交、版本、日志和二进制摘要。三个平台已通过[提交 c4aae0b3 的检查](https://github.com/Const-Time/codex-proxy-rs/actions/runs/38704423431)。这证明所列原生进程与构建合同；数据库和第三方 workbench 的完整业务验收仍以各自记录的平台为准，不提供 Windows 插件制品兼容保证。
 
 ### Responses HTTP 接入进度
 
