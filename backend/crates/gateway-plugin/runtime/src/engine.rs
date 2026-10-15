@@ -201,19 +201,18 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
     manifest
         .contributes
         .iter()
-        .filter(|(cap, decl)| {
-            !matches!(
-                cap,
-                Capability::Management
-                    | Capability::FrontendAuthentication
-                    | Capability::ModelCatalog
-                    | Capability::ModelRouter
-                    | Capability::Scheduler
-                    | Capability::RetryPolicy
-                    | Capability::Maintenance
-                    | Capability::Observer
-                    | Capability::CommandLine
-            ) || decl.version != 1
+        .filter(|(cap, decl)| match cap {
+            Capability::Middleware => decl.version != 4,
+            Capability::Management
+            | Capability::FrontendAuthentication
+            | Capability::ModelCatalog
+            | Capability::ModelRouter
+            | Capability::Scheduler
+            | Capability::RetryPolicy
+            | Capability::Maintenance
+            | Capability::Observer
+            | Capability::CommandLine => decl.version != 1,
+            _ => true,
         })
         .map(|(cap, _)| cap.identifier().into())
         .collect()

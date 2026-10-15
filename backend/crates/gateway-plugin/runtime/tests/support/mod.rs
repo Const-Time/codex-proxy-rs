@@ -19,6 +19,7 @@ use std::{
 #[derive(Default)]
 pub struct MemoryStore {
     pub save_fault: AtomicU8,
+    state_gate: Mutex<Option<Arc<StateGate>>>,
     unreadable: AtomicBool,
     pub records: Mutex<BTreeMap<String, PluginRecord>>,
     artifacts: Mutex<BTreeMap<String, PluginArtifact>>,
@@ -30,6 +31,38 @@ pub fn actor() -> MutationContext {
         actor: MutationActor::System,
         request_id: "plugin-test".into(),
     }
+}
+#[derive(Default)]
+struct StateGate {
+    entered: tokio::sync::Notify,
+    dropped: tokio::sync::Notify,
+}
+struct StateWaiting(Arc<StateGate>);
+impl Drop for StateWaiting {
+    fn drop(&mut self) {
+        self.0.dropped.notify_one();
+    }
+}
+/// Hold the real SDK callback at the store port, then cancel its actual caller.
+pub(crate) async fn cancel_middleware_state<T, E>(
+    store: &MemoryStore,
+    cancellation: &gateway_core::lifecycle::CancellationToken,
+    call: impl std::future::Future<Output = Result<T, E>>,
+) {
+    let gate = Arc::new(StateGate::default());
+    *store.state_gate.lock().unwrap() = Some(gate.clone());
+    tokio::pin!(call);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            () = gate.entered.notified() => (),
+            _ = &mut call => panic!("invocation ended before its state callback entered the store"),
+        }
+        cancellation.cancel();
+        assert!(call.await.is_err());
+        gate.dropped.notified().await;
+    })
+    .await
+    .expect("cancelled invocation must drop its pending state callback");
 }
 fn conflict() -> AdminError {
     AdminError::conflict("stale")
@@ -174,6 +207,12 @@ impl PluginStore for MemoryStore {
         s: &PluginStateScope,
         key: &str,
     ) -> Result<Option<PluginStateRecord>, AdminError> {
+        let gate = self.state_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _waiting = StateWaiting(gate.clone());
+            gate.entered.notify_one();
+            futures::future::pending::<()>().await;
+        }
         let records = self.records.lock().unwrap();
         if records
             .get(&s.instance_id)
@@ -469,4 +508,28 @@ fn memory_snapshot(
             })
             .collect(),
     }
+}
+
+/// Confirm SDK callbacks committed to the original instance store.
+pub(crate) async fn assert_middleware_state(
+    store: &MemoryStore,
+    manager: &gateway_admin::plugins::PluginManager,
+    key: &str,
+    value: u64,
+) {
+    use gateway_admin::ports::plugins::PluginService;
+    let installed = manager.list().await.unwrap().remove(0);
+    let snapshot = store
+        .state_snapshot(&installed.id, installed.revision)
+        .await
+        .unwrap();
+    let row = snapshot
+        .records
+        .iter()
+        .find(|row| row.namespace == "counter" && row.key == key)
+        .unwrap();
+    assert_eq!(row.value, json!(value));
+    assert_eq!(row.schema_version, 1);
+    assert_eq!(row.version, 1);
+    assert!(snapshot.records.iter().all(|row| row.key != "invalid"));
 }

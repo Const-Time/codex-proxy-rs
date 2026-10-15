@@ -18,6 +18,7 @@ impl core::Sender for Sender {
     }
 }
 struct Fixture {
+    store: Arc<crate::support::MemoryStore>,
     manager: PluginManager,
     _cache: tempfile::TempDir,
 }
@@ -27,12 +28,10 @@ impl Fixture {
         let cache = tempfile::tempdir().unwrap();
         let manager = PluginManager::new(
             store.clone(),
-            Arc::new(super::plan::KernelRuntime(
-                gateway_plugin_runtime::PluginEngine::new(
-                    cache.path().into(),
-                    "3.11.2".parse().unwrap(),
-                    store,
-                ),
+            Arc::new(gateway_plugin_runtime::PluginEngine::new(
+                cache.path().into(),
+                "3.11.2".parse().unwrap(),
+                store.clone(),
             )),
         );
         let artifact = manager
@@ -53,6 +52,7 @@ impl Fixture {
             .await
             .unwrap();
         Self {
+            store,
             manager,
             _cache: cache,
         }
@@ -296,5 +296,41 @@ async fn websocket_waits_are_cancelled_by_disable_and_frozen_ancestor_exclusion_
             .unwrap()
             .is_err()
     );
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn private_state_callbacks_follow_websocket_invocation() {
+    let f = Fixture::new().await;
+    for value in 1..=3 {
+        if value == 3 {
+            let ctx = context("private-state", sender(false));
+            let cancellation = ctx.cancellation.clone();
+            let plan = f.plan(cancellation.clone());
+            crate::support::cancel_middleware_state(
+                &f.store,
+                &cancellation,
+                plan.run(
+                    ctx,
+                    message(core::Kind::Binary, b"cancelled".to_vec()),
+                    identity(),
+                ),
+            )
+            .await;
+            crate::support::assert_middleware_state(&f.store, &f.manager, "websocket", 2).await;
+        }
+        let result = f
+            .plan(Default::default())
+            .run(
+                context("private-state", sender(false)),
+                message(core::Kind::Binary, b"original".to_vec()),
+                identity(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.payload, Bytes::from_static(b"original"));
+        crate::support::assert_middleware_state(&f.store, &f.manager, "websocket", value).await;
+    }
     f.manager.shutdown().await;
 }

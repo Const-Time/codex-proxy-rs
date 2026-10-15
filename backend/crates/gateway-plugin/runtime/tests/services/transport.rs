@@ -19,10 +19,7 @@ impl TransportFixture {
             store.clone(),
         )
         .with_services(Arc::new(move || Ok(Some(root_factory.clone()))));
-        let manager = PluginManager::new(
-            store,
-            Arc::new(crate::middleware::plan::KernelRuntime(engine)),
-        );
+        let manager = PluginManager::new(store, Arc::new(engine));
         let artifact = manager
             .upload(http_archive("1.0.0"), &actor())
             .await

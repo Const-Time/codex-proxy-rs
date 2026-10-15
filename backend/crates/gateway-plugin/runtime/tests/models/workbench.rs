@@ -377,7 +377,7 @@ async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinit
             let manager = Arc::new_cyclic(|plugins| {
                 PluginManager::new(
                     store.clone(),
-                    Arc::new(crate::middleware::plan::KernelRuntime(
+                    Arc::new(
                         PluginEngine::new(
                             env.cache.path().join("native-workbench"),
                             "3.11.2".parse().unwrap(),
@@ -391,7 +391,7 @@ async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinit
                             )),
                             env.admin.services().client_keys(),
                         ),
-                    )),
+                    ),
                 )
             });
             let caller_artifact = manager
@@ -893,7 +893,7 @@ async fn official_and_rebuilt_workbench_execute_management_business_without_rewr
         let manager = Arc::new_cyclic(|plugins| {
             PluginManager::new(
                 store.clone(),
-                Arc::new(crate::middleware::plan::KernelRuntime(
+                Arc::new(
                     PluginEngine::new(
                         env.cache.path().join("plugins"),
                         "3.11.2".parse().unwrap(),
@@ -907,23 +907,18 @@ async fn official_and_rebuilt_workbench_execute_management_business_without_rewr
                         )),
                         env.admin.services().client_keys(),
                     ),
-                )),
+                ),
             )
         });
         let artifact = manager.upload(Arc::from(bytes), &actor()).await.unwrap();
         assert_eq!(artifact.plugin_id, "codex-proxy.capability-workbench");
         assert_eq!(artifact.version, "0.3.1");
-        assert!(
-            artifact
-                .unsupported_capabilities
-                .contains(&"middleware".into())
-        );
+        assert!(artifact.unsupported_capabilities.is_empty());
         assert!(
             !artifact
                 .unsupported_capabilities
                 .contains(&"command_line".into())
         );
-        // Explicit kernel composition keeps production enablement gates intact.
         let installed = manager
             .update(None, update(&artifact.sha256, 0, true), &actor())
             .await

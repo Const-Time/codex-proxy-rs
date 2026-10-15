@@ -29,6 +29,31 @@ impl Invocation {
             _ => false,
         }
     }
+    async fn call_state(
+        &self,
+        callback: BoxFuture<'static, Result<RpcReply, PluginFault>>,
+    ) -> Result<RpcReply, PluginFault> {
+        let cancellation = match self {
+            Self::Service(invocation) => &invocation.cancellation,
+            Self::WebSocket(invocation) => &invocation.cancellation,
+            Self::Execution(invocation) => &invocation.cancellation,
+            Self::Http(invocation) => &invocation.cancellation,
+        };
+        let closed = async {
+            match self {
+                Self::Service(invocation) => invocation.closed.cancelled().await,
+                Self::WebSocket(invocation) => invocation.closed.cancelled().await,
+                Self::Http(invocation) => invocation.callbacks_closed.cancelled().await,
+                // RPC owns execution callback cancellation; body delivery may outlive it.
+                Self::Execution(_) => futures::future::pending::<()>().await,
+            }
+        };
+        tokio::select! { biased;
+            () = cancellation.cancelled() => Err(PluginFault::new(ErrorCode::Cancelled, "middleware invocation cancelled")),
+            () = closed => Err(PluginFault::new(ErrorCode::PermissionDenied, "middleware callback scope ended")),
+            result = callback => result,
+        }
+    }
     fn close(&self) {
         if let Self::Service(invocation) = self {
             invocation.closed.cancel();
@@ -389,6 +414,10 @@ impl CallbackHandler for MiddlewareCallbacks {
         params: serde_json::Value,
         payload: Vec<u8>,
     ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
+        let state_method = matches!(
+            context.stage,
+            Stage::Http | Stage::WebSocket | Stage::Service | Stage::Request | Stage::Attempt
+        ) && crate::callbacks::is_state_method(&method);
         let model_method = crate::models::is_method(&method)
             || (method.starts_with("host.http.")
                 && !crate::outbound::is_method(&method)
@@ -399,6 +428,7 @@ impl CallbackHandler for MiddlewareCallbacks {
             return self.inner.call(context, method, params, payload);
         }
         if !model_method
+            && !state_method
             && !service_method
             && !super::http::is_method(&method)
             && !matches!(
@@ -433,6 +463,7 @@ impl CallbackHandler for MiddlewareCallbacks {
             })
             .map(|entry| entry.invocation.clone());
         let models = self.models.clone();
+        let inner = self.inner.clone();
         Box::pin(async move {
             let invocation = invocation.ok_or_else(|| {
                 PluginFault::new(
@@ -440,6 +471,11 @@ impl CallbackHandler for MiddlewareCallbacks {
                     "middleware invocation is no longer active",
                 )
             })?;
+            if state_method {
+                return invocation
+                    .call_state(inner.call(context, method, params, payload))
+                    .await;
+            }
             if let Invocation::Service(invocation) = invocation {
                 return tokio::select! {biased;
                     ()=invocation.cancellation.cancelled()=>Err(if service_method {super::service_cancelled()}else{PluginFault::new(ErrorCode::Cancelled,"service invocation cancelled")}),

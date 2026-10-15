@@ -1,66 +1,14 @@
-//! Exercise publication with real plugin processes. The test composition enables
-//! the kernel explicitly; production still rejects middleware until API mounts exist.
+//! Exercise production middleware publication with real plugin processes.
 mod attempt;
 use super::*;
 use crate::support::{MemoryStore, actor, update};
-use async_trait::async_trait;
 use gateway_admin::{
-    model::{AdminError, AdminErrorKind, plugins::*},
+    model::{AdminErrorKind, plugins::*},
     plugins::PluginManager,
-    ports::plugins::{PluginProcess, PluginRuntime, PluginService, PluginStore},
+    ports::plugins::{PluginRuntime, PluginService, PluginStore},
 };
 use gateway_plugin_runtime::PluginEngine;
 
-pub(crate) struct KernelRuntime(pub(crate) PluginEngine);
-#[async_trait]
-impl PluginRuntime for KernelRuntime {
-    async fn prepare_state(
-        &self,
-        record: &PluginRecord,
-        artifact: &PluginArtifact,
-        process: Option<&Arc<dyn PluginProcess>>,
-    ) -> Result<Option<PluginStateCommit>, AdminError> {
-        self.0.prepare_state(record, artifact, process).await
-    }
-    async fn shutdown(&self) {
-        self.0.shutdown().await;
-    }
-    fn observer_plan(
-        &self,
-        targets: Vec<gateway_admin::ports::plugins::PluginObserverTarget>,
-        services: Option<Arc<dyn gateway_core::engine::middleware::service::Factory>>,
-        cancellation: gateway_core::lifecycle::CancellationToken,
-    ) -> Result<Option<Arc<dyn gateway_core::engine::observation::RequestObserverPlan>>, AdminError>
-    {
-        self.0.observer_plan(targets, services, cancellation)
-    }
-    fn contributes_model_catalog(&self, artifact: &PluginArtifact) -> Result<bool, AdminError> {
-        self.0.contributes_model_catalog(artifact)
-    }
-    fn describe(&self, info: PluginArtifactInfo) -> Result<PluginArtifactInfo, AdminError> {
-        self.0.describe(info)
-    }
-    async fn inspect(&self, bytes: Arc<[u8]>) -> Result<PluginArtifact, AdminError> {
-        self.0.inspect(bytes).await
-    }
-    async fn validate(
-        &self,
-        record: &PluginRecord,
-        artifact: &PluginArtifact,
-        old: Option<&PluginArtifact>,
-    ) -> Result<(), AdminError> {
-        let mut candidate = record.clone();
-        candidate.enabled = false;
-        self.0.validate(&candidate, artifact, old).await
-    }
-    async fn prepare(
-        &self,
-        record: &PluginRecord,
-        artifact: PluginArtifact,
-    ) -> Result<Arc<dyn PluginProcess>, AdminError> {
-        self.0.prepare(record, artifact).await
-    }
-}
 struct Installation {
     store: Arc<MemoryStore>,
     manager: PluginManager,
@@ -71,11 +19,11 @@ impl Installation {
     async fn new() -> Self {
         let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(MemoryStore::default());
-        let runtime = Arc::new(KernelRuntime(PluginEngine::new(
+        let runtime = Arc::new(PluginEngine::new(
             cache.path().into(),
             "3.11.2".parse().unwrap(),
             store.clone(),
-        )));
+        ));
         let manager = PluginManager::new(store.clone(), runtime.clone());
         let digest = manager
             .upload(crate::support::archive("1.0.0", true), &actor())
@@ -89,12 +37,12 @@ impl Installation {
             _cache: cache,
         }
     }
-    fn restart_runtime(&self) -> Arc<KernelRuntime> {
-        Arc::new(KernelRuntime(PluginEngine::new(
+    fn restart_runtime(&self) -> Arc<PluginEngine> {
+        Arc::new(PluginEngine::new(
             self._cache.path().into(),
             "3.11.2".parse().unwrap(),
             self.store.clone(),
-        )))
+        ))
     }
     fn command(&self, revision: u64, order: i32) -> PluginUpdate {
         let mut command = update(&self.digest, revision, true);
@@ -508,19 +456,12 @@ async fn binding_validation_rejects_empty_ambiguous_and_undeclared_scopes_withou
             .unwrap()
             .is_empty()
     );
-    // Production still rejects enabling a manifest before data-plane integration.
     let production = Arc::new(PluginEngine::new(
         f._cache.path().into(),
         "3.11.2".parse().unwrap(),
         f.store.clone(),
     ));
     let manager = PluginManager::new(f.store.clone(), production.clone());
-    assert!(
-        manager
-            .update(None, f.command(0, 0), &actor())
-            .await
-            .is_err()
-    );
     let mut draft = f.command(0, 0);
     draft.enabled = false;
     let saved = manager.update(None, draft, &actor()).await.unwrap();
@@ -536,16 +477,16 @@ async fn binding_validation_rejects_empty_ambiguous_and_undeclared_scopes_withou
     let mut declared = f.store.artifact(&record.artifact_sha256).await.unwrap();
     declared.info.manifest["contributes"]["middleware"]["stages"] =
         json!(["http", "websocket", "service", "request", "attempt"]);
+    record.enabled = true;
     for mount in [
         PluginMiddlewareMount::Http,
         PluginMiddlewareMount::WebSocket,
         PluginMiddlewareMount::Service,
+        PluginMiddlewareMount::Request,
+        PluginMiddlewareMount::Attempt,
     ] {
         record.middleware.as_mut().unwrap().mounts = vec![mount];
         production.validate(&record, &declared, None).await.unwrap();
-        record.enabled = true;
-        assert!(production.validate(&record, &declared, None).await.is_err());
-        record.enabled = false;
     }
     assert!(
         manager
@@ -553,6 +494,69 @@ async fn binding_validation_rejects_empty_ambiguous_and_undeclared_scopes_withou
             .unwrap()
             .is_empty()
     );
+    manager
+        .update(Some(&saved.id), f.command(1, 0), &actor())
+        .await
+        .unwrap();
+    assert!(
+        !manager
+            .freeze_middleware(context(false))
+            .unwrap()
+            .is_empty()
+    );
     manager.shutdown().await;
     f.manager.shutdown().await;
+}
+
+async fn private_state_callbacks_follow_execution(mount: MiddlewareMount, key: &str) {
+    let f = Installation::new().await;
+    f.manager
+        .update(None, f.command(0, 0), &actor())
+        .await
+        .unwrap();
+    for value in 1..=3 {
+        let mut ctx = context(false);
+        ctx.mount = mount;
+        if mount == MiddlewareMount::Attempt {
+            ctx.attempt_index = Some(1);
+            ctx.account_id =
+                Some(gateway_core::account::ProviderAccountId::new("acct_original").unwrap());
+        }
+        if value == 3 {
+            let cancel = ctx.cancellation.clone();
+            let plan = f.manager.freeze_middleware(ctx.clone()).unwrap();
+            crate::support::cancel_middleware_state(
+                &f.store,
+                &cancel,
+                plan.run(
+                    request("private-state"),
+                    terminal(Arc::new(Trace::default()), false),
+                ),
+            )
+            .await;
+            ctx.cancellation = CancellationToken::new();
+            crate::support::assert_middleware_state(&f.store, &f.manager, key, 2).await;
+        }
+        let trace = Arc::new(Trace::default());
+        let response = f
+            .manager
+            .freeze_middleware(ctx)
+            .unwrap()
+            .run(request("private-state"), terminal(trace.clone(), false))
+            .await
+            .unwrap();
+        let (_, _, _, body, _) = response.into_parts();
+        body.close().await;
+        assert_eq!(trace.next.load(Ordering::SeqCst), 1);
+        crate::support::assert_middleware_state(&f.store, &f.manager, key, value).await;
+    }
+    f.manager.shutdown().await;
+}
+#[tokio::test]
+async fn private_state_callbacks_follow_request_invocation() {
+    private_state_callbacks_follow_execution(MiddlewareMount::Request, "request").await;
+}
+#[tokio::test]
+async fn private_state_callbacks_follow_attempt_invocation() {
+    private_state_callbacks_follow_execution(MiddlewareMount::Attempt, "attempt").await;
 }

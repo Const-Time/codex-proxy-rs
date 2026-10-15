@@ -1,5 +1,6 @@
 //! Real SDK subprocess -> Responses wire bridge -> Core attempt and receipts.
 use super::*;
+use async_trait::async_trait;
 use gateway_core::{
     account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy},
     engine::{provider::*, *},

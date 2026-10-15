@@ -136,12 +136,7 @@ async fn official_workbench_archive_registers_public_resources_without_rewriting
     let artifact = runtime.inspect(Arc::from(bytes)).await.unwrap();
     assert_eq!(artifact.info.plugin_id, "codex-proxy.capability-workbench");
     assert_eq!(artifact.info.version, "0.3.1");
-    assert!(
-        artifact
-            .info
-            .unsupported_capabilities
-            .contains(&"middleware".into())
-    );
+    assert!(artifact.info.unsupported_capabilities.is_empty());
     assert!(
         !artifact
             .info
@@ -169,16 +164,7 @@ async fn official_workbench_archive_registers_public_resources_without_rewriting
         observer: None,
     };
     store.save(&record, 0, &actor(), None).await.unwrap();
-    assert_eq!(
-        runtime
-            .validate(&record, &artifact, None)
-            .await
-            .err()
-            .unwrap()
-            .kind(),
-        AdminErrorKind::Invalid
-    );
-    // Exercise the real runtime kernel while recording that production enablement is still gated.
+    runtime.validate(&record, &artifact, None).await.unwrap();
     let process = runtime.prepare(&record, artifact).await.unwrap();
     process.activate();
     assert!(
@@ -350,10 +336,10 @@ async fn unsupported_extensions_require_adaptation_and_plaintext_secret_configur
     ));
     let manager = PluginManager::new(store, runtime);
     let artifact = manager
-        .upload(archive("1.0.0", true), &actor())
+        .upload(crate::support::upstream_archive("1.0.0"), &actor())
         .await
         .unwrap();
-    assert_eq!(artifact.unsupported_capabilities, ["middleware"]);
+    assert_eq!(artifact.unsupported_capabilities, ["upstream_adapter"]);
     let error = manager
         .update(None, update(&artifact.sha256, 0, true), &actor())
         .await

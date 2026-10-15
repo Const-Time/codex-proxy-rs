@@ -1,6 +1,5 @@
 mod dispatch;
 mod upgrade;
-use super::plan::KernelRuntime;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_admin::{model::plugins::*, plugins::PluginManager, ports::plugins::PluginService};
@@ -24,6 +23,7 @@ use std::{
 };
 
 struct Fixture {
+    store: Arc<crate::support::MemoryStore>,
     manager: PluginManager,
     _cache: tempfile::TempDir,
 }
@@ -31,12 +31,12 @@ impl Fixture {
     async fn new() -> Self {
         let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(crate::support::MemoryStore::default());
-        let runtime = Arc::new(KernelRuntime(PluginEngine::new(
+        let runtime = Arc::new(PluginEngine::new(
             cache.path().into(),
             "3.11.2".parse().unwrap(),
             store.clone(),
-        )));
-        let manager = PluginManager::new(store, runtime);
+        ));
+        let manager = PluginManager::new(store.clone(), runtime);
         let artifact = manager
             .upload(
                 crate::support::http_archive("1.0.0"),
@@ -55,6 +55,7 @@ impl Fixture {
             .await
             .unwrap();
         Self {
+            store,
             manager,
             _cache: cache,
         }
@@ -718,5 +719,47 @@ async fn sdk_http_admin_disable_revokes_streamed_reply_and_closes_waiting_source
             .unwrap()
             .is_empty()
     );
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn private_state_callbacks_follow_http_invocation() {
+    let f = Fixture::new().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    for value in 1..=3 {
+        if value == 3 {
+            let ctx = context();
+            let cancellation = ctx.cancellation.clone();
+            let (body, _, _) = source(vec![], None);
+            crate::support::cancel_middleware_state(
+                &f.store,
+                &cancellation,
+                f.run(
+                    "private-state",
+                    body,
+                    ctx,
+                    compose(vec![], |request: core::Request| {
+                        Box::pin(async move { Ok(core::Response::new(request.into_body())) })
+                    }),
+                ),
+            )
+            .await;
+            crate::support::assert_middleware_state(&f.store, &f.manager, "http", 2).await;
+        }
+        let next = compose(vec![], {
+            let calls = calls.clone();
+            move |request: core::Request| {
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(core::Response::new(request.into_body()))
+                })
+            }
+        });
+        let (body, _, _) = source(vec![], None);
+        let response = f.run("private-state", body, context(), next).await.unwrap();
+        collect(response.into_body()).await;
+        crate::support::assert_middleware_state(&f.store, &f.manager, "http", value).await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     f.stop().await;
 }

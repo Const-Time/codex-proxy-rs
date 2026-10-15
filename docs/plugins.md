@@ -35,9 +35,10 @@
 | 观察订阅 | observer v1；请求完成、实际上游 WebSocket 原始帧；冻结 Key/分组范围、有界投递及独立撤销，观察失败不控制业务执行 |
 | 状态迁移 | `plugin.state.migrate`；配置阶段有界批次，Keep/Replace/Delete 与实例版本同事务提交；失败和并发变更保留旧状态 |
 | 命令行 | command_line v1；实例帮助、类型化参数、执行和零退出后的原生账号提交，宿主系统根调用选择现有 Key |
-| 未开放的能力 | middleware、upstream_adapter、Key 预算写入；未绑定宿主模型调用权限的阶段回调 |
+| 中间件 | middleware v4；HTTP、独立 WebSocket、service、request/attempt 挂载，冻结绑定、单次 next、正文透传/改写及私有状态回调 |
+| 未开放的能力 | upstream_adapter、Key 预算写入；未绑定宿主模型调用权限的阶段回调 |
 
-第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。生产启用仍因 middleware 门禁被拒绝；其余贡献能力、完整业务与目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
+第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。middleware v4 已开放正常启用；该原包及仅替换 SDK 的重建包通过生产校验器、七项声明能力的基本联合调用和原生模型验收。完整业务变体及其他目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
 
 管理资源声明的 `public` 随实际插件代次保留。匿名读取使用 `GET /api/plugins/resource?id=…&revision=…&path=…`，只返回当前启用实例在 `management.register` 中明确登记为公开、且归档清单声明的静态资源；私有或未登记路径返回 404，失效代次返回 409。返回格式沿用 `{status, contentType, body}` 的 JSON envelope 和 base64 正文，公开 HTML 不作为宿主同源页面执行。管理资源读取及插件业务调用继续使用现有管理员入口。改变公开声明、停用或升级均通过原实例代次生效。
 
@@ -85,7 +86,7 @@ Core 从同一份请求准备结果冻结订阅；Responses JSON/SSE/WS、Images
 
 声明未支持能力的插件可保存为停用实例，但不能启用。未实现的宿主回调明确返回 unsupported，不伪造成功。宿主版本范围不匹配显示警告；包平台、摘要、协议或注册清单不匹配会拒绝启动。使用上游插件前须核对这张表；没有验证 workbench 或任意第三方插件的全功能兼容性。
 
-中间件 v4 的单次 `next`、正文透传/改写、事实快照和取消已在 Runtime 内核通过 SDK 子进程验证。管理页可保存停用实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层，以及原 Core 的 request/attempt、routing/scheduling/retry/upstream 阶段可主动调用这些业务；HTTP、独立 WebSocket、注册和认证阶段的主动调用也已接入；其他阶段继续实施。上表仍将 middleware 列为未开放；不能把合同或内核测试通过理解为第三方中间件现在可以直接启用。
+中间件 v4 已开放正常安装启用，单次 `next`、正文透传/改写、事实快照和取消使用原宿主执行链。管理页可保存实例的中间件绑定：HTTP、WebSocket 会话、宿主服务、request/attempt 挂载和执行顺序。HTTP、WebSocket 会话和服务必须选择全部请求；request/attempt 可选择全部请求或指定 Key/分组。顺序较小者先进入，同序号按实例 ID 排序；响应按相反方向返回。分组匹配使用宿主冻结的 Key 授权分组，只选择调用范围，不增加资源权限。Responses JSON/SSE/WS、Images 和 Search 的 request/attempt 数据面挂载已接入验证；执行设置已接入 request 改写与 attempt 来源视图，原生模型子调用也已进入这两层计划。HTTP 的宿主惰性正文、冻结计划及 Runtime RPC 已接通真实 SDK；API 入口与原始 WebSocket 传输也已接入，HTTP、管理和 request/attempt 阶段的宿主主动分派已接入；独立 WebSocket 消息中间件已接入原生 Responses 和插件自有会话，service Runtime 执行桥与冻结计划已通过 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项服务已接入；管理和已授权 service 层，以及原 Core 的 request/attempt、routing/scheduling/retry/upstream 阶段可主动调用这些业务；HTTP、独立 WebSocket、注册和认证阶段的主动调用也已接入；其他阶段继续实施。五个中间件阶段的私有状态回调复用原实例存储、schema、配额和 CAS；沿实际调用的取消与结束信号清理，不提供额外管理权限。
 
 SDK 与宿主 RPC 共用同一次调用的处理预算。受管 `host.middleware.next` 等待宿主期间暂停插件预算，收到宿主结果后恢复未消耗的时间；重复 next 或已耗尽的预算不能续期。网关请求的原截止时间、父取消与插件撤销继续生效。原生宿主回调读取同一 RPC 预算，宿主服务继续使用原请求的冻结发布；资源流初始响应交付后，后续期限交由原资源 owner 持有。
 
@@ -149,7 +150,7 @@ HTTP v4 内核保留原始 method、URI、版本、多值头、数据帧、trail
 
 正文流和升级会话继续持有原 RPC 范围，直到流结束、会话完成、取消或到期。停用、换代和进程退出会撤销已经取得初始回复的输出。插件不能吞掉宿主终端或正文的原始错误，也不能在 HTTP 范围签发模型、管理或资源权限；没有宿主设置基线时不能自行构造设置。
 
-升级任务只接受宿主产生的同一握手响应句柄及原状态，成功交付后单次领取；修改握手或丢弃响应不会启动会话。非法状态、伪造来源和未知帧标签让插件进程进入故障状态，显式重启后恢复。主动业务拒绝仍可处理后续请求。以上 Runtime 行为已通过真实 SDK 子进程验证，API 入口和原始升级传输已接入本地 Router/发布计划/Core 账本验证。HTTP、管理和 request/attempt 阶段的宿主主动分派，以及独立 WebSocket 消息挂载均已接入；service 挂载继续实施，生产 middleware 门禁继续保留。
+升级任务只接受宿主产生的同一握手响应句柄及原状态，成功交付后单次领取；修改握手或丢弃响应不会启动会话。非法状态、伪造来源和未知帧标签让插件进程进入故障状态，显式重启后恢复。主动业务拒绝仍可处理后续请求。以上 Runtime 行为已通过真实 SDK 子进程验证，API 入口和原始升级传输已接入本地 Router/发布计划/Core 账本验证。HTTP、管理和 request/attempt 阶段的宿主主动分派，以及独立 WebSocket 消息挂载均已接入；service 挂载和五个阶段的私有状态回调均已接入生产运行时。
 
 ## HTTP API 接入
 
@@ -159,7 +160,7 @@ HTTP 计划位于路由匹配之前，可改写 method、URI 或头，再进入�
 
 HTTP 层可领取 API 提供的原始 WebSocket 升级能力，保留验证后的协议与二进制消息。会话读取队列只有一个缓冲槽位，独立读写锁避免收发相互阻塞。成功握手保留 Host 连接登记至会话结束；修改或丢弃握手不启动会话，也不等待传输升级才释放名额。原生 Responses WebSocket 经过 HTTP 层时使用同一握手任务保护，并沿原 create/权限/控制帧/费用链执行。插件停用、Host 排空、对端关闭会及时收敛连接；没有模型调用的自有会话不产生模型费用。
 
-新增 20 项本地 API 合同测试，总计 423 项 API 测试通过，覆盖正常鉴权、method/URI 重新匹配、两层设置来源继承、唯一计费、JSON/SSE 撤销及真实 TCP 的原生/自有会话与握手丢弃。该证据与 Runtime 的真实 SDK 测试分别验证各自边界；完整第三方插件端到端验收仍待完成。`host.http.dispatch` 已接通 HTTP、管理和 request/attempt 阶段，独立 WebSocket 消息中间件已接通，service 中间件以及 upstream_adapter 继续实施，生产启用门禁继续保留。
+新增 20 项本地 API 合同测试，总计 423 项 API 测试通过，覆盖正常鉴权、method/URI 重新匹配、两层设置来源继承、唯一计费、JSON/SSE 撤销及真实 TCP 的原生/自有会话与握手丢弃。该证据与 Runtime 的真实 SDK 测试分别验证各自边界；完整第三方插件端到端验收仍待完成。`host.http.dispatch` 已接通 HTTP、管理和 request/attempt 阶段，独立 WebSocket 消息中间件已接通，service 中间件已接入；upstream_adapter 的生产启用仍须完成验收。
 
 ## Service 运行时桥接
 

@@ -25,7 +25,7 @@ use std::{
 
 // Exercise real preparation/publication while production enablement remains gated.
 // The only bypass is enabled=false during validation; declarations and schemas still validate.
-pub(super) struct CandidateRuntime(pub(super) Arc<PluginEngine>);
+pub(crate) struct CandidateRuntime(pub(crate) Arc<PluginEngine>);
 #[async_trait]
 impl PluginRuntime for CandidateRuntime {
     async fn prepare_state(
