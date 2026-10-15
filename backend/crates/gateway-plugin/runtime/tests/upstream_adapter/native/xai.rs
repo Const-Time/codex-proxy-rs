@@ -12,7 +12,18 @@ use provider_xai::*;
 use std::{sync::Arc, time::Duration};
 
 pub(super) async fn seed(ports: &ProviderStorePorts, id: &ProviderAccountId, access: &str) {
-    let input = GrokCredentialAdmin
+    ports
+        .accounts()
+        .create_account(account(id, access))
+        .await
+        .unwrap();
+}
+
+pub(super) fn account(
+    id: &ProviderAccountId,
+    access: &str,
+) -> gateway_core::account::NewProviderAccount {
+    GrokCredentialAdmin
         .prepare_import(&CreateGrokCredential {
             account_id: id.clone(),
             name: id.to_string(),
@@ -35,8 +46,7 @@ pub(super) async fn seed(ports: &ProviderStorePorts, id: &ProviderAccountId, acc
             initial_error_reason: None,
             initial_error_message: None,
         })
-        .unwrap();
-    ports.accounts().create_account(input).await.unwrap();
+        .unwrap()
 }
 
 // All native services use their real stores. Only external network ports are replaced:

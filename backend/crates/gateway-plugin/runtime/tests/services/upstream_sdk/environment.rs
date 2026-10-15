@@ -60,11 +60,11 @@ impl Environment {
     pub async fn with_login_admin() -> Option<Self> {
         Self::with_admin_username(None, "sdk-fixture@fixture.test", vec![]).await
     }
-    pub async fn with_login_admin_and_openai_accounts(
-        url: &str,
+    pub async fn with_login_admin_and_accounts(
+        url: Option<&str>,
         accounts: Vec<gateway_core::account::NewProviderAccount>,
     ) -> Option<Self> {
-        Self::with_admin_username(Some(url), "sdk-fixture@fixture.test", accounts).await
+        Self::with_admin_username(url, "sdk-fixture@fixture.test", accounts).await
     }
     async fn with_admin_username(
         url: Option<&str>,

@@ -2,7 +2,12 @@
 use super::super::execution::Server;
 use super::websocket::Socket;
 use crate::services::upstream_sdk::environment::Environment;
-use crate::support::{actor, api::ApiServer, update, upstream_archive_contract};
+use crate::support::{
+    actor,
+    api::ApiServer,
+    update, upstream_archive_contract,
+    xai::{Proxy, Trust},
+};
 use futures::{SinkExt as _, StreamExt as _};
 use gateway_admin::{
     model::{
@@ -17,6 +22,7 @@ use gateway_plugin_runtime::PluginEngine;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -63,15 +69,15 @@ fn manager(env: &Environment) -> Arc<PluginManager> {
     ))
 }
 
-fn configuration(url: &str, websocket: bool) -> Value {
+fn configuration(url: &str, websocket: bool, provider: &str, model: &str) -> Value {
     json!({"adapter_url":url,"adapter_transport":if websocket {"websocket"} else {"http_sse"},
-        "adapter_models":["gpt-5.4"]})
+        "adapter_provider":provider,"adapter_models":[model]})
 }
 
-fn input(allowed: &str, websocket: bool) -> Value {
-    json!({"model":"gpt-5.4","input":"native adapter API","fixture_api":true,
+fn input(allowed: &str, websocket: bool, model: &str) -> Value {
+    json!({"model":model,"input":"native adapter API","fixture_api":true,
         "behavior":if websocket {"websocket"} else {"http"},
-        "fixture_account":allowed,"fixture_credential_revision":1,"fixture_model":"gpt-5.4"})
+        "fixture_account":allowed,"fixture_credential_revision":1,"fixture_model":model})
 }
 
 async fn http_model(api: &ApiServer, authorization: &str, mut body: Value, stream: bool) {
@@ -150,10 +156,10 @@ async fn websocket_model(api: &ApiServer, authorization: &str, mut body: Value) 
     socket.close(None).await.unwrap();
 }
 
-async fn settled(env: &Environment, count: i64, key: &str, account: &str) {
+async fn settled(env: &Environment, count: i64, key: &str, account: &str, provider: &str) {
     let ports = env.store.provider_ports();
     let key = gateway_core::policy::ClientApiKeyId::new(key).unwrap();
-    let provider = gateway_core::identity::ProviderKind::new("openai").unwrap();
+    let provider = gateway_core::identity::ProviderKind::new(provider).unwrap();
     let accounts = [gateway_core::account::ProviderAccountId::new(account).unwrap()];
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -188,6 +194,42 @@ async fn settled(env: &Environment, count: i64, key: &str, account: &str) {
 
 #[tokio::test]
 async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_and_websocket() {
+    run("openai", None).await;
+}
+
+#[tokio::test]
+async fn normal_xai_v1_v2_adapters_charge_native_ledger_through_api_restore_and_upgrade() {
+    let root = match std::env::var_os("CPR_NATIVE_XAI_TRUST") {
+        Some(root) => PathBuf::from(root),
+        None => {
+            for key in ["CPR_TEST_DATABASE_URL", "CPR_TEST_REDIS_URL"] {
+                if std::env::var_os(key).is_none() {
+                    let ci = std::env::var("CI")
+                        .ok()
+                        .is_some_and(|v| !matches!(v.as_str(), "" | "false" | "0"));
+                    assert!(
+                        !ci,
+                        "{key} is required for native xAI API integration tests in CI"
+                    );
+                    return;
+                }
+            }
+            Trust::new().run_with_timeout(
+                "upstream_adapter::native::api::normal_xai_v1_v2_adapters_charge_native_ledger_through_api_restore_and_upgrade",
+                Duration::from_secs(180),
+            ).await;
+            return;
+        }
+    };
+    run("xai", Some(&root)).await;
+}
+
+async fn run(provider: &str, root: Option<&Path>) {
+    let model = if provider == "xai" {
+        "grok-4.5"
+    } else {
+        "gpt-5.4"
+    };
     for contract in [1, 2] {
         for websocket in [false, true] {
             eprintln!("adapter v{contract}, upstream websocket={websocket}: enable/API");
@@ -195,12 +237,35 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             let socket = Socket::new(false, false).await;
             let allowed = format!("acct_allowed_{}", uuid::Uuid::new_v4().simple());
             let forbidden = format!("acct_forbidden_{}", uuid::Uuid::new_v4().simple());
-            let Some(mut env) = Environment::with_login_admin_and_openai_accounts(
-                &http.url,
-                vec![
-                    account(&allowed, "fixture-provider-secret"),
-                    account(&forbidden, "fixture-forbidden-secret"),
-                ],
+            let url = if websocket { &socket.url } else { &http.url };
+            let proxy = if let Some(root) = root {
+                Some(Proxy::start(root, &format!("subject-{allowed}"), url, "api").await)
+            } else {
+                None
+            };
+            let accounts = [
+                (&allowed, "fixture-provider-secret"),
+                (&forbidden, "fixture-forbidden-secret"),
+            ]
+            .into_iter()
+            .map(|(id, token)| {
+                if let Some(proxy) = &proxy {
+                    let mut prepared = super::xai::account(
+                        &gateway_core::account::ProviderAccountId::new(id.clone()).unwrap(),
+                        token,
+                    );
+                    prepared.account = prepared.account.with_outbound_proxy(Some(
+                        gateway_core::account::OutboundProxy::parse(&proxy.url).unwrap(),
+                    ));
+                    prepared
+                } else {
+                    account(id, token)
+                }
+            })
+            .collect();
+            let Some(mut env) = Environment::with_login_admin_and_accounts(
+                (provider == "openai").then_some(http.url.as_str()),
+                accounts,
             )
             .await
             else {
@@ -221,9 +286,8 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                 .await
                 .unwrap();
             assert!(artifact.unsupported_capabilities.is_empty());
-            let url = if websocket { &socket.url } else { &http.url };
             let mut command = update(&artifact.sha256, 0, true);
-            command.configuration = configuration(url, websocket);
+            command.configuration = configuration(url, websocket, provider, model);
             command.upstream_adapter = Some(PluginUpstreamAdapterBinding {
                 scope: PluginExecutionScope::All {},
             });
@@ -271,7 +335,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                         color: AccountGroupColor::parse("#2563EBFF").unwrap(),
                         budget: Default::default(),
                         model_multipliers: BTreeMap::from([(
-                            "gpt-5.4".into(),
+                            model.into(),
                             GroupModelMultiplier::All("1.5".into()),
                         )]),
                     },
@@ -319,7 +383,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                 .unwrap();
             let authorization = format!("Bearer {}", key.secret.expose_for_response());
             let mut api = ApiServer::new(&env, plugins.clone()).await;
-            let body = input(&allowed, websocket);
+            let body = input(&allowed, websocket, model);
             let denied = api
                 .client
                 .post(format!("http://{}/v1/responses", api.address))
@@ -332,7 +396,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             http_model(&api, &authorization, body.clone(), false).await;
             http_model(&api, &authorization, body.clone(), true).await;
             websocket_model(&api, &authorization, body.clone()).await;
-            settled(&env, 3, key.secret.record.id.as_str(), &allowed).await;
+            settled(&env, 3, key.secret.record.id.as_str(), &allowed, provider).await;
             let raw = "{ \"future\": 9007199254740993, \"text\": \"雪☃\", \"status\": \"completed\", \"id\": \"adapter-response\" }\n";
             for (index, (mode, status)) in [("chunks", 200), ("tail-fault", 502)]
                 .into_iter()
@@ -368,6 +432,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                     4 + index as i64,
                     key.secret.record.id.as_str(),
                     &allowed,
+                    provider,
                 )
                 .await;
             }
@@ -381,14 +446,14 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             assert_eq!(plugins.list().await.unwrap()[0].status, "ready");
             let mut api = ApiServer::new(&env, plugins.clone()).await;
             http_model(&api, &authorization, body.clone(), false).await;
-            settled(&env, 6, key.secret.record.id.as_str(), &allowed).await;
+            settled(&env, 6, key.secret.record.id.as_str(), &allowed, provider).await;
 
             let replacement = plugins
                 .upload(upstream_archive_contract("1.0.1", 3 - contract), &actor())
                 .await
                 .unwrap();
             let mut command = update(&replacement.sha256, installed.revision, true);
-            command.configuration = configuration(url, websocket);
+            command.configuration = configuration(url, websocket, provider, model);
             command.upstream_adapter = installed.upstream_adapter.clone();
             let upgraded = plugins
                 .update(Some(&installed.id), command, &actor())
@@ -397,7 +462,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             eprintln!("adapter v{contract}, upstream websocket={websocket}: upgraded/API");
             assert_eq!(upgraded.revision, installed.revision + 1);
             http_model(&api, &authorization, body, false).await;
-            settled(&env, 7, key.secret.record.id.as_str(), &allowed).await;
+            settled(&env, 7, key.secret.record.id.as_str(), &allowed, provider).await;
 
             let requests: Vec<(String,String,String,String,bool)> = sqlx::query_as(
                 "SELECT provider_kind,provider_account_id,client_api_key_ref,upstream_transport,\
@@ -416,7 +481,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                 vec![("failed".into(), 1), ("succeeded".into(), 6)]
             );
             for row in requests {
-                assert_eq!(row.0, "openai");
+                assert_eq!(row.0, provider);
                 assert_eq!(row.1, allowed);
                 assert_eq!(row.2, key.secret.record.id.to_string());
                 assert_eq!(row.3, if websocket { "websocket" } else { "http_sse" });
@@ -450,7 +515,14 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                 assert_eq!(socket.pings.load(Ordering::SeqCst), 7);
                 for headers in socket.headers.lock().unwrap().iter() {
                     assert_eq!(headers["authorization"], "Bearer fixture-provider-secret");
-                    assert_eq!(headers["chatgpt-account-id"], format!("chatgpt-{allowed}"));
+                    if provider == "xai" {
+                        assert_eq!(headers["x-grok-user-id"], format!("subject-{allowed}"));
+                        assert_eq!(headers["x-xai-token-auth"], "xai-grok-cli");
+                        assert!(!headers.contains_key("chatgpt-account-id"));
+                    } else {
+                        assert_eq!(headers["chatgpt-account-id"], format!("chatgpt-{allowed}"));
+                    }
+                    assert!(!headers.contains_key("cookie"));
                 }
             } else {
                 let requests = http.requests.lock().unwrap();
@@ -458,7 +530,16 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                 for request in &requests[initial_requests..] {
                     assert!(request.contains("authorization: Bearer fixture-provider-secret"));
                     assert!(request.contains("x-fixture: adapter"));
-                    assert!(request.contains(&format!("chatgpt-account-id: chatgpt-{allowed}")));
+                    if provider == "xai" {
+                        assert!(request.contains(&format!("x-grok-user-id: subject-{allowed}")));
+                        assert!(request.contains("x-xai-token-auth: xai-grok-cli"));
+                        assert!(!request.contains("chatgpt-account-id"));
+                    } else {
+                        assert!(
+                            request.contains(&format!("chatgpt-account-id: chatgpt-{allowed}"))
+                        );
+                    }
+                    assert!(!request.contains("cookie:"));
                     assert!(!request.contains("fixture-forbidden-secret"));
                 }
                 assert_eq!(socket.pings.load(Ordering::SeqCst), 0);
@@ -469,6 +550,29 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             drop(plugins);
             drop(resources);
             env.close().await;
+            if let Some(proxy) = proxy {
+                let events = proxy.events();
+                let catalog: Vec<_> = events
+                    .iter()
+                    .filter(|event| event["kind"] == "catalog")
+                    .collect();
+                assert!(
+                    catalog.iter().any(|event| event["path"] == "/v1/models"),
+                    "native startup must fetch the real Provider catalog"
+                );
+                assert!(catalog.iter().all(|event| event["authorization"] == true));
+                assert!(
+                    !events.iter().any(|event| event["kind"] == "forbidden"),
+                    "only owned offline endpoints may be contacted: {events:?}"
+                );
+                let sends: Vec<_> = events
+                    .iter()
+                    .filter(|event| event["kind"] == "inference")
+                    .collect();
+                assert_eq!(sends.len(), 7, "each API request must send exactly once");
+                assert!(sends.iter().all(|event| event["authorization"] == true));
+                proxy.stop().await;
+            }
         }
     }
 }

@@ -143,7 +143,9 @@ upstream 阶段的私有状态、普通/流式模型调用，以及 `host.http.d
 
 正常 JSON/SSE/WS 和原生模型调用入口将同一管理发布快照传入 Core。匹配依据宿主冻结的 Key、分组及公开模型，排除全部发起插件祖先；匹配但未恢复的实例保留拒绝门禁，不能悄悄走原生执行。成功选中的进程撤销加入同一请求取消链；停用、配置替换或保存结果不确定时撤销旧发布。未匹配的进程撤销不加入当前请求。
 
-执行回归使用真实 SDK 子进程和本地 HTTP/WebSocket 服务；管理发布、原生 Provider 及重启恢复均使用生产 PluginEngine 校验和正常启用，已删除临时修改 enabled 的测试 Runtime。真实 Core、原生 OpenAI/xAI Provider、PostgreSQL/Redis 账号协调与 SDK 子进程的 HTTP 回归已验证冻结分组权限、各 Provider 的受管认证头、实际档位和本地定价倍率、唯一费用结算、尾部故障禁止重放，以及用户取消、Key 撤权和插件停用后的原租约释放。xAI 使用原凭据仓库、选择器、额度投影及失败反馈，外部网络端口由测试替换；已解析的上游限流进入原账号冷却，插件 RPC 故障不降低账号资格。两家 Provider 的持久化续接均通过原 Redis 仓库恢复：同 Key/账号及插件代次可继续，另一有效 Key 在准入前拒绝；升级后旧状态在出站前拒绝，新请求仍可正常执行。执行记录和费用由原测试端口观测，不能将这些回归等同于完整 PostgreSQL 账本验收。Core 观测端推进混合 canonical/wire 帧中的序列事实，防止漏记开始或完成；wire 帧仍不受旁路事实的交付门禁约束。Core 的 WebSocket 客户端传输元数据、两家原生 Provider、SDK 与 Host 受管 WS 已联合验证同连接多轮续接、取消读取后恢复、唯一结算，以及取消/撤权/停用关闭在途和空闲连接。插件进程重启及原凭据 CAS 推进版本后，旧状态在出站前返回 `previous_response_not_found` 并要求客户端用完整输入重建；同一旧连接的并发领取只有一方成功，失败方不关闭胜出请求保留的连接。实例、Key、账号、凭据版本和进程归属不符均采用明确的客户端重放语义，Core 不对此内部重放。原生 OpenAI 的真实 API JSON/SSE/客户端 WS、HTTP/WS 上游与 PostgreSQL 账本已联合验收 v1/v2：原用户 Key 仅访问授权分组账号，沿原 Store writers 保存用量、冻结 1.5 分组倍率、唯一共享扣费和日/周窗口；正常进程恢复及 v1/v2 双向版本切换后仍可执行。测试单独核对 v1 disable_fast 和 v2 fast_mode 请求元数据，不改 SDK。该证据不代替 xAI 的完整 API/账本、其余宿主回调和目标第三方业务验收；这些项目继续按原清单完成。管理页面可直接保存和启用受支持版本的绑定。
+执行回归使用真实 SDK 子进程和本地 HTTP/WebSocket 服务；管理发布、原生 Provider 及重启恢复均使用生产 PluginEngine 校验和正常启用，已删除临时修改 enabled 的测试 Runtime。真实 Core、原生 OpenAI/xAI Provider、PostgreSQL/Redis 账号协调与 SDK 子进程的 HTTP 回归已验证冻结分组权限、各 Provider 的受管认证头、实际档位和本地定价倍率、唯一费用结算、尾部故障禁止重放，以及用户取消、Key 撤权和插件停用后的原租约释放。xAI 使用原凭据仓库、选择器、额度投影及失败反馈，外部网络端口由测试替换；已解析的上游限流进入原账号冷却，插件 RPC 故障不降低账号资格。两家 Provider 的持久化续接均通过原 Redis 仓库恢复：同 Key/账号及插件代次可继续，另一有效 Key 在准入前拒绝；升级后旧状态在出站前拒绝，新请求仍可正常执行。执行记录和费用由原测试端口观测，不能将这些回归等同于完整 PostgreSQL 账本验收。Core 观测端推进混合 canonical/wire 帧中的序列事实，防止漏记开始或完成；wire 帧仍不受旁路事实的交付门禁约束。Core 的 WebSocket 客户端传输元数据、两家原生 Provider、SDK 与 Host 受管 WS 已联合验证同连接多轮续接、取消读取后恢复、唯一结算，以及取消/撤权/停用关闭在途和空闲连接。插件进程重启及原凭据 CAS 推进版本后，旧状态在出站前返回 `previous_response_not_found` 并要求客户端用完整输入重建；同一旧连接的并发领取只有一方成功，失败方不关闭胜出请求保留的连接。实例、Key、账号、凭据版本和进程归属不符均采用明确的客户端重放语义，Core 不对此内部重放。
+
+原生 OpenAI 与 xAI 的真实 API JSON/SSE/客户端 WS、HTTP/WS 上游与 PostgreSQL 账本已联合验收适配器 v1/v2：原用户 Key 仅访问授权分组账号，沿原 Store writers 保存用量、冻结 1.5 分组倍率、逐请求唯一共享扣费和日/周窗口；PluginManager 从原数据库恢复实例及 v1/v2 双向合同切换后仍可执行。RawBody 成功保留原始正文；RPC 尾部失败返回错误，已确认费用仍在同一原账本准确结算，实际出站不重放。测试分别使用原生 Provider 初始化；xAI 的正式目录地址经账号实际代理访问受控 TLS 服务，推理使用原生 Grok 认证头与受管传输，不替换 Provider 网络端口或 Core。测试单独核对 v1 disable_fast 和 v2 fast_mode 请求元数据，不改 SDK。证据限定于这些受控上游场景，其他 xAI 故障和生命周期变体、其余宿主回调及目标第三方完整业务仍按原清单验收。管理页面可直接保存和启用受支持版本的绑定。
 
 ## HTTP 运行时桥接
 
@@ -403,7 +405,7 @@ PostgreSQL 执行记录已具备持续恢复租约：复用原 running 行，延
 
 普通请求默认没有总时长上限。Core 请求分支可显式设置非负毫秒数，始终从原请求开始时间计算；null 移除总期限，改写不更换身份、取消信号或费用归属。OpenAI 文本/Images/Search 与 xAI 推理/压缩均传递可选截止时间，连接预算、握手和接收空闲超时仍各自生效。插件页面桥保留 10 分钟调用限制，RPC 保留单次调用上限。
 
-Provider 账号调度槽位现已随其 fenced guard 自动续期；不会重新选号、增加并发数、重置调度间隔或获得新的 fencing token。释放前停止续期，租约丢失取消原请求，显式期限到达由 Core 判定 timeout。PostgreSQL 的 deadline_at 用于有限恢复租约，不以虚构远期时间表示无限执行。SDK request 设置值与来源视图已接线；生产 middleware 门禁继续保留，等待其余声明范围完成。
+Provider 账号调度槽位现已随其 fenced guard 自动续期；不会重新选号、增加并发数、重置调度间隔或获得新的 fencing token。释放前停止续期，租约丢失取消原请求，显式期限到达由 Core 判定 timeout。PostgreSQL 的 deadline_at 用于有限恢复租约，不以虚构远期时间表示无限执行。SDK request 设置值与来源视图已接线；middleware v4 已允许正常启用，其余合同和第三方业务继续按支持范围验收。
 
 
 ### SDK 执行设置传递

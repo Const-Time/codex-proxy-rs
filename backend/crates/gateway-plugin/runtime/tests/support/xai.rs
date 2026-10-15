@@ -16,7 +16,7 @@ impl Trust {
         let root = directory.path();
         std::fs::create_dir(root.join("empty-roots")).unwrap();
         std::fs::write(root.join("ca.conf"), "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ca\n[dn]\nCN=CPR owned offline xAI fixture\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n").unwrap();
-        std::fs::write(root.join("server.ext"), "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:auth.x.ai\n").unwrap();
+        std::fs::write(root.join("server.ext"), "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:auth.x.ai,DNS:cli-chat-proxy.grok.com\n").unwrap();
         for args in [
             vec![
                 "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config",
@@ -66,6 +66,9 @@ impl Trust {
         Self { directory }
     }
     pub async fn run(&self, name: &str) {
+        self.run_with_timeout(name, Duration::from_secs(60)).await;
+    }
+    pub async fn run_with_timeout(&self, name: &str, timeout: Duration) {
         let root = self.directory.path();
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
         child
@@ -74,7 +77,7 @@ impl Trust {
             .env("SSL_CERT_FILE", root.join("ca.pem"))
             .env("SSL_CERT_DIR", root.join("empty-roots"))
             .kill_on_drop(true);
-        let output = tokio::time::timeout(Duration::from_secs(60), child.output())
+        let output = tokio::time::timeout(timeout, child.output())
             .await
             .expect("isolated native xAI case must finish")
             .unwrap();
@@ -101,8 +104,9 @@ impl Proxy {
     pub async fn start(root: &Path, subject: &str, inference: &str, mode: &str) -> Self {
         let script = root.join("proxy.py");
         std::fs::write(&script, include_str!("xai.py")).unwrap();
-        let log = root.join("proxy.jsonl");
-        let config = root.join("proxy.json");
+        let id = uuid::Uuid::new_v4().simple();
+        let log = root.join(format!("proxy-{id}.jsonl"));
+        let config = root.join(format!("proxy-{id}.json"));
         std::fs::write(
             &config,
             serde_json::to_vec(
