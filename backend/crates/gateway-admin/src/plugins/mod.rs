@@ -49,6 +49,7 @@ pub struct PluginManager {
     active: RwLock<ActivePlugins>,
     maintenance_changed: tokio::sync::Notify,
     stopping: gateway_core::lifecycle::CancellationToken,
+    retirements: std::sync::Mutex<Vec<Shutdown>>,
     shutdown: std::sync::Mutex<Option<Shutdown>>,
 }
 impl PluginManager {
@@ -65,6 +66,7 @@ impl PluginManager {
             active: RwLock::new(BTreeMap::new()),
             maintenance_changed: tokio::sync::Notify::new(),
             stopping: Default::default(),
+            retirements: std::sync::Mutex::default(),
             shutdown: std::sync::Mutex::default(),
         }
     }
@@ -165,6 +167,19 @@ impl PluginManager {
         self.maintenance_changed.notify_one();
         Ok(())
     }
+    // Updates revoke old publications immediately and drain them asynchronously.
+    // Keep that same stop future owned until shutdown, including when an update
+    // caller or an earlier shutdown waiter disappears.
+    fn retire(&self, process: Arc<dyn PluginProcess>) {
+        let retirement = async move { process.stop().await }.boxed().shared();
+        let mut retirements = self
+            .retirements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retirements.retain(|task| task.peek().is_none());
+        retirements.push(retirement.clone());
+        tokio::spawn(retirement);
+    }
     pub async fn shutdown(&self) {
         self.stopping.cancel();
         let _guard = self.changes.lock().await;
@@ -193,12 +208,18 @@ impl PluginManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         let runtime = self.runtime.clone();
+        let retirements = std::mem::take(
+            &mut *self
+                .retirements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         let shutdown = async move {
-            futures::future::join_all(active.into_values().map(|(_, p)| async move {
+            let active = futures::future::join_all(active.into_values().map(|(_, p)| async move {
                 p.revoke();
                 p.stop().await;
-            }))
-            .await;
+            }));
+            futures::join!(active, futures::future::join_all(retirements));
             runtime.shutdown().await;
         }
         .boxed()
@@ -579,9 +600,7 @@ impl PluginService for PluginManager {
                         .remove(&record.id);
                     if let Some((_, old)) = old {
                         old.revoke();
-                        tokio::spawn(async move {
-                            old.stop().await;
-                        });
+                        self.retire(old);
                     }
                     self.maintenance_changed.notify_one();
                 }
@@ -625,9 +644,7 @@ impl PluginService for PluginManager {
         };
         self.maintenance_changed.notify_one();
         if let Some((_, old)) = old {
-            tokio::spawn(async move {
-                old.stop().await;
-            });
+            self.retire(old);
         }
         self.view(record).await
     }
@@ -660,9 +677,7 @@ impl PluginService for PluginManager {
             .remove(id);
         if let Some((_, old)) = old {
             old.revoke();
-            tokio::spawn(async move {
-                old.stop().await;
-            });
+            self.retire(old);
         }
         self.maintenance_changed.notify_one();
         Ok(())

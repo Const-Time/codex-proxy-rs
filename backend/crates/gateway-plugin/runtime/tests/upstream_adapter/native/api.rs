@@ -250,7 +250,7 @@ async fn run(provider: &str, root: Option<&Path>) {
             .into_iter()
             .map(|(id, token)| {
                 if let Some(proxy) = &proxy {
-                    let mut prepared = super::xai::account(
+                    let mut prepared = crate::support::xai::account(
                         &gateway_core::account::ProviderAccountId::new(id.clone()).unwrap(),
                         token,
                     );

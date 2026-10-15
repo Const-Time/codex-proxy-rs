@@ -9,6 +9,7 @@ import ssl
 import sys
 import threading
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 
 config = json.loads(pathlib.Path(sys.argv[1]).read_text())
 root = pathlib.Path(config["root"])
@@ -20,6 +21,11 @@ context.load_cert_chain(root / "server.pem", root / "server.key")
 context.set_alpn_protocols(["http/1.1"])
 verified = "fixture-xai-verified-token"
 candidate = "fixture-xai-candidate-token"
+quota_release = threading.Event()
+
+
+def is_catalog_mode():
+    return config["mode"] in {"api", "quota", "quota-wait"}
 
 
 def event(kind, **fields):
@@ -49,7 +55,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         allowed = {"auth.x.ai:443"}
-        if config["mode"] == "api":
+        if is_catalog_mode():
             allowed.add("cli-chat-proxy.grok.com:443")
         if self.path not in allowed:
             event("forbidden", target=self.path)
@@ -120,7 +126,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def catalog(self):
         authorization = self.headers.get("Authorization")
         valid = authorization in {"Bearer fixture-provider-secret", "Bearer fixture-forbidden-secret"}
-        event("catalog", path=self.path, authorization=valid)
+        event("catalog", path=self.path, authorization=valid,
+              subject=self.headers.get("x-userid") == config["subject"],
+              token_auth=self.headers.get("x-xai-token-auth") == "xai-grok-cli")
         if not valid:
             self.json_reply(401, {})
         elif self.path == "/v1/models":
@@ -130,9 +138,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "apiBackend": "responses", "supportedInApi": True,
             }]})
         elif self.path == "/v1/billing?format=credits":
-            self.json_reply(200, {"config": {"creditUsagePercent": 25}})
+            if config["mode"] == "quota-wait" and not quota_release.wait(15):
+                self.json_reply(504, {})
+                return
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            stamp = lambda value: value.isoformat().replace("+00:00", "Z")
+            self.json_reply(200, {"config": {"creditUsagePercent": 25,
+                "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": stamp(now - timedelta(days=1)), "end": stamp(now + timedelta(days=6))},
+                "futureWindow": {"kind": "rolling"}}})
         elif self.path == "/v1/user?include=subscription":
-            self.json_reply(200, {"subscriptionTier": "SuperGrokPro"})
+            self.json_reply(200, {"userId": "fixture-native-user", "email": "fixture-private@example.test", "subscriptionTier": "SuperGrokPro"})
         else:
             event("forbidden", target=self.path)
             self.json_reply(403, {})
@@ -141,7 +157,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(self.connection, ssl.SSLSocket):
             self.forward()
             return
-        if config["mode"] == "api" and self.headers.get("Host") == "cli-chat-proxy.grok.com":
+        if is_catalog_mode() and self.headers.get("Host") == "cli-chat-proxy.grok.com":
             self.catalog()
             return
         if self.path == "/.well-known/openid-configuration":
@@ -167,6 +183,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.json_reply(403, {})
 
     def do_POST(self):
+        if not isinstance(self.connection, ssl.SSLSocket) and config["mode"] == "quota-wait" and self.path == "/__fixture/release":
+            quota_release.set()
+            self.json_reply(200, {})
+            return
         if not isinstance(self.connection, ssl.SSLSocket):
             self.forward()
             return

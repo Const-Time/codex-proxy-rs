@@ -152,3 +152,33 @@ impl Proxy {
         let _ = self.child.wait().await.unwrap();
     }
 }
+
+pub(crate) fn account(
+    id: &gateway_core::account::ProviderAccountId,
+    access: &str,
+) -> gateway_core::account::NewProviderAccount {
+    provider_xai::GrokCredentialAdmin
+        .prepare_import(&provider_xai::CreateGrokCredential {
+            account_id: id.clone(),
+            name: id.to_string(),
+            secret: provider_xai::GrokOAuthSecret {
+                access_token: provider_xai::SecretValue::new(access),
+                refresh_token: provider_xai::SecretValue::new("fixture-refresh-token"),
+                id_token: None,
+                scope: provider_xai::OFFICIAL_SCOPES.join(" "),
+            },
+            account: provider_xai::GrokAccountProfile {
+                subject: format!("subject-{id}"),
+                email: None,
+                upstream_account_id: None,
+                plan_type: Some("pro".into()),
+                access_token_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                refresh_token_expires_at: None,
+            },
+            enabled: true,
+            initial_credential_state: gateway_core::account::CredentialState::Ready,
+            initial_error_reason: None,
+            initial_error_message: None,
+        })
+        .unwrap()
+}
