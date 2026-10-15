@@ -3,6 +3,7 @@ use gateway_admin::{model::plugins::*, plugins::PluginManager, ports::plugins::P
 use gateway_core::{engine::middleware::service as core, middleware::compose};
 
 struct Fixture {
+    store: Arc<crate::support::MemoryStore>,
     manager: PluginManager,
     digest: String,
     _cache: tempfile::TempDir,
@@ -13,12 +14,10 @@ impl Fixture {
         let cache = tempfile::tempdir().unwrap();
         let manager = PluginManager::new(
             store.clone(),
-            Arc::new(super::plan::KernelRuntime(
-                gateway_plugin_runtime::PluginEngine::new(
-                    cache.path().into(),
-                    "3.11.2".parse().unwrap(),
-                    store,
-                ),
+            Arc::new(gateway_plugin_runtime::PluginEngine::new(
+                cache.path().into(),
+                "3.11.2".parse().unwrap(),
+                store.clone(),
             )),
         );
         let digest = manager
@@ -30,6 +29,7 @@ impl Fixture {
             .unwrap()
             .sha256;
         let f = Self {
+            store,
             manager,
             digest,
             _cache: cache,
@@ -698,5 +698,36 @@ async fn sdk_local_service_preview_rejects_missing_source_identity() {
     let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
     assert!(value.get("error").is_some(), "{value}");
     assert!(value.get("result").is_none());
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn private_state_callbacks_follow_service_invocation() {
+    let f = Fixture::new().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    for value in 1..=3 {
+        if value == 3 {
+            let context = ctx("private-state");
+            let cancellation = context.cancellation.clone();
+            let plan = f.plan(&context);
+            crate::support::cancel_middleware_state(
+                &f.store,
+                &cancellation,
+                plan.run(context, json!({"value":7}), terminal(calls.clone())),
+            )
+            .await;
+            crate::support::assert_middleware_state(&f.store, &f.manager, "service", 2).await;
+        }
+        let context = ctx("private-state");
+        assert_eq!(
+            f.plan(&context)
+                .run(context, json!({"value":7}), terminal(calls.clone()))
+                .await
+                .unwrap(),
+            json!({"value":7})
+        );
+        crate::support::assert_middleware_state(&f.store, &f.manager, "service", value).await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     f.manager.shutdown().await;
 }

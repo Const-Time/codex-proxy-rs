@@ -19,6 +19,13 @@ use std::{
     },
 };
 
+pub(crate) fn is_state_method(method: &str) -> bool {
+    matches!(
+        method,
+        "host.state.get" | "host.state.put" | "host.state.delete"
+    )
+}
+
 struct Namespace {
     declaration: StateNamespace,
     schema: jsonschema::Validator,
@@ -195,7 +202,7 @@ impl CallbackHandler for Callbacks {
             if !active.load(Ordering::Acquire)
                 || context.instance_id != id
                 || context.generation != revision
-                || !matches!(
+                || !(matches!(
                     context.stage,
                     Stage::Management
                         | Stage::PublicManagement
@@ -207,7 +214,14 @@ impl CallbackHandler for Callbacks {
                         | Stage::Scheduling
                         | Stage::Retry
                         | Stage::Upstream
-                )
+                ) || (matches!(
+                    context.stage,
+                    Stage::Http
+                        | Stage::WebSocket
+                        | Stage::Service
+                        | Stage::Request
+                        | Stage::Attempt
+                ) && is_state_method(&method)))
             {
                 return Err(PluginFault::new(
                     ErrorCode::PermissionDenied,
@@ -437,10 +451,7 @@ impl CallbackHandler for Callbacks {
                 }
                 return Ok(reply);
             }
-            if !matches!(
-                method.as_str(),
-                "host.state.get" | "host.state.put" | "host.state.delete"
-            ) {
+            if !is_state_method(&method) {
                 return Err(PluginFault::new(
                     ErrorCode::Unsupported,
                     "host callback is not implemented by this host",

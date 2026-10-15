@@ -560,7 +560,7 @@ Core 的 `prepare_execution` 为中间件准备一个不可克隆的根请求：
 
 API 持续驱动已开始的 Core 启动过程，不随等待响应的 HTTP/WS 调用方一起丢弃。准入或额度端口可能已产生副作用，启动必须返回后才能把会话移交给响应 owner；调用方已离开或丢弃未领取的结果时，交接守卫把会话交给原有 `detach_finalize`，由 Core 按原请求 ID 结算并释放准入。该交接不轮询 Provider、不提交下游，也不为中间件建立独立费用账本。
 
-Core 的中间件组合器用不可复制的 `Next` 表示一次续体，Runtime 的 v4 RPC 再按父调用 scope 校验单次 `host.middleware.next`、正文读取、事实快照和关闭。正文透传不预读；改写使用 GMB1 来源映射，每个来源只保留一个在途帧，并限制展开数量和总字节。宿主事件信封不序列化为可写权限，也不实现 Clone；一对多改写只把信封交给最后一个输出。信封可携带整个 `CoordinatedEvent` 的批次结束标记，外层 delivery 必须等标记到达后才提交这一批，不能把首个改写输出当成 Core 已提交。
+Core 的中间件组合器用不可复制的 `Next` 表示一次续体，Runtime 的 v4 RPC 再按父调用 scope 校验单次 `host.middleware.next`、正文读取、事实快照和关闭。五个挂载阶段的私有状态回调同样先匹配原绑定的完整 CallContext，并沿其取消及结束信号调用原 PluginStore；通用状态层只为这些阶段开放状态方法，不增加管理操作者或模型权限。正文透传不预读；改写使用 GMB1 来源映射，每个来源只保留一个在途帧，并限制展开数量和总字节。宿主事件信封不序列化为可写权限，也不实现 Clone；一对多改写只把信封交给最后一个输出。信封可携带整个 `CoordinatedEvent` 的批次结束标记，外层 delivery 必须等标记到达后才提交这一批，不能把首个改写输出当成 Core 已提交。
 
 插件处理预算由 SDK 与宿主 RPC 的同一调用期限持有；受管 next 等待期间暂停，结果交付后恢复剩余预算，取消、错误与父调用退出释放暂停。原生宿主回调绑定此预算视图，同时保留原 Core 截止时间，宿主服务的冻结发布与授权不因暂停而重建。资源流初始响应交付后交给原资源 owner 维护；网关总期限、租约续期和撤销仍由原 owner 负责。
 
@@ -568,18 +568,18 @@ RPC End 撤销插件回调句柄，外层响应仍保有原正文的提交和清
 
 HTTP 入口合同单独保留原始请求/响应、惰性数据帧、trailers 和宿主扩展，不借用已鉴权的 request 正文。认证前上下文只持有宿主调用 ID、祖先排除、取消和期限，不虚构 Key 或管理身份。Admin 从同一发布快照冻结 HTTP 计划，匹配实例故障时保持门禁；响应正文在 RPC 返回后继续检查撤销，取消或期限到达立即释放原正文。升级响应保留尚未启动的会话任务，只有原握手状态成功交付后才可领取一次；响应被替换或丢弃时释放任务。HTTP Runtime RPC 已使用同一调用注册表接通真实 SDK：原响应部件通过不透明句柄一次转移，正文读取保留未读帧，上传管道只有一个缓冲槽位，最多保留 32 个正文和 16 个上传管道。RPC End 撤销回调，原资源池保留到响应所有权转移或流终态，不提前破坏透传句柄。非法协议使原进程进入故障状态，须显式重启恢复；业务拒绝和原始传输错误不改写为协议故障。升级会话只接受原握手状态和响应句柄，收发继续受原调用取消及期限约束。API 为宿主登录、插件安装管理及其固定页面/静态资产保留恢复入口，继续使用原 Router、鉴权、审计与存储提交；插件调用及模型接口不获豁免。内部恢复请求仍保有原图名额和取消/期限。其他入口在路由匹配前运行 HTTP 计划，method/URI 改写重新进入原 Router，并在正常鉴权后把运行设置 rebase 到原 Key 快照；不在 HTTP 阶段签发 Key 执行身份。request/attempt 复用同一发布快照及取消链，原 Core 仍唯一拥有权限、费用和终态。惰性响应保留 HTTP 调用寿命至 EOF/错误/丢弃；原生和插件自有升级只由保留原握手的任务启动。升级待领取 future 持有 Host 连接 guard，握手改写或丢弃即可释放名额；成功升级后 guard 归会话持有，停用、Host 排空或对端关闭收敛连接。API 合同已通过本地真实 Router/Core/TCP 测试；HTTP、管理及 request/attempt 阶段的宿主主动分派已接线，独立 WebSocket 消息中间件已接入原生和插件自有会话，service Runtime 执行桥已接通冻结计划、单次 next 和类型化 JSON Result，输入在原服务前解码、输出在返回调用者前解码；管理员 API Key 查询、生成、删除，以及本地设置/定价七项服务已从正常鉴权后的 HTTP 入口接入，使用管理审计签发的 request ID。写入终端拒绝改写审计身份，原 SettingsService 仍拥有持久化与配置发布；取消等待不丢弃已进入的写入，原图名额保留到完成，结果不确定时沿用 50202。管理和已授权 service 层的 host.services.call 沿同一图调用这些业务，SDK 操作者字段按公共或显式本地合同投影，实际审计使用终端单独持有的真实身份。管理 RPC 的模型/HTTP 回调继承入口图和冻结端口，RPC 结束撤销旧授权；本地设置和定价使用 local.settings.v1 合同保留订阅开关、分项倍率、同步策略及来源哈希，原上游同名完整设置不被本地类型冒充；其他阶段仍待接入，生产启用门禁不变。内部 HTTP 子调用复用 Core 的 ExtensionCallScope，发起实例和所有祖先由宿主排除；8 层、16 活跃、64 总调用的限制与模型子调用使用同一图。API 验证父调用关联及图身份，进入原 Router 正常鉴权，不构造管理员身份。HTTP 响应/会话保有调用名额直到传输终态，Core 模型结算不得提前归还 HTTP 名额。宿主分派可能写入状态，沿同一 Core 副作用标记阻止父模型请求重放。Runtime 的 next 和主动分派复用惰性正文池和不透明响应部件；子调用故障可由插件处理，原 next 和原始输入/响应正文故障仍保持原保护。
 
-Admin 发布中间件绑定的同一份实例事实，Store 的 0031 迁移只追加 JSON 绑定字段；绑定不会进入插件握手或敏感配置。调用计划按宿主身份和挂载点筛选，固定顺序、进程及 generation，并关联发布 epoch 和进程撤销信号。状态不确定时关闭调用门禁；候选准备失败不修改已发布计划；恢复失败保留匹配范围的必需层。计划外层正文继续检查撤销并把 commit/status/close 委托原 owner，禁止在 RPC End 后使用旧代透传响应提交。API 在准备根请求前取得一次发布快照，绑定撤销信号与 Core 原请求和响应访问守卫。生产启用仍需其余声明范围的 API/Provider 适配完成。
+Admin 发布中间件绑定的同一份实例事实，Store 的 0031 迁移只追加 JSON 绑定字段；绑定不会进入插件握手或敏感配置。调用计划按宿主身份和挂载点筛选，固定顺序、进程及 generation，并关联发布 epoch 和进程撤销信号。状态不确定时关闭调用门禁；候选准备失败不修改已发布计划；恢复失败保留匹配范围的必需层。计划外层正文继续检查撤销并把 commit/status/close 委托原 owner，禁止在 RPC End 后使用旧代透传响应提交。API 在准备根请求前取得一次发布快照，绑定撤销信号与 Core 原请求和响应访问守卫。middleware v4 已允许正常启用；API 各挂载保留同一冻结计划和原 Provider/结算职责。
 
 Responses HTTP 的 request 适配先完成入口鉴权与解码，再运行冻结的中间件计划；传入插件及返回 Core 的请求头均复用现有受管头和逐跳头过滤。插件改写后重新解码模型、正文及续接信息，但不能切换客户端 JSON/SSE 传输，Key、请求 ID、诊断身份与截止时间由原准备结果保留。无匹配层时使用现有透明响应路径。
 
-非空计划把原 ExecutionSession 包成尚未提交的 JSON/SSE 正文。JSON 信封保留全部原事件；SSE 保留每个 Core 原子批次边界。最外层验证整个改写批次后才提交，首批为空、非法 JSON/SSE 或终态缺失不能确认交付；单批最多 1024 帧及 8 MiB，JSON 总正文最多 8 MiB。提交和结算继续委托 Core，终态输出前完成原终结；插件改写失败、撤销或下游离开都通过原清理 owner 释放名额并保留已产生费用，不重放 Provider。此接入由真实 Core、路由与管理发布测试覆盖，仍不等于开放 middleware 安装启用。
+非空计划把原 ExecutionSession 包成尚未提交的 JSON/SSE 正文。JSON 信封保留全部原事件；SSE 保留每个 Core 原子批次边界。最外层验证整个改写批次后才提交，首批为空、非法 JSON/SSE 或终态缺失不能确认交付；单批最多 1024 帧及 8 MiB，JSON 总正文最多 8 MiB。提交和结算继续委托 Core，终态输出前完成原终结；插件改写失败、撤销或下游离开都通过原清理 owner 释放名额并保留已产生费用，不重放 Provider。此接入由真实 Core、路由与管理发布测试覆盖，middleware v4 安装启用使用正常 PluginEngine 校验器。
 
 
 Core 的 RequestObserverPlan 由请求准备结果强持有冻结计划，原生子调用继承同一端口和真实插件祖先；不建立第二份发布索引。终态事实只从原 ModelRequestFinalization 投影，不携带原始错误、凭据或诊断正文；未知费用保留 unknown 和空金额。原 Provider 已建立的最后一次 attempt 提供账号和模型事实，后续选号失败不回退到候选或虚构账号。终态写入、费用结算和准入释放完成后只投递一次，读取等待取消后继续原会话清理，观察端口不增加业务取消源。实际上游 WebSocket 事件在中间件之前读取；原失败批次仅在 Provider 流边界观察一次，重试丢弃和终态重用均不重复派发。事件序号跨 attempt 连续，判断使用实际上游 transport，客户端协议不代替上游事实。计划必须同步提交有界后台工作，不在 Core 内等待插件 RPC；Runtime 用现有 RPC 限额编译冻结的实际进程订阅，按顺序、插件和实例 ID 投递；终态、WebSocket worker、每请求队列和全局原始帧字节分别有界，单次调用最多两秒。队列只保留 SDK 元数据、受限原始载荷和原调用图，不重复保留整份 Core wire。完成事件先关闭帧队列，再尝试终态投递；worker 对队列表仅持弱引用，空闲时监听实际匹配订阅者的撤销，其他实例的存活不保活已撤销队列。RPC 绑定宿主签发的原进程身份、冻结 service 工厂和独立观察期限，显式缺失工厂不会查询后来发布；取消与错误只结束观察作用域，不影响业务取消或结算。Admin 在原 Publication 中保存 observer 绑定并共享编译计划，API 在原 RootPlan 挂载该端口，原生子调用保留父计划。观察发布有独立撤销信号，观察实例变更不会撤销业务 epoch；没有观察进程时跳过订阅，同实例的业务贡献仍遵守原故障门禁。服务工厂在计划字段为空时捕获原发布，避免计划和工厂相互强持有。绑定复用原实例 CAS、追加迁移及完整备份，observer v1 已接入；剩余阶段回调和目标插件兼容继续验收。
 
 Core 的 `AttemptMiddleware` 端口按根请求绑定，每次真实重试创建新调用。`next` 只接收操作正文；路由候选、账号范围、请求身份、期限和原会话状态保持冻结。插件不能获得可独立轮询的 ProviderStream：Core 先验证冷流元数据和账号归属并尝试登记，再通过受管 `AttemptSource` 逐条交付事件。每条原始事件先经过同一个 Core 观测与费用累计路径，插件输出只作为交付内容，不能覆盖费用、响应观测或原生续接状态。
 
-中间件等待和 Provider 准备 future 由会话持有；临时丢弃读取等待后会恢复原调用，不重复执行插件或选号。受管来源的读取 future 也能暂停后恢复。原来源尚未结束时，插件不能以提前 EOF 宣告成功；插件自身失败按宿主错误终结，不计作 Provider 健康失败或自动重试。上游原始错误仍由 Core 决定重试与原子失败交付，即使插件捕获错误后挂起，取消时也保留错误批次中的原始费用。此端口已通过 Core 集成测试，Responses HTTP、Images 和 standalone Search 的 SDK attempt 协议桥已连接此端口，生产 middleware 能力仍等待其余声明范围接入。
+中间件等待和 Provider 准备 future 由会话持有；临时丢弃读取等待后会恢复原调用，不重复执行插件或选号。受管来源的读取 future 也能暂停后恢复。原来源尚未结束时，插件不能以提前 EOF 宣告成功；插件自身失败按宿主错误终结，不计作 Provider 健康失败或自动重试。上游原始错误仍由 Core 决定重试与原子失败交付，即使插件捕获错误后挂起，取消时也保留错误批次中的原始费用。此端口已通过 Core 集成测试，Responses HTTP、Images 和 standalone Search 的 SDK attempt 协议桥已连接此端口，middleware v4 的五个挂载均已接入。
 
 
 Responses HTTP 在准备根请求时使用同一发布快照分别冻结 request 与 attempt 范围，并把两层撤销信号关联到根请求和等待中的外层调用。每次真实 attempt 使用 Core 的序号、候选 Provider、上游模型与原截止时间创建调用；改写后重新解码，禁止改变已路由的模型、续接、storage intent、传输和能力需求，Provider 私有状态由宿主原样附回。
@@ -590,7 +590,7 @@ attempt 来源正文只编码 Core 已观察的事件。SDK 的正文展开必�
 Images 与 standalone Search 复用 `gateway-api::openai::middleware` 的发布快照冻结、根请求撤销、Core 未提交正文和外层交付逻辑。原生端点使用 RawJson 表达，不经过 Responses 文档编码；请求改写按原入口重建 operation，保留图片生成/编辑类型及端点既有会话头合同。attempt 的原来源先由 Core 观测，再将唯一原始 JSON 与全部事实封套交给插件；投影输出仍为 raw JSON，费用与上游状态不由投影更新。无匹配计划直接调用原始收集路径，不施加插件文档上限。响应访问守卫仅关联授权/插件撤销，不能关联正常完成时会取消的 Core 请求信号。
 
 
-WebSocket attempt 复用同一 PreparedRootExecution 和冻结中间件发布快照，Core 会话仍由现有 WebSocket forwarder 驱动。协议桥使用逐消息 JsonDocument，先检查完整改写批次的 JSON 类型、终态与宿主响应 ID，之后才允许原交付屏障提交。重解码保留宿主的下游连接 ID 和已选择的 `use_websocket` 标记，Provider 私有状态由原请求附回；投影不能改变续接、冻结模型或客户端 stream 合同。原控制帧 pump 始终持有同一读取 future，错误中断和排队 create 不重复执行插件或 Provider。转发器额外持有独立于 Core 正常完成的插件撤销信号，覆盖上游结束后仍等待下游写入的阶段；撤销竞争前先建立原 PendingExecution 清理守卫，确保内层 future 尚未轮询就被丢弃时仍能释放准入并结算。WebSocket request 层也使用同一 Core 正文和外层 Delivery，生产总能力门禁仍等待其余声明范围。
+WebSocket attempt 复用同一 PreparedRootExecution 和冻结中间件发布快照，Core 会话仍由现有 WebSocket forwarder 驱动。协议桥使用逐消息 JsonDocument，先检查完整改写批次的 JSON 类型、终态与宿主响应 ID，之后才允许原交付屏障提交。重解码保留宿主的下游连接 ID 和已选择的 `use_websocket` 标记，Provider 私有状态由原请求附回；投影不能改变续接、冻结模型或客户端 stream 合同。原控制帧 pump 始终持有同一读取 future，错误中断和排队 create 不重复执行插件或 Provider。转发器额外持有独立于 Core 正常完成的插件撤销信号，覆盖上游结束后仍等待下游写入的阶段；撤销竞争前先建立原 PendingExecution 清理守卫，确保内层 future 尚未轮询就被丢弃时仍能释放准入并结算。WebSocket request 层也使用同一 Core 正文和外层 Delivery，middleware v4 已开放正常启用。
 
 
 WebSocket request/attempt 使用相同冻结计划与根身份。API 的 ExecutionBody 按 ClientTransport 输出 JSON 文档、SSE 或 WS JSON 消息，Delivery 复用原批次上限与 commit/finalization 校验；WS 不添加 SSE 结束帧。响应 ID、Provider 续接状态只从宿主来源信封读取，并在完整批次通过校验且原执行终结后更新连接快照。request 改写后的续接 ID 再匹配原快照，不能把旧状态附给另一响应。

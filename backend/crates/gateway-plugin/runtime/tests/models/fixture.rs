@@ -831,27 +831,31 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new() -> Self {
-        Self::build(false, false, &["acct_allowed"], None).await
+        Self::build(false, false, &["acct_allowed"], None, false).await
     }
     pub async fn with_middleware() -> Self {
-        Self::build(true, false, &["acct_allowed"], None).await
+        Self::build(true, false, &["acct_allowed"], None, false).await
     }
     pub async fn with_command() -> Self {
-        Self::build(false, true, &["acct_allowed"], None).await
+        Self::build(false, true, &["acct_allowed"], None, false).await
     }
     pub async fn with_accounts(accounts: &[&str]) -> Self {
-        Self::build(true, false, accounts, None).await
+        Self::build(true, false, accounts, None, false).await
+    }
+    pub async fn with_upstream_accounts(accounts: &[&str]) -> Self {
+        Self::build(true, false, accounts, None, true).await
     }
     pub async fn with_affinity(
         affinity: Arc<dyn gateway_core::provider_ports::ProviderSessionAffinityPort>,
     ) -> Self {
-        Self::build(false, false, &["acct_allowed"], Some(affinity)).await
+        Self::build(false, false, &["acct_allowed"], Some(affinity), false).await
     }
     async fn build(
         middleware: bool,
         command_line: bool,
         accounts: &[&str],
         affinity: Option<Arc<dyn gateway_core::provider_ports::ProviderSessionAffinityPort>>,
+        upstream_adapter: bool,
     ) -> Self {
         let core = Arc::new(Core::default());
         let mut providers: Vec<Arc<dyn Provider>> = vec![core.clone()];
@@ -891,8 +895,10 @@ impl Fixture {
                 )),
                 Arc::new(Keys),
             );
-            let runtime: Arc<dyn PluginRuntime> = if middleware || command_line {
-                Arc::new(crate::middleware::plan::KernelRuntime(engine))
+            let runtime: Arc<dyn PluginRuntime> = if upstream_adapter {
+                Arc::new(crate::upstream_adapter::binding::CandidateRuntime(
+                    Arc::new(engine),
+                ))
             } else {
                 Arc::new(engine)
             };

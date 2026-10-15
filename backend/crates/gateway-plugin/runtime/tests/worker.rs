@@ -1507,6 +1507,100 @@ async fn main() {
     let _ = session.run(handler).await;
 }
 
+async fn middleware_private_state(
+    host: &gateway_plugin_sdk::client::HostClient,
+    key: &str,
+) -> Result<(), PluginFault> {
+    let params = json!({"namespace":"counter","key":key});
+    let previous = host
+        .call("host.state.get", params.clone(), vec![])
+        .await
+        .map_err(|error| error.into_plugin_fault())?
+        .result["record"]
+        .clone();
+    let value = previous["value"].as_u64().unwrap_or(0) + 1;
+    let put = json!({"namespace":"counter","key":key,"value":value,"expected_version":previous["version"]});
+    let saved = host
+        .call("host.state.put", put.clone(), vec![])
+        .await
+        .map_err(|error| error.into_plugin_fault())?;
+    assert_eq!(
+        host.call("host.state.put", put, vec![])
+            .await
+            .err()
+            .unwrap()
+            .into_plugin_fault()
+            .code,
+        ErrorCode::Conflict
+    );
+    let read = host
+        .call("host.state.get", params.clone(), vec![])
+        .await
+        .map_err(|error| error.into_plugin_fault())?;
+    assert_eq!(read.result["record"]["value"], value);
+    assert_eq!(read.result["record"]["version"], saved.result["version"]);
+    host.call(
+        "host.state.delete",
+        json!({"namespace":"counter","key":key,"expected_version":saved.result["version"]}),
+        vec![],
+    )
+    .await
+    .map_err(|error| error.into_plugin_fault())?;
+    assert!(
+        host.call("host.state.get", params, vec![])
+            .await
+            .map_err(|error| error.into_plugin_fault())?
+            .result["record"]
+            .is_null()
+    );
+    host.call(
+        "host.state.put",
+        json!({"namespace":"counter","key":key,"value":value,"expected_version":null}),
+        vec![],
+    )
+    .await
+    .map_err(|error| error.into_plugin_fault())?;
+    for (method, params, payload) in [
+        (
+            "host.state.put",
+            json!({"namespace":"counter","key":"invalid","value":"invalid","expected_version":null}),
+            vec![],
+        ),
+        (
+            "host.state.get",
+            json!({"namespace":"undeclared","key":key}),
+            vec![],
+        ),
+        (
+            "host.state.get",
+            json!({"namespace":"counter","key":key}),
+            vec![1],
+        ),
+    ] {
+        assert_eq!(
+            host.call(method, params, payload)
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault()
+                .code,
+            ErrorCode::InvalidInput
+        );
+    }
+    for method in ["host.auth.list", "host.groups.ensure"] {
+        assert_eq!(
+            host.call(method, json!({}), vec![])
+                .await
+                .err()
+                .unwrap()
+                .into_plugin_fault()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+    }
+    Ok(())
+}
+
 mod worker_middleware {
     //! A real SDK author handler, plus intentionally malformed wire variants.
     use gateway_plugin_sdk::{
@@ -1519,6 +1613,17 @@ mod worker_middleware {
     pub async fn handle(call: PluginCall) -> Result<CallReply, PluginFault> {
         let input: serde_json::Value = serde_json::from_slice(&call.payload).unwrap();
         let mode = input["mode"].as_str().unwrap().to_owned();
+        if mode == "private-state" {
+            super::middleware_private_state(
+                &call.host,
+                match call.context.stage {
+                    gateway_plugin_sdk::Stage::Request => "request",
+                    gateway_plugin_sdk::Stage::Attempt => "attempt",
+                    _ => unreachable!(),
+                },
+            )
+            .await?;
+        }
         if input["service_probe"] == true {
             assert!(
                 call.host
@@ -1899,6 +2004,9 @@ mod worker_http {
             .find(|h| h.name == "x-fixture-mode")
             .map(|h| String::from_utf8(h.value.clone()).unwrap())
             .unwrap_or_else(|| "pass".into());
+        if mode == "private-state" {
+            super::middleware_private_state(&call.host, "http").await?;
+        }
         if mode != "service-probe" {
             assert_eq!(call.call_id, "host-call");
         }
@@ -2244,6 +2352,9 @@ async fn worker_service(
         Some("service-fixture-parent")
     );
     let mode = call.request_id.clone();
+    if mode == "private-state" {
+        middleware_private_state(&host, "service").await?;
+    }
     if mode == "host-service" {
         return ServiceResponse::from_result::<ApiKeyExists>(
             host.service::<ApiKeyExists>(()).await,
@@ -2344,6 +2455,9 @@ async fn worker_websocket(
         .find(|h| h.name == "x-fixture-mode")
         .map(|h| String::from_utf8(h.value.clone()).unwrap())
         .unwrap_or_default();
+    if mode == "private-state" {
+        middleware_private_state(&call.host, "websocket").await?;
+    }
     if mode == "service-probe" {
         let exists = call
             .host

@@ -97,11 +97,8 @@ async fn manager(environment: &Environment) -> Arc<PluginManager> {
                 .unwrap();
             Ok(registry.service_factory())
         }));
-        PluginManager::new(
-            environment.store.plugin_store(),
-            Arc::new(crate::middleware::plan::KernelRuntime(runtime)),
-        )
-        .with_services(environment.admin.services().service_settings())
+        PluginManager::new(environment.store.plugin_store(), Arc::new(runtime))
+            .with_services(environment.admin.services().service_settings())
     })
 }
 #[tokio::test]
