@@ -34,9 +34,10 @@
 | 账号凭据 | `host.auth.list/get_runtime/get/save`；管理员管理调用、宿主 System 根命令和宿主签发的 maintenance 作用域；upstream 仅开放当前 Provider 租约绑定账号的三项读取 |
 | 观察订阅 | observer v1；请求完成、实际上游 WebSocket 原始帧；冻结 Key/分组范围、有界投递及独立撤销，观察失败不控制业务执行 |
 | 状态迁移 | `plugin.state.migrate`；配置阶段有界批次，Keep/Replace/Delete 与实例版本同事务提交；失败和并发变更保留旧状态 |
-| 未开放的能力 | middleware、upstream_adapter、command_line、Key 预算写入；非 management/public_management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
+| 命令行 | command_line v1；实例帮助、类型化参数、执行和零退出后的原生账号提交，宿主系统根调用选择现有 Key |
+| 未开放的能力 | middleware、upstream_adapter、Key 预算写入；未绑定宿主模型调用权限的阶段回调 |
 
-第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。生产启用仍因 middleware/command_line 门禁被拒绝；其余贡献能力、完整业务与目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
+第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。生产启用仍因 middleware 门禁被拒绝；其余贡献能力、完整业务与目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
 
 管理资源声明的 `public` 随实际插件代次保留。匿名读取使用 `GET /api/plugins/resource?id=…&revision=…&path=…`，只返回当前启用实例在 `management.register` 中明确登记为公开、且归档清单声明的静态资源；私有或未登记路径返回 404，失效代次返回 409。返回格式沿用 `{status, contentType, body}` 的 JSON envelope 和 base64 正文，公开 HTML 不作为宿主同源页面执行。管理资源读取及插件业务调用继续使用现有管理员入口。改变公开声明、停用或升级均通过原实例代次生效。
 
@@ -50,7 +51,9 @@
 
 客户端 WebSocket 分别显式选择上游 WebSocket 或 HTTP，原始 WS 帧观察只随实际的上游 WebSocket 产生，保持请求关联、账号身份与递增序号。原生 HTTP 调用另外验证首选 WebSocket 准备超时后的 HTTP/SSE 回退；两者是不同的传输选择。实际协议使用标准 created/completed 生命周期，HTTP 保留原 zstd 请求压缩；计费不依赖异步观测记录先落库。真实 API 夹具使用原 Host 连接登记，但不代表完整 Host worker/signal 退出验收。本项只证明所列基础调用和 Linux x86_64 制品，不代表这些贡献的全部业务变体、其他插件/能力、所有传输故障或其他平台完整兼容，生产门禁继续保留。
 
-`command_line` v1 的注册、类型化参数、帮助、执行 RPC 与网关命令入口已接入。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图。本人命令按登录用户归属选择 Key；宿主系统命令可分页查询全部 Key 的 ID、名称和启用状态（每页 1–200 项），并按 ID 绑定原 Core 授权，不读取或返回明文密钥。系统权限只属于宿主签发的 command_line 根调用；管理页、管理 API Key 和插件 actor 不会获得该权限。模型推理仍走原权限、准入、额度、费用和实时撤销链；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。Host 复用 Ctrl-C、SIGTERM 和原排空时限，等同一 Core 调用图完成结算与释放后停止 worker；清理超时会保留已确认结果并报告未完整完成。命令账号结果已接入下述原生校验和提交链；完整回调和目标制品兼容尚待验收，该能力仍不可启用。
+`command_line` v1 的注册、类型化参数、帮助、执行 RPC 与网关命令入口已接入。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图。本人命令按登录用户归属选择 Key；宿主系统命令可分页查询全部 Key 的 ID、名称和启用状态（每页 1–200 项），并按 ID 绑定原 Core 授权，不读取或返回明文密钥。系统权限只属于宿主签发的 command_line 根调用；管理页、管理 API Key 和插件 actor 不会获得该权限。模型推理仍走原权限、准入、额度、费用和实时撤销链；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。Host 复用 Ctrl-C、SIGTERM 和原排空时限，等同一 Core 调用图完成结算与释放后停止 worker；清理超时会保留已确认结果并报告未完整完成。命令账号结果沿下述原生校验和提交链执行；`command_line` v1 已开放，同时声明其他未开放能力的制品仍须先完成对应兼容验收。
+
+真实网关 CLI 已验证从数据库恢复启用实例，在配置的 HTTP 端口已被占用时仍可运行命令；帮助不执行命令，成功执行沿原账号事务只提交一次并保留插件审计，stdout/stderr 和非零退出码按原结果交付，非零结果不提交账号，停用实例在下一次 CLI 启动后仍不可执行。命令结果的 xAI 原生轮换已验证 discovery/UserInfo、临近到期先刷新并提交 Provider 确认的新令牌，以及主体或 issuer 不匹配时拒绝提交；同一旧凭据版本不能再次保存。
 
 只有宿主系统命令的零退出结果可以提交账号，每次最多 32 项，按顺序处理。SDK facts 是未验证输入：OpenAI 使用原凭据 codec 和导入/文件重新授权校验，从原生材料提取身份及有效期；xAI 使用原凭据解码及官方 OAuth 验证，有效期提示受原导入政策校验，刷新时使用官方响应的 token 生命周期。Provider 重建原生凭据与身份，不直接保存插件声明的套餐或刷新计划；替换必须匹配原账号身份和凭据 revision，不允许重绑身份。Admin 使用原导入/轮换事务、Provider 缓存失效和 Core 发布，Store 在同一事务内锁定实际启用的插件 revision，并记录插件审计身份；账号名称、启用状态和路由设置继续由原 owner 保存。
 
@@ -62,7 +65,7 @@ RPC 与账号处理共用命令总期限。准备开始后，原生账号任务�
 
 授权使用宿主实际操作者与调用上下文。管理会话在原用户存储检查管理员角色和启用状态；普通用户、停用管理员、管理阶段的 System 或插件 actor 不能取得全局凭据权限。维护任务使用实际插件身份，终端回调要求真实 System 根调用。四类回调在原数据库事务中锁定实际启用的插件 revision，旧进程仍运行也不能越过停用或版本变更。保存从准备开始标记同一 Core 调用图的副作用，取消等待或超时后保留原生提交与排空责任，不自动重放。上游适配器的三项读取绑定实际 Provider 选中的账号及凭据版本，不授予全局账号权限。`list` 最多返回该账号，保留 Provider/游标过滤和 1–200 的请求界限；`get_runtime/get` 对其他账号返回 PermissionDenied。原账号版本或认证类型变化返回 Conflict，不导出新版本材料给旧租约；原数据库事务继续检查启用的插件 revision。读取沿实际在途调用的取消、结束和 Key 撤权信号收尾，不另建凭据缓存。Provider 已提供精确提交版本的接纳端口，复用原生凭据 codec 和同一个账号容量租约，不再选号或申请新容量；载入期间停止构造认证头，提交版本被覆盖、身份/主体/代理漂移、材料无效或等待者丢弃时不恢复旧材料。该端口仅由实际 Provider 连接提供，借用祖先账号且不能修改账号状态的租约不提供更新能力。绑定 `save` 仅允许替换当前账号的准确版本，拒绝新建和其他账号，沿原 Admin/Provider 的准备、事务、审计与发布完成提交。原 ManagedCall 的读写锁将凭据读取、认证头构造和实际 HTTP/WS 操作与保存/接纳串行化；切换关闭旧正文和 WebSocket，更新 HTTP 复用作用域，续接只保留确认后的版本。SDK 的原始上下文保持不变，当前版本由实际 Provider owner 决定。保存与接纳任务共享同一个原 Core 子 permit，SDK 等待取消后仍完成原生责任，原 InvocationCalls 退出等待覆盖这段操作。准备、提交或接纳失败会结束本次调用，不自动重放或恢复旧连接。真实 SDK/原生数据库已验证 OpenAI 成功保存、HTTP 发送互斥、WebSocket 重新握手与新版本续接、退出排空，以及两家 Provider 的无效材料拒绝。xAI 使用实际账号代理完成官方 discovery/UserInfo 校验和原生保存，临近到期时先刷新并采用校验后的新令牌；主体或 issuer 不匹配时不提交、不发送推理和不重放。测试使用隔离进程的本地证书与受控代理，仅允许 OAuth 端点和本地推理夹具，不改变生产官方地址或 TLS 校验；此组测试需 Python 3 和 OpenSSL。实际第三方插件和其余合同仍待完整验收，upstream_adapter 生产门禁保留。
 
-命令行沿用同一套配置、Bundle 和原插件发布，不另建命令索引。无参数仍启动服务；全局帮助不加载配置或连接数据库。实例帮助不执行命令，执行时由 Admin 解析当前启用版本并再次检查资格；参数错误不回显输入，非 UTF-8 输入不会回退到服务启动。实例命令仍受上述能力门禁约束。
+命令行沿用同一套配置、Bundle 和原插件发布，不另建命令索引。无参数仍启动服务；全局帮助不加载配置或连接数据库。实例帮助不执行命令，执行时由 Admin 解析当前启用版本并再次检查资格；参数错误不回显输入，非 UTF-8 输入不会回退到服务启动。实例命令要求当前实例启用且注册了兼容的命令能力。
 
 ```text
 codex-proxy-rs --help

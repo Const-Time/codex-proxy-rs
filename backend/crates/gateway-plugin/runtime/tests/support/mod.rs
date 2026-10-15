@@ -1,6 +1,7 @@
 pub(crate) mod api;
 pub(crate) mod database;
 pub(crate) mod quota_server;
+pub(crate) mod xai;
 use async_trait::async_trait;
 use gateway_admin::{
     model::{AdminError, MutationActor, MutationContext, plugins::*},

@@ -75,24 +75,11 @@ impl Fixture {
             upstream_adapter: None,
             observer: None,
         };
-        // Inspect/validate continue to expose the production gate; the test runs
-        // the actual prepared process explicitly, without a production test hook.
-        assert!(
-            self.artifact
-                .info
-                .unsupported_capabilities
-                .iter()
-                .any(|c| c == "command_line")
-        );
-        assert_eq!(
-            self.engine
-                .validate(&record, &self.artifact, None)
-                .await
-                .err()
-                .unwrap()
-                .kind(),
-            AdminErrorKind::Invalid
-        );
+        assert!(self.artifact.info.unsupported_capabilities.is_empty());
+        self.engine
+            .validate(&record, &self.artifact, None)
+            .await
+            .unwrap();
         record.enabled = false;
         self.engine
             .validate(&record, &self.artifact, None)

@@ -66,6 +66,49 @@ fn connection(value: &str) -> Value {
     url.set_password(None).unwrap();
     json!({"url":url.as_str(), "password":password})
 }
+fn configure(
+    directory: &std::path::Path,
+    database_url: &str,
+    redis_url: &str,
+    port: u16,
+) -> PathBuf {
+    let assets = directory.join("assets");
+    let log_directory = directory.join("logs");
+    std::fs::create_dir(&assets).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<!doctype html><title>Host fixture</title>",
+    )
+    .unwrap();
+    let mut settings: Value = config::Config::builder()
+        .add_source(config::File::from_str(
+            include_str!("../../../../../deploy/config.example.yaml"),
+            config::FileFormat::Yaml,
+        ))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    settings["host"]["listen"] = json!({"host":"127.0.0.1", "port":port});
+    settings["host"]["runtime_data_dir"] = json!(directory.join("runtime"));
+    settings["host"]["logging"]["stdout"] = json!(false);
+    settings["host"]["logging"]["file"]["directory"] = json!(log_directory);
+    settings["host"]["drain_timeout_seconds"] = json!(1);
+    settings["host"]["worker_shutdown_timeout_seconds"] = json!(5);
+    settings["store"]["database"] = connection(database_url);
+    settings["store"]["redis"] = connection(redis_url);
+    settings["admin"]["default_username"] = json!("host-fixture@fixture.test");
+    settings["admin"]["default_password"] = json!("host-fixture-admin-password");
+    settings["api"]["asset_directory"] = json!(assets);
+    std::fs::create_dir(directory.join("deploy")).unwrap();
+    std::fs::write(
+        directory.join("deploy/config.yaml"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    drop(settings);
+    log_directory
+}
 fn logs(directory: &std::path::Path) -> String {
     std::fs::read_dir(directory)
         .unwrap()
@@ -97,43 +140,9 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
     }
     let binary = binary();
     let directory = tempfile::tempdir().unwrap();
-    let assets = directory.path().join("assets");
-    let log_directory = directory.path().join("logs");
-    std::fs::create_dir(&assets).unwrap();
-    std::fs::write(
-        assets.join("index.html"),
-        "<!doctype html><title>Host fixture</title>",
-    )
-    .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mut settings: Value = config::Config::builder()
-        .add_source(config::File::from_str(
-            include_str!("../../../../../deploy/config.example.yaml"),
-            config::FileFormat::Yaml,
-        ))
-        .build()
-        .unwrap()
-        .try_deserialize()
-        .unwrap();
-    settings["host"]["listen"] = json!({"host":"127.0.0.1", "port":port});
-    settings["host"]["runtime_data_dir"] = json!(directory.path().join("runtime"));
-    settings["host"]["logging"]["stdout"] = json!(false);
-    settings["host"]["logging"]["file"]["directory"] = json!(log_directory);
-    settings["host"]["drain_timeout_seconds"] = json!(1);
-    settings["host"]["worker_shutdown_timeout_seconds"] = json!(5);
-    settings["store"]["database"] = connection(&database_url);
-    settings["store"]["redis"] = connection(&redis_url);
-    settings["admin"]["default_username"] = json!("host-fixture@fixture.test");
-    settings["admin"]["default_password"] = json!("host-fixture-admin-password");
-    settings["api"]["asset_directory"] = json!(assets);
-    std::fs::create_dir(directory.path().join("deploy")).unwrap();
-    std::fs::write(
-        directory.path().join("deploy/config.yaml"),
-        serde_json::to_vec(&settings).unwrap(),
-    )
-    .unwrap();
-    drop(settings);
+    let log_directory = configure(directory.path(), &database_url, &redis_url, port);
     drop(listener);
     let stderr = directory.path().join("stderr");
     let mut gateway = Gateway(
@@ -324,4 +333,149 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
     drop(gateway);
     pool.close().await;
     database.close().await;
+}
+
+async fn cli(
+    binary: &std::path::Path,
+    directory: &std::path::Path,
+    args: &[&str],
+) -> (std::process::ExitStatus, String, String) {
+    use std::{io::Read as _, os::unix::process::CommandExt as _};
+    let stderr = tempfile::NamedTempFile::new_in(directory).unwrap();
+    let mut child = Gateway(
+        Command::new(binary)
+            .args(args)
+            .current_dir(directory)
+            .process_group(0)
+            .env("RUST_LOG", "info")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .stdout(Stdio::piped())
+            .stderr(stderr.reopen().unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let status = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("real gateway command must shut down its SDK process and workers");
+    let mut stdout = String::new();
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    (
+        status,
+        stdout,
+        std::fs::read_to_string(stderr.path()).unwrap(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actual_gateway_cli_restores_command_and_commits_native_accounts_without_binding_http() {
+    use crate::{
+        command_line::credentials::Native,
+        services::upstream_sdk::environment::Environment,
+        support::{actor, command_archive},
+    };
+    let Some((database, database_url, redis_url)) = Database::create().await else {
+        return;
+    };
+    let binary = binary();
+    let directory = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    configure(
+        directory.path(),
+        &database_url,
+        &redis_url,
+        listener.local_addr().unwrap().port(),
+    );
+    let env = Environment::from_database(
+        database,
+        database_url,
+        redis_url,
+        "host-fixture@fixture.test",
+    )
+    .await;
+    let mut fixture=Native::with_environment(json!({"command_result":{"stdout":"confirmed native CLI\n","stderr":"","exit_code":0,"accounts":[create("native-cli-account")]}}),None,command_archive("1.0.0"),env).await;
+    fixture.process.revoke();
+    fixture.process.stop().await;
+    let id = fixture.record.id.clone();
+    let (status, stdout, stderr) = cli(&binary, directory.path(), &["plugin", &id, "--help"]).await;
+    assert!(
+        status.success(),
+        "real CLI must restore an enabled command plugin: {stderr}"
+    );
+    assert!(stdout.contains("probe"));
+    assert_eq!(fixture.count().await, 0, "help must not execute a command");
+    let before: i64 = sqlx::query_scalar("select config_revision from runtime_settings where id=1")
+        .fetch_one(&fixture.env.pool)
+        .await
+        .unwrap();
+    let (status, stdout, stderr) = cli(&binary, directory.path(), &["plugin", &id, "probe"]).await;
+    assert!(
+        status.success(),
+        "native CLI account command must succeed: {stderr}"
+    );
+    assert_eq!(stdout, "confirmed native CLI\n");
+    assert_eq!(fixture.count().await, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select config_revision from runtime_settings where id=1")
+            .fetch_one(&fixture.env.pool)
+            .await
+            .unwrap(),
+        before + 1
+    );
+    let audits: Vec<String> =
+        sqlx::query_scalar("select actor_ref from admin_audit_events where actor_kind='plugin'")
+            .fetch_all(&fixture.env.pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, vec![format!("plugin:{id}@1")]);
+    fixture.record.revision = 2;
+    fixture.record.configuration = json!({"command_result":{"stdout":"declined CLI\n","stderr":"fixture command declined\n","exit_code":7,"accounts":[create("must-not-be-committed")]}});
+    fixture
+        .env
+        .store
+        .plugin_store()
+        .save(&fixture.record, 1, &actor(), None)
+        .await
+        .unwrap();
+    let (status, stdout, stderr) = cli(&binary, directory.path(), &["plugin", &id, "probe"]).await;
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(stdout, "declined CLI\n");
+    assert_eq!(stderr, "fixture command declined\n");
+    assert_eq!(
+        fixture.count().await,
+        1,
+        "nonzero command result cannot commit returned accounts"
+    );
+    fixture.record.revision = 3;
+    fixture.record.enabled = false;
+    fixture
+        .env
+        .store
+        .plugin_store()
+        .save(&fixture.record, 2, &actor(), None)
+        .await
+        .unwrap();
+    let (status, _, _) = cli(&binary, directory.path(), &["plugin", &id, "probe"]).await;
+    assert!(
+        !status.success(),
+        "disabled plugin must stay disabled across actual CLI startup"
+    );
+    assert_eq!(fixture.count().await, 1);
+    drop(listener);
+    fixture.close().await;
 }

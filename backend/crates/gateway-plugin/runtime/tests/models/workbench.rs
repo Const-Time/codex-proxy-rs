@@ -919,7 +919,7 @@ async fn official_and_rebuilt_workbench_execute_management_business_without_rewr
                 .contains(&"middleware".into())
         );
         assert!(
-            artifact
+            !artifact
                 .unsupported_capabilities
                 .contains(&"command_line".into())
         );

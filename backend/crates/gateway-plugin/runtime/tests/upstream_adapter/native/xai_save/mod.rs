@@ -1,7 +1,6 @@
 //! Real xAI OAuth preparation through an owned proxy, native Admin and the SDK adapter.
-mod fixture;
 use super::{capture, fixture::Fixture};
-use fixture::{Proxy, Trust};
+use crate::support::xai::{Proxy, Trust};
 use gateway_core::{engine::ExecutionOutcome, upstream::UpstreamSendState};
 use serde_json::json;
 use std::{path::PathBuf, time::Duration};
