@@ -143,7 +143,7 @@ async fn official_workbench_archive_registers_public_resources_without_rewriting
             .contains(&"middleware".into())
     );
     assert!(
-        artifact
+        !artifact
             .info
             .unsupported_capabilities
             .contains(&"command_line".into())

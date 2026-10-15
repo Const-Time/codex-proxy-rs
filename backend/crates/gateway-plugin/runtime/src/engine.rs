@@ -212,6 +212,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
                     | Capability::RetryPolicy
                     | Capability::Maintenance
                     | Capability::Observer
+                    | Capability::CommandLine
             ) || decl.version != 1
         })
         .map(|(cap, _)| cap.identifier().into())

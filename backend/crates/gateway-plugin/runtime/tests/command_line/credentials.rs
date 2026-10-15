@@ -72,8 +72,7 @@ impl Native {
             observer: None,
         };
         store.save(&record, 0, &actor(), None).await.unwrap();
-        // The kernel fixture uses actual SDK processes and native stores while
-        // the production command gate remains explicit in inspect/validate.
+        engine.validate(&record, &artifact, None).await.unwrap();
         let process = engine.prepare(&record, artifact.clone()).await.unwrap();
         process.activate();
         Self {
@@ -582,4 +581,241 @@ async fn command_personal_actor_cannot_use_native_global_account_port() {
     root.wait_until_idle().await;
     assert_eq!(fixture.count().await, 0);
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn command_xai_result_uses_native_userinfo_before_committing_replacement() {
+    xai(
+        "command_xai_result_uses_native_userinfo_before_committing_replacement",
+        "save",
+    )
+    .await;
+}
+#[tokio::test]
+async fn command_xai_result_commits_refreshed_material_from_native_provider() {
+    xai(
+        "command_xai_result_commits_refreshed_material_from_native_provider",
+        "refresh",
+    )
+    .await;
+}
+#[tokio::test]
+async fn command_xai_result_rejects_foreign_verified_subject_without_committing() {
+    xai(
+        "command_xai_result_rejects_foreign_verified_subject_without_committing",
+        "subject",
+    )
+    .await;
+}
+#[tokio::test]
+async fn command_xai_result_rejects_foreign_discovery_issuer_without_committing() {
+    xai(
+        "command_xai_result_rejects_foreign_discovery_issuer_without_committing",
+        "issuer",
+    )
+    .await;
+}
+
+async fn xai(name: &str, mode: &str) {
+    use crate::support::xai::{Proxy, Trust};
+    use gateway_core::account::{CredentialState, ProviderAccountId};
+    use provider_xai::{
+        CreateGrokCredential, GrokAccountProfile, GrokCredentialAdmin, GrokOAuthSecret,
+        OFFICIAL_SCOPES, SecretValue,
+    };
+    let root = match std::env::var_os("CPR_NATIVE_XAI_TRUST") {
+        Some(root) => std::path::PathBuf::from(root),
+        None => {
+            for key in ["CPR_TEST_DATABASE_URL", "CPR_TEST_REDIS_URL"] {
+                if std::env::var_os(key).is_none() {
+                    let ci = std::env::var("CI")
+                        .ok()
+                        .is_some_and(|v| !matches!(v.as_str(), "" | "false" | "0"));
+                    assert!(
+                        !ci,
+                        "{key} is required for native command integration tests in CI"
+                    );
+                    return;
+                }
+            }
+            Trust::new()
+                .run(&format!("command_line::credentials::{name}"))
+                .await;
+            return;
+        }
+    };
+    let env = Environment::new().await.unwrap();
+    let ports = env.store.provider_ports();
+    let id = ProviderAccountId::new(format!("acct_{}", uuid::Uuid::new_v4().simple())).unwrap();
+    let subject = format!("subject-{id}");
+    let prepared = GrokCredentialAdmin
+        .prepare_import(&CreateGrokCredential {
+            account_id: id.clone(),
+            name: "Native xAI name".into(),
+            enabled: true,
+            initial_credential_state: CredentialState::Ready,
+            initial_error_reason: None,
+            initial_error_message: None,
+            secret: GrokOAuthSecret {
+                access_token: SecretValue::new("fixture-original-xai-token"),
+                refresh_token: SecretValue::new("fixture-refresh-token"),
+                id_token: None,
+                scope: OFFICIAL_SCOPES.join(" "),
+            },
+            account: GrokAccountProfile {
+                subject: subject.clone(),
+                email: None,
+                upstream_account_id: None,
+                plan_type: Some("pro".into()),
+                access_token_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                refresh_token_expires_at: None,
+            },
+        })
+        .unwrap();
+    ports.accounts().create_account(prepared).await.unwrap();
+    let proxy = Proxy::start(&root, &subject, "http://127.0.0.1:9", mode).await;
+    sqlx::query(
+        "update provider_accounts set enabled=false,weight=7,outbound_proxy_url=$1 where id=$2",
+    )
+    .bind(&proxy.url)
+    .bind(id.as_str())
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    let original = ports.accounts().load_current_credential(&id).await.unwrap();
+    let mut material = original.credential.expose_to_provider().clone();
+    material["access_token"] = json!("fixture-xai-candidate-token");
+    let expiry =
+        chrono::Utc::now() + chrono::Duration::seconds(if mode == "refresh" { 20 } else { 3600 });
+    let account = json!({"action":"replace", "account_id":id.as_str(), "credential_revision":original.account.revision().get(),
+        "facts":{"name":"SDK candidate name", "authentication_kind":"oauth", "has_refresh_token":true,
+            "upstream_user_id":subject, "access_token_expires_at_ms":expiry.timestamp_millis(), "next_refresh_at_ms":1,
+            "material":material}});
+    let f = Native::with_environment(
+        configuration(vec![account]),
+        None,
+        command_archive("1.0.0"),
+        env,
+    )
+    .await;
+    let before: i64 = sqlx::query_scalar("select config_revision from runtime_settings where id=1")
+        .fetch_one(&f.env.pool)
+        .await
+        .unwrap();
+    let root = ExtensionCallScope::default();
+    let result = f
+        .process
+        .command(call(&root, CancellationToken::new()), None)
+        .await;
+    root.wait_until_idle().await;
+    let success = matches!(mode, "save" | "refresh");
+    if success {
+        let output = result.unwrap();
+        assert_eq!(output.saved_accounts, 1);
+        assert_eq!(output.stdout, "confirmed output\n");
+        assert!(matches!(
+            f.process
+                .command(call(&root, CancellationToken::new()), None)
+                .await
+                .err()
+                .unwrap(),
+            PluginCommandError::Incomplete {
+                saved_accounts: 0,
+                ..
+            }
+        ));
+    } else {
+        assert!(matches!(
+            result.err().unwrap(),
+            PluginCommandError::Incomplete {
+                saved_accounts: 0,
+                ..
+            }
+        ));
+    }
+    let stored = ports.accounts().load_current_credential(&id).await.unwrap();
+    assert_eq!(
+        stored.account.revision().get(),
+        original.account.revision().get() + u64::from(success)
+    );
+    let secret = stored.credential.expose_to_provider();
+    assert_eq!(
+        secret["access_token"],
+        if mode == "refresh" {
+            "fixture-xai-verified-token"
+        } else if success {
+            "fixture-xai-candidate-token"
+        } else {
+            "fixture-original-xai-token"
+        }
+    );
+    assert_eq!(
+        secret["refresh_token"],
+        if mode == "refresh" {
+            "fixture-xai-verified-refresh"
+        } else {
+            "fixture-refresh-token"
+        }
+    );
+    let row = sqlx::query(
+        "select name,enabled,weight,outbound_proxy_url from provider_accounts where id=$1",
+    )
+    .bind(id.as_str())
+    .fetch_one(&f.env.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("name"), "Native xAI name");
+    assert!(!row.get::<bool, _>("enabled"));
+    assert_eq!(row.get::<i16, _>("weight"), 7);
+    assert_eq!(row.get::<String, _>("outbound_proxy_url"), proxy.url);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select config_revision from runtime_settings where id=1")
+            .fetch_one(&f.env.pool)
+            .await
+            .unwrap(),
+        before + i64::from(success)
+    );
+    assert_eq!(f.env.published.lock().unwrap().len(), usize::from(success));
+    let audits: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "select actor_ref,changed_fields from admin_audit_events where actor_kind='plugin'",
+    )
+    .fetch_all(&f.env.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audits,
+        if success {
+            vec![(
+                "plugin:command-fixture@1".into(),
+                vec!["credentials".into()],
+            )]
+        } else {
+            vec![]
+        }
+    );
+    let events = proxy.events();
+    assert_eq!(
+        events.iter().filter(|e| e["kind"] == "discovery").count(),
+        1
+    );
+    let userinfo: Vec<_> = events.iter().filter(|e| e["kind"] == "userinfo").collect();
+    assert_eq!(userinfo.len(), usize::from(mode != "issuer"));
+    assert!(userinfo.iter().all(|e| e["authorization"] == true));
+    let refresh: Vec<_> = events.iter().filter(|e| e["kind"] == "refresh").collect();
+    assert_eq!(refresh.len(), usize::from(mode == "refresh"));
+    assert!(refresh.iter().all(|e| e["validated"] == true));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e["kind"].as_str(), Some("forbidden" | "inference")))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select count(*) from user_group_budget_windows")
+            .fetch_one(&f.env.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    f.close().await;
+    proxy.stop().await;
 }

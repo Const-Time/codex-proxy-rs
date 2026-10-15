@@ -7,7 +7,7 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-pub(super) struct Trust {
+pub(crate) struct Trust {
     directory: tempfile::TempDir,
 }
 impl Trust {
@@ -87,7 +87,7 @@ impl Trust {
     }
 }
 
-pub(super) struct Proxy {
+pub(crate) struct Proxy {
     child: tokio::process::Child,
     pub url: String,
     log: PathBuf,
@@ -100,7 +100,7 @@ impl Drop for Proxy {
 impl Proxy {
     pub async fn start(root: &Path, subject: &str, inference: &str, mode: &str) -> Self {
         let script = root.join("proxy.py");
-        std::fs::write(&script, include_str!("proxy.py")).unwrap();
+        std::fs::write(&script, include_str!("xai.py")).unwrap();
         let log = root.join("proxy.jsonl");
         let config = root.join("proxy.json");
         std::fs::write(
