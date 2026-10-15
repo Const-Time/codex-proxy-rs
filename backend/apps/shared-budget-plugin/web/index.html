@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>共享额度管理</title><link rel="stylesheet" href="app.css"></head>
+<body><main>
+  <header><p class="eyebrow">用户与分组</p><h1>共享额度管理</h1><p>同一用户在同一分组中的所有 Key 共用额度。</p></header>
+  <section aria-labelledby="target-heading">
+    <h2 id="target-heading">查询用量</h2>
+    <form id="lookup"><div class="grid"><label>用户 ID<input id="user" required maxlength="128" autocomplete="off"></label><label>分组 ID<input id="group" required maxlength="128" autocomplete="off"></label></div><button type="submit">查询</button></form>
+    <div id="budget" hidden><div class="grid metrics"><div><span>每日已用 / 有效限额（USD）</span><strong id="daily"></strong><small id="daily-reset"></small></div><div><span>每周已用 / 有效限额（USD）</span><strong id="weekly"></strong><small id="weekly-reset"></small></div></div><p id="multiplier"></p><p class="hint">读取不推进窗口；过期窗口显示的是保留的历史观测。限额为 0 表示不限额。</p></div>
+  </section>
+  <section aria-labelledby="limits-heading"><h2 id="limits-heading">调整分组基础限额</h2><p>影响此分组的所有用户；各人的额度倍率和已有用量保持不变。</p>
+    <form id="limits"><div class="grid"><label>每日限额（USD）<input id="daily-limit" required inputmode="decimal" pattern="[0-9]+(\.[0-9]+)?" maxlength="40"></label><label>每周限额（USD）<input id="weekly-limit" required inputmode="decimal" pattern="[0-9]+(\.[0-9]+)?" maxlength="40"></label></div><label class="check"><input id="confirm-limits" type="checkbox" required>我确认将修改整个分组的基础限额</label><button id="save-limits" type="submit" disabled>保存限额</button></form>
+  </section>
+  <section aria-labelledby="reset-heading"><h2 id="reset-heading">重置当前用户的共享用量</h2><p>仅重置选定用户＋分组的每日和每周用量，涵盖其所有 Key；不消费上游重置卡，不改变订阅周期。</p>
+    <button id="prepare-reset" type="button" disabled>为查询目标准备重置</button><button id="reload-reset" type="button" class="secondary">读取最近操作</button>
+    <div id="draft" hidden><dl><dt>操作编号</dt><dd id="event-id"></dd><dt>目标</dt><dd id="reset-target"></dd><dt>结果</dt><dd id="reset-result"></dd></dl>
+      <p class="hint">调用失败或断开后，使用此编号重试。不要为同一次重置创建新编号。</p>
+      <label class="check"><input id="confirm-reset" type="checkbox">我确认重置上面所列目标的共享用量</label><button id="execute-reset" type="button">确认执行 / 使用原编号重试</button>
+      <details><summary>归档此操作</summary><p>归档不会取消或撤销已开始的重置，结果未知时仍可能已经生效。先复制操作编号并核对结果，再决定是否准备另一项重置。</p><label class="check"><input id="confirm-archive" type="checkbox">我已记录编号，了解归档不会取消原操作</label><button id="archive-reset" type="button" class="secondary">归档操作草稿</button></details>
+    </div>
+  </section>
+  <p id="status" role="status" aria-live="polite">正在读取最近操作…</p>
+</main><script src="app.js"></script></body></html>

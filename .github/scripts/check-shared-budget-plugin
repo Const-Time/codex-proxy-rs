@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$root/backend"
+cargo build --locked -p cpr-shared-budget-plugin -p codex-proxy-plugin-cli
+target="$(rustc -vV | sed -n 's/^host: //p')"
+binary_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"]+"/debug")')"
+output="$root/.runtime/shared-budget-package"
+mkdir -p "$output"
+"$binary_dir/cpr-plugin" package --manifest apps/shared-budget-plugin/plugin.json \
+  --binary "$binary_dir/cpr-shared-budget-plugin" --target "$target" \
+  --output-dir "$output" --resource-map web=web
+archive_name="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["publisher"]+"."+m["name"]+"-"+m["version"]+"-"+sys.argv[2]+".tar.gz")' apps/shared-budget-plugin/plugin.json "$target")"
+CPR_SHARED_BUDGET_ARCHIVE="$output/$archive_name"
+test -f "$CPR_SHARED_BUDGET_ARCHIVE"
+export CPR_SHARED_BUDGET_ARCHIVE
+cargo test --locked -p gateway-plugin-runtime --all-features --test main \
+  quota::packaged_shared_budget_plugin_uses_native_permissions_cas_reset_and_restored_state -- --exact --ignored

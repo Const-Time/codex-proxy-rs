@@ -12,6 +12,7 @@ use syn::{Item, visit::Visit};
 pub(super) const WORKSPACE_MEMBERS: &[&str] = &[
     "apps/gateway",
     "apps/plugin-cli",
+    "apps/shared-budget-plugin",
     "crates/gateway-plugin/sdk",
     "crates/gateway-plugin/runtime",
     "crates/gateway-admin",
@@ -168,6 +169,7 @@ fn gateway_admin_stays_free_of_infrastructure_dependencies() {
 const PACKAGE_TO_MEMBER: &[(&str, &str)] = &[
     ("codex-proxy-rs", "apps/gateway"),
     ("codex-proxy-plugin-cli", "apps/plugin-cli"),
+    ("cpr-shared-budget-plugin", "apps/shared-budget-plugin"),
     ("gateway-plugin-sdk", "crates/gateway-plugin/sdk"),
     ("gateway-plugin-runtime", "crates/gateway-plugin/runtime"),
     ("gateway-admin", "crates/gateway-admin"),
@@ -220,6 +222,7 @@ const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("codex-proxy-rs", "gateway-admin"),
     ("codex-proxy-rs", "gateway-plugin-runtime"),
     ("codex-proxy-plugin-cli", "gateway-plugin-sdk"),
+    ("cpr-shared-budget-plugin", "gateway-plugin-sdk"),
     ("gateway-plugin-runtime", "gateway-plugin-sdk"),
     ("gateway-plugin-runtime", "gateway-admin"),
     ("gateway-plugin-runtime", "gateway-core"),

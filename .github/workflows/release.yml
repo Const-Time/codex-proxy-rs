@@ -219,8 +219,15 @@ jobs:
             -v "$PWD/..:/workspace" \
             -w /workspace/backend \
             rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa \
-            cargo build --release --locked --target "${{ matrix.target }}" --bin codex-proxy-rs
+            cargo build --release --locked --target "${{ matrix.target }}" --bin codex-proxy-rs --bin cpr-plugin --bin cpr-shared-budget-plugin
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "../dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/${{ matrix.binary }}"
+          cp "target/${{ matrix.target }}/release/cpr-plugin" "../dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/cpr-plugin"
+          "target/${{ matrix.target }}/release/cpr-plugin" package \
+            --manifest apps/shared-budget-plugin/plugin.json \
+            --binary "target/${{ matrix.target }}/release/cpr-shared-budget-plugin" \
+            --target "${{ matrix.target }}" \
+            --output-dir "../dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/plugins" \
+            --resource-map web=web
         working-directory: backend
         env:
           CPR_VERSION: ${{ needs.release-info.outputs.version }}
@@ -271,9 +278,16 @@ jobs:
       - name: Build binary
         shell: bash
         run: |
-          cargo build --release --locked --target "${{ matrix.target }}" --bin codex-proxy-rs
+          cargo build --release --locked --target "${{ matrix.target }}" --bin codex-proxy-rs --bin cpr-plugin --bin cpr-shared-budget-plugin
           mkdir -p "../dist/binaries/${{ matrix.os }}-${{ matrix.arch }}"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "../dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/${{ matrix.binary }}"
+          cp "target/${{ matrix.target }}/release/cpr-plugin" "../dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/cpr-plugin"
+          "target/${{ matrix.target }}/release/cpr-plugin" package \
+            --manifest apps/shared-budget-plugin/plugin.json \
+            --binary "target/${{ matrix.target }}/release/cpr-shared-budget-plugin" \
+            --target "${{ matrix.target }}" \
+            --output-dir "../dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/plugins" \
+            --resource-map web=web
         working-directory: backend
         env:
           CPR_VERSION: ${{ needs.release-info.outputs.version }}
@@ -384,6 +398,16 @@ jobs:
               binary_dest = package_root / platform["binary"]
               shutil.copy2(binary_src, binary_dest)
               binary_dest.chmod(0o755)
+              cli_src = binary_src.parent / "cpr-plugin"
+              cli_dest = package_root / "cpr-plugin"
+              shutil.copy2(cli_src, cli_dest)
+              cli_dest.chmod(0o755)
+              plugin_manifest = json.loads(pathlib.Path("backend/apps/shared-budget-plugin/plugin.json").read_text())
+              plugin_name = f"{plugin_manifest['publisher']}.{plugin_manifest['name']}-{plugin_manifest['version']}-{platform['target']}.tar.gz"
+              plugin_src = binary_src.parent / "plugins" / plugin_name
+              plugin_dest = release_dir / plugin_name
+              shutil.copy2(plugin_src, plugin_dest)
+              assets.append(plugin_dest)
               shutil.copytree(frontend_dir, web_dist, dirs_exist_ok=True)
               deploy_dir = package_root / "deploy"
               deploy_dir.mkdir()
