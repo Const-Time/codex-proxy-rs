@@ -499,7 +499,7 @@ async fn native_quota_refresh_plugin_revision_change_rejects_stale_result_and_ne
         .env
         .store
         .plugin_store()
-        .save(&replacement, 1, &support::actor())
+        .save(&replacement, 1, &support::actor(), None)
         .await
         .unwrap();
     f.server.release.notify_one();

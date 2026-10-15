@@ -71,7 +71,7 @@ impl Native {
             upstream_adapter: None,
             observer: None,
         };
-        store.save(&record, 0, &actor()).await.unwrap();
+        store.save(&record, 0, &actor(), None).await.unwrap();
         // The kernel fixture uses actual SDK processes and native stores while
         // the production command gate remains explicit in inspect/validate.
         let process = engine.prepare(&record, artifact.clone()).await.unwrap();
@@ -92,7 +92,7 @@ impl Native {
         self.env
             .store
             .plugin_store()
-            .save(&self.record, expected, &actor())
+            .save(&self.record, expected, &actor(), None)
             .await
             .unwrap();
         self.process = self
@@ -531,7 +531,7 @@ async fn command_later_save_is_fenced_by_original_plugin_row_after_disable() {
             .env
             .store
             .plugin_store()
-            .save(&disabled, fixture.record.revision, &actor())
+            .save(&disabled, fixture.record.revision, &actor(), None)
             .await
             .unwrap();
         observed.proceed.notify_one();

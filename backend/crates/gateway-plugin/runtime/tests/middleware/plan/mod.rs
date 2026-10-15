@@ -14,6 +14,14 @@ use gateway_plugin_runtime::PluginEngine;
 pub(crate) struct KernelRuntime(pub(crate) PluginEngine);
 #[async_trait]
 impl PluginRuntime for KernelRuntime {
+    async fn prepare_state(
+        &self,
+        record: &PluginRecord,
+        artifact: &PluginArtifact,
+        process: Option<&Arc<dyn PluginProcess>>,
+    ) -> Result<Option<PluginStateCommit>, AdminError> {
+        self.0.prepare_state(record, artifact, process).await
+    }
     async fn shutdown(&self) {
         self.0.shutdown().await;
     }

@@ -219,6 +219,22 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
 }
 #[async_trait]
 impl PluginRuntime for PluginEngine {
+    async fn prepare_state(
+        &self,
+        record: &PluginRecord,
+        artifact: &PluginArtifact,
+        process: Option<&Arc<dyn PluginProcess>>,
+    ) -> Result<Option<PluginStateCommit>, AdminError> {
+        let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
+            .map_err(|_| AdminError::invalid("invalid plugin manifest"))?;
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            crate::state::prepare(record, &manifest, self.store.as_ref(), process),
+        )
+        .await
+        .map_err(|_| AdminError::unavailable("plugin state migration deadline reached"))?
+    }
+
     async fn shutdown(&self) {
         self.logs.drain().await;
     }
@@ -372,24 +388,18 @@ impl PluginRuntime for PluginEngine {
         }
         if manifest.state.len() > 16
             || manifest.state.iter().any(|s| {
-                s.maximum_records > 4096
+                s.schema_version > i32::MAX as u32
+                    || s.maximum_records > 4096
                     || s.maximum_bytes > 4 * 1024 * 1024
                     || s.maximum_value_bytes > 256 * 1024
             })
         {
             return Err(AdminError::invalid("插件私有状态声明超过宿主限制"));
         }
-        if let Some(previous) = previous {
-            if previous.info.plugin_id != artifact.info.plugin_id {
-                return Err(AdminError::invalid("实例只能切换同一插件的版本"));
-            }
-            let old: Manifest = serde_json::from_value(previous.info.manifest.clone())
-                .map_err(|_| AdminError::invalid("旧插件清单无效"))?;
-            if old.state != manifest.state {
-                return Err(AdminError::invalid(
-                    "此版本变更了私有状态声明，需要状态迁移能力，当前不支持原地切换",
-                ));
-            }
+        if let Some(previous) = previous
+            && previous.info.plugin_id != artifact.info.plugin_id
+        {
+            return Err(AdminError::invalid("实例只能切换同一插件的版本"));
         }
         Ok(())
     }
@@ -620,6 +630,19 @@ struct LivePlugin {
 }
 #[async_trait]
 impl PluginProcess for LivePlugin {
+    async fn migrate_state(
+        &self,
+        batch: PluginStateMigrationBatch,
+    ) -> Result<Vec<PluginStateMigrationChange>, AdminError> {
+        if self.active.load(Ordering::Acquire)
+            || self.session.diagnostic() != crate::rpc::RpcSessionDiagnostic::Ready
+            || self.access.is_revoked()
+        {
+            return Err(AdminError::conflict("plugin state candidate ended"));
+        }
+        crate::state::invoke(&self.session, batch).await
+    }
+
     fn command_help(&self, name: Option<&str>) -> Result<Option<String>, AdminError> {
         crate::command_line::help(&self.commands, self.services.caller().instance_id(), name)
     }

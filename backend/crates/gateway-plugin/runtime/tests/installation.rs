@@ -168,7 +168,7 @@ async fn official_workbench_archive_registers_public_resources_without_rewriting
         upstream_adapter: None,
         observer: None,
     };
-    store.save(&record, 0, &actor()).await.unwrap();
+    store.save(&record, 0, &actor(), None).await.unwrap();
     assert_eq!(
         runtime
             .validate(&record, &artifact, None)

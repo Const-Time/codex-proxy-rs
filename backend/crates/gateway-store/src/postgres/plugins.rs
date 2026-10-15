@@ -234,6 +234,7 @@ impl PluginStore for PgPluginStore {
         record: &PluginRecord,
         expected: u64,
         actor: &MutationContext,
+        state: Option<&PluginStateCommit>,
     ) -> Result<(), AdminError> {
         let mut tx = self.pool.begin().await.map_err(|_| unavailable())?;
         if let Some(binding) = &record.observer {
@@ -341,6 +342,9 @@ impl PluginStore for PgPluginStore {
         if result.rows_affected() != 1 {
             return Err(conflict());
         }
+        if let Some(state) = state {
+            commit_state(&mut tx, &record.id, state).await?;
+        }
         audit(
             &mut tx,
             actor,
@@ -374,6 +378,29 @@ impl PluginStore for PgPluginStore {
         audit(&mut tx, actor, id, "plugin.uninstall").await?;
         tx.commit().await.map_err(|_| unavailable())
     }
+    async fn state_snapshot(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> Result<PluginStateSnapshot, AdminError> {
+        let mut tx = self.pool.begin().await.map_err(|_| unavailable())?;
+        let actual: Option<i64> =
+            sqlx::query_scalar("select revision from plugin_instances where id=$1 for update")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| unavailable())?;
+        if actual
+            != if revision == 0 {
+                None
+            } else {
+                Some(signed(revision)?)
+            }
+        {
+            return Err(conflict());
+        }
+        read_state_snapshot(&mut tx, id).await
+    }
     async fn state_get(
         &self,
         scope: &PluginStateScope,
@@ -384,6 +411,13 @@ impl PluginStore for PgPluginStore {
         let row = sqlx::query("select value,version,schema_version from plugin_private_state where instance_id=$1 and namespace=$2 and key=$3")
             .bind(&scope.instance_id).bind(&scope.namespace).bind(key).fetch_optional(&mut *tx).await.map_err(|_| unavailable())?;
         row.map(|row| {
+            if row
+                .try_get::<i32, _>("schema_version")
+                .map_err(|_| unavailable())?
+                != i32::try_from(scope.schema_version).map_err(|_| conflict())?
+            {
+                return Err(conflict());
+            }
             Ok(PluginStateRecord {
                 value: row.try_get("value").map_err(|_| unavailable())?,
                 version: row
@@ -483,6 +517,149 @@ pub(crate) async fn lock_plugin_resource(
             "plugin resource",
             "stale plugin generation",
         ));
+    }
+    Ok(())
+}
+
+async fn read_state_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<PluginStateSnapshot, AdminError> {
+    let declarations: Vec<serde_json::Value> = sqlx::query_scalar("select declaration from plugin_state_schemas where instance_id=$1 order by namespace limit 17")
+        .bind(id).fetch_all(&mut **tx).await.map_err(|_| unavailable())?;
+    if declarations.len() > 16 {
+        return Err(unavailable());
+    }
+    let namespaces = declarations
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(|_| unavailable()))
+        .collect::<Result<Vec<PluginStateSchema>, _>>()?;
+    let rows = sqlx::query("select namespace,key,value,version,schema_version from plugin_private_state where instance_id=$1 order by namespace,key limit 65537")
+        .bind(id).fetch_all(&mut **tx).await.map_err(|_| unavailable())?;
+    if rows.len() > 65536 {
+        return Err(unavailable());
+    }
+    let mut records = Vec::with_capacity(rows.len());
+    let mut size = 0_usize;
+    for row in rows {
+        let value: serde_json::Value = row.try_get("value").map_err(|_| unavailable())?;
+        size += serde_json::to_vec(&value).map_err(|_| unavailable())?.len();
+        if size > 64 * 1024 * 1024 {
+            return Err(unavailable());
+        }
+        records.push(PluginStateEntry {
+            namespace: row.try_get("namespace").map_err(|_| unavailable())?,
+            key: row.try_get("key").map_err(|_| unavailable())?,
+            value,
+            version: u64::try_from(
+                row.try_get::<i64, _>("version")
+                    .map_err(|_| unavailable())?,
+            )
+            .map_err(|_| unavailable())?,
+            schema_version: u32::try_from(
+                row.try_get::<i32, _>("schema_version")
+                    .map_err(|_| unavailable())?,
+            )
+            .map_err(|_| unavailable())?,
+        });
+    }
+    Ok(PluginStateSnapshot {
+        namespaces,
+        records,
+    })
+}
+
+async fn commit_state(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    state: &PluginStateCommit,
+) -> Result<(), AdminError> {
+    use std::collections::BTreeMap;
+    if read_state_snapshot(tx, id).await? != state.expected {
+        return Err(conflict());
+    }
+    let before: BTreeMap<_, _> = state
+        .expected
+        .records
+        .iter()
+        .map(|row| ((row.namespace.as_str(), row.key.as_str()), row))
+        .collect();
+    let after: BTreeMap<_, _> = state
+        .target
+        .records
+        .iter()
+        .map(|row| ((row.namespace.as_str(), row.key.as_str()), row))
+        .collect();
+    let namespaces: BTreeMap<_, _> = state
+        .target
+        .namespaces
+        .iter()
+        .map(|ns| (ns.namespace.as_str(), ns))
+        .collect();
+    if namespaces.len() > 16
+        || namespaces.len() != state.target.namespaces.len()
+        || after.len() != state.target.records.len()
+        || before
+            .values()
+            .any(|row| !namespaces.contains_key(row.namespace.as_str()))
+        || after.iter().any(|(key, row)| {
+            before.get(key).is_none_or(|old| old.version != row.version)
+                || namespaces
+                    .get(row.namespace.as_str())
+                    .is_none_or(|ns| ns.schema_version != row.schema_version)
+        })
+    {
+        return Err(AdminError::invalid("invalid state commit boundary"));
+    }
+    for (key, old) in &before {
+        match after.get(key) {
+            None => {
+                sqlx::query("delete from plugin_private_state where instance_id=$1 and namespace=$2 and key=$3")
+                .bind(id).bind(key.0).bind(key.1).execute(&mut **tx).await.map_err(|_| unavailable())?;
+            }
+            Some(new) if new.value != old.value || new.schema_version != old.schema_version => {
+                sqlx::query("update plugin_private_state set value=$4,schema_version=$5,version=nextval('plugin_state_version') where instance_id=$1 and namespace=$2 and key=$3")
+                    .bind(id).bind(key.0).bind(key.1).bind(&new.value).bind(i32::try_from(new.schema_version).map_err(|_| conflict())?)
+                    .execute(&mut **tx).await.map_err(|_| unavailable())?;
+            }
+            _ => {}
+        }
+    }
+    for ns in namespaces.values() {
+        if ns.maximum_records == 0
+            || ns.maximum_records > 4096
+            || ns.maximum_bytes == 0
+            || ns.maximum_bytes > 4 * 1024 * 1024
+            || ns.maximum_value_bytes == 0
+            || ns.maximum_value_bytes > 256 * 1024
+            || ns.schema_version == 0
+            || ns.schema_version > i32::MAX as u32
+            || after
+                .values()
+                .filter(|row| row.namespace == ns.namespace)
+                .any(|row| {
+                    serde_json::to_vec(&row.value)
+                        .map_or(true, |value| value.len() > ns.maximum_value_bytes as usize)
+                })
+        {
+            return Err(AdminError::invalid("invalid state commit quota"));
+        }
+        let (count, bytes): (i64,i64) = sqlx::query_as("select count(*),coalesce(sum(octet_length(value::text)),0)::bigint from plugin_private_state where instance_id=$1 and namespace=$2")
+            .bind(id).bind(&ns.namespace).fetch_one(&mut **tx).await.map_err(|_| unavailable())?;
+        if count > i64::from(ns.maximum_records) || bytes as u64 > ns.maximum_bytes {
+            return Err(AdminError::invalid("plugin state quota exceeded"));
+        }
+    }
+    if state.expected.namespaces != state.target.namespaces {
+        sqlx::query("delete from plugin_state_schemas where instance_id=$1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|_| unavailable())?;
+        for ns in &state.target.namespaces {
+            sqlx::query("insert into plugin_state_schemas(instance_id,namespace,declaration) values($1,$2,$3)")
+                .bind(id).bind(&ns.namespace).bind(serde_json::to_value(ns).map_err(|_| unavailable())?).execute(&mut **tx).await.map_err(|_| unavailable())?;
+        }
     }
     Ok(())
 }

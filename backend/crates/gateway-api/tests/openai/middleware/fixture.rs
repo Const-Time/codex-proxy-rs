@@ -70,6 +70,7 @@ impl PluginStore for Store {
         record: &PluginRecord,
         revision: u64,
         _: &MutationContext,
+        _: Option<&PluginStateCommit>,
     ) -> AdminResult<()> {
         let mut records = self.records.lock().unwrap();
         let current = records.iter_mut().find(|row| row.id == record.id).unwrap();

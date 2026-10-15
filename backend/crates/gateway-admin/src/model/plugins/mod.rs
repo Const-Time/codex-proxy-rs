@@ -1,4 +1,6 @@
 //! 插件持久化事实和管理视图；配置与私有状态不实现内容型 Debug。
+mod state;
+pub use state::*;
 pub mod management;
 pub mod middleware;
 pub mod policy;
