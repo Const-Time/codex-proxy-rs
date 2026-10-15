@@ -37,14 +37,7 @@ async fn real_core_bound_credentials_sdk_reads_only_native_selected_account_and_
 }
 
 async fn barrier(f: &Fixture, started: &mut gateway_core::engine::execution::StartedExecution) {
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), started.session.next_event())
-            .await
-            .is_err()
-    );
-    tokio::time::timeout(Duration::from_secs(5), f.server.entered.notified())
-        .await
-        .unwrap();
+    super::fixture::drive_until(started, &f.server.entered, Duration::from_secs(5)).await;
     assert_eq!(f.in_flight().await, 1);
 }
 async fn finish(f: Fixture, mut started: gateway_core::engine::execution::StartedExecution) {

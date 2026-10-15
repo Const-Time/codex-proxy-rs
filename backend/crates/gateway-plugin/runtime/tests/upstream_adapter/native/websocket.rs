@@ -163,10 +163,10 @@ impl Callback for Recorder {
         Ok(response)
     }
 }
-struct Socket {
-    url: String,
-    headers: Arc<Mutex<Vec<http::HeaderMap>>>,
-    pings: Arc<AtomicUsize>,
+pub(super) struct Socket {
+    pub(super) url: String,
+    pub(super) headers: Arc<Mutex<Vec<http::HeaderMap>>>,
+    pub(super) pings: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
     changed: Arc<tokio::sync::Notify>,
@@ -179,7 +179,7 @@ impl Drop for Socket {
     }
 }
 impl Socket {
-    async fn new(resume: bool, pause: bool) -> Self {
+    pub(super) async fn new(resume: bool, pause: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let headers = Arc::new(Mutex::new(vec![]));
@@ -244,7 +244,7 @@ impl Socket {
             task,
         }
     }
-    async fn wait_closed(&self, count: usize) {
+    pub(super) async fn wait_closed(&self, count: usize) {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let changed = self.changed.notified();
@@ -407,14 +407,8 @@ async fn real_core_websocket_adapter_cancel_key_revoke_and_plugin_disable_close_
                 )
                 .await
                 .unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(200), started.session.next_event())
-                    .await
-                    .is_err()
-            );
-            tokio::time::timeout(Duration::from_secs(3), server.entered.notified())
-                .await
-                .unwrap();
+            super::fixture::drive_until(&mut started, &server.entered, Duration::from_secs(3))
+                .await;
             assert_eq!(f.in_flight().await, 1);
             match revoke {
                 "key" => f.revoke_key(),

@@ -26,14 +26,7 @@ async fn pending(
     started: &mut gateway_core::engine::execution::StartedExecution,
     selected: &capture::Selected,
 ) -> capture::Captured {
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), started.session.next_event())
-            .await
-            .is_err()
-    );
-    tokio::time::timeout(Duration::from_secs(5), f.server.entered.notified())
-        .await
-        .unwrap();
+    super::fixture::drive_until(started, &f.server.entered, Duration::from_secs(5)).await;
     let captured = selected.lock().unwrap().take().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

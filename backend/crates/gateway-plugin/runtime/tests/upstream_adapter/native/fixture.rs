@@ -1,4 +1,4 @@
-use super::super::{binding::CandidateRuntime, execution::Server, *};
+use super::super::{execution::Server, *};
 use crate::models::fixture::Core;
 use crate::services::upstream_sdk::environment::Environment;
 use chrono::Utc;
@@ -138,6 +138,22 @@ struct StartOptions {
     fields: serde_json::Map<String, serde_json::Value>,
 }
 
+// Core/adapter streams are cold: keep polling until the actual network barrier,
+// rather than dropping the driver after an assumed startup duration.
+pub(super) async fn drive_until(
+    started: &mut StartedExecution,
+    entered: &tokio::sync::Notify,
+    budget: Duration,
+) {
+    tokio::time::timeout(budget, async {
+        tokio::select! {
+            biased;
+            () = entered.notified() => {},
+            _ = started.session.next_event() => panic!("paused upstream completed before its network barrier"),
+        }
+    }).await.expect("native SDK must reach the actual network barrier");
+}
+
 impl Fixture {
     pub async fn new() -> Option<Self> {
         Self::for_provider("openai").await
@@ -245,7 +261,7 @@ impl Fixture {
             )
             .with_credentials(env.admin.services().plugin_credentials()),
         );
-        let manager = PluginManager::new(plugin_store.clone(), Arc::new(CandidateRuntime(engine)));
+        let manager = PluginManager::new(plugin_store.clone(), engine);
         let artifact = manager
             .upload(upstream_archive("1.0.0"), &actor())
             .await
@@ -502,10 +518,7 @@ impl Fixture {
             )
             .with_credentials(self.env.admin.services().plugin_credentials()),
         );
-        self.manager = PluginManager::new(
-            self.plugin_store.clone(),
-            Arc::new(CandidateRuntime(engine)),
-        );
+        self.manager = PluginManager::new(self.plugin_store.clone(), engine);
         self.manager.restore().await.unwrap();
     }
     pub async fn advance_credential(&mut self) {

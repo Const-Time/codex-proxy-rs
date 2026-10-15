@@ -336,7 +336,10 @@ async fn unsupported_extensions_require_adaptation_and_plaintext_secret_configur
     ));
     let manager = PluginManager::new(store, runtime);
     let artifact = manager
-        .upload(crate::support::upstream_archive("1.0.0"), &actor())
+        .upload(
+            crate::support::upstream_archive_contract("1.0.0", 3),
+            &actor(),
+        )
         .await
         .unwrap();
     assert_eq!(artifact.unsupported_capabilities, ["upstream_adapter"]);

@@ -273,7 +273,7 @@ pub fn archive(version: &str, extra_capability: bool) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false, false, false, false),
+        (false, false, false, 0, false, false, false),
     )
 }
 pub fn authentication_archive(version: &str) -> Arc<[u8]> {
@@ -283,7 +283,7 @@ pub fn authentication_archive(version: &str) -> Arc<[u8]> {
         true,
         false,
         false,
-        (false, false, false, false, false, false, false),
+        (false, false, false, 0, false, false, false),
     )
 }
 pub fn routing_archive(version: &str) -> Arc<[u8]> {
@@ -293,7 +293,7 @@ pub fn routing_archive(version: &str) -> Arc<[u8]> {
         false,
         true,
         false,
-        (false, false, false, false, false, false, false),
+        (false, false, false, 0, false, false, false),
     )
 }
 pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
@@ -303,7 +303,7 @@ pub fn scheduling_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         true,
-        (false, false, false, false, false, false, false),
+        (false, false, false, 0, false, false, false),
     )
 }
 pub fn retry_archive(version: &str) -> Arc<[u8]> {
@@ -313,7 +313,7 @@ pub fn retry_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (true, false, false, false, false, false, false),
+        (true, false, false, 0, false, false, false),
     )
 }
 pub fn http_archive(version: &str) -> Arc<[u8]> {
@@ -323,7 +323,7 @@ pub fn http_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, true, false, false, false, false, false),
+        (false, true, false, 0, false, false, false),
     )
 }
 pub fn catalog_archive(version: &str) -> Arc<[u8]> {
@@ -333,17 +333,20 @@ pub fn catalog_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, true, false, false, false, false),
+        (false, false, true, 0, false, false, false),
     )
 }
 pub fn upstream_archive(version: &str) -> Arc<[u8]> {
+    upstream_archive_contract(version, 2)
+}
+pub fn upstream_archive_contract(version: &str, contract: u32) -> Arc<[u8]> {
     build_archive(
         version,
         false,
         false,
         false,
         false,
-        (false, false, false, true, false, false, false),
+        (false, false, false, contract, false, false, false),
     )
 }
 pub fn maintenance_archive(version: &str) -> Arc<[u8]> {
@@ -353,7 +356,7 @@ pub fn maintenance_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false, true, false, false),
+        (false, false, false, 0, true, false, false),
     )
 }
 pub fn observer_archive(version: &str) -> Arc<[u8]> {
@@ -363,7 +366,7 @@ pub fn observer_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false, false, true, false),
+        (false, false, false, 0, false, true, false),
     )
 }
 pub fn command_archive(version: &str) -> Arc<[u8]> {
@@ -373,7 +376,7 @@ pub fn command_archive(version: &str) -> Arc<[u8]> {
         false,
         false,
         false,
-        (false, false, false, false, false, false, true),
+        (false, false, false, 0, false, false, true),
     )
 }
 fn build_archive(
@@ -382,7 +385,7 @@ fn build_archive(
     authentication: bool,
     routing: bool,
     scheduling: bool,
-    modes: (bool, bool, bool, bool, bool, bool, bool),
+    modes: (bool, bool, bool, u32, bool, bool, bool),
 ) -> Arc<[u8]> {
     let (retry, http, catalog, upstream, maintenance, observer, command_line) = modes;
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
@@ -429,8 +432,8 @@ fn build_archive(
         contributes["model_catalog"] =
             json!({"id":"local.fixture.catalog","version":1,"stages":["registration"]});
     }
-    if upstream {
-        contributes["upstream_adapter"] = json!({"id":"local.fixture.upstream","version":2,"stages":["upstream"],"inputFormats":["openai"],"outputFormats":["openai"]});
+    if upstream > 0 {
+        contributes["upstream_adapter"] = json!({"id":"local.fixture.upstream","version":upstream,"stages":["upstream"],"inputFormats":["openai"],"outputFormats":["openai"]});
     }
     let mut manifest = json!({"manifestVersion":2,"name":"fixture","displayName":"Fixture","publisher":"local","version":version,"description":"Lifecycle fixture","license":"MIT",
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,
