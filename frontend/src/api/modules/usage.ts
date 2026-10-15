@@ -91,6 +91,8 @@ export interface UsageListRecord {
   requestedModel: string | null
   upstreamModel: string | null
   upstreamResponseModel: string | null
+  requestedServiceTier: string | null
+  upstreamServiceTier: string | null
   serviceTier: string | null
   clientTransport: string
   upstreamTransport: string | null
@@ -125,6 +127,8 @@ export interface UsageRecord {
   requestedModel: string | null
   upstreamModel: string | null
   upstreamResponseModel: string | null
+  requestedServiceTier: string | null
+  upstreamServiceTier: string | null
   serviceTier: string | null
   statusCode: number | null
   clientTransport: string

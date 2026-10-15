@@ -1,27 +1,16 @@
 <script setup lang="ts">
 import type { AccountGroup } from '@/api'
-import { Download, Pencil, Search, Trash2, Upload } from '@lucide/vue'
+import { Search } from '@lucide/vue'
 import { computed } from 'vue'
 
-import BaseButton from '@/components/base/BaseButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import ProviderFilterSegmented from '@/components/ProviderFilterSegmented.vue'
 import { accountStatusFilterOptions } from '../constants'
 
 const props = defineProps<{
-  selectedCount: number
-  batchDeleting: boolean
-  exportingAccounts: boolean
   groups: AccountGroup[]
   groupsLoading: boolean
-}>()
-
-const emit = defineEmits<{
-  deleteSelected: []
-  exportSelected: []
-  create: []
-  editSelected: []
 }>()
 
 const search = defineModel<string>('search', { required: true })
@@ -42,10 +31,10 @@ const groupOptions = computed(() => [
   <div
     class="flex w-full flex-col gap-3 xl:flex-row xl:flex-wrap xl:items-center"
     role="group"
-    aria-label="账号筛选与操作"
+    aria-label="账号筛选"
   >
     <div
-      class="grid w-full min-w-0 grid-cols-2 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7.75rem] xl:flex xl:w-auto xl:flex-none xl:flex-wrap xl:gap-3"
+      class="grid w-full min-w-0 grid-cols-2 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7.75rem] xl:flex xl:w-full xl:flex-wrap xl:gap-3"
     >
       <BaseInput
         v-model="search"
@@ -76,51 +65,6 @@ const groupOptions = computed(() => [
         v-model="provider"
         class="col-span-2 w-full sm:col-span-1 xl:w-31 xl:shrink-0"
       />
-    </div>
-
-    <div
-      class="grid w-full grid-cols-2 gap-2 xl:flex xl:w-auto xl:flex-wrap xl:shrink-0 xl:self-end xl:items-center xl:justify-end xl:ml-auto"
-    >
-      <BaseButton
-        v-if="selectedCount > 0"
-        variant="secondary"
-        class="w-full whitespace-nowrap xl:w-auto"
-        @click="emit('editSelected')"
-      >
-        <Pencil class="size-4 text-cp-link" />
-        批量编辑账号
-      </BaseButton>
-      <BaseButton
-        v-if="selectedCount > 0"
-        variant="destructive"
-        class="w-full whitespace-nowrap xl:w-auto"
-        :disabled="batchDeleting"
-        @click="emit('deleteSelected')"
-      >
-        <Trash2 class="size-4" />
-        删除选中 ({{ selectedCount }})
-      </BaseButton>
-      <BaseButton
-        v-if="selectedCount > 0"
-        variant="secondary"
-        class="w-full whitespace-nowrap xl:w-auto"
-        :loading="exportingAccounts"
-        @click="emit('exportSelected')"
-      >
-        <template #icon>
-          <Download class="size-4" />
-        </template>
-        导出选中 ({{ selectedCount }})
-      </BaseButton>
-      <BaseButton
-        variant="primary"
-        class="whitespace-nowrap xl:w-auto"
-        :class="selectedCount > 0 ? 'col-span-2 w-full' : 'col-span-2 justify-self-end'"
-        @click="emit('create')"
-      >
-        <Upload class="size-4" />
-        导入账号
-      </BaseButton>
     </div>
   </div>
 </template>

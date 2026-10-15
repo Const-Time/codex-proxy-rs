@@ -27,6 +27,7 @@ import AccountQuotaPanel from './components/AccountQuotaPanel/index.vue'
 import AccountQuotaSummaryCell from './components/AccountQuotaSummaryCell/index.vue'
 import AccountStatusBadge from './components/AccountStatusBadge/index.vue'
 import AccountTableActions from './components/AccountTableActions.vue'
+import AccountToolbarActions from './components/AccountToolbarActions.vue'
 import AccountUsagePanel from './components/AccountUsagePanel.vue'
 import { useAccountBatchEditor } from './composables/useAccountBatchEditor'
 import { useAccountConnectionTest } from './composables/useAccountConnectionTest'
@@ -184,24 +185,6 @@ const {
     <BaseCard
       class="cp-mobile-table-host mt-4 flex flex-col xl:h-[calc(100dvh-250px)] xl:min-h-125"
     >
-      <template #header>
-        <AccountFilters
-          v-model:search="searchQuery"
-          v-model:status="statusQuery"
-          v-model:provider="providerQuery"
-          v-model:group="groupQuery"
-          :groups="groups"
-          :groups-loading="groupsLoading"
-          :selected-count="selectedIds.size"
-          :batch-deleting="batchDeleting"
-          :exporting-accounts="exportingAccounts"
-          @delete-selected="showDeleteModal = true"
-          @export-selected="handleExportAccounts"
-          @create="openCreateAccount"
-          @edit-selected="openBatchEdit"
-        />
-      </template>
-
       <template #body>
         <div class="flex min-h-0 flex-col xl:h-full">
           <div v-if="loadError" role="alert" class="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-cp bg-cp-error-container px-4 py-3 text-cp-sm text-cp-error">
@@ -223,6 +206,27 @@ const {
             :empty-text="loadError ? '账号数据读取失败，请重试' : '暂无账号数据'"
             @sort-change="handleSortChange"
           >
+            <template #toolbar-actions>
+              <AccountToolbarActions
+                :selected-count="selectedIds.size"
+                :batch-deleting="batchDeleting"
+                :exporting-accounts="exportingAccounts"
+                @delete-selected="showDeleteModal = true"
+                @export-selected="handleExportAccounts"
+                @create="openCreateAccount"
+                @edit-selected="openBatchEdit"
+              />
+            </template>
+            <template #toolbar>
+              <AccountFilters
+                v-model:search="searchQuery"
+                v-model:status="statusQuery"
+                v-model:provider="providerQuery"
+                v-model:group="groupQuery"
+                :groups="groups"
+                :groups-loading="groupsLoading"
+              />
+            </template>
             <template #expander="{ row }">
               <button
                 type="button"

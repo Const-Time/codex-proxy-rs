@@ -176,7 +176,7 @@ impl CodexCanonicalDecoder {
         self
     }
 
-    /// 响应未报告实际档位时，才使用请求档位估算费用。
+    /// 使用最终发送给上游的请求档位估算费用，不由响应回显覆盖。
     #[must_use]
     pub fn with_requested_service_tier(mut self, service_tier: Option<&str>) -> Self {
         self.requested_service_tier = normalize_service_tier(service_tier);
@@ -235,7 +235,7 @@ impl CodexCanonicalDecoder {
         std::mem::take(&mut self.timing_signals)
     }
 
-    /// 返回本 attempt 已从上游响应生命周期帧观察到的实际服务档位。
+    /// 返回本 attempt 的上游响应回显档位，仅供诊断，不作为本地计费依据。
     #[must_use]
     pub fn response_service_tier(&self) -> Option<&str> {
         self.response_service_tier.as_deref()
@@ -905,10 +905,8 @@ impl CodexCanonicalDecoder {
             .filter(|model| !model.is_empty())
             .unwrap_or(&self.upstream_model)
             .to_owned();
-        let service_tier = self
-            .response_service_tier
-            .as_deref()
-            .or(self.requested_service_tier.as_deref());
+        // 与用量统计统一按最终发送档位估算，响应回显不改变本地计价口径。
+        let service_tier = self.requested_service_tier.as_deref();
         let tool_calls = billable_tool_calls(response);
         if let Some(breakdown) = usage
             .filter(|usage| billable_usage_is_complete(response, *usage))

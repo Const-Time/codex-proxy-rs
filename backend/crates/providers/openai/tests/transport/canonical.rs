@@ -311,7 +311,7 @@ fn decoder_should_emit_calculated_cost_for_complete_known_model_usage() {
 }
 
 #[test]
-fn decoder_should_prefer_response_service_tier_over_requested_tier_for_billing() {
+fn decoder_should_bill_requested_service_tier_despite_default_response() {
     let body = concat!(
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fast_cost\",\"model\":\"gpt-5.4\",\"service_tier\":\"default\"}}\n\n",
@@ -328,12 +328,12 @@ fn decoder_should_prefer_response_service_tier_over_requested_tier_for_billing()
     assert!(canonical_facts(&events).into_iter().any(|event| matches!(
         event,
         GatewayEvent::CalculatedCost(cost)
-            if cost.total().amount().scaled() == 3_437_500
+            if cost.total().amount().scaled() == 6_875_000
     )));
 }
 
 #[test]
-fn decoder_should_use_response_service_tier_when_request_omits_it() {
+fn decoder_should_bill_standard_when_request_omits_service_tier() {
     let body = concat!(
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_response_tier_cost\",\"model\":\"gpt-5.4\",\"service_tier\":\"priority\"}}\n\n",
@@ -349,7 +349,7 @@ fn decoder_should_use_response_service_tier_when_request_omits_it() {
     assert!(canonical_facts(&events).into_iter().any(|event| matches!(
         event,
         GatewayEvent::CalculatedCost(cost)
-            if cost.total().amount().scaled() == 6_875_000
+            if cost.total().amount().scaled() == 3_437_500
     )));
 }
 
@@ -438,7 +438,7 @@ fn decoder_should_fail_closed_for_fixed_block_web_search_content() {
 }
 
 #[test]
-fn websocket_decoder_should_prefer_response_service_tier_over_requested_tier_for_billing() {
+fn websocket_decoder_should_bill_requested_service_tier_despite_default_response() {
     let created = websocket_event_to_sse_frame(
         r#"{"type":"response.created","response":{"id":"resp_ws_fast_cost","model":"gpt-5.4","service_tier":"default"}}"#,
     )
@@ -458,7 +458,7 @@ fn websocket_decoder_should_prefer_response_service_tier_over_requested_tier_for
     assert!(canonical_facts(&events).into_iter().any(|event| matches!(
         event,
         GatewayEvent::CalculatedCost(cost)
-            if cost.total().amount().scaled() == 3_437_500
+            if cost.total().amount().scaled() == 6_875_000
     )));
 }
 
@@ -1097,14 +1097,21 @@ fn pricing_response_cost(
 }
 
 #[test]
-fn billing_should_follow_actual_tier_and_only_fall_back_when_it_is_absent() {
+fn billing_should_follow_requested_tier_independently_of_response_tier() {
     for (requested, actual, expected) in [
-        (Some("fast"), Some("default"), Some(1_000_000_000)),
-        (Some("auto"), Some("fast"), Some(2_000_000_000)),
-        (Some("default"), Some("flex"), Some(500_000_000)),
+        (Some("priority"), Some("default"), Some(2_000_000_000)),
+        (Some("priority"), Some("auto"), Some(2_000_000_000)),
+        (Some("fast"), Some("default"), Some(2_000_000_000)),
+        (Some("auto"), Some("fast"), None),
+        (Some("auto"), Some("default"), None),
+        (Some("default"), Some("flex"), Some(1_000_000_000)),
+        (Some("flex"), Some("priority"), Some(500_000_000)),
         (Some("fast"), None, Some(2_000_000_000)),
         (Some("auto"), None, None),
-        (Some("default"), Some("future"), None),
+        (Some("default"), Some("future"), Some(1_000_000_000)),
+        (Some("future"), Some("default"), None),
+        (None, Some("priority"), Some(1_000_000_000)),
+        (None, None, Some(1_000_000_000)),
     ] {
         assert_eq!(
             pricing_response_cost(requested, actual, json!([]), &[]),
@@ -1124,14 +1131,65 @@ fn billing_should_add_file_and_web_search_fees_without_tier_markup() {
     for (tier, expected) in [("default", 1_150_000_000), ("fast", 2_150_000_000)] {
         assert_eq!(
             pricing_response_cost(
-                None,
                 Some(tier),
+                Some("default"),
                 output.clone(),
                 &[json!({"type": "web_search"})]
             ),
             Some(expected)
         );
     }
+}
+
+#[test]
+fn outbound_fast_billing_preserves_component_price_multipliers() {
+    let pricing = serde_json::from_value(json!({
+        "multiplierBps": 20000,
+        "multiplierScope": {"components": ["cacheRead"]},
+        "bands": {}
+    }))
+    .unwrap();
+    let response = json!({"type":"response.completed","response":{
+        "id":"resp_fast_scoped","model":"gpt-6-astra","status":"completed",
+        "service_tier":"default","output":[],
+        "usage":{"input_tokens":176902,"output_tokens":631,"total_tokens":177533,
+            "input_tokens_details":{"cached_tokens":175744,"cache_write_tokens":0}}
+    }});
+    let created = json!({"type":"response.created","response":{
+        "id":"resp_fast_scoped","model":"gpt-6-astra","service_tier":"auto"
+    }});
+    let body = format!(
+        "event: response.created\ndata: {created}\n\nevent: response.completed\ndata: {response}\n\n"
+    );
+    let mut decoder = CodexCanonicalDecoder::new("gpt-6-astra")
+        .with_requested_service_tier(Some("priority"))
+        .with_pricing(Some(pricing))
+        .with_raw_sse_passthrough();
+    let events = decoder.push(body.as_bytes()).expect("decode Fast cost");
+    let cost = canonical_facts(&events)
+        .into_iter()
+        .find_map(|event| match event {
+            GatewayEvent::CalculatedCost(cost) => Some(cost.clone().into_estimate()),
+            _ => None,
+        })
+        .expect("priced cost");
+    let breakdown = cost.breakdown().expect("frozen component amounts");
+    assert_eq!(breakdown.service_tier(), Some("priority"));
+    assert_eq!(decoder.response_service_tier(), Some("default"));
+    // Fast selects $20/$100/$2 rates; only cache reads receive the system 2x.
+    assert_eq!(breakdown.input_amount().amount().canonical(), "0.02316");
+    assert_eq!(breakdown.output_amount().amount().canonical(), "0.0631");
+    assert_eq!(
+        breakdown.cache_read_amount().amount().canonical(),
+        "0.702976"
+    );
+    assert_eq!(breakdown.total_amount().amount().canonical(), "0.789236");
+    let raw: Vec<u8> = events
+        .iter()
+        .filter_map(|event| event.wire_event().and_then(|wire| wire.raw_sse_frame()))
+        .flat_map(|frame| frame.iter().copied())
+        .collect();
+    assert_eq!(raw, body.as_bytes());
 }
 
 #[test]

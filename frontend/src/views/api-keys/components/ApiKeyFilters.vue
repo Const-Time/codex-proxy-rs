@@ -16,11 +16,11 @@ const emit = defineEmits<{
 
 <template>
   <div
-    class="flex w-full flex-wrap items-center gap-3"
+    class="flex min-w-0 flex-wrap items-center gap-2"
     role="group"
     aria-label="API Key 筛选与操作"
   >
-    <div class="flex shrink-0 items-center justify-end gap-2 md:ml-auto">
+    <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
       <BaseButton
         v-if="selectedCount > 0"
         variant="destructive"

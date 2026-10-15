@@ -1285,25 +1285,22 @@ async fn transient_settlement_failure_rolls_back_and_retries_exact_cost_before_a
     let Some(database) = TestDatabase::create("budgets_retry").await else {
         return;
     };
-    seed(&database, "key", "1", "5").await;
+    seed(&database, "key", "1", "50").await;
+    sqlx::query("update account_groups set model_multipliers=$1")
+        .bind(serde_json::json!({"model":{"multiplier":"3","scope":{"components":["output","cacheRead"]}}})).execute(&database.pool).await.unwrap();
     let store = PgClientBudgetStore::new(database.pool.clone());
-    sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
-        .bind(group_id("key").as_str())
-        .bind(serde_json::json!({"test-model":"2"}))
-        .execute(&database.pool)
-        .await
-        .unwrap();
-    let frozen = store
+    let scope = store
         .admit(
             key_id("key"),
             Some(group_id("key")),
-            Some(gateway_core::routing::PublicModelId::new("test-model").unwrap()),
+            Some(gateway_core::routing::PublicModelId::new("model").unwrap()),
         )
         .await
         .unwrap();
     let pending = ClientBudgetCharge {
-        scope: Some(frozen),
-        ..charge("key", "retry", "1.25")
+        scope: Some(scope),
+        components_usd: gateway_core::engine::budget::budget_components(&scoped_cost()),
+        ..charge("key", "retry", "10")
     };
     // 在费用事件插入后让窗口写入失败，验证整个事务回滚。
     sqlx::raw_sql(
@@ -1332,6 +1329,8 @@ async fn transient_settlement_failure_rolls_back_and_retries_exact_cost_before_a
         .execute(&database.pool)
         .await
         .unwrap();
+    // A later admission uses a different model/rule but must drain this user's
+    // pending charge using the OLD rule and old component facts.
     sqlx::query("update account_groups set model_multipliers='{}'")
         .execute(&database.pool)
         .await
@@ -1347,7 +1346,7 @@ async fn transient_settlement_failure_rolls_back_and_retries_exact_cost_before_a
     store.settle(pending.clone()).await.unwrap();
     assert_eq!(
         status(&database, "key").await.daily_used_usd.canonical(),
-        "2.5"
+        "17"
     );
     database.close().await;
 }
@@ -1610,7 +1609,7 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
         .bind(group_id("scoped").as_str()).bind(serde_json::json!({"test-model":{"multiplier":"3","scope":{"components":["cacheRead","output"]}}}))
         .execute(&db.pool).await.unwrap();
     let store = PgClientBudgetStore::new(db.pool.clone());
-    let frozen = store
+    let frozen_scope = store
         .admit(
             key_id("scoped"),
             Some(group_id("scoped")),
@@ -1618,9 +1617,26 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
         )
         .await
         .unwrap();
+    let settled = ClientBudgetCharge {
+        scope: Some(frozen_scope.clone()),
+        components_usd: gateway_core::engine::budget::budget_components(&scoped_cost()),
+        ..charge("scoped", "scoped", "10")
+    };
+    // Reproduce the async writer race: neither INSERT nor FINALIZE has persisted.
+    sqlx::query("update account_groups set model_multipliers='{}'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    store.settle(settled.clone()).await.unwrap();
+    let count: i64 = sqlx::query_scalar("select count(*) from model_requests")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(status(&db, "scoped").await.daily_used_usd.canonical(), "17");
     let snapshot = serde_json::json!({"version":1,"total":"10","input":"4","output":"2","cacheRead":"1","cacheWrite":"1","image":{"input":"1","cacheRead":"0.5"}});
-    sqlx::query("insert into model_requests(id,client_api_key_ref,user_id,config_revision,protocol,operation,endpoint,client_transport,requested_model_id,routing_scope,routing_group_refs,routing_group_names_snapshot,started_at,deadline_at,outcome,completed_at,cost_source,cost_amount,cost_currency,billing_snapshot_json) values('req_scoped','scoped','budget-user',1,'openai','responses','/v1/responses','http_sse','test-model','groups',$1,'[\"scoped\"]',now(),now()+interval '1 hour','failed',now(),'calculated',10,'USD',$2)")
-        .bind(vec![group_id("scoped").to_string()]).bind(snapshot.clone()).execute(&db.pool).await.unwrap();
+    sqlx::query("insert into model_requests(id,client_api_key_ref,user_id,config_revision,protocol,operation,endpoint,client_transport,requested_model_id,routing_scope,routing_group_refs,routing_group_names_snapshot,started_at,deadline_at,outcome,completed_at,cost_source,cost_amount,cost_currency,billing_snapshot_json,billing_multiplier,billing_multiplier_scope) values('req_scoped','scoped','budget-user',1,'openai','responses','/v1/responses','http_sse','test-model','groups',$1,'[\"scoped\"]',now(),now()+interval '1 hour','failed',now(),'calculated',10,'USD',$2,$3::text::numeric,$4)")
+        .bind(vec![group_id("scoped").to_string()]).bind(snapshot.clone()).bind(frozen_scope.billing.multiplier().canonical()).bind(sqlx::types::Json(frozen_scope.billing.scope())).execute(&db.pool).await.unwrap();
     let billed: String = sqlx::query_scalar(
         "select billed_cost_amount::text from model_requests where id='req_scoped'",
     )
@@ -1632,15 +1648,9 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
         .execute(&db.pool)
         .await
         .unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
     for _ in 0..2 {
-        store
-            .settle(ClientBudgetCharge {
-                scope: Some(frozen.clone()),
-                components_usd: ["5", "2", "1.5", "1"].map(|amount| amount.parse().unwrap()),
-                ..charge("scoped", "scoped", "10")
-            })
-            .await
-            .unwrap();
+        store.settle(settled.clone()).await.unwrap();
     }
     assert_eq!(status(&db, "scoped").await.daily_used_usd.canonical(), "17");
     let ledger: (String,String,serde_json::Value) = sqlx::query_as("select amount_usd::text,raw_amount_usd::text,billing_multiplier_scope from user_group_charge_events where request_id='req_scoped'").fetch_one(&db.pool).await.unwrap();
@@ -1648,7 +1658,7 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
     assert_eq!(ledger.1, "10.0000000000");
     assert_eq!(
         serde_json::from_value::<gateway_core::metering::MultiplierScope>(ledger.2).unwrap(),
-        frozen.billing.scope().clone()
+        frozen_scope.billing.scope().clone()
     );
     for (scope, expected) in [
         (serde_json::json!("all"), "30.0000000000"),
@@ -1685,5 +1695,191 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
     .await
     .unwrap();
     assert_eq!(zero, "8.5000000000");
+    db.close().await;
+}
+
+fn scoped_cost() -> gateway_core::metering::CostEstimate {
+    use gateway_core::metering::*;
+    let usd = |s: &str| Money::new(s.parse().unwrap(), CurrencyCode::new("USD").unwrap());
+    CalculatedCostBreakdown::new(
+        CalculatedCostAmounts::new(usd("4"), usd("2"), usd("1"), usd("1"), usd("10"), usd("10")),
+        CalculatedCostRates::new(usd("1"), usd("1"), usd("1"), usd("1")),
+        Some("default".into()),
+        100,
+    )
+    .with_image(ImageCostBreakdown {
+        input_tokens: 1,
+        cached_tokens: 1,
+        input_amount: usd("1"),
+        cache_read_amount: usd("0.5"),
+        input_price_per_million: usd("1"),
+        cache_read_price_per_million: usd("1"),
+    })
+    .calculated_cost()
+    .into_estimate()
+}
+
+#[tokio::test]
+async fn execution_owned_costs_bill_each_attempt_without_observations() {
+    let Some(db) = TestDatabase::create("budget_cost_facts").await else {
+        return;
+    };
+    seed(&db, "facts", "0", "0").await;
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    for (index, scope, rate, expected) in [
+        (
+            0,
+            serde_json::json!({"components":["cacheRead","output"]}),
+            "3",
+            "39",
+        ),
+        (1, serde_json::json!("all"), "3", "75"),
+        (2, serde_json::json!({"components":["input"]}), "0", "15"),
+        (
+            3,
+            serde_json::json!({"components":["cacheWrite"]}),
+            "1",
+            "25",
+        ),
+    ] {
+        sqlx::query("update account_groups set model_multipliers=$1")
+            .bind(serde_json::json!({"model":{"multiplier":rate,"scope":scope}}))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let frozen = store
+            .admit(
+                key_id("facts"),
+                Some(group_id("facts")),
+                Some(gateway_core::routing::PublicModelId::new("model").unwrap()),
+            )
+            .await
+            .unwrap();
+        let mut charge = charge("facts", &format!("facts-{index}"), "5");
+        charge.scope = Some(frozen);
+        // Two priced attempts plus an unitemized provider fee: scoped rules must
+        // not guess its split. Unknown attempts contribute zero.
+        for cost in [
+            scoped_cost(),
+            scoped_cost(),
+            gateway_core::metering::CostEstimate::unavailable(),
+        ] {
+            let amount = cost
+                .total()
+                .map_or(gateway_core::metering::Decimal::ZERO, |money| {
+                    money.amount()
+                });
+            charge.amount_usd = charge.amount_usd.checked_add(amount).unwrap();
+            for (sum, amount) in charge
+                .components_usd
+                .iter_mut()
+                .zip(gateway_core::engine::budget::budget_components(&cost))
+            {
+                *sum = sum.checked_add(amount).unwrap();
+            }
+        }
+        assert_eq!(charge.amount_usd.canonical(), "25");
+        for _ in 0..2 {
+            store.settle(charge.clone()).await.unwrap();
+        }
+        let (raw, billed): (String, String) = sqlx::query_as("select raw_amount_usd::text,amount_usd::text from user_group_charge_events where request_id=$1")
+            .bind(charge.request_id.as_str()).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(
+            raw.parse::<gateway_core::metering::Decimal>()
+                .unwrap()
+                .canonical(),
+            "25"
+        );
+        assert_eq!(
+            billed
+                .parse::<gateway_core::metering::Decimal>()
+                .unwrap()
+                .canonical(),
+            expected
+        );
+    }
+    assert_eq!(status(&db, "facts").await.daily_used_usd.canonical(), "154");
+    db.close().await;
+}
+
+#[tokio::test]
+async fn cached_request_charges_scoped_markup_before_async_finalization() {
+    use gateway_core::metering::*;
+    let Some(db) = TestDatabase::create("budget_cached_fast").await else {
+        return;
+    };
+    seed(&db, "cached", "0", "0").await;
+    sqlx::query("update account_groups set model_multipliers=$1")
+        .bind(serde_json::json!({"model":{"multiplier":"2","scope":{"components":["cacheRead","cacheWrite"]}}})).execute(&db.pool).await.unwrap();
+    let store = PgClientBudgetStore::new(db.pool.clone());
+    let scope = store
+        .admit(
+            key_id("cached"),
+            Some(group_id("cached")),
+            Some(gateway_core::routing::PublicModelId::new("model").unwrap()),
+        )
+        .await
+        .unwrap();
+    let usd = |s: &str| Money::new(s.parse().unwrap(), CurrencyCode::new("USD").unwrap());
+    for (tier, percent, input, output, cache, raw, rates, expected) in [
+        (
+            "default",
+            100,
+            "0.01158",
+            "0.03155",
+            "0.175744",
+            "0.218874",
+            ["10", "50", "1"],
+            "0.394618",
+        ),
+        (
+            "priority",
+            200,
+            "0.02316",
+            "0.0631",
+            "0.351488",
+            "0.437748",
+            ["20", "100", "2"],
+            "0.789236",
+        ),
+    ] {
+        // Settlement consumes already tier-priced facts, never applies Fast again.
+        let cost = CalculatedCostBreakdown::new(
+            CalculatedCostAmounts::new(
+                usd(input),
+                usd(output),
+                usd(cache),
+                usd("0"),
+                usd("0.218874"),
+                usd(raw),
+            ),
+            CalculatedCostRates::new(usd(rates[0]), usd(rates[1]), usd(rates[2]), usd("0")),
+            Some(tier.into()),
+            percent,
+        )
+        .calculated_cost()
+        .into_estimate();
+        let pending = ClientBudgetCharge {
+            scope: Some(scope.clone()),
+            components_usd: gateway_core::engine::budget::budget_components(&cost),
+            ..charge("cached", tier, raw)
+        };
+        for _ in 0..2 {
+            store.settle(pending.clone()).await.unwrap();
+        }
+        let row: (String, String) = sqlx::query_as(
+            "select raw_amount_usd::text,amount_usd::text from user_group_charge_events where request_id=$1",
+        )
+        .bind(pending.request_id.as_str())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.parse::<Decimal>().unwrap().canonical(), raw);
+        assert_eq!(row.1.parse::<Decimal>().unwrap().canonical(), expected);
+    }
+    assert_eq!(
+        status(&db, "cached").await.daily_used_usd.canonical(),
+        "1.183854"
+    );
     db.close().await;
 }

@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import type { UsageDisplayRecord } from '../utils/records'
 import { CornerDownRight } from '@lucide/vue'
-
 import { computed } from 'vue'
+
 import { usageModelDisplay } from '../utils/records'
+import { serviceTierSummary } from '../utils/serviceTier'
 
 const props = defineProps<{
   record: UsageDisplayRecord
 }>()
+
+const tierSummary = computed(() => serviceTierSummary(props.record))
 
 const modelDisplay = computed(() => usageModelDisplay(props.record))
 </script>
@@ -20,6 +23,7 @@ const modelDisplay = computed(() => usageModelDisplay(props.record))
     >
       {{ modelDisplay.primary }}
     </code>
+    <span v-if="tierSummary" class="text-cp-xs text-cp-text-secondary" :title="tierSummary">{{ tierSummary }}</span>
     <div
       v-for="route in modelDisplay.routes"
       :key="route.kind"

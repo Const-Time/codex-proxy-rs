@@ -27,6 +27,7 @@ import {
   visibleRequestText,
   visibleResponseText,
 } from '../utils/records'
+import { serviceTierLabel } from '../utils/serviceTier'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
@@ -88,7 +89,9 @@ const modelRouteItems = computed(() => [
 
 const clientUpstreamItems = computed(() => [
   { label: '客户端 IP', value: props.record ? usageClientIp(props.record) : '—', mono: true },
-  { label: '服务档位', value: props.record?.serviceTier, mono: true },
+  { label: '请求档位', value: serviceTierLabel(props.record?.requestedServiceTier), mono: true },
+  { label: '上游返回档位', value: serviceTierLabel(props.record?.upstreamServiceTier), mono: true },
+  { label: '计价档位', value: props.record?.serviceTier, mono: true },
   { label: '事件类型', value: props.record?.kind, mono: true },
   { label: '尝试序号', value: finalAttemptIndex.value },
   {
@@ -197,7 +200,7 @@ const billingItems = computed(() => {
     { label: value.image ? '图像输出单价' : '输出单价', value: value.outputPriceDisplay, mono: true },
     { label: value.image ? '文本缓存单价' : '缓存单价', value: value.cacheReadPriceDisplay, mono: true },
     { label: '缓存写入单价', value: value.cacheWritePriceDisplay, mono: true },
-    { label: '服务档位', value: value.serviceTierDisplay },
+    { label: '计价档位', value: value.serviceTierDisplay },
     { label: '服务档位倍率', value: value.multiplierDisplay, mono: true },
   ]
 })

@@ -575,6 +575,8 @@ pub struct DashboardObservation {
 /// 使用记录表格的窄读模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub requested_service_tier: Option<String>,
+    pub upstream_service_tier: Option<String>,
     /// 上游返回的 turn-state，未返回时为本次出站请求值；仅管理员可见。
     pub turn_state: Option<String>,
     /// response / request；历史记录可能没有来源标记。

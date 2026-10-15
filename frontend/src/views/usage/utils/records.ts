@@ -35,6 +35,8 @@ export interface UsageViewModel {
   upstreamModel: string | null
   upstreamResponseModel: string | null
   serviceTier: string | null
+  requestedServiceTier: string | null
+  upstreamServiceTier: string | null
   statusCode: number | null
   clientTransport: string
   upstreamTransport: string | null
@@ -105,6 +107,8 @@ export function normalizeUsageRecord(record: UsageRecordDetail): UsageViewModel 
     upstreamModel: record.upstreamModel,
     upstreamResponseModel: record.upstreamResponseModel,
     serviceTier: record.serviceTier,
+    requestedServiceTier: record.requestedServiceTier,
+    upstreamServiceTier: record.upstreamServiceTier,
     statusCode: record.statusCode,
     clientTransport: record.clientTransport,
     upstreamTransport: record.upstreamTransport,
