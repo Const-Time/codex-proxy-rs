@@ -40,6 +40,8 @@ jobs:
             backend:
               - 'backend/**'
               - 'release/version.yaml'
+              - '.github/scripts/**'
+              - '.github/fixtures/**'
               - '.github/workflows/**'
             frontend:
               - 'frontend/**'

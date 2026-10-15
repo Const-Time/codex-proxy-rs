@@ -340,7 +340,7 @@ CI 单独执行真实备份恢复验收：使用与测试 PostgreSQL 服务相�
 
 只读事实、实例自有分组/Key、显式共享额度管理和 management 原生模型回调已接入；后续继续接入完整深度扩展与具体业务插件。现有差异功能尚未从主程序移出。用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
 
-本轮实际运行验证平台为 Linux x86_64。CLI 可生成 Linux x86_64 / aarch64、macOS aarch64 制品，但本轮未完成其他平台的真实进程验证，不提供 Windows 插件制品兼容保证。
+发布平台检查从 `release/platforms.yaml` 读取目标，在 Linux x86_64、Linux aarch64 和 macOS aarch64 原生运行器上执行 SDK、打包工具及安装生命周期测试，构建网关与 `cpr-plugin` release 二进制并执行帮助命令。Linux 使用与发布一致的固定 Rust/Bookworm 镜像；结果保留提交、版本、日志和二进制摘要。三个平台已通过[提交 a4ac4436 的检查](https://github.com/Const-Time/codex-proxy-rs/actions/runs/38694166117)。这证明所列原生进程与构建合同；数据库和第三方 workbench 的完整业务验收仍以各自记录的平台为准，不提供 Windows 插件制品兼容保证。
 
 ### Responses HTTP 接入进度
 
@@ -431,7 +431,7 @@ Core 已提供宿主签发的父请求上下文，request/attempt 协议桥传�
 
 请求正文与 HME1 事件批次最多 8 MiB，每个 RPC 范围最多 16 个活动模型资源。流句柄只属于创建它的宿主调用；结束、取消、停用、换代或进程退出时撤销并交回 Core 清理。一次读取保持完整事件批次，maximum_bytes 太小返回 capacity 并保留待交付批次，调用者可加大上限再读；end=true 仅在原终态、结算和准入释放完成后返回。RPC 取消不会丢掉已开始的准入、交付提交或结算。
 
-当前原生模型协议支持 openai，Generate 走现有模型路由；Images generation/edit 与 standalone Search 沿用本地固定 OpenAI 端点，不参与文本模型映射。它们的正文模型若存在必须与 SDK 元数据一致，仍由 Provider 解释原生正文；续接仅允许 Generate 且元数据必须匹配正文。认证、命令、维护和观察阶段的原生模型回调尚未开放。
+当前原生模型协议支持 openai，Generate 走现有模型路由；Images generation/edit 与 standalone Search 沿用本地固定 OpenAI 端点，不参与文本模型映射。它们的正文模型若存在必须与 SDK 元数据一致，仍由 Provider 解释原生正文；续接仅允许 Generate 且元数据必须匹配正文。命令阶段使用上述宿主签发的根调用授权；认证、维护和观察阶段的原生模型回调尚未开放。
 
 账号排除由 Core 的活动 attempt 提供：Provider 在 next 后选定账号，Core 校验冷流元数据后保留只读账号事实；事实随原 attempt 的释放失效，不延长账号租约或父请求。子调用路由与每次 Provider 启动前排除所有仍占用账号的模型祖先，显式目标和续接 pin 也不得绕过。冻结路由后父账号才确定的调用，在原 attempt 启动边界再次检查；无可用替代账号直接拒绝，不能等待父请求释放自身账号。若已进入 Provider 选号等待，相关祖先新占用候选账号时撤销旧等待，以 not-sent 的无可选账号错误收尾；不自动重启中间件 next，原结算和清理继续执行。候选范围外的祖先账号变化不撤销合法等待。静态回调 account_id 仍可进一步收窄范围，插件 wire 不签发账号授权。
 
