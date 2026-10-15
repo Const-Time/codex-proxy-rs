@@ -585,3 +585,27 @@ async fn extension_session_owner_is_visible_to_sdk_but_cannot_be_removed_from_ho
     trace.closed_once().await;
     fixture.stop().await;
 }
+
+#[tokio::test]
+async fn http_short_circuit_accepts_sdk_json_error_documents_without_running_next() {
+    let fixture = Fixture::new().await;
+    for streaming in [false, true] {
+        let trace = Arc::new(Trace::default());
+        let response = fixture
+            .run("ws-short", streaming, trace.clone())
+            .await
+            .unwrap();
+        let (_, status, _, mut body, _) = response.into_parts();
+        assert_eq!(status, 403);
+        let frame = body.next_frame().await.unwrap().unwrap();
+        assert_eq!(frame.framing(), MiddlewareFraming::JsonDocument);
+        assert_eq!(
+            frame.bytes().as_ref(),
+            br#"{"error":{"message":"blocked"}}"#
+        );
+        assert!(body.next_frame().await.unwrap().is_none());
+        assert!(body.is_finalized());
+        assert_eq!(trace.next.load(Ordering::SeqCst), 0);
+    }
+    fixture.stop().await;
+}

@@ -46,6 +46,9 @@ impl Drop for TextServer {
     }
 }
 
+const IMAGE_SUCCESS: &str = r#"{ "created": 1720000000, "data":[{"b64_json":"iVBORw0KGgo=","revised_prompt":"fixture 图片"}], "future":9007199254740993 }"#;
+const IMAGE_FAILURE: &str = r#"{ "error":{"message":"fixture image rejected","type":"invalid_request_error"}, "future":9007199254740993 }"#;
+
 struct ModelServer {
     url: String,
     requests: Arc<std::sync::Mutex<Vec<String>>>,
@@ -114,17 +117,23 @@ impl ModelServer {
                     }
                     let end = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap();
                     let request = String::from_utf8(bytes[..end].to_vec()).unwrap();
-                    let (content_type, body) = if request.starts_with("GET /codex/models?") {
-                        ("application/json", json!({"models":[{"slug":"gpt-5.4","display_name":"Native fixture model","supported_in_api":true,"input_modalities":["text"]}]}).to_string())
+                    let (status, content_type, body) = if request.starts_with("GET /codex/models?") {
+                        (200, "application/json", json!({"models":[{"slug":"gpt-5.4","display_name":"Native fixture model","supported_in_api":true,"input_modalities":["text"]}]}).to_string())
+                    } else if request.starts_with("POST /codex/images/edits ") || request.starts_with("POST /codex/images/generations ") {
+                        let body = &bytes[end + 4..];
+                        let document: Value = serde_json::from_slice(body).expect("native image provider must receive JSON");
+                        captured.lock().unwrap().push(format!("{request}\r\n\r\n{}",String::from_utf8(body.to_vec()).unwrap()));
+                        if document["prompt"] == "reject-fixture" {(422, "application/problem+json", IMAGE_FAILURE.into())}
+                        else {(201, "application/json", IMAGE_SUCCESS.into())}
                     } else {
                         assert!(request.starts_with("POST /codex/responses "), "unexpected fixture request: {}", request.lines().next().unwrap());
                         let body = if request.to_ascii_lowercase().contains("content-encoding: zstd") {
                             zstd::stream::decode_all(&bytes[end + 4..]).unwrap()
                         } else { bytes[end + 4..].to_vec() };
                         captured.lock().unwrap().push(format!("{request}\r\n\r\n{}",String::from_utf8(body).unwrap()));
-                        ("text/event-stream", response_events().into_iter().map(|event| format!("event: {}\ndata: {event}\n\n",event["type"].as_str().unwrap())).collect())
+                        (200, "text/event-stream", response_events().into_iter().map(|event| format!("event: {}\ndata: {event}\n\n",event["type"].as_str().unwrap())).collect())
                     };
-                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                    socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
                 });
             }
         });
@@ -1142,6 +1151,270 @@ async fn official_and_rebuilt_workbench_execute_management_business_without_rewr
             request(&manager, &restored, &admin_actor, "GET", "api/tasks", None).await,
             (200, json!({"version":1,"value":value}))
         );
+        manager.shutdown().await;
+        drop(manager);
+        env.close().await;
+    }
+}
+
+/// Uses the unchanged release artifacts, real API/Provider and original Store writers.
+#[tokio::test]
+#[ignore = "requires verified original/rebuilt artifacts and isolated PostgreSQL/Redis"]
+async fn official_and_rebuilt_workbench_convert_uploaded_images_through_native_api() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    for archive in verified_workbench_archives() {
+        let upstream = ModelServer::new(false).await;
+        let account_id = format!("acct_image_{}", uuid::Uuid::new_v4().simple());
+        let mut env = Environment::with_login_admin_and_accounts(
+            Some(&upstream.url),
+            vec![native_account(&account_id, "native-image-account")],
+        )
+        .await
+        .expect("isolated database required");
+        env.start_store_writers();
+        let store = env.store.plugin_store();
+        let manager = Arc::new_cyclic(|plugins| {
+            PluginManager::new(
+                store.clone(),
+                Arc::new(
+                    PluginEngine::new(
+                        env.cache.path().join("workbench-images"),
+                        "3.12.0".parse().unwrap(),
+                        store.clone(),
+                    )
+                    .with_data(env.admin.services().plugin_data())
+                    .with_models(
+                        Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
+                            env.core.execution_service(),
+                            plugins.clone(),
+                        )),
+                        env.admin.services().client_keys(),
+                    ),
+                ),
+            )
+        });
+        let artifact = manager.upload(archive, &actor()).await.unwrap();
+        let mut command = update(&artifact.sha256, 0, true);
+        command.middleware = Some(PluginMiddlewareBinding {
+            order: 1,
+            mounts: vec![
+                PluginMiddlewareMount::Request,
+                PluginMiddlewareMount::Attempt,
+            ],
+            scope: PluginExecutionScope::All {},
+        });
+        let installed = manager.update(None, command, &actor()).await.unwrap();
+        let scope = PluginMutationScope {
+            instance_id: installed.id.clone(),
+            revision: installed.revision,
+            actor: actor(),
+        };
+        let resources = env.admin.services().plugin_resources();
+        let group = resources
+            .ensure_group(
+                scope.clone(),
+                PluginGroupEnsure {
+                    resource_key: "native-images".into(),
+                    name: "Native workbench images".into(),
+                    color: "#2563EBFF".into(),
+                    description: None,
+                },
+            )
+            .await
+            .unwrap();
+        resources
+            .change_members(
+                scope,
+                PluginGroupMembers {
+                    resource_key: "native-images".into(),
+                    add: vec![account_id],
+                    remove: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let login = env
+            .admin
+            .services()
+            .auth()
+            .login(LoginCommand {
+                username: Some("sdk-fixture@fixture.test".into()),
+                password: "sdk-business-fixture-password".into(),
+            })
+            .await
+            .unwrap();
+        let user = env
+            .admin
+            .services()
+            .auth()
+            .resolve_admin_user_id(Some(&login.session_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let context = MutationContext {
+            actor: MutationActor::AdminSession {
+                admin_user_id: user,
+            },
+            request_id: "workbench-images".into(),
+        };
+        let key = env
+            .admin
+            .services()
+            .client_keys()
+            .create(
+                &context,
+                CreateClientKey {
+                    name: "Native image key".into(),
+                    label: None,
+                    group_ids: vec![AccountGroupId::new(group.id).unwrap()],
+                    limits: RateLimits::unlimited(),
+                },
+            )
+            .await
+            .unwrap();
+        let authorization = format!("Bearer {}", key.secret.expose_for_response());
+        let mut api = ApiServer::new(&env, manager.clone()).await;
+        let url = format!("http://{}/v1/images/edits", api.address);
+        let first = b"\x89PNG\0\xff\r\n--not-a-boundary";
+        let second = b"second binary image";
+        let mut multipart = Vec::new();
+        for (name, value) in [
+            ("model", "gpt-image-2"),
+            ("prompt", "make red 图片"),
+            ("n", "2"),
+            ("quality", "low"),
+            ("response_format", "b64_json"),
+        ] {
+            multipart.extend_from_slice(format!("--image-fixture\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes());
+        }
+        for (name, bytes) in [("image", first.as_slice()), ("image[]", second.as_slice())] {
+            multipart.extend_from_slice(format!("--image-fixture\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"fixture.png\"\r\nContent-Type: image/png\r\n\r\n").as_bytes());
+            multipart.extend_from_slice(bytes);
+            multipart.extend_from_slice(b"\r\n");
+        }
+        multipart.extend_from_slice(b"--image-fixture--\r\n");
+        let response = api
+            .client
+            .post(&url)
+            .header("authorization", &authorization)
+            .header(
+                "content-type",
+                "multipart/form-data; boundary=\"image-fixture\"",
+            )
+            .header("x-codex-image-turn-id", "fixture-image-turn")
+            .body(multipart.clone())
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, 201, "{body}");
+        assert_eq!(body, IMAGE_SUCCESS);
+        let captured = upstream.requests.lock().unwrap()[0].clone();
+        let (headers, body) = captured.split_once("\r\n\r\n").unwrap();
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("content-type: application/json"));
+        assert!(headers.contains("authorization: bearer native-image-account"));
+        assert!(!headers.contains(key.secret.expose_for_response()));
+        assert!(headers.contains("x-codex-image-turn-id: fixture-image-turn"));
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap(),
+            json!({"model":"gpt-image-2","prompt":"make red 图片","n":2,"quality":"low","images":[{"image_url":format!("data:image/png;base64,{}",STANDARD.encode(first))},{"image_url":format!("data:image/png;base64,{}",STANDARD.encode(second))}]})
+        );
+        // JSON bodies and non-image fields remain byte-for-byte transparent.
+        let raw = r#"{ "prompt":"unchanged", "images":[], "future":9007199254740993 }"#;
+        // Native account scheduling enforces the configured inter-request gap,
+        // including for these immediately returned local image responses.
+        let interval: i64 =
+            sqlx::query_scalar("SELECT request_interval_ms FROM runtime_settings WHERE id=1")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+        let gap = std::time::Duration::from_millis(u64::try_from(interval).unwrap() + 1);
+        for endpoint in ["edits", "generations"] {
+            tokio::time::sleep(gap).await;
+            let response = api
+                .client
+                .post(format!("http://{}/v1/images/{endpoint}", api.address))
+                .header("authorization", &authorization)
+                .header("content-type", "application/json")
+                .body(raw)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert_eq!(
+                status,
+                201,
+                "endpoint={endpoint}, body={body}, native_requests={}",
+                upstream.requests.lock().unwrap().len()
+            );
+            assert_eq!(body, IMAGE_SUCCESS);
+            assert!(
+                upstream
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .ends_with(raw)
+            );
+        }
+        tokio::time::sleep(gap).await;
+        let response = api
+            .client
+            .post(&url)
+            .header("authorization", &authorization)
+            .json(&json!({"prompt":"reject-fixture"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 422);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+        assert_eq!(response.text().await.unwrap(), IMAGE_FAILURE);
+        let sent = upstream.requests.lock().unwrap().len();
+        assert_eq!(sent, 4);
+        // Invalid multipart is rejected by the original plugin before Provider send.
+        let response = api
+            .client
+            .post(&url)
+            .header("authorization", &authorization)
+            .header("content-type", "multipart/form-data; boundary=missing")
+            .body(multipart.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        assert!(response.text().await.unwrap().contains("multipart"));
+        let response = api
+            .client
+            .post(&url)
+            .header(
+                "content-type",
+                "multipart/form-data; boundary=image-fixture",
+            )
+            .body(multipart)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(upstream.requests.lock().unwrap().len(), sent);
+        let (_, snapshot) =
+            request(&manager, &installed, &context, "GET", "api/snapshot", None).await;
+        assert!(
+            snapshot["facts"]["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["event"] == "image_edit_multipart_adapted"),
+            "{snapshot}"
+        );
+        api.close().await;
+        drop(api);
         manager.shutdown().await;
         drop(manager);
         env.close().await;

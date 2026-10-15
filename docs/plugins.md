@@ -348,7 +348,7 @@ CI 单独执行真实备份恢复验收：使用与测试 PostgreSQL 服务相�
 
 完整网关进程的 SIGTERM 用例已验证管理员 HTTP 管理调用发起的 SDK 原生账号提交：原事务被锁阻塞期间，Host 进入扩展收尾仍保持进程存活；解锁后只提交一次、保留原配置版本推进和插件审计，随后退出并回收 SDK 子进程。Host 外置用例另覆盖命令完成、取消、信号、监听失败与启动收尾时，原写入任务和日志均保留至扩展收尾结束。这不替代其他回调、实际第三方业务或所有传输的完整 Host 验收。
 
-只读事实、实例自有分组/Key、显式共享额度管理和 management 原生模型回调已接入；后续继续接入完整深度扩展与具体业务插件。现有差异功能尚未从主程序移出。用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
+只读事实、实例自有分组/Key、显式共享额度管理和 management 原生模型回调已接入。共享额度管理界面与操作编排已有独立业务插件；用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
 
 发布平台检查从 `release/platforms.yaml` 读取目标，在 Linux x86_64、Linux aarch64 和 macOS aarch64 原生运行器上执行 SDK、打包工具及安装生命周期测试，构建网关与 `cpr-plugin` release 二进制并执行帮助命令。Linux 使用与发布一致的固定 Rust/Bookworm 镜像；结果保留提交、版本、日志和二进制摘要。三个平台已通过[提交 a4ac4436 的检查](https://github.com/Const-Time/codex-proxy-rs/actions/runs/38694166117)。这证明所列原生进程与构建合同；数据库和第三方 workbench 的完整业务验收仍以各自记录的平台为准，不提供 Windows 插件制品兼容保证。
 
@@ -361,7 +361,7 @@ request 挂载已接入 Responses JSON/SSE 的认证后链路：插件可改写�
 
 attempt 挂载已连接 Responses HTTP 和真实 SDK 子进程：每次重试独立调用，先校验并尝试登记原上游，再允许插件读取；费用、账号权限和续接状态由原执行链保留。插件可改写正文、客户端状态码和响应头，也可直接返回错误正文；改写不能改变已经冻结的模型、续接、storage intent、传输或能力需求。request 与 attempt 可同时挂载，仍只由原 Core 请求结算。
 
-验证覆盖 JSON/SSE 透传、正文改写/展开、原始事实保留、错误短路、撤销与展开批次的交付屏障。非 2xx 错误正文可为原始字节，最多 8 MiB；JSON 来源最多保留 16384 个事件。这仍是生产启用前的接线验证，middleware 能力门禁保持关闭，尚不能直接启用任意第三方中间件。
+验证覆盖 JSON/SSE 透传、正文改写/展开、原始事实保留、错误短路、撤销与展开批次的交付屏障。非 2xx 独立错误正文可声明原始字节或 JSON 文档，最多 8 MiB；已经调用 next 的正文继续保持宿主签发的格式。JSON 来源最多保留 16384 个事件。middleware v4 已允许正常启用，第三方兼容范围仍以目标制品的实际业务验证为准。
 
 
 ### Images 与 standalone Search 接入进度
@@ -370,6 +370,8 @@ request/attempt 两层已接入 `/v1/images/generations`、`/v1/images/edits` �
 
 未改写的响应保留原始 JSON 字节、空白和字段次序，不包装成 Responses 对象。插件可修改客户端状态及正文，但不能修改原上游状态、费用和结算身份。请求取消、插件撤销、非法输出和超限均沿用同一 Core 清理路径。middleware v4 已允许正常启用；经过中间件的 JSON 文档仍受 8 MiB 上限约束，大图响应可能超限，无匹配中间件时保留原有大响应合同。
 
+
+官方 workbench 0.3.1 原包和本地 SDK 重建包已通过真实 API、原生 OpenAI Provider 及 PostgreSQL/Redis 图片验收：multipart 双图上传转换为正确的 base64 JSON，JSON 编辑与生成请求保持原始字节，成功/错误响应保留状态、媒体类型和大整数；无效 multipart 返回插件的 JSON 400，未鉴权请求不进入上游。修复前宿主将插件直接返回的 JSON 错误误判为格式违规，导致进程失效和连接断开；现在接受合法独立 JSON 错误，仍严格校验已有下游正文的格式。此记录覆盖 Images API，workbench 页面的 Responses 图片会话另行验收。
 
 ### WebSocket request/attempt 接入进度
 
