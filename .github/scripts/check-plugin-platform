@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+: "${TARGET:?expected a release platform target}"
+cd "$root/backend"
+output="$root/dist/plugin-platform-$TARGET"
+mkdir -p "$output"
+exec > >(tee "$output/check.log") 2>&1
+
+# Tests execute on the target architecture; emulated cross-compilation alone is
+# insufficient evidence for process startup, RPC, archive modes or shutdown.
+host="$(rustc -vV | sed -n 's/^host: //p')"
+test "$host" = "$TARGET"
+git -C "$root" rev-parse HEAD > "$output/commit.txt"
+rustc -vV
+cargo test --locked --target "$TARGET" -p gateway-plugin-sdk -p codex-proxy-plugin-cli --test main
+cargo test --locked --target "$TARGET" -p gateway-plugin-runtime --all-features --test main installation::
+cargo build --release --locked --target "$TARGET" -p codex-proxy-rs -p codex-proxy-plugin-cli --bins
+
+for binary in codex-proxy-rs cpr-plugin; do
+  cp "target/$TARGET/release/$binary" "$output/$binary"
+done
+"$output/codex-proxy-rs" --version
+"$output/cpr-plugin" package --help
+(cd "$output" && shasum -a 256 codex-proxy-rs cpr-plugin > SHA256SUMS)
+printf '%s\n' 'Native plugin checks and release binaries completed.'
