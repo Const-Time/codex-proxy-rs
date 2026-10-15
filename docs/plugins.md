@@ -51,7 +51,7 @@
 
 上述原包与 SDK 重建包还通过七项声明能力的联合内核验收：真实管理员与本人 Key、原 Admin/Core/Store、OpenAI Provider 和 PostgreSQL/Redis，分别使用上游 WebSocket 成功及 WebSocket 准备超时后 HTTP/SSE 回退的受控回包。每个场景比较一次原生基线调用、两次原生模型 RPC 与真实 API 的 JSON、客户端 WebSocket 调用。原外部认证将 demo principal 映射到有效 Key，拒绝无效 demo 身份，无关 Bearer Key 继续原鉴权；外部身份不能访问管理员 API，停用实例后旧授权和命令失效。模型路由、账号选号、request/attempt 改写与终态观察对应同一批原请求 ID，实际选号与观察均保持授权账号；ping 经原命令 owner 返回且不提交账号。核对实际请求头、亲和命中/范围外未命中且不修改原绑定、相同用量、冻结 1.5 倍率、唯一共享扣费及日/周窗口金额。
 
-客户端 WebSocket 分别显式选择上游 WebSocket 或 HTTP，原始 WS 帧观察只随实际的上游 WebSocket 产生，保持请求关联、账号身份与递增序号。原生 HTTP 调用另外验证首选 WebSocket 准备超时后的 HTTP/SSE 回退；两者是不同的传输选择。实际协议使用标准 created/completed 生命周期，HTTP 保留原 zstd 请求压缩；计费不依赖异步观测记录先落库。真实 API 夹具使用原 Host 连接登记，但不代表完整 Host worker/signal 退出验收。本项只证明所列基础调用和 Linux x86_64 制品，不代表这些贡献的全部业务变体、其他插件/能力、所有传输故障或其他平台完整兼容，生产门禁继续保留。
+客户端 WebSocket 分别显式选择上游 WebSocket 或 HTTP，原始 WS 帧观察只随实际的上游 WebSocket 产生，保持请求关联、账号身份与递增序号。原生 HTTP 调用另外验证首选 WebSocket 准备超时后的 HTTP/SSE 回退；两者是不同的传输选择。实际协议使用标准 created/completed 生命周期，HTTP 保留原 zstd 请求压缩；计费不依赖异步观测记录先落库。真实 API 夹具使用原 Host 连接登记，但不代表完整 Host worker/signal 退出验收。本项只证明所列基础调用和 Linux x86_64 制品，不代表这些贡献的全部业务变体、其他插件/能力、所有传输故障或其他平台完整兼容。受支持贡献版本的正常启用以本页支持矩阵为准。
 
 `command_line` v1 的注册、类型化参数、帮助、执行 RPC 与网关命令入口已接入。命令参数只进入二进制载荷，校验失败不执行命令，帮助隐藏敏感默认值；时长按有符号纳秒精确解析。执行使用原实例 revision、宿主操作者、冻结服务和同一调用图。本人命令按登录用户归属选择 Key；宿主系统命令可分页查询全部 Key 的 ID、名称和启用状态（每页 1–200 项），并按 ID 绑定原 Core 授权，不读取或返回明文密钥。系统权限只属于宿主签发的 command_line 根调用；管理页、管理 API Key 和插件 actor 不会获得该权限。模型推理仍走原权限、准入、额度、费用和实时撤销链；取消、超时或未确认响应不自动重跑，命令结束会关闭未读流和回调。Host 复用 Ctrl-C、SIGTERM 和原排空时限，等同一 Core 调用图完成结算与释放后停止 worker；清理超时会保留已确认结果并报告未完整完成。命令账号结果沿下述原生校验和提交链执行；`command_line` v1 已开放，同时声明其他未开放能力的制品仍须先完成对应兼容验收。
 
@@ -374,7 +374,7 @@ Responses JSON/SSE/WS 的 request 层已接通 SDK `declare_capabilities`。声�
 
 Core 路由仍校验改写后正文中的全部需求，并继承链入口中未声明处理的需求及各层额外 `required`。后层重新引入的功能会恢复检查，不能取消前层的额外上游要求；原生续接不能声明为已处理。attempt 重解码保留继承的声明，但继续独立比较实际正文的能力，不能在已选路由后借声明修改能力范围。声明仅用于 Responses request；attempt、Images 和 Search 会明确拒绝。
 
-这项接线经过 SDK 子进程、嵌套 next 与本地 Core 路由验证，覆盖 HTTP JSON/SSE 和 WebSocket 两层组合。它不解除 middleware 生产启用门禁：宿主模型调用及其余声明范围仍在实施。
+这项接线经过 SDK 子进程、嵌套 next 与本地 Core 路由验证，覆盖 HTTP JSON/SSE 和 WebSocket 两层组合。middleware v4 已允许正常启用；宿主模型调用及其他声明范围仍按本页支持矩阵和实际宿主权限校验。
 
 
 ### 请求级运行设置基础
