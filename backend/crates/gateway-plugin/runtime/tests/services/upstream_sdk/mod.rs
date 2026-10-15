@@ -82,7 +82,7 @@ fn archive() -> Arc<[u8]> {
     }
     tar.into_inner().unwrap().finish().unwrap().into()
 }
-async fn manager(environment: &Environment) -> Arc<PluginManager> {
+pub(super) async fn manager(environment: &Environment) -> Arc<PluginManager> {
     Arc::new_cyclic(|manager: &std::sync::Weak<PluginManager>| {
         let services = manager.clone();
         let runtime = PluginEngine::new(
