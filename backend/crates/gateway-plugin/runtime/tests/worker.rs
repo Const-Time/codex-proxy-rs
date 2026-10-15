@@ -971,6 +971,7 @@ mod upstream_callbacks {
 
 struct Worker {
     callback_oauth_url: String,
+    registration_signal: String,
     state_migration: String,
     state_migration_signal: String,
     public_callbacks: bool,
@@ -1288,6 +1289,9 @@ impl PluginHandler for Worker {
                 Ok(CallReply::unary(json!({}),vec![]))
             },
             "plugin.register" if !self.fail=>{
+                if !self.registration_signal.is_empty() {
+                    tokio::fs::write(&self.registration_signal, b"registration").await.unwrap();
+                }
                 if self.adapter_mode == "registration-log-fault" || self.adapter_mode == "registration-log-pending" {
                     let reply = call.host.call("host.log", json!({"event":"fixture.registration"}), vec![]).await.map_err(|error| error.into_plugin_fault())?;
                     assert_eq!(reply.result, json!({"recorded":true}));
@@ -1458,6 +1462,10 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        registration_signal: session.handshake().configuration["registration_signal"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
         state_migration: session.handshake().configuration["state_migration"]
             .as_str()
             .unwrap_or("")
