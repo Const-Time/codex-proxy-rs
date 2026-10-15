@@ -292,7 +292,7 @@ async fn credentials_reads_and_saves_lock_actual_enabled_plugin_revision_before_
             .env
             .store
             .plugin_store()
-            .save(&record, expected, &support::actor())
+            .save(&record, expected, &support::actor(), None)
             .await
             .unwrap();
         assert_eq!(

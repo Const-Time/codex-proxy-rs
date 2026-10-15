@@ -33,7 +33,8 @@
 | 维护任务 | maintenance v1 的 `plugin.reconcile`，Core 已发布配置与已发布实例驱动，Host 监督周期、重试和关闭 |
 | 账号凭据 | `host.auth.list/get_runtime/get/save`；管理员管理调用、宿主 System 根命令和宿主签发的 maintenance 作用域；upstream 仅开放当前 Provider 租约绑定账号的三项读取 |
 | 观察订阅 | observer v1；请求完成、实际上游 WebSocket 原始帧；冻结 Key/分组范围、有界投递及独立撤销，观察失败不控制业务执行 |
-| 未开放的能力 | middleware、upstream_adapter、command_line、Key 预算写入、状态迁移；非 management/public_management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
+| 状态迁移 | `plugin.state.migrate`；配置阶段有界批次，Keep/Replace/Delete 与实例版本同事务提交；失败和并发变更保留旧状态 |
+| 未开放的能力 | middleware、upstream_adapter、command_line、Key 预算写入；非 management/public_management/request/attempt/routing/scheduling/upstream 阶段的原生模型回调 |
 
 第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。生产启用仍因 middleware/command_line 门禁被拒绝；其余贡献能力、完整业务与目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
 
@@ -311,7 +312,13 @@ SDK `ensure_key` 已开放，每个实例最多登记 256 个 Key 资源，只�
 
 单包最多 32 MiB；制品总量最多 128 个 / 512 MiB；最多 64 个实例。管理资源单个最多 1 MiB、注册资源合计最多 8 MiB；管理请求和响应正文最多 1 MiB。资源必须在清单和管理注册中声明，页面不得加载外部资源或嵌套 iframe，脚本须打包为普通脚本而非 ES module。
 
-私有状态最多 16 个命名空间，每个最多 4096 条、4 MiB，单值最多 256 KiB，实际采用清单与宿主共同约束。版本切换不允许改变状态声明；需要迁移的插件版本当前不能原地升级。私有状态不能作为本地用户额度或账本的替代权威。
+私有状态最多 16 个命名空间，每个最多 4096 条、4 MiB，单值最多 256 KiB，schemaVersion 受 PostgreSQL 正整数范围约束，实际采用清单与宿主共同约束。私有状态不能作为本地用户额度或账本的替代权威。
+
+版本切换支持上游 `plugin.state.migrate` 合同。同一 schemaVersion 不能改变 schema；版本变化必须用 `migratesFrom` 声明实际已存版本，降级也需要明确声明和反向转换。新增命名空间可以为空；有记录的命名空间不能直接移除，必须先通过迁移显式删除记录，再在后续版本移除声明。配额收紧必须容纳全部现有记录。
+
+原 Store 在插件实例锁下取得数据 schema 和带版本的记录快照。候选 SDK 进程在 Configuration 阶段接收每批最多 64 条、按输入字节进一步分批的有序记录，只能逐项返回 Keep、Replace 或 Delete，不能指定其他实例、增加键或改变提交边界。迁移期间普通宿主状态回调拒绝执行；全部批次共享 30 秒准备期限。宿主按目标 schema 和单值限制验证结果，数据库再按实际 JSONB 字节检查总量。提交时在原实例更新事务中重新比对完整源快照，状态和新实例 revision 一起生效；旧进程若在准备期间写入，升级以冲突结束，保留旧版本和最新数据。准备失败、无效结果、准备超时或准备取消不会切换状态。提交回执丢失时，沿原实例版本核对实际提交结果，不自动重跑迁移。
+
+迁移 `0041_plugin_state_schemas.sql` 为原私有数据补充 schema 元数据，并从既有实例的制品清单回填，不改写原值和 CAS 版本。停用时更换制品不执行迁移，也不改动数据 schema；再次启用时以实际已存 schema 准备迁移。迁移成功后恢复只读取已提交状态，不重新转换；卸载由原实例外键级联清理。该数据元数据随完整 PostgreSQL 备份保存，解包缓存仍可重建。上游协议与限制参考固定版本的[状态合同](https://github.com/zyycn/codex-proxy-rs/blob/3315ddbff620e161c13ee834fcbd7f3ceb611a12/backend/crates/gateway-plugin/sdk/src/call/host.rs)和[状态切换规则](https://github.com/zyycn/codex-proxy-rs/blob/3315ddbff620e161c13ee834fcbd7f3ceb611a12/backend/crates/gateway-store/src/postgres/plugins/state.rs)。
 
 迁移 `0027_plugins.sql` 追加制品、实例与私有状态表，不修改已有迁移、用户归属或用户＋分组账本。完整 PostgreSQL 备份包含这些表；运行目录下的插件解包缓存可从数据库制品重建。恢复后仅启动已启用实例，单个插件启动失败不阻止网关启动。
 

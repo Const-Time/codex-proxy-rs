@@ -96,7 +96,7 @@ async fn real_core_bound_credentials_read_fences_persisted_plugin_disable_and_st
         record.revision += 1;
         record.enabled = enabled;
         store
-            .save(&record, expected, &crate::support::actor())
+            .save(&record, expected, &crate::support::actor(), None)
             .await
             .unwrap();
         // Persist the real row directly, leaving the old SDK generation alive to exercise the DB fence.

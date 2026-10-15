@@ -493,7 +493,7 @@ impl PluginService for PluginManager {
             .await?;
         let catalog = self.runtime.contributes_model_catalog(&artifact)?;
         let candidate = if record.enabled {
-            Some(self.runtime.prepare(&record, artifact).await?)
+            Some(self.runtime.prepare(&record, artifact.clone()).await?)
         } else {
             None
         };
@@ -503,7 +503,24 @@ impl PluginService for PluginManager {
             }
             return Err(error);
         }
-        if let Err(error) = self.store.save(&record, update.revision, actor).await {
+        let state = match self
+            .runtime
+            .prepare_state(&record, &artifact, candidate.as_ref())
+            .await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                if let Some(candidate) = candidate {
+                    candidate.stop().await;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .store
+            .save(&record, update.revision, actor, state.as_ref())
+            .await
+        {
             let persisted = self.store.list().await;
             let committed = persisted
                 .as_ref()

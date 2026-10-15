@@ -22,6 +22,7 @@ pub struct MemoryStore {
     pub records: Mutex<BTreeMap<String, PluginRecord>>,
     artifacts: Mutex<BTreeMap<String, PluginArtifact>>,
     state: Mutex<BTreeMap<(String, String, String), PluginStateRecord>>,
+    state_schemas: Mutex<BTreeMap<String, Vec<PluginStateSchema>>>,
 }
 pub fn actor() -> MutationContext {
     MutationContext {
@@ -90,6 +91,7 @@ impl PluginStore for MemoryStore {
         r: &PluginRecord,
         expected: u64,
         _: &MutationContext,
+        state: Option<&PluginStateCommit>,
     ) -> Result<(), AdminError> {
         let fault = self.save_fault.swap(0, Ordering::SeqCst);
         if fault == 1 {
@@ -98,6 +100,38 @@ impl PluginStore for MemoryStore {
         let mut records = self.records.lock().unwrap();
         if records.get(&r.id).map_or(0, |r| r.revision) != expected {
             return Err(conflict());
+        }
+        if let Some(commit) = state {
+            let mut schemas = self.state_schemas.lock().unwrap();
+            let mut rows = self.state.lock().unwrap();
+            let snapshot = memory_snapshot(&r.id, &schemas, &rows);
+            if snapshot != commit.expected {
+                return Err(conflict());
+            }
+            let mut version = rows.values().map(|row| row.version).max().unwrap_or(0);
+            rows.retain(|(id, _, _), _| id != &r.id);
+            for row in &commit.target.records {
+                let old = snapshot
+                    .records
+                    .iter()
+                    .find(|old| old.namespace == row.namespace && old.key == row.key)
+                    .unwrap();
+                let next = if old.value == row.value && old.schema_version == row.schema_version {
+                    old.version
+                } else {
+                    version += 1;
+                    version
+                };
+                rows.insert(
+                    (r.id.clone(), row.namespace.clone(), row.key.clone()),
+                    PluginStateRecord {
+                        value: row.value.clone(),
+                        version: next,
+                        schema_version: row.schema_version,
+                    },
+                );
+            }
+            schemas.insert(r.id.clone(), commit.target.namespaces.clone());
         }
         records.insert(r.id.clone(), r.clone());
         if fault == 3 {
@@ -119,15 +153,28 @@ impl PluginStore for MemoryStore {
         records.remove(id);
         Ok(())
     }
+    async fn state_snapshot(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> Result<PluginStateSnapshot, AdminError> {
+        let records = self.records.lock().unwrap();
+        if records.get(id).map_or(0, |row| row.revision) != revision {
+            return Err(conflict());
+        }
+        Ok(memory_snapshot(
+            id,
+            &self.state_schemas.lock().unwrap(),
+            &self.state.lock().unwrap(),
+        ))
+    }
     async fn state_get(
         &self,
         s: &PluginStateScope,
         key: &str,
     ) -> Result<Option<PluginStateRecord>, AdminError> {
-        if self
-            .records
-            .lock()
-            .unwrap()
+        let records = self.records.lock().unwrap();
+        if records
             .get(&s.instance_id)
             .is_none_or(|r| r.revision != s.revision || !r.enabled)
         {
@@ -151,10 +198,8 @@ impl PluginStore for MemoryStore {
         expected: Option<u64>,
         value: Option<serde_json::Value>,
     ) -> Result<u64, AdminError> {
-        if self
-            .records
-            .lock()
-            .unwrap()
+        let records = self.records.lock().unwrap();
+        if records
             .get(&s.instance_id)
             .is_none_or(|r| r.revision != s.revision || !r.enabled)
         {
@@ -349,7 +394,7 @@ fn build_archive(
     }
     let mut manifest = json!({"manifestVersion":2,"name":"fixture","displayName":"Fixture","publisher":"local","version":version,"description":"Lifecycle fixture","license":"MIT",
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,
-        "configurationSchema":{"type":"object","properties":{"callback_oauth_url":{"type":"string"},"public_callbacks":{"type":"boolean"},"public_resource":{"type":"boolean"},"command_registration":{"type":"object"},"command_result":{"type":"object"},"adapter_models":{"type":"array","items":{"type":"string"}},"adapter_provider":{"type":"string"},"adapter_mode":{"type":"string"},"adapter_url":{"type":"string"},"adapter_transport":{"type":"string"},"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
+        "configurationSchema":{"type":"object","properties":{"state_migration":{"type":"string"},"state_migration_signal":{"type":"string"},"callback_oauth_url":{"type":"string"},"public_callbacks":{"type":"boolean"},"public_resource":{"type":"boolean"},"command_registration":{"type":"object"},"command_result":{"type":"object"},"adapter_models":{"type":"array","items":{"type":"string"}},"adapter_provider":{"type":"string"},"adapter_mode":{"type":"string"},"adapter_url":{"type":"string"},"adapter_transport":{"type":"string"},"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
         "state":[{"namespace":"counter","schemaVersion":1,"schema":{"type":"integer"},"maximumRecords":10,"maximumBytes":1024,"maximumValueBytes":128}],
         "resources":{"index.html":"text/html"},"package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},
         "files":{"bin/plugin":hex::encode(Sha256::digest(&executable)),"index.html":hex::encode(Sha256::digest(page))}}});
@@ -401,5 +446,26 @@ pub fn request(operation: &str) -> PluginHttpRequest {
         query: String::new(),
         content_type: Some("application/json".into()),
         body: serde_json::to_vec(&json!({"operation":operation})).unwrap(),
+    }
+}
+
+fn memory_snapshot(
+    id: &str,
+    schemas: &BTreeMap<String, Vec<PluginStateSchema>>,
+    state: &BTreeMap<(String, String, String), PluginStateRecord>,
+) -> PluginStateSnapshot {
+    PluginStateSnapshot {
+        namespaces: schemas.get(id).cloned().unwrap_or_default(),
+        records: state
+            .iter()
+            .filter(|((owner, _, _), _)| owner == id)
+            .map(|((_, namespace, key), row)| PluginStateEntry {
+                namespace: namespace.clone(),
+                key: key.clone(),
+                value: row.value.clone(),
+                version: row.version,
+                schema_version: row.schema_version,
+            })
+            .collect(),
     }
 }

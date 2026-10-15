@@ -37,7 +37,11 @@ pub trait PluginStore: Send + Sync {
         record: &PluginRecord,
         expected: u64,
         actor: &MutationContext,
+        state: Option<&PluginStateCommit>,
     ) -> Result<()>;
+    async fn state_snapshot(&self, _id: &str, _revision: u64) -> Result<PluginStateSnapshot> {
+        Err(AdminError::unavailable("插件状态迁移存储未接入"))
+    }
     async fn delete(&self, id: &str, expected: u64, actor: &MutationContext) -> Result<()>;
     async fn state_get(
         &self,
@@ -54,6 +58,12 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    async fn migrate_state(
+        &self,
+        _batch: PluginStateMigrationBatch,
+    ) -> Result<Vec<PluginStateMigrationChange>> {
+        Err(AdminError::unavailable("插件状态迁移未接入"))
+    }
     fn command_help(&self, _name: Option<&str>) -> Result<Option<String>> {
         Ok(None)
     }
@@ -197,6 +207,14 @@ pub trait PluginProcess: Send + Sync {
 }
 #[async_trait]
 pub trait PluginRuntime: Send + Sync {
+    async fn prepare_state(
+        &self,
+        _record: &PluginRecord,
+        _artifact: &PluginArtifact,
+        _process: Option<&Arc<dyn PluginProcess>>,
+    ) -> Result<Option<PluginStateCommit>> {
+        Ok(None)
+    }
     /// Called after active processes stop; drains accepted runtime work from
     /// candidates whose preparation failed or whose caller was cancelled.
     async fn shutdown(&self) {}

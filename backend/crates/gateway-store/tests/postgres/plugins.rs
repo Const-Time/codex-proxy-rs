@@ -124,8 +124,8 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
     let mut second = first.clone();
     second.id = "auth-b".into();
     let (a, b) = tokio::join!(
-        store.save(&first, 0, &actor),
-        store.save(&second, 0, &actor)
+        store.save(&first, 0, &actor, None),
+        store.save(&second, 0, &actor, None)
     );
     assert_ne!(
         a.is_ok(),
@@ -141,17 +141,22 @@ async fn authentication_bindings_persist_and_only_one_enabled_authenticator_can_
         std::mem::swap(&mut first, &mut second);
     }
     second.enabled = false;
-    store.save(&second, 0, &actor).await.unwrap();
+    store.save(&second, 0, &actor, None).await.unwrap();
     second.enabled = true;
     second.revision = 2;
     assert_eq!(
-        store.save(&second, 1, &actor).await.err().unwrap().kind(),
+        store
+            .save(&second, 1, &actor, None)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
         AdminErrorKind::Conflict
     );
     first.enabled = false;
     first.revision = 2;
-    store.save(&first, 1, &actor).await.unwrap();
-    store.save(&second, 1, &actor).await.unwrap();
+    store.save(&first, 1, &actor, None).await.unwrap();
+    store.save(&second, 1, &actor, None).await.unwrap();
     assert_eq!(
         store
             .list()
@@ -349,7 +354,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         configuration: json!({}),
         secrets: BTreeMap::from([("token".into(), "not-in-audit".into())]),
     };
-    store.save(&record, 0, &actor).await.unwrap();
+    store.save(&record, 0, &actor, None).await.unwrap();
     assert!(store.list().await.unwrap()[0].upstream_adapter == record.upstream_adapter);
     assert!(store.list().await.unwrap()[0].observer == record.observer);
     for invalid in [
@@ -374,7 +379,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         invalid_record.observer = Some(invalid);
         assert!(
             store
-                .save(&invalid_record, record.revision, &actor)
+                .save(&invalid_record, record.revision, &actor, None)
                 .await
                 .is_err()
         );
@@ -387,7 +392,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
     });
     assert!(
         store
-            .save(&invalid_adapter, record.revision, &actor)
+            .save(&invalid_adapter, record.revision, &actor, None)
             .await
             .is_err()
     );
@@ -408,7 +413,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         invalid_retry.retry_policy = Some(invalid);
         assert_eq!(
             store
-                .save(&invalid_retry, record.revision, &actor)
+                .save(&invalid_retry, record.revision, &actor, None)
                 .await
                 .err()
                 .unwrap()
@@ -424,7 +429,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
     invalid_scheduler.account_scheduler.as_mut().unwrap().order = 10_001;
     assert_eq!(
         store
-            .save(&invalid_scheduler, record.revision, &actor)
+            .save(&invalid_scheduler, record.revision, &actor, None)
             .await
             .err()
             .unwrap()
@@ -439,7 +444,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
         PluginExecutionScope::Keys { ids: vec![] };
     assert_eq!(
         store
-            .save(&invalid_router, record.revision, &actor)
+            .save(&invalid_router, record.revision, &actor, None)
             .await
             .err()
             .unwrap()
@@ -453,7 +458,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
     invalid_binding.middleware.as_mut().unwrap().mounts.clear();
     assert_eq!(
         store
-            .save(&invalid_binding, record.revision, &actor)
+            .save(&invalid_binding, record.revision, &actor, None)
             .await
             .err()
             .unwrap()
@@ -513,14 +518,14 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
             .is_err()
     );
     record.id = "plugin-b".into();
-    store.save(&record, 0, &actor).await.unwrap();
+    store.save(&record, 0, &actor, None).await.unwrap();
     assert!(store.list().await.unwrap()[0].middleware == record.middleware);
     let mut invalid_binding = record.clone();
     invalid_binding.revision += 1;
     invalid_binding.middleware.as_mut().unwrap().mounts.clear();
     assert_eq!(
         store
-            .save(&invalid_binding, record.revision, &actor)
+            .save(&invalid_binding, record.revision, &actor, None)
             .await
             .err()
             .unwrap()
@@ -536,7 +541,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
     record.id = "plugin-a".into();
     record.revision = 2;
     record.enabled = false;
-    store.save(&record, 1, &actor).await.unwrap();
+    store.save(&record, 1, &actor, None).await.unwrap();
     let stale = PluginStateScope {
         instance_id: record.id.clone(),
         ..other
@@ -575,7 +580,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
             .contains("not-in-audit")
     );
     record.id = "plugin-b".into();
-    store.save(&record, 1, &actor).await.unwrap();
+    store.save(&record, 1, &actor, None).await.unwrap();
     store.delete("plugin-b", 2, &actor).await.unwrap();
     store.delete_artifact(&info.sha256, &actor).await.unwrap();
     store.delete_artifact(&info.sha256, &actor).await.unwrap();

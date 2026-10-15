@@ -971,6 +971,8 @@ mod upstream_callbacks {
 
 struct Worker {
     callback_oauth_url: String,
+    state_migration: String,
+    state_migration_signal: String,
     public_callbacks: bool,
     public_resource: bool,
     command_registration: serde_json::Value,
@@ -1218,6 +1220,35 @@ impl PluginHandler for Worker {
                     _ => Ok(CallReply::unary(json!({}),vec![])),
                 }
             },
+            "plugin.state.migrate" => {
+                use gateway_plugin_sdk::call::host::*;
+                assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Configuration);
+                assert_eq!(call.params, json!({}));
+                assert!(call.host.call("host.state.get", json!({"namespace":"counter","key":"value"}), vec![]).await.is_err());
+                let request: StateMigrationRequest = serde_json::from_slice(&call.payload).unwrap();
+                if self.state_migration == "envelope" { return Ok(CallReply::unary(json!({"unexpected":true}), b"{}".to_vec())); }
+                if self.state_migration == "malformed" { return Ok(CallReply::unary(json!({}), b"not-json".to_vec())); }
+                if self.state_migration == "fail" { return Err(PluginFault::new(ErrorCode::Fault,"migration fixture failure")); }
+                if self.state_migration == "wait" {
+                    tokio::fs::write(&self.state_migration_signal, std::process::id().to_string()).await.unwrap();
+                    while !tokio::fs::try_exists(format!("{}.release", self.state_migration_signal)).await.unwrap() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+                let mut changes: Vec<_> = request.records.into_iter().map(|row| {
+                    if self.state_migration == "delete_all" { StateMigrationChange::Delete { key: row.key } }
+                    else if self.state_migration == "unwrap" { StateMigrationChange::Replace { key: row.key, value: row.value["value"].clone() } }
+                    else if self.state_migration == "wrap" { StateMigrationChange::Replace { key: row.key, value: json!({"value":row.value}) } }
+                    else if self.state_migration == "bad_keys" { StateMigrationChange::Keep { key: "foreign-key".into() } }
+                    else if self.state_migration == "invalid_value" { StateMigrationChange::Replace { key: row.key, value: json!(false) } }
+                    else if self.state_migration == "actions" && row.key == "delete" { StateMigrationChange::Delete { key: row.key } }
+                    else if self.state_migration == "actions" && row.key != "keep" { StateMigrationChange::Replace { key: row.key, value: json!(row.value.as_i64().unwrap()*10) } }
+                    else { StateMigrationChange::Keep { key: row.key } }
+                }).collect();
+                if self.state_migration == "missing" { changes.pop(); }
+                if self.state_migration == "reorder" { changes.reverse(); }
+                Ok(CallReply::unary(json!({}), serde_json::to_vec(&StateMigrationResult { changes }).unwrap()))
+            }
             "plugin.reconcile" => {
                 use gateway_plugin_sdk::Stage;
                 assert_eq!(call.context.stage, Stage::Maintenance);
@@ -1331,7 +1362,9 @@ impl PluginHandler for Worker {
             },
             "management.handle"=>{
                 let input:serde_json::Value=serde_json::from_slice(&call.payload).unwrap();
-                let result=if input["operation"]=="state" {
+                let result=if input["operation"]=="state_read" {
+                    call.host.call("host.state.get",json!({"namespace":"counter","key":"value"}),vec![]).await.map_err(|e|e.into_plugin_fault())?.result
+                } else if input["operation"]=="state" {
                     let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":"value"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
                     let expected=existing.result["record"]["version"].as_u64();
                     let count=existing.result["record"]["value"].as_u64().unwrap_or(0)+1;
@@ -1417,6 +1450,14 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        state_migration: session.handshake().configuration["state_migration"]
+            .as_str()
+            .unwrap_or("")
+            .into(),
+        state_migration_signal: session.handshake().configuration["state_migration_signal"]
+            .as_str()
+            .unwrap_or("")
+            .into(),
         callback_oauth_url: session.handshake().configuration["callback_oauth_url"]
             .as_str()
             .unwrap_or_default()

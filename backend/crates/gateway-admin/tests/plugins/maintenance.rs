@@ -32,7 +32,13 @@ impl PluginStore for Unused {
     async fn list(&self) -> Result<Vec<PluginRecord>, AdminError> {
         unreachable!()
     }
-    async fn save(&self, _: &PluginRecord, _: u64, _: &MutationContext) -> Result<(), AdminError> {
+    async fn save(
+        &self,
+        _: &PluginRecord,
+        _: u64,
+        _: &MutationContext,
+        _: Option<&PluginStateCommit>,
+    ) -> Result<(), AdminError> {
         unreachable!()
     }
     async fn delete(&self, _: &str, _: u64, _: &MutationContext) -> Result<(), AdminError> {
