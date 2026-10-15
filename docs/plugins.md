@@ -350,7 +350,7 @@ CI 单独执行真实备份恢复验收：使用与测试 PostgreSQL 服务相�
 
 只读事实、实例自有分组/Key、显式共享额度管理和 management 原生模型回调已接入。共享额度管理界面与操作编排已有独立业务插件；用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。
 
-发布平台检查从 `release/platforms.yaml` 读取目标，在 Linux x86_64、Linux aarch64 和 macOS aarch64 原生运行器上执行 SDK、打包工具及安装生命周期测试，构建网关与 `cpr-plugin` release 二进制并执行帮助命令。Linux 使用与发布一致的固定 Rust/Bookworm 镜像；结果保留提交、版本、日志和二进制摘要。三个平台已通过[提交 c4aae0b3 的检查](https://github.com/Const-Time/codex-proxy-rs/actions/runs/38704423431)。这证明所列原生进程与构建合同；数据库和第三方 workbench 的完整业务验收仍以各自记录的平台为准，不提供 Windows 插件制品兼容保证。
+发布平台检查从 `release/platforms.yaml` 读取目标，在 Linux x86_64、Linux aarch64 和 macOS aarch64 原生运行器上执行 SDK、打包工具、共享额度插件及安装生命周期测试，构建网关、`cpr-plugin` 和共享额度插件的 release 二进制，执行帮助命令并生成实际可安装插件包。Linux 使用与发布一致的固定 Rust/Bookworm 镜像；结果保留提交、版本、日志和二进制摘要。三个平台已通过[提交 08d8408b 的检查](https://github.com/Const-Time/codex-proxy-rs/actions/runs/38722225847)。此前生产源码相同的[提交 ff2b6c2b 的三个 CI 制品](https://github.com/Const-Time/codex-proxy-rs/actions/runs/38718991664)另经下载核对 ZIP 摘要、二进制架构、插件清单、可执行权限和资源内容；这些是验收制品，不代表正式发布。这证明所列原生进程与构建合同；数据库和第三方 workbench 的完整业务验收仍以各自记录的平台为准，不提供 Windows 插件制品兼容保证。
 
 ### Responses HTTP 接入进度
 
