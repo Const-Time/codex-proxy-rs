@@ -1,4 +1,5 @@
 mod account_isolation;
+mod cookies;
 mod fast_mode;
 mod precommit;
 mod response_interrupt;
@@ -2572,7 +2573,10 @@ async fn websocket_idle_timeout_diagnosis_survives_ambiguous_send_wrapping() {
             .await
             .expect("partial response")
             .expect("valid partial response");
-        if event.has_client_event() {
+        if event
+            .wire_event()
+            .is_some_and(|wire| wire.event_type() == Some("response.output_text.delta"))
+        {
             break;
         }
     }
@@ -2791,7 +2795,7 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
         websocket
             .send(Message::Text(
                 json!({
-                    "type": "response.output_item.added",
+                    "type": "response.in_progress",
                     "output_index": 0,
                     "item": {
                         "id": "msg_structural",
@@ -2908,8 +2912,8 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
                     }
                 }
                 assert!(
-                    !event.has_client_event(),
-                    "structural events must remain behind the replay boundary"
+                    !event.has_client_event() || event.is_replayable_prelude(),
+                    "delivered preludes preserve the replay boundary"
                 );
             }
             Some(Err(error)) => break error,
@@ -2928,7 +2932,7 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
     assert_eq!(
         error.diagnostic().map(|diagnostic| diagnostic.as_str()),
         Some(
-            "OpenAI WebSocket closed before a terminal response (close code 1000); last event type: response.output_item.added"
+            "OpenAI WebSocket closed before a terminal response (close code 1000); last event type: response.in_progress"
         )
     );
     let raw_close: Value = serde_json::from_str(
@@ -2943,7 +2947,7 @@ async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() 
     assert_eq!(raw_close.get("reason"), Some(&json!("")));
     assert_eq!(
         raw_close.get("last_event_type"),
-        Some(&json!("response.output_item.added"))
+        Some(&json!("response.in_progress"))
     );
     let connection = error
         .connection_observation()
@@ -6452,7 +6456,11 @@ async fn capacity_stream_rejection_only_retries_before_semantic_output_on_both_t
                 original
             );
             if !semantic_output {
-                assert!(client_events.is_empty());
+                assert!(
+                    client_events
+                        .iter()
+                        .all(|event| event.is_replayable_prelude())
+                );
             }
             client_events.extend(error.take_atomic_client_events());
             let wire = client_events
@@ -6468,7 +6476,7 @@ async fn capacity_stream_rejection_only_retries_before_semantic_output_on_both_t
 }
 
 #[tokio::test]
-async fn ordinary_request_should_hold_created_until_later_failure_can_rotate() {
+async fn ordinary_request_forwards_created_and_preserves_later_rotation() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_first_event_latency").await;
     let (base_url, release, first_chunk_sent, server) = paused_chunked_sse_server(
@@ -6492,39 +6500,18 @@ async fn ordinary_request_should_hold_created_until_later_failure_can_rotate() {
         .await
         .expect("prepare provider stream");
 
-    let mut first_chunk_sent = Box::pin(first_chunk_sent);
-    loop {
-        tokio::select! {
-            sent = &mut first_chunk_sent => {
-                sent.expect("first upstream chunk");
-                break;
-            }
-            next = stream.next() => {
-                let event = next
-                    .expect("provider stream must stay open")
-                    .expect("provider event");
-                assert!(!event.has_client_event(), "response.created must remain replayable");
-            }
-        }
-    }
-
-    let exposed = timeout(Duration::from_millis(100), async {
-        loop {
-            let next = stream
-                .next()
-                .await
-                .expect("provider stream must stay open")
-                .expect("provider event");
-            if next.has_client_event() {
-                return next;
-            }
-        }
-    })
-    .await;
-    assert!(
-        exposed.is_err(),
-        "a structural event must not commit the downstream before a later 429"
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
+    .await
+    .expect("created must arrive before the next upstream chunk");
+    assert_eq!(
+        created.wire_event().unwrap().event_type(),
+        Some("response.created")
     );
+    assert!(created.is_replayable_prelude());
+    first_chunk_sent.await.expect("first chunk sent");
 
     release.send(()).expect("release second upstream chunk");
     let mut failure = loop {
@@ -6548,13 +6535,13 @@ async fn ordinary_request_should_hold_created_until_later_failure_can_rotate() {
             .iter()
             .filter_map(|event| event.wire_event()?.event_type())
             .collect::<Vec<_>>(),
-        vec!["response.created", "response.failed"]
+        vec!["response.failed"]
     );
     server.await.expect("chunked SSE server");
 }
 
 #[tokio::test]
-async fn ordinary_request_should_bound_structural_event_replay_grace() {
+async fn ordinary_request_forwards_structural_events_before_upstream_finishes() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_bounded_replay_grace").await;
     let (base_url, release, _first_chunk_sent, server) = paused_chunked_sse_server(
@@ -6574,34 +6561,29 @@ async fn ordinary_request_should_bound_structural_event_replay_grace() {
         .await
         .expect("prepare provider stream");
 
-    let first_event = timeout(Duration::from_secs(4), async {
-        loop {
-            let event = stream
-                .next()
-                .await
-                .expect("provider stream must stay open")
-                .expect("provider event");
-            if event.has_client_event() {
-                return event;
-            }
-        }
-    })
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
     .await
-    .expect("response.created must be released after the bounded grace period");
-
+    .unwrap();
     assert_eq!(
-        first_event.wire_event().and_then(|wire| wire.event_type()),
+        created.wire_event().unwrap().event_type(),
         Some("response.created")
     );
+    assert!(created.is_replayable_prelude());
     release.send(()).expect("finish upstream response");
-    while let Some(event) = stream.next().await {
-        event.expect("clean upstream EOF");
-    }
+    let events = stream.collect::<Vec<_>>().await;
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.as_ref().unwrap().has_client_event())
+    );
     server.await.expect("chunked SSE server");
 }
 
 #[tokio::test]
-async fn continuation_should_hold_created_until_semantic_output() {
+async fn continuation_forwards_created_before_semantic_output() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_continuation_prefetch").await;
     let (base_url, release, first_chunk_sent, server) = paused_chunked_sse_server(
@@ -6630,42 +6612,24 @@ async fn continuation_should_hold_created_until_semantic_output() {
         .await
         .expect("prepare provider stream");
 
-    let mut first_chunk_sent = Box::pin(first_chunk_sent);
-    loop {
-        tokio::select! {
-            sent = &mut first_chunk_sent => {
-                sent.expect("first upstream chunk");
-                break;
-            }
-            next = stream.next() => {
-                let event = next
-                    .expect("provider stream must stay open")
-                    .expect("provider event");
-                assert!(!event.has_client_event(), "created was exposed before the first chunk barrier");
-            }
-        }
-    }
-
-    let blocked = timeout(Duration::from_millis(100), async {
-        loop {
-            let next = stream
-                .next()
-                .await
-                .expect("provider stream must stay open")
-                .expect("provider event");
-            if next.has_client_event() {
-                return next;
-            }
-        }
-    })
-    .await;
-    assert!(blocked.is_err());
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
+    .await
+    .expect("created must arrive before the next upstream chunk");
+    assert_eq!(
+        created.wire_event().unwrap().event_type(),
+        Some("response.created")
+    );
+    assert!(created.is_replayable_prelude());
+    first_chunk_sent.await.expect("first chunk sent");
 
     release.send(()).expect("release semantic output chunk");
     let first_event = loop {
         let next = timeout(Duration::from_secs(1), stream.next())
             .await
-            .expect("semantic output must release the prefetched batch")
+            .expect("semantic output arrives after release")
             .expect("provider stream must stay open")
             .expect("provider event");
         if next.has_client_event() {
@@ -6674,7 +6638,7 @@ async fn continuation_should_hold_created_until_semantic_output() {
     };
     assert_eq!(
         first_event.wire_event().and_then(|wire| wire.event_type()),
-        Some("response.created")
+        Some("response.content_part.added")
     );
     while let Some(event) = stream.next().await {
         event.expect("continuation response must complete");
@@ -8514,7 +8478,9 @@ async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
                 client_events.extend(error.take_atomic_client_events());
                 if native_continuation && !semantic_output {
                     assert!(
-                        client_events.is_empty(),
+                        client_events
+                            .iter()
+                            .all(|event| event.is_replayable_prelude()),
                         "raw quota error must not override replay projection"
                     );
                     assert_eq!(
@@ -8559,7 +8525,7 @@ async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
 }
 
 #[tokio::test]
-async fn quota_continuation_after_structural_commit_preserves_original_failure() {
+async fn late_quota_continuation_rejection_requires_client_replay_before_output() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
     let original = json!({"type":"response.failed","response":{"id":"resp_quota","error":{"code":"usage_limit_reached","message":"limit reached"}}});
@@ -8575,16 +8541,17 @@ async fn quota_continuation_after_structural_commit_preserves_original_failure()
         )
         .await
         .unwrap();
-    timeout(Duration::from_secs(3), async {
-        while let Some(event) = stream.next().await {
-            if event.unwrap().has_client_event() {
-                return;
-            }
-        }
-        panic!("expected grace commit");
-    })
+    let created = timeout(
+        Duration::from_secs(1),
+        precommit::next_client_event(&mut stream),
+    )
     .await
-    .expect("bounded grace");
+    .unwrap();
+    assert_eq!(
+        created.wire_event().unwrap().event_type(),
+        Some("response.created")
+    );
+    assert!(created.is_replayable_prelude());
     release.send(()).unwrap();
     let mut delivered_failure = false;
     let error = loop {
@@ -8598,9 +8565,9 @@ async fn quota_continuation_after_structural_commit_preserves_original_failure()
             None => panic!("expected failure"),
         }
     };
-    assert!(delivered_failure);
-    assert!(!error.replay_is_safe());
-    assert_ne!(
+    assert!(!delivered_failure);
+    assert!(error.replay_is_safe());
+    assert_eq!(
         error.continuation_recovery_disposition(),
         Some(ContinuationRecoveryDisposition::ClientReplayRequired)
     );
@@ -8959,15 +8926,27 @@ pub(crate) async fn assert_local_connection_capacity_is_not_an_upstream_failure(
 }
 
 #[tokio::test]
-async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_down_accounts() {
+async fn request_rejections_should_not_retry_or_cool_down_accounts() {
     use gateway_core::provider_ports::ProviderCooldownPort as _;
-    for use_websocket in [false, true] {
+    for (use_websocket, (code, expected_kind)) in [false, true].into_iter().flat_map(|websocket| {
+        [
+            ("flex_unavailable", ProviderErrorKind::Unavailable),
+            ("turn_rate_limit_exceeded", ProviderErrorKind::RateLimited),
+        ]
+        .map(|case| (websocket, case))
+    }) {
         let store = Arc::new(MemoryAccountStore::default());
         let account_id = "acct_provider_contract";
         create_account(&store, account_id).await;
         let cooldowns = Arc::new(MemoryCooldownPort::new());
         let server = MockServer::start().await;
-        let body = json!({"error":{"type":"resource_unavailable","code":"flex_unavailable","message":"Flex capacity unavailable."}});
+        let error_type = if code == "turn_rate_limit_exceeded" {
+            "rate_limit_error"
+        } else {
+            "resource_unavailable"
+        };
+        let body =
+            json!({"error":{"type":error_type,"code":code,"message":"Retry this request later."}});
         Mock::given(method(if use_websocket { "GET" } else { "POST" }))
             .and(path("/codex/responses"))
             .respond_with(
@@ -8994,7 +8973,7 @@ async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_dow
         let mut stream = provider
             .execute(
                 planned_request("openai", operation),
-                context("req_flex", CancellationToken::new()),
+                context("req_terminal_rejection", CancellationToken::new()),
             )
             .await
             .unwrap();
@@ -9002,14 +8981,12 @@ async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_dow
             match stream.next().await {
                 Some(Ok(_)) => {}
                 Some(Err(error)) => break error,
-                None => panic!("expected Flex failure"),
+                None => panic!("expected request rejection"),
             }
         };
-        assert_eq!(error.kind(), ProviderErrorKind::Unavailable);
-        assert_eq!(
-            error.upstream_code().map(|code| code.as_str()),
-            Some("flex_unavailable")
-        );
+        assert_eq!(error.kind(), expected_kind);
+        assert_eq!(error.upstream_code().map(|code| code.as_str()), Some(code));
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(300)));
         assert!(!error.replay_is_safe());
         assert!(error.pre_delivery_retry().is_none());
         assert!(error.retry_is_prohibited());
@@ -9017,6 +8994,11 @@ async fn flex_http_and_websocket_opening_rejections_should_not_retry_or_cool_dow
         let response = error.client_visible_upstream_response().unwrap();
         assert_eq!(response.status(), 429);
         assert_eq!(response.body().as_ref(), body.to_string().as_bytes());
+        assert!(
+            response.headers().iter().any(|header| {
+                header.name() == "retry-after" && header.value().as_ref() == b"300"
+            })
+        );
         let account = store.account(account_id).unwrap();
         assert_eq!(account.credential_state(), CredentialState::Ready);
         assert_eq!(account.quota().access(), QuotaAccessState::Unknown);

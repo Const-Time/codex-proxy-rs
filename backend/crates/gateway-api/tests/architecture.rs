@@ -74,6 +74,7 @@ fn source_tree_should_match_frozen_machine_manifest() {
         "src/openai/execution.rs",
         "src/openai/responses/error.rs",
         "src/openai/responses/http.rs",
+        "src/openai/responses/keepalive.rs",
         "src/openai/middleware/attempt/body.rs",
         "src/openai/middleware/attempt/mod.rs",
         "src/openai/middleware/attempt/output.rs",

@@ -20,7 +20,7 @@ use futures::StreamExt;
 use futures::future::{BoxFuture, pending};
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ExecutionService, ExecutionSession,
-    StartExecution, StartProviderExecution, StartedExecution,
+    ResponseCommit, StartExecution, StartProviderExecution, StartedExecution,
 };
 use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError};
 use gateway_core::error::{
@@ -44,6 +44,7 @@ use crate::openai::{api_router, authenticated_client_for_provider};
 
 #[derive(Default)]
 struct Trace {
+    response_commit: ResponseCommit,
     events: Mutex<Vec<&'static str>>,
     client_statuses: Mutex<Vec<u16>>,
     cancelled: AtomicBool,
@@ -134,7 +135,7 @@ impl Trace {
         self.client_statuses
             .lock()
             .expect("client status lock")
-            .push(status);
+            .push(self.response_commit.status_code().unwrap_or(status));
     }
 
     fn client_statuses(&self) -> Vec<u16> {
@@ -157,6 +158,7 @@ enum NextStep {
     Event(CoordinatedEvent),
     DelayedEvent(Duration, CoordinatedEvent),
     Error(EngineError),
+    DelayedError(Duration, EngineError),
     FinalizeCancelled,
     FinalizeSuccess,
     End,
@@ -350,6 +352,9 @@ impl FakeSession {
 }
 
 impl ExecutionSession for FakeSession {
+    fn response_commit(&self) -> ResponseCommit {
+        self.trace.response_commit.clone()
+    }
     fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>> {
         Box::pin(async move {
             match self.next.pop_front().unwrap_or(NextStep::End) {
@@ -362,6 +367,13 @@ impl ExecutionSession for FakeSession {
                     tokio::time::sleep(delay).await;
                     self.trace.push("next_event");
                     Ok(Some(event))
+                }
+                NextStep::DelayedError(delay, error) => {
+                    self.trace.push("wait_error");
+                    tokio::time::sleep(delay).await;
+                    self.trace.push("next_error");
+                    self.finalized = true;
+                    Err(error)
                 }
                 NextStep::Error(error) => {
                     self.trace.push("next_error");
@@ -1027,7 +1039,7 @@ async fn dropping_stream_during_keepalive_should_cancel_and_finalize_execution()
 }
 
 #[tokio::test(start_paused = true)]
-async fn streaming_keepalive_should_wait_for_first_event_before_committing_http_status() {
+async fn streaming_keepalive_covers_first_event_wait_without_committing_business_output() {
     let trace = Arc::new(Trace::default());
     let session = FakeSession::streaming(
         Arc::clone(&trace),
@@ -1043,10 +1055,18 @@ async fn streaming_keepalive_should_wait_for_first_event_before_committing_http_
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(30)).await;
 
-    assert!(!response.is_finished());
-    assert!(trace.client_statuses().is_empty());
     let response = response.await.expect("response task");
     assert_eq!(response.status(), StatusCode::OK);
+    assert!(trace.client_statuses().is_empty());
+    assert_eq!(trace.snapshot(), vec!["wait_event"]);
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(
+        body.next().await.unwrap().unwrap(),
+        Bytes::from_static(b": keep-alive\n\n")
+    );
+    tokio::time::advance(Duration::from_secs(45)).await;
+    let output = body.next().await.unwrap().unwrap();
+    assert_ne!(output, Bytes::from_static(b": keep-alive\n\n"));
     assert_eq!(trace.snapshot(), vec!["wait_event", "next_event", "commit"]);
 }
 
@@ -2143,4 +2163,100 @@ impl ExecutionService for SessionExecution {
     ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
         Box::pin(async { panic!("Responses must use model execution") })
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn streaming_error_after_initial_keepalive_should_be_a_terminal_sse_failure() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![NextStep::DelayedError(
+            Duration::from_secs(45),
+            EngineError::Deadline,
+        )],
+    )
+    .with_response_headers(vec![ProviderResponseHeader::new(
+        "x-codex-turn-state",
+        Bytes::from_static(b"private-attempt-state"),
+    )]);
+    let response = stream_execution_response(Box::new(session), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("x-codex-turn-state"));
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let events = parse_sse_events(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).starts_with(": keep-alive\n\n"));
+    let failed = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("response.failed"))
+        .expect("failure event");
+    let payload: Value = serde_json::from_str(&failed.data).unwrap();
+    assert_eq!(payload["response"]["error"]["code"], "request_timeout");
+    assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+    assert_eq!(trace.client_statuses(), vec![200]);
+    assert_eq!(trace.snapshot(), vec!["wait_error", "next_error"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn streaming_late_upstream_error_should_preserve_extended_error_fields() {
+    let mut error = json!({
+        "type": "invalid_request_error", "code": "misalignment_policy_violation",
+        "message": "synthetic policy error", "misalignment": {"category": "synthetic"},
+        "extension": {"opaque": true}
+    });
+    let failure = ProviderError::new(ProviderErrorKind::InvalidRequest, UpstreamSendState::Sent)
+        .with_client_visible_upstream_response(
+            ClientVisibleUpstreamResponse::new(
+                400,
+                Some(b"application/json".to_vec()),
+                Bytes::from(json!({"error": error}).to_string()),
+            )
+            .with_headers(vec![ProviderResponseHeader::new(
+                "retry-after",
+                Bytes::from_static(b"7"),
+            )]),
+        );
+    error["headers"] = json!({"retry-after": "7"});
+    let session = FakeSession::streaming(
+        Arc::new(Trace::default()),
+        vec![NextStep::DelayedError(
+            Duration::from_secs(30),
+            EngineError::Provider(failure),
+        )],
+    );
+    let response = stream_execution_response(Box::new(session), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let events = parse_sse_events(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    let failed = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("response.failed"))
+        .unwrap();
+    let payload: Value = serde_json::from_str(&failed.data).unwrap();
+    assert_eq!(payload["response"]["error"], error);
+    assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_stream_before_first_event_should_cancel_the_original_wait() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::DelayedEvent(
+                Duration::from_secs(240),
+                delivery(completed(), CommitRequirement::CommitBeforeDelivery),
+            ),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let response = stream_execution_response(Box::new(session), None).await;
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(
+        body.next().await.unwrap().unwrap(),
+        Bytes::from_static(b": keep-alive\n\n")
+    );
+    drop(body);
+    tokio::task::yield_now().await;
+    assert!(trace.is_cancelled());
+    assert_eq!(trace.snapshot(), vec!["wait_event", "cancel_finalize"]);
 }

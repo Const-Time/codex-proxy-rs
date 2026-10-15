@@ -623,8 +623,9 @@ impl CodexCredentialSelector {
                 .find(|candidate| candidate.account.id() == selected.account.id())
                 .map(|candidate| candidate.account.clone())
                 .ok_or(CredentialSelectionError::InvalidCredential)?;
-            // Validate the complete snapshot before reserving capacity or request intervals.
-            let runtime = self.repository.load_runtime_credential(&account).await?;
+            // Only observation timestamps may advance without invalidating selection.
+            // Revalidate all other facts before reserving capacity or request intervals.
+            let (account, runtime) = self.repository.reload_selected_credential(&account).await?;
             let allows_account_state_mutation = !diagnostic || account.enabled();
             match self
                 .leases

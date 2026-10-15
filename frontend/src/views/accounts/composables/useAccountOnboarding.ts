@@ -12,6 +12,7 @@ import { errorMessage } from '@/utils/async'
 import { isRecord } from '@/utils/object'
 import { formatProviderLabel, isSupportedProvider } from '@/utils/providers'
 import { accountImportSettings, accountProxyError, emptyAccountCreateForm } from '../components/AccountCreateModal/model'
+import { splitAccountDocument } from '../utils/accountImport'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
 type ImportProvider = 'openai' | 'xai'
@@ -35,6 +36,8 @@ export function useAccountOnboarding(options: {
   const creatingAccount = creatingAccountAction.loading
   const authorizingOAuth = authorizingOAuthAction.loading
   const createForm = ref(emptyAccountCreateForm())
+  const completedImports = new Map<string, number>()
+  watch(createForm, () => completedImports.clear(), { deep: true, flush: 'sync' })
 
   const showCreateModal = computed({
     get: () => createModalOpen.value,
@@ -188,46 +191,50 @@ export function useAccountOnboarding(options: {
         throw new Error('重新授权结果与目标账号不一致，请刷新账号列表检查')
       return '账号文件重新授权成功'
     }
-    let importedCount = 0
-    for (const entry of documents) {
-      const result = await importAccounts({
-        provider,
-        settings: accountImportSettings(createForm.value),
-        outboundProxyId: createForm.value.proxyMode === 'proxy' ? createForm.value.proxyId.trim() : undefined,
-        data: entry.document,
-      })
-      importedCount += result.importedCount
-    }
-    return `${formatProviderLabel(provider)} 账号已导入 ${importedCount} 个`
+    return importDocuments(documents)
   }
 
   async function importMixedAccountDocument() {
-    const documents = parseMixedImportDocuments(parseImportJson(createForm.value.importTexts.json))
+    return importDocuments(parseMixedImportDocuments(parseImportJson(createForm.value.importTexts.json)))
+  }
+
+  async function importDocuments(documents: MixedImportDocument[]) {
+    if (documents.length > MAX_TOKEN_IMPORT_COUNT)
+      throw new Error(`一次最多导入 ${MAX_TOKEN_IMPORT_COUNT} 项，请拆分后重试`)
     let importedCount = 0
     const failures: string[] = []
-
-    for (const entry of documents) {
+    const seen = new Set<string>()
+    for (const [index, entry] of documents.entries()) {
+      const input = {
+        provider: entry.provider,
+        settings: accountImportSettings(createForm.value),
+        outboundProxyId: createForm.value.proxyMode === 'proxy' ? createForm.value.proxyId.trim() : undefined,
+        data: entry.document,
+      }
+      const identity = JSON.stringify(input)
+      if (seen.has(identity))
+        continue
+      seen.add(identity)
+      const completed = completedImports.get(identity)
+      if (completed !== undefined) {
+        importedCount += completed
+        continue
+      }
       try {
-        const result = await importAccounts({
-          provider: entry.provider,
-          settings: accountImportSettings(createForm.value),
-          outboundProxyId: createForm.value.proxyMode === 'proxy' ? createForm.value.proxyId.trim() : undefined,
-          data: entry.document,
-        })
+        const maximumMiB = entry.provider === 'xai' ? 16 : 4
+        if (new TextEncoder().encode(identity).length > maximumMiB * 1024 * 1024)
+          throw new Error(`单条文档超过 ${maximumMiB} MiB，请拆分后重试`)
+        const result = await importAccounts(input)
+        completedImports.set(identity, result.importedCount)
         importedCount += result.importedCount
       }
       catch (error) {
-        const message = errorMessage(error, '导入失败')
-        failures.push(`${formatProviderLabel(entry.provider, 'OpenAI')}：${message}`)
+        failures.push(`第 ${index + 1} 项 ${formatProviderLabel(entry.provider)}：${errorMessage(error, '导入失败')}`)
       }
     }
-
-    if (importedCount === 0) {
-      throw new Error(failures.length > 0 ? `批量导入失败：${failures.join('、')}` : '批量文件没有可导入的账号')
-    }
-
-    if (failures.length > 0) {
-      return `已导入 ${importedCount} 个账号，${failures.length} 个文档失败：${failures.join('、')}`
+    if (failures.length) {
+      await options.reload()
+      throw new Error(`已导入 ${importedCount} 个账号，${failures.length} 项失败：${failures.join('、')}。保持输入不变重试会跳过已确认成功的条目；网络中断的条目请先检查账号列表。`)
     }
     return `已导入 ${importedCount} 个账号`
   }
@@ -301,10 +308,7 @@ function accountImportDocuments(
   reauthorizing = false,
 ): MixedImportDocument[] {
   if (provider === 'openai' && isOpenAiTokenImportMode(mode)) {
-    return [{
-      provider,
-      document: parseOpenAiTokenImport(value, mode),
-    }]
+    return splitAccountDocument({ provider, document: parseOpenAiTokenImport(value, mode) })
   }
   const parsed: unknown = parseImportJson(value)
   if (reauthorizing && isRecord(parsed) && Array.isArray(parsed.documents)) {
@@ -349,7 +353,7 @@ function providerImportDocuments(value: unknown, provider: ImportProvider): Mixe
   }
   if (!isRecord(value))
     throw new Error('导入文件必须是 JSON object')
-  return [{ provider, document: value }]
+  return splitAccountDocument({ provider, document: value })
 }
 
 function parseMixedImportDocuments(value: unknown): MixedImportDocument[] {
@@ -365,7 +369,7 @@ function parseMixedImportDocuments(value: unknown): MixedImportDocument[] {
       throw new Error('批量导入文件包含无效的 Provider 文档')
     if (!isRecord(entry.document))
       throw new Error('批量导入文件包含无效的 Provider 文档')
-    documents.push({ provider, document: entry.document })
+    documents.push(...splitAccountDocument({ provider, document: entry.document }))
   }
 
   if (documents.length === 0)

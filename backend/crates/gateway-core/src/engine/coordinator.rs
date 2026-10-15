@@ -279,6 +279,7 @@ where
             budget_prior_attempts_usd: Decimal::ZERO,
             budget_prior_components_usd: [Decimal::ZERO; 4],
             budget_attempt_already_counted: false,
+            response_commit: super::execution::ResponseCommit::new(trace.clone()),
             trace,
             deadline,
             deadline_timer: deadline.wait().fuse(),
@@ -301,7 +302,8 @@ where
             transient_retry_counts: BTreeMap::new(),
             current: None,
             send_state_watermark: UpstreamSendState::NotSent,
-            downstream_committed_at: None,
+            delivery_committed: false,
+            replay_barrier_reached: false,
             client_status_code: None,
             delivery_pending: false,
             upstream_complete: false,
@@ -440,7 +442,9 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     current: Option<CurrentAttempt>,
     /// 请求级发送状态水位；跨 attempt 单调不降，终态写回不得低于此档。
     send_state_watermark: UpstreamSendState,
-    downstream_committed_at: Option<SystemTime>,
+    response_commit: super::execution::ResponseCommit,
+    delivery_committed: bool,
+    replay_barrier_reached: bool,
     client_status_code: Option<u16>,
     delivery_pending: bool,
     upstream_complete: bool,
@@ -499,6 +503,11 @@ where
         self.response_control.clone()
     }
 
+    /// 与传输层共享的首次响应提交事实。
+    pub fn response_commit(&self) -> super::execution::ResponseCommit {
+        self.response_commit.clone()
+    }
+
     /// 当前请求共享的诊断上下文。
     pub fn trace(&self) -> TraceContext {
         self.trace.clone()
@@ -525,7 +534,8 @@ where
         loop {
             match self.pull().await? {
                 PullOutcome::Event(event) => {
-                    if self.downstream_committed_at.is_some() {
+                    self.replay_barrier_reached |= !event.is_replayable_prelude();
+                    if self.delivery_committed {
                         return Ok(Some(CoordinatedEvent::single(
                             event,
                             CommitRequirement::AlreadyCommitted,
@@ -543,7 +553,7 @@ where
                     error,
                     send_state,
                 } => {
-                    let requirement = if self.downstream_committed_at.is_some() {
+                    let requirement = if self.delivery_committed {
                         CommitRequirement::AlreadyCommitted
                     } else {
                         self.delivery_pending = true;
@@ -554,7 +564,7 @@ where
                     return CoordinatedEvent::try_batch(events, requirement).map(Some);
                 }
                 PullOutcome::End => {
-                    if self.downstream_committed_at.is_some() {
+                    if self.delivery_committed {
                         self.finish_success().await?;
                     }
                     return Ok(None);
@@ -570,7 +580,7 @@ where
     /// 会话已提交、已有待提交结果或执行失败时返回错误。
     pub async fn collect_uncommitted(&mut self) -> Result<Vec<ProviderEvent>, EngineError> {
         self.resume_finalization().await;
-        if self.downstream_committed_at.is_some() || self.delivery_pending {
+        if self.delivery_committed || self.delivery_pending {
             return Err(EngineError::InvalidDeliveryState);
         }
         if self.is_finalized() {
@@ -609,14 +619,15 @@ where
         &mut self,
         client_status_code: Option<u16>,
     ) -> Result<(), EngineError> {
-        if !self.delivery_pending || self.downstream_committed_at.is_some() || self.is_finalized() {
+        if !self.delivery_pending || self.delivery_committed || self.is_finalized() {
             return Err(EngineError::InvalidDeliveryState);
         }
-        let committed_at = SystemTime::now();
-        self.trace.record(
-            "downstream.committed",
-            json!({"status": client_status_code}),
-        );
+        self.response_commit.record(client_status_code);
+        let committed_at = self
+            .response_commit
+            .committed_at()
+            .ok_or(EngineError::InvalidDeliveryState)?;
+        let client_status_code = self.response_commit.status_code();
         if self.request_persisted {
             best_effort_store_write(
                 "mark_downstream_committed",
@@ -629,7 +640,7 @@ where
             )
             .await;
         }
-        self.downstream_committed_at = Some(committed_at);
+        self.delivery_committed = true;
         self.client_status_code = client_status_code;
         self.delivery_pending = false;
         if self.upstream_complete {
@@ -650,7 +661,10 @@ where
         if self.client_status_code.is_some() {
             return Err(EngineError::InvalidDeliveryState);
         }
-        if self.request_persisted {
+        let committed_status = self.response_commit.status_code();
+        let client_status_code = committed_status.unwrap_or(client_status_code);
+        // 保活后的失败终结已写入实际 HTTP 状态，不能再触发仅补空值的 Store 更新
+        if self.request_persisted && !(self.is_finalized() && committed_status.is_some()) {
             best_effort_store_write(
                 "record_client_status",
                 &self.request_id,
@@ -1834,7 +1848,7 @@ where
         );
         let account_rotation_retry = self.account_selection.required_account().is_none()
             && self.continuation_attempt == ContinuationAttempt::None
-            && self.downstream_committed_at.is_none()
+            && !self.replay_barrier_reached
             && !self.delivery_pending
             && attempt_send_state != UpstreamSendState::Ambiguous
             && matches!(
@@ -1851,7 +1865,7 @@ where
         let transport_recovery = match error.pre_delivery_retry() {
             Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { transport })
                 if !self.connection_budget.exhausted()
-                    && self.downstream_committed_at.is_none()
+                    && !self.replay_barrier_reached
                     && !self.delivery_pending
                     && attempt_send_state == UpstreamSendState::NotSent
                     && self.current_send_state() == UpstreamSendState::NotSent
@@ -1868,7 +1882,7 @@ where
                 retry_index,
                 delay,
             }) if !self.connection_budget.exhausted()
-                && self.downstream_committed_at.is_none()
+                && !self.replay_barrier_reached
                 && !self.delivery_pending
                 && attempt_send_state != UpstreamSendState::Ambiguous =>
             {
@@ -1876,7 +1890,7 @@ where
             }
             Some(crate::error::PreDeliveryRetry::SameAccountTransportFallback)
                 if !self.connection_budget.exhausted()
-                    && self.downstream_committed_at.is_none()
+                    && !self.replay_barrier_reached
                     && !self.delivery_pending
                     && attempt_send_state != UpstreamSendState::Ambiguous =>
             {
@@ -1891,7 +1905,7 @@ where
             && !connection_retry_requested
             && self.account_selection.required_account().is_none()
             && self.continuation_attempt == ContinuationAttempt::None
-            && self.downstream_committed_at.is_none()
+            && !self.replay_barrier_reached
             && !self.delivery_pending
             && attempt_send_state != UpstreamSendState::Ambiguous
             && provider_proved_replay_safe
@@ -1922,7 +1936,7 @@ where
         };
         let same_account_retry = error.retries_same_account()
             && provider_proved_replay_safe
-            && self.downstream_committed_at.is_none()
+            && !self.replay_barrier_reached
             && !self.delivery_pending
             && attempt_send_state != UpstreamSendState::Ambiguous
             && self.routing_attempts < self.plan.max_attempts().get()
@@ -1946,7 +1960,8 @@ where
             "connectionRetries": self.connection_retries,
             "connectionBudgetRemainingMs": self.connection_budget.remaining().map(duration_ms),
             "delayMs": transient_retry.or(transport_recovery.map(|(_, delay)| delay)).map(duration_ms),
-            "downstreamCommitted": self.downstream_committed_at.is_some(),
+            "downstreamCommitted": self.response_commit.committed_at().is_some(),
+            "replayBarrierReached": self.replay_barrier_reached,
             "sendState": format!("{attempt_send_state:?}"),
         }));
         let input = self.retry_input(
@@ -2248,7 +2263,7 @@ where
         if self.has_descendant_effects()
             || self.account_selection.required_account().is_some()
             || self.continuation_attempt == ContinuationAttempt::None
-            || self.downstream_committed_at.is_some()
+            || self.replay_barrier_reached
             || self.delivery_pending
             || send_state == UpstreamSendState::Ambiguous
             || !provider_proved_replay_safe
@@ -2390,8 +2405,11 @@ where
                 UpstreamSendState::Sent
             },
             attempt_count: self.attempts,
-            downstream_committed_at: self.downstream_committed_at,
-            client_status_code: self.client_status_code,
+            downstream_committed_at: self.response_commit.committed_at(),
+            client_status_code: self
+                .response_commit
+                .status_code()
+                .or(self.client_status_code),
             upstream_status_code,
             client_response_id: self.observation.client_response_id.clone(),
             upstream_request_id,
@@ -2439,7 +2457,7 @@ where
         let send_state = self.raise_send_watermark(send_state);
         let outcome = if error.kind() == ProviderErrorKind::Cancelled {
             ExecutionOutcome::Cancelled
-        } else if self.downstream_committed_at.is_some() {
+        } else if self.response_commit.committed_at().is_some() {
             ExecutionOutcome::Incomplete
         } else {
             ExecutionOutcome::Failed
@@ -2466,13 +2484,15 @@ where
     }
 
     async fn finish_interruption(&mut self, error: &EngineError) -> Result<(), EngineError> {
+        // 结算 I/O 可能继续等待，先冻结交付事实以保持终态与实际 HTTP 状态一致
+        self.response_commit.finish();
         let (outcome, gateway_error) = match error {
             EngineError::Cancelled => (
                 ExecutionOutcome::Cancelled,
                 GatewayError::new(GatewayErrorKind::Cancelled, "request was cancelled"),
             ),
             EngineError::Deadline => (
-                if self.downstream_committed_at.is_some() {
+                if self.response_commit.committed_at().is_some() {
                     ExecutionOutcome::Incomplete
                 } else {
                     ExecutionOutcome::Failed
@@ -2486,7 +2506,7 @@ where
         };
         let send_state = if self.attempts == 0 {
             UpstreamSendState::NotSent
-        } else if self.downstream_committed_at.is_some()
+        } else if self.delivery_committed
             || self
                 .current
                 .as_ref()
@@ -2575,8 +2595,11 @@ where
             outcome: finalization.outcome,
             send_state: finalization.send_state,
             attempt_count: self.attempts,
-            downstream_committed_at: self.downstream_committed_at,
-            client_status_code: self.client_status_code,
+            downstream_committed_at: self.response_commit.committed_at(),
+            client_status_code: self
+                .response_commit
+                .status_code()
+                .or(self.client_status_code),
             upstream_status_code: finalization.upstream_status_code.or(observed_status_code),
             client_response_id: self.observation.client_response_id.clone(),
             upstream_request_id: finalization.upstream_request_id.or(upstream_request_id),
@@ -2609,6 +2632,7 @@ where
     }
 
     async fn persist_finalization(&mut self, finalization: ModelRequestFinalization) {
+        self.response_commit.finish();
         if let Some(observer) = &self.observer {
             observer.record_finalization(
                 &finalization,

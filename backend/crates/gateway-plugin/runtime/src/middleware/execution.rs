@@ -156,6 +156,12 @@ pub(super) async fn invoke(
 }
 
 fn rpc_error(error: RpcError) -> MiddlewareError {
+    if error.is_overloaded() {
+        return MiddlewareError::Gateway(gateway_core::error::GatewayError::new(
+            gateway_core::error::GatewayErrorKind::MiddlewareCapacityUnavailable,
+            "Request middleware is temporarily busy",
+        ));
+    }
     let rejected = matches!(&error, RpcError::Remote(fault) if fault.code == ErrorCode::Rejected);
     MiddlewareError::Remote {
         source: Box::new(error),

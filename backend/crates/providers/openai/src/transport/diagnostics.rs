@@ -36,6 +36,7 @@ const PERSISTABLE_UPSTREAM_CODES: &[&str] = &[
     "cyber_policy",
     "deactivated_workspace",
     "flex_unavailable",
+    "turn_rate_limit_exceeded",
     "identity_verification_required",
     "insufficient_quota",
     "invalid_api_key",
@@ -97,6 +98,8 @@ pub enum CodexFailureCategory {
     /// 当前用量窗口已经耗尽，但存在自动恢复的重置时间。
     UsageLimitExhausted,
     RateLimited,
+    /// Request-scoped turn limit; never cool the account or replay in the proxy.
+    TurnRateLimited,
     QuotaExhausted,
     CloudflareChallenge,
     CloudflarePathBlocked,
@@ -231,7 +234,10 @@ impl CodexUpstreamFailure {
     /// 返回该拒绝是否允许换号重放。
     #[must_use]
     pub const fn replay_is_safe(&self) -> bool {
-        if matches!(self.category, CodexFailureCategory::FlexUnavailable) {
+        if matches!(
+            self.category,
+            CodexFailureCategory::FlexUnavailable | CodexFailureCategory::TurnRateLimited
+        ) {
             return false;
         }
         match self.send_phase {
@@ -411,6 +417,9 @@ fn classify_upstream_failure(
     let message = fields.message.to_ascii_lowercase();
     let body = body.to_ascii_lowercase();
 
+    if code == "turn_rate_limit_exceeded" {
+        return CodexFailureCategory::TurnRateLimited;
+    }
     if code == "flex_unavailable" {
         return CodexFailureCategory::FlexUnavailable;
     }

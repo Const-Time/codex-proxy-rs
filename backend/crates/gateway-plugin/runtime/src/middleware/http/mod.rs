@@ -413,6 +413,12 @@ impl Drop for Invocation {
     }
 }
 pub(super) fn rpc_error(error: crate::RpcError) -> MiddlewareError {
+    if error.is_overloaded() {
+        return MiddlewareError::Gateway(gateway_core::error::GatewayError::new(
+            gateway_core::error::GatewayErrorKind::MiddlewareCapacityUnavailable,
+            "Request middleware is temporarily busy",
+        ));
+    }
     let rejected =
         matches!(&error,crate::RpcError::Remote(fault) if fault.code==ErrorCode::Rejected);
     MiddlewareError::Remote {

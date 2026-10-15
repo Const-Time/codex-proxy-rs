@@ -176,7 +176,7 @@ fn rpc_error(error: RpcError) -> core::Error {
             let code = match error {
                 RpcError::Timeout => ErrorCode::Timeout,
                 RpcError::Cancelled => ErrorCode::Cancelled,
-                RpcError::Capacity => ErrorCode::Capacity,
+                RpcError::Capacity | RpcError::Overloaded => ErrorCode::Capacity,
                 _ => ErrorCode::Fault,
             };
             PluginFault::new(code, error.diagnostic().1)

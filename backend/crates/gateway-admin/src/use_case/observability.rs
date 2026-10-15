@@ -596,7 +596,14 @@ impl ScenarioCosts {
         &mut self,
         bucket_start: DateTime<Utc>,
         amount: DecimalAmount,
+        request_count: u64,
     ) -> Result<(), AdminError> {
+        let scaled = decimal(&amount)
+            .and_then(|value| value.scaled().checked_mul(u128::from(request_count)))
+            .and_then(|value| gateway_core::metering::Decimal::from_scaled(value).ok())
+            .ok_or_else(|| AdminError::internal("用量标准成本超出数值范围"))?;
+        let amount = DecimalAmount::from_str(&scaled.canonical())
+            .map_err(|_| AdminError::internal("用量标准成本超出数值范围"))?;
         self.total = Some(match self.total.take() {
             Some(current) => current
                 .checked_add(&amount)
@@ -696,9 +703,13 @@ async fn recover_standard_costs(
         };
         let standard = adjusted_group_amount(&fact, standard_raw, standard_selected)
             .ok_or_else(|| AdminError::internal("模型倍率计费超出金额范围"))?;
-        scenarios.standard.add(fact.bucket_start, standard)?;
+        scenarios
+            .standard
+            .add(fact.bucket_start, standard, fact.request_count)?;
         if let Some(billed) = no_cache_cost(&fact, &breakdown) {
-            scenarios.no_cache.add(fact.bucket_start, billed)?;
+            scenarios
+                .no_cache
+                .add(fact.bucket_start, billed, fact.request_count)?;
         }
     }
     Ok(scenarios)

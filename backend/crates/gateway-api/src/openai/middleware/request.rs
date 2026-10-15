@@ -123,6 +123,7 @@ pub(in crate::openai) async fn respond(
         .with_execution_context(prepared.nested_context());
         let ip = input.decoded.metadata().client_ip();
         let agent = input.decoded.metadata().user_agent().map(str::to_owned);
+        let (admitted, keepalive) = tokio::sync::oneshot::channel();
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
             Box::pin(async move {
                 if request.protocol() != "openai" {
@@ -165,14 +166,22 @@ pub(in crate::openai) async fn respond(
                     .session
                     .trace()
                     .capture("client.request.body", &input.body);
+                let _ = admitted.send(started.session.response_commit());
                 super::execution_middleware_response(started.session, transport).await
             })
         });
-        match plan.run(request, next).await {
-            Ok(response) => {
-                super::deliver_middleware_response(response, streaming, input.connection).await
+        let response = async move {
+            match plan.run(request, next).await {
+                Ok(response) => {
+                    super::deliver_middleware_response(response, streaming, input.connection).await
+                }
+                Err(error) => super::delivery::error_response(&error),
             }
-            Err(error) => super::delivery::error_response(&error),
+        };
+        if streaming {
+            crate::openai::responses::keepalive::response(response, keepalive).await
+        } else {
+            response.await
         }
     };
     if let Ok(id) = HeaderValue::from_str(&request_id) {

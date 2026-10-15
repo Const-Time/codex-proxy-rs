@@ -145,3 +145,62 @@ async fn queued_query_runs_after_one_slot_is_released() {
             .expect("occupied query must succeed");
     }
 }
+
+#[tokio::test]
+async fn cancelled_snapshot_keeps_its_slot_until_postgres_finishes_rollback() {
+    let Some(db) = super::TestDatabase::create("cancelled_query_budget").await else {
+        return;
+    };
+    let budget = ObservabilityQueryBudget::try_new(1, Duration::from_millis(20)).unwrap();
+    let worker_budget = budget.clone();
+    let pool = db.pool.clone();
+    let (started_tx, started_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        worker_budget
+            .run_connection(&pool, "blocked snapshot", |mut connection| async move {
+                use sqlx::Connection;
+                let mut tx = connection.begin().await.unwrap();
+                sqlx::query("set local statement_timeout='2s'")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                let pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                started_tx.send(pid).unwrap();
+                let _ = sqlx::query("select pg_sleep(10)").execute(&mut *tx).await;
+                Ok(())
+            })
+            .await
+    });
+    let pid = started_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2),async {
+        loop {
+            let active: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where pid=$1 and wait_event='PgSleep')")
+                .bind(pid).fetch_one(&db.pool).await.unwrap();
+            if active { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        budget
+            .run("must remain blocked", async { Ok(()) })
+            .await
+            .is_err()
+    );
+    // The database statement deadline bounds cancellation cleanup as well as normal reads.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if budget.run("after rollback", async { Ok(()) }).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    db.close().await;
+}

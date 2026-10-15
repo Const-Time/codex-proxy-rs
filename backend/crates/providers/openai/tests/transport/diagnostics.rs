@@ -425,3 +425,29 @@ fn diagnostic_wire_dump_preserves_binary_bytes_and_numbers_every_fragment() {
         assert_eq!(value, expected);
     }
 }
+
+#[test]
+fn turn_rate_limit_does_not_grant_proxy_replay_or_account_cooldown() {
+    for phase in [
+        CodexUpstreamSendPhase::BeforePayload,
+        CodexUpstreamSendPhase::AfterPayload,
+        CodexUpstreamSendPhase::Ambiguous,
+    ] {
+        let failure = CodexUpstreamFailure::from_response(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"code":"turn_rate_limit_exceeded","type":"rate_limit_error","message":"Retry this turn later."}}"#,
+            Some(53),
+            &CodexUpstreamDiagnostics::default(),
+            None,
+            &[],
+            &[],
+            phase,
+        );
+        assert_eq!(failure.category(), CodexFailureCategory::TurnRateLimited);
+        assert!(!failure.replay_is_safe());
+    }
+    assert_eq!(
+        classify(429, r#"{"error":{"message":"turn_rate_limit_exceeded"}}"#),
+        CodexFailureCategory::RateLimited
+    );
+}

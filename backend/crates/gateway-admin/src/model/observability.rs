@@ -312,6 +312,8 @@ pub struct ProviderBillingInput {
 /// 控制面仅保留通用事实，具体 Provider 负责校验已持久化总额并恢复标准费用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageCalculatedBillingFact {
+    /// 完全相同的单条计费事实数；先逐条舍入，再乘以数量。
+    pub request_count: u64,
     pub billing_multiplier: DecimalAmount,
     pub billing_multiplier_scope: gateway_core::metering::MultiplierScope,
     pub breakdown: Option<CalculatedBillingBreakdown>,

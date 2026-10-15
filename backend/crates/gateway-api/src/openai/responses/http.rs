@@ -328,6 +328,19 @@ pub async fn stream_execution_response(
     session: Box<dyn ExecutionSession>,
     connection_guard: Option<Box<dyn ConnectionGuard>>,
 ) -> Response {
+    let (admitted, keepalive) = tokio::sync::oneshot::channel();
+    let _ = admitted.send(session.response_commit());
+    super::keepalive::response(
+        stream_execution_response_inner(session, connection_guard),
+        keepalive,
+    )
+    .await
+}
+
+async fn stream_execution_response_inner(
+    session: Box<dyn ExecutionSession>,
+    connection_guard: Option<Box<dyn ConnectionGuard>>,
+) -> Response {
     let mut execution = PendingExecution::new(session);
     let Some(session) = execution.session_mut() else {
         return internal_gateway_response("gateway response session is unavailable");

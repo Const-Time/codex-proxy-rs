@@ -2198,3 +2198,229 @@ async fn request_detail_filters_combine_snapshots_owners_and_client_transport() 
         assert_eq!(page.items.len(), usize::from(expected > 0));
     }
 }
+
+#[tokio::test]
+async fn deep_usage_pages_preserve_exact_order_ties_tail_and_owner_group_filters() {
+    let Some(db) = TestDatabase::create("deep_usage_pages").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    sqlx::raw_sql(
+        "insert into users(id, username, password_hash, created_at, updated_at) values
+        ('alice','alice','hash',now(),now()),('bob','bob','hash',now(),now());",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    clone_request_facts(
+        &db.pool,
+        "req_observe_success",
+        1207,
+        now,
+        "jsonb_build_object('id','page_' || lpad(n::text,5,'0'),
+       'user_id',case when n%3=0 then 'bob' else 'alice' end,
+       'routing_group_refs',jsonb_build_array(case when n%5=0 then 'other' else 'wanted' end),
+       'started_at',$3::timestamptz - (n/11)*interval '1 minute' - interval '1 second',
+       'downstream_committed_at',$3::timestamptz - (n/11)*interval '1 minute' - interval '500 milliseconds',
+       'completed_at',$3::timestamptz - (n/11)*interval '1 minute',
+       'deadline_at',$3::timestamptz - (n/11)*interval '1 minute' + interval '5 minutes')",
+    )
+    .await;
+    let expected: Vec<String> = sqlx::query_scalar(
+        "select id from model_requests where user_id='alice'
+       and routing_group_refs @> array['wanted'] order by started_at desc,id desc",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let repo = observability_repository(&db.pool);
+    let range =
+        ObservabilityRange::new(now - TimeDelta::days(1), now + TimeDelta::seconds(1)).unwrap();
+    for page in [1, 2, 7, 16, 33, 1000] {
+        let result = repo
+            .list_usage_records(UsageRecordQuery {
+                range,
+                filter: UsageRecordFilter {
+                    owner_user_id: Some("alice".into()),
+                    group_id: Some("wanted".into()),
+                    ..Default::default()
+                },
+                current_page: page,
+                page_size: ObservabilityPageSize::new(23).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.total, expected.len() as u64);
+        let offset = (page as usize - 1) * 23;
+        let expected_page =
+            &expected[offset.min(expected.len())..(offset + 23).min(expected.len())];
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>(),
+            expected_page
+        );
+        assert!(
+            result
+                .items
+                .iter()
+                .all(|item| item.user_id.as_deref() == Some("alice"))
+        );
+    }
+    db.close().await;
+}
+
+#[tokio::test]
+async fn billing_facts_group_identical_rows_without_merging_price_scope_or_owner() {
+    let Some(db) = TestDatabase::create("billing_fact_groups").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    seed_calculated_billing_facts(&db.pool, now).await.unwrap();
+    sqlx::raw_sql(
+        "insert into users(id, username, password_hash, created_at, updated_at) values
+        ('alice','alice','hash',now(),now()),('bob','bob','hash',now(),now());",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    clone_request_facts(
+        &db.pool,
+        "req_observe_calculated",
+        1000,
+        now,
+        "jsonb_build_object('id','cost_' || n::text,
+       'user_id',case when n%2=0 then 'alice' else 'bob' end,
+       'billing_multiplier',case when n%4=0 then 2 else 1 end)",
+    )
+    .await;
+    let repo = observability_repository(&db.pool);
+    let range =
+        ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1)).unwrap();
+    let facts = repo
+        .usage_calculated_billing_facts(
+            range,
+            UsageRecordFilter {
+                owner_user_id: Some("alice".into()),
+                ..Default::default()
+            },
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(facts.len(), 2);
+    assert!(
+        facts
+            .iter()
+            .all(|fact| fact.request_count == 250 && fact.total.amount.as_str() == "1.25")
+    );
+    let multipliers = facts
+        .iter()
+        .map(|fact| fact.billing_multiplier.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(multipliers, std::collections::BTreeSet::from(["1", "2"]));
+    db.close().await;
+}
+
+#[tokio::test]
+async fn deep_ops_pages_merge_sources_with_stable_ties_and_user_filter() {
+    let Some(db) = TestDatabase::create("deep_ops_pages").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    sqlx::raw_sql(
+        "insert into users(id, username, password_hash, created_at, updated_at) values
+        ('alice','alice','hash',now(),now()),('bob','bob','hash',now(),now());",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    clone_request_facts(
+        &db.pool,
+        "req_observe_failed",
+        303,
+        now,
+        "jsonb_build_object('id','err_' || lpad(n::text,5,'0'),
+       'user_id',case when n%3=0 then 'bob' else 'alice' end,
+       'started_at',$3::timestamptz - (n/9)*interval '1 minute' - interval '1 second',
+       'completed_at',$3::timestamptz - (n/9)*interval '1 minute',
+       'deadline_at',$3::timestamptz - (n/9)*interval '1 minute' + interval '5 minutes')",
+    )
+    .await;
+    sqlx::query(
+        "insert into ops_events select (jsonb_populate_record(null::ops_events,
+       to_jsonb(oe) || jsonb_build_object('id','event_' || lpad(n::text,5,'0'),
+       'model_request_id','err_' || lpad(n::text,5,'0'),
+       'created_at',$1::timestamptz - (n/9)*interval '1 minute'))).*
+       from ops_events oe cross join generate_series(1,303) n where oe.id='ops_observe_retry'",
+    )
+    .bind(now)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let expected: Vec<String> = sqlx::query_scalar("select stable_id from (
+       select 'model_request:'||id as stable_id,completed_at as occurred_at from model_requests where user_id='alice'
+       union all select 'ops_event:'||oe.id,oe.created_at from ops_events oe join model_requests mr on mr.id=oe.model_request_id where mr.user_id='alice'
+       ) all_errors order by occurred_at desc,stable_id desc").fetch_all(&db.pool).await.unwrap();
+    let repo = observability_repository(&db.pool);
+    let range =
+        ObservabilityRange::new(now - TimeDelta::days(1), now + TimeDelta::seconds(1)).unwrap();
+    for page in [1, 2, 9, 24, 25, 1000] {
+        let result = repo
+            .list_ops_errors(OpsErrorQuery {
+                range,
+                filter: OpsErrorFilter {
+                    user_id: Some("alice".into()),
+                    ..Default::default()
+                },
+                current_page: page,
+                page_size: ObservabilityPageSize::new(17).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.total, expected.len() as u64);
+        let offset = (page as usize - 1) * 17;
+        let actual: Vec<_> = result
+            .items
+            .iter()
+            .map(|item| format!("{}:{}", item.source, item.event_id))
+            .collect();
+        assert_eq!(
+            actual,
+            expected[offset.min(expected.len())..(offset + 17).min(expected.len())]
+        );
+    }
+    db.close().await;
+}
+
+async fn clone_request_facts(
+    pool: &PgPool,
+    source: &str,
+    count: i32,
+    now: chrono::DateTime<Utc>,
+    patch: &'static str,
+) {
+    let columns: Vec<String> = sqlx::query_scalar("select quote_ident(attname) from pg_attribute
+        where attrelid='model_requests'::regclass and attnum>0 and not attisdropped and attgenerated=''
+        order by attnum").fetch_all(pool).await.unwrap();
+    let selected = columns
+        .iter()
+        .map(|column| format!("(copied).{column}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let statement = format!("insert into model_requests ({}) select {selected} from (
+        select jsonb_populate_record(null::model_requests,to_jsonb(mr)||({patch})) as copied
+        from model_requests mr cross join generate_series(1,$1) n where mr.id=$2 and $3::timestamptz is not null) copies",columns.join(","));
+    sqlx::query(sqlx::AssertSqlSafe(statement))
+        .bind(count)
+        .bind(source)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+}

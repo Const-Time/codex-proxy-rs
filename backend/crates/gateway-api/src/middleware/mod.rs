@@ -338,6 +338,11 @@ async fn dispatch(
     }
 }
 fn error(failure: &MiddlewareError) -> Response {
+    if let MiddlewareError::Gateway(error) = failure
+        && error.kind() == gateway_core::error::GatewayErrorKind::MiddlewareCapacityUnavailable
+    {
+        return crate::openai::error::gateway_error_response(error);
+    }
     let status = if failure.is_rejected() {
         StatusCode::FORBIDDEN
     } else {

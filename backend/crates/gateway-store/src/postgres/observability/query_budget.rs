@@ -2,11 +2,13 @@
 
 use std::{
     future::Future,
+    ops::{Deref, DerefMut},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use futures::{Stream, TryStreamExt, stream::BoxStream};
+use sqlx::{PgConnection, PgPool, Postgres, pool::PoolConnection};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{StoreBackend, StoreError, StoreResult};
@@ -16,6 +18,36 @@ use crate::{StoreBackend, StoreError, StoreResult};
 pub struct ObservabilityQueryBudget {
     slots: Arc<Semaphore>,
     wait_timeout: Duration,
+}
+
+/// 查询和回滚共同持有连接预算，客户端取消不能提前释放槽位。
+pub struct ObservabilityConnection {
+    connection: PoolConnection<Postgres>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Deref for ObservabilityConnection {
+    type Target = PgConnection;
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl DerefMut for ObservabilityConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+
+impl Drop for ObservabilityConnection {
+    fn drop(&mut self) {
+        let returning = self.connection.return_to_pool();
+        let permit = self.permit.take();
+        tokio::spawn(async move {
+            returning.await;
+            drop(permit);
+        });
+    }
 }
 
 impl ObservabilityQueryBudget {
@@ -48,6 +80,36 @@ impl ObservabilityQueryBudget {
     {
         let _slot = self.acquire(operation).await?;
         query.await
+    }
+
+    /// 在单一连接上执行需要快照一致性的历史查询，并覆盖取消后的事务回滚。
+    ///
+    /// # Errors
+    /// 排队、连接获取、查询超过总时限或 SQL 失败时返回错误。
+    pub async fn run_connection<T, F, Q>(
+        &self,
+        pool: &PgPool,
+        operation: &'static str,
+        query: F,
+    ) -> StoreResult<T>
+    where
+        F: FnOnce(ObservabilityConnection) -> Q,
+        Q: Future<Output = StoreResult<T>>,
+    {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let permit = self.acquire(operation).await?;
+            let connection = pool
+                .acquire()
+                .await
+                .map_err(|_| crate::postgres_unavailable("acquire history query connection"))?;
+            query(ObservabilityConnection {
+                connection,
+                permit: Some(permit),
+            })
+            .await
+        })
+        .await
+        .map_err(|_| crate::postgres_unavailable("history query execution budget exhausted"))?
     }
 
     /// 将槽位持有到查询流消费结束、报错或被丢弃，而不是仅持有到流创建完成。

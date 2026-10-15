@@ -1014,6 +1014,8 @@ pub enum GatewayErrorKind {
     AccountCapacityUnavailable,
     /// Provider 的本地账号基础设施不可用。
     ProviderInfrastructureUnavailable,
+    /// Plugin execution admission is saturated; never bypass middleware.
+    MiddlewareCapacityUnavailable,
     /// 上游限流。
     RateLimited,
     /// 上游暂不可用。
@@ -1042,6 +1044,7 @@ impl GatewayErrorKind {
             Self::NoAvailableProvider => "no_available_provider",
             Self::AccountCapacityUnavailable => "account_capacity_unavailable",
             Self::ProviderInfrastructureUnavailable => "provider_infrastructure_unavailable",
+            Self::MiddlewareCapacityUnavailable => "middleware_capacity_unavailable",
             Self::RateLimited => "rate_limited",
             Self::UpstreamUnavailable => "upstream_unavailable",
             Self::MessageTooBig => "message_too_big",

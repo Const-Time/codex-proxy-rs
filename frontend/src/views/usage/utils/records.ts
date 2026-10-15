@@ -13,6 +13,7 @@ import type {
 
 import { isRecord } from '@/utils/object'
 import { formatDuration } from './format'
+import { generationRate } from './generationRate'
 
 export { usageModelDisplay } from './modelDisplay'
 
@@ -280,7 +281,12 @@ export function usageLatencyDetails(record: UsageCommonRecord) {
     })
   }
 
+  const rate = 'logicalOutcome' in record && record.logicalOutcome !== 'succeeded'
+    ? null
+    : generationRate({ outputTokens: record.tokenDetails.outputTokens, latencyMs: totalMs, firstTokenMs })
+
   return {
+    generationRateDisplay: rate === null ? '—' : `${rate.toFixed(1)} tokens/s`,
     // SSE 可能先收到生命周期事件而没有文本或推理增量；这不是首字，须保留原始语义。
     firstOutputLabel: firstTokenMs === null && firstEventMs !== null ? '首事件' : '首字',
     firstOutputDisplay: formatDuration(firstTokenMs ?? firstEventMs),

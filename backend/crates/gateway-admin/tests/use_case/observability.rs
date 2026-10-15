@@ -375,6 +375,7 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
         }],
     }]);
     store.replace_calculated_billing_facts(vec![UsageCalculatedBillingFact {
+        request_count: 1,
         billing_multiplier: "1".parse().unwrap(),
         billing_multiplier_scope: Default::default(),
         breakdown: None,
@@ -647,6 +648,7 @@ async fn usage_insights_should_reject_partial_costs_when_billing_stream_fails() 
     let range = observation_range(now);
     let store = Arc::new(FixtureObservabilityStore::new(range));
     store.replace_calculated_billing_facts(vec![UsageCalculatedBillingFact {
+        request_count: 1,
         billing_multiplier: "1".parse().unwrap(),
         billing_multiplier_scope: Default::default(),
         breakdown: None,
@@ -1068,4 +1070,49 @@ fn diagnostic(name: &str, request_count: u64) -> DiagnosticObservation {
 fn quarter_hour_start(value: DateTime<Utc>) -> DateTime<Utc> {
     let elapsed = value.timestamp().rem_euclid(15 * 60);
     value - Duration::seconds(elapsed) - Duration::nanoseconds(i64::from(value.nanosecond()))
+}
+
+#[tokio::test]
+async fn grouped_billing_scenarios_match_repeated_per_request_rounding() {
+    let now = Utc::now();
+    let range = observation_range(now);
+    let fact = UsageCalculatedBillingFact {
+        request_count: 1,
+        billing_multiplier: "1.123456789".parse().unwrap(),
+        billing_multiplier_scope: Default::default(),
+        breakdown: None,
+        bucket_start: quarter_hour_start(now),
+        provider_kind: "openai".into(),
+        upstream_model_id: "gpt-5.5".into(),
+        service_tier: None,
+        input_tokens: Some(800),
+        output_tokens: Some(200),
+        cached_tokens: Some(0),
+        cache_write_tokens: Some(0),
+        total: CurrencyCost {
+            currency: "USD".into(),
+            amount: "1.25".parse().unwrap(),
+        },
+    };
+    let mut results = Vec::new();
+    for grouped in [false, true] {
+        let store = Arc::new(FixtureObservabilityStore::new(range));
+        let facts = if grouped {
+            vec![UsageCalculatedBillingFact {
+                request_count: 137,
+                ..fact.clone()
+            }]
+        } else {
+            vec![fact.clone(); 137]
+        };
+        store.replace_calculated_billing_facts(facts);
+        let services = observability_services_with_calculated_billing(store).await;
+        let insights = services
+            .observability()
+            .usage_insights(range, UsageFilter::default())
+            .await
+            .unwrap();
+        results.push(format!("{:?}", insights.cost));
+    }
+    assert_eq!(results[0], results[1]);
 }

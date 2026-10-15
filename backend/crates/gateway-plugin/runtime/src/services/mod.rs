@@ -203,7 +203,7 @@ impl Registry {
             .scopes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if scopes.len() >= 32 || scopes.contains_key(&context.resource_scope_id) {
+        if scopes.len() >= 256 || scopes.contains_key(&context.resource_scope_id) {
             return Err(PluginFault::new(
                 ErrorCode::Capacity,
                 "service callback scope unavailable",

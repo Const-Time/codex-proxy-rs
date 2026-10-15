@@ -1,5 +1,7 @@
 //! 数据面执行用例：认证、准入、路由、continuation、circuit 与会话生命周期。
 mod affinity;
+mod delivery;
+pub use delivery::ResponseCommit;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -501,6 +503,10 @@ pub struct StartedExecution {
 }
 
 pub trait ExecutionSession: Send {
+    fn response_commit(&self) -> ResponseCommit {
+        ResponseCommit::default()
+    }
+
     /// Monotonic execution fact; an implementation without evidence must stay conservative.
     fn send_state(&self) -> UpstreamSendState {
         UpstreamSendState::Ambiguous
@@ -2030,6 +2036,10 @@ impl Drop for DefaultExecutionSession {
 }
 
 impl ExecutionSession for DefaultExecutionSession {
+    fn response_commit(&self) -> ResponseCommit {
+        self.core.response_commit()
+    }
+
     fn send_state(&self) -> UpstreamSendState {
         self.core.current_send_state()
     }

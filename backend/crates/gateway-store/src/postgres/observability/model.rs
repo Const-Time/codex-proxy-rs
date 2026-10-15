@@ -352,6 +352,8 @@ pub struct RequestMetricPoint {
 /// 已完整交付且由 Provider 计算费用的请求事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalculatedUsageBillingFact {
+    /// 完全相同的单条计费事实数；先逐条舍入，再乘以数量。
+    pub request_count: u64,
     pub billing_multiplier: DecimalAmount,
     pub billing_multiplier_scope: gateway_core::metering::MultiplierScope,
     pub billing_snapshot_json: Option<serde_json::Value>,

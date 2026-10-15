@@ -377,6 +377,7 @@ pub(crate) fn admin_calculated_usage_billing_fact(
     fact: CalculatedUsageBillingFact,
 ) -> AdminStoreResult<admin_observability::UsageCalculatedBillingFact> {
     Ok(admin_observability::UsageCalculatedBillingFact {
+        request_count: fact.request_count,
         billing_multiplier: admin_decimal_amount(fact.billing_multiplier)?,
         billing_multiplier_scope: fact.billing_multiplier_scope,
         breakdown: fact
@@ -1092,6 +1093,7 @@ pub(crate) fn calculated_usage_billing_fact_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<CalculatedUsageBillingFact> {
     Ok(CalculatedUsageBillingFact {
+        request_count: to_u64(get(row, "request_count")?)?,
         billing_multiplier: DecimalAmount::from_str(&get::<String>(row, "billing_multiplier")?)?,
         billing_multiplier_scope: row
             .try_get::<sqlx::types::Json<gateway_core::metering::MultiplierScope>, _>(

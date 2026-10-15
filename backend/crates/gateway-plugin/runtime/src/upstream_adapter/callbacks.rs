@@ -67,7 +67,7 @@ impl Callbacks {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if context.stage != Stage::Upstream
-            || calls.len() >= 32
+            || calls.len() >= 256
             || calls.contains_key(&context.resource_scope_id)
         {
             return Err(invalid(UpstreamSendState::NotSent));

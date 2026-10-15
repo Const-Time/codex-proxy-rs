@@ -21,6 +21,8 @@ const latencyDetails = computed(() => usageLatencyDetails(props.record))
       <span class="text-cp-text-secondary">{{ latencyDetails.firstOutputDisplay }}</span>
       <span class="text-cp-xs text-cp-text-quaternary">总耗时</span>
       <span class="text-cp-text">{{ latencyDetails.totalDisplay }}</span>
+      <span class="text-cp-xs text-cp-text-quaternary">生成速率</span>
+      <span class="text-cp-text-secondary">{{ latencyDetails.generationRateDisplay }}</span>
     </div>
 
     <UsageDetailPopover title="延迟明细" trigger-label="查看延迟明细">
@@ -49,6 +51,10 @@ const latencyDetails = computed(() => usageLatencyDetails(props.record))
           {{ latencyDetails.totalDisplay }}
         </span>
       </div>
+
+      <p class="m-0 text-cp-xs leading-snug text-cp-text-quaternary">
+        生成速率为输出 Token 数除以首字到完成的耗时；缺少有效采样时不估算。
+      </p>
 
       <div
         v-if="latencyDetails.transportItems.length"

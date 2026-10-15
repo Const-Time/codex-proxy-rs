@@ -2,6 +2,63 @@
 use super::*;
 
 #[tokio::test]
+async fn slow_next_releases_execution_capacity_but_retains_inflight_limit() {
+    let fixture = Fixture::with_limits(RpcLimits {
+        maximum_calls: 64,
+        maximum_executing_calls: 1,
+        maximum_queued_calls: 1,
+        maximum_callbacks: 1,
+        ..RpcLimits::default()
+    })
+    .await;
+    let (entered, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut tasks = Vec::new();
+    for index in 0..64 {
+        let callbacks = fixture.callbacks.clone();
+        let session = fixture.session.clone();
+        let entered = entered.clone();
+        let release = release.clone();
+        tasks.push(tokio::spawn(async move {
+            let next = gateway_core::middleware::compose(vec![], move |input| {
+                Box::pin(async move {
+                    entered.send(()).unwrap();
+                    release.acquire().await.unwrap().forget();
+                    terminal(Arc::new(Trace::default()), false).run(input).await
+                })
+            });
+            let mut context = context(false);
+            context.request_id =
+                gateway_core::engine::ModelRequestId::new(format!("req_capacity_{index}")).unwrap();
+            callbacks
+                .invoke(session, context, request("pass"), next)
+                .await
+        }));
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    // Waiting downstream requests still own their inflight lease: no bypass at the cap.
+    let trace = Arc::new(Trace::default());
+    let result = fixture.run("pass", false, trace.clone()).await;
+    assert!(matches!(result, Err(MiddlewareError::Gateway(error))
+        if error.kind() == gateway_core::error::GatewayErrorKind::MiddlewareCapacityUnavailable));
+    assert_eq!(trace.next.load(Ordering::SeqCst), 0);
+    release.add_permits(64);
+    for task in tasks {
+        drop(
+            tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn request_and_attempt_next_can_outlive_rpc_budget_without_resetting_core_deadline() {
     let fixture = Fixture::with_limits(RpcLimits {
         maximum_call_timeout: Duration::from_millis(300),

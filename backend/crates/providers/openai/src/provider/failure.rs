@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::transport::diagnostics::is_capacity_error;
-use gateway_core::diagnostics::TraceContext;
+use crate::transport::protocol::responses::is_replaceable_response_prelude;
 
 /// OpenAI 失败对 Smart 账号分数的结构化 reason 闭集。
 ///
@@ -76,138 +76,64 @@ impl MappedProviderFailure {
     }
 }
 
-pub(super) enum PreCommitPoll<T> {
-    Upstream(T),
-    GraceElapsed,
+pub(super) struct ClientEventDelivery {
+    replay_closed: bool,
+    replayable_prelude: bool,
 }
 
-pub(super) async fn wait_for_replay_grace(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
-}
-
-/// 提交边界前的上游事件预取。
-///
-/// 原始 chunk 计数而不是重编码后的 event 大小。时间与字节阈值共同限定无感换号
-/// 窗口；任一边界到达都会提交已缓存 wire，不能因网关私有资源规则伪造上游协议
-/// 失败。一旦提交，后续事件不再具备无痕重放资格。
-pub(super) struct PreCommitClientEvents {
-    pending: Vec<ProviderEvent>,
-    prefetched_bytes: usize,
-    replay_grace_started_at: Option<Instant>,
-    committed: bool,
-    trace: TraceContext,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum PreCommitReleaseReason {
-    SemanticOutput,
-    Terminal,
-    ByteLimit,
-    GraceTimeout,
-    Eof,
-}
-
-impl PreCommitClientEvents {
-    pub(super) const fn new(trace: TraceContext) -> Self {
+impl ClientEventDelivery {
+    pub(super) fn new(replayable_prelude: bool) -> Self {
         Self {
-            pending: Vec::new(),
-            prefetched_bytes: 0,
-            replay_grace_started_at: None,
-            committed: false,
-            trace,
+            replay_closed: false,
+            replayable_prelude,
         }
     }
 
-    pub(super) fn observe_chunk(&mut self, bytes: usize) {
-        if !self.committed {
-            self.prefetched_bytes = self.prefetched_bytes.saturating_add(bytes);
-        }
-    }
-
-    pub(super) fn stage(
+    pub(super) fn forward(
         &mut self,
         incoming: Vec<ProviderEvent>,
         timing_signals: ResponseEventSignals,
         completed: bool,
     ) -> Vec<ProviderEvent> {
-        if self.committed {
+        if self.replay_closed || incoming.is_empty() {
             return incoming;
         }
-        let starts_replay_grace = incoming.iter().any(ProviderEvent::has_client_event);
-        self.pending.extend(incoming);
-        if timing_signals.semantic_output {
-            return self.commit_pending(PreCommitReleaseReason::SemanticOutput);
+        if timing_signals.semantic_output
+            || completed
+            || !self.replayable_prelude
+            || !incoming.iter().all(is_replaceable_prelude)
+        {
+            return self.commit(incoming);
         }
-        if completed {
-            return self.commit_pending(PreCommitReleaseReason::Terminal);
-        }
-        if self.prefetched_bytes > MAX_STREAM_PREFETCH_BYTES {
-            return self.commit_pending(PreCommitReleaseReason::ByteLimit);
-        }
-        if starts_replay_grace && self.replay_grace_started_at.is_none() {
-            self.replay_grace_started_at = Some(Instant::now());
-        }
-        Vec::new()
-    }
-
-    pub(super) fn finish(
-        &mut self,
-        incoming: Vec<ProviderEvent>,
-        timing_signals: ResponseEventSignals,
-        completed: bool,
-    ) -> Vec<ProviderEvent> {
-        let events = self.stage(incoming, timing_signals, completed);
-        if self.committed {
-            events
-        } else {
-            self.commit_pending(PreCommitReleaseReason::Eof)
-        }
+        incoming
+            .into_iter()
+            .map(ProviderEvent::with_replayable_prelude)
+            .collect()
     }
 
     pub(super) fn commit(&mut self, incoming: Vec<ProviderEvent>) -> Vec<ProviderEvent> {
-        if self.committed {
-            return incoming;
-        }
-        self.pending.extend(incoming);
-        // 此入口只在同批次已出现语义输出、随后失败时释放原始事件。
-        self.commit_pending(PreCommitReleaseReason::SemanticOutput)
+        self.replay_closed = true;
+        incoming
     }
 
-    pub(super) fn take_for_failure(&mut self, incoming: Vec<ProviderEvent>) -> Vec<ProviderEvent> {
-        self.pending.extend(incoming);
-        self.prefetched_bytes = 0;
-        self.replay_grace_started_at = None;
-        std::mem::take(&mut self.pending)
+    pub(super) const fn replay_closed(&self) -> bool {
+        self.replay_closed
     }
+}
 
-    pub(super) fn replay_grace_deadline(&self) -> Option<Instant> {
-        self.replay_grace_started_at
-            .and_then(|started| started.checked_add(STREAM_REPLAY_GRACE))
-    }
-
-    pub(super) const fn is_committed(&self) -> bool {
-        self.committed
-    }
-
-    pub(super) fn commit_pending(&mut self, reason: PreCommitReleaseReason) -> Vec<ProviderEvent> {
-        // Provider 只记录释放缓存的原因；实际下游提交仍由 Core 记录和裁决。
-        if self.trace.is_enabled() {
-            self.trace.record("provider.precommit.released", json!({
-                "reason": reason,
-                "prefetchedBytes": self.prefetched_bytes,
-                "waitMs": self.replay_grace_started_at.map_or(0, |started| started.elapsed().as_millis()),
-            }));
-        }
-        self.committed = true;
-        self.prefetched_bytes = 0;
-        self.replay_grace_started_at = None;
-        std::mem::take(&mut self.pending)
-    }
+fn is_replaceable_prelude(event: &ProviderEvent) -> bool {
+    event
+        .wire_event()
+        .is_some_and(|wire| match wire.event_type() {
+            Some(event_type) => is_replaceable_response_prelude(event_type, wire.data()),
+            // 上游 SSE 注释也即时透传，但不能把传输心跳当作业务交付
+            None => wire.raw_sse_frame().is_some_and(|frame| {
+                std::str::from_utf8(frame).is_ok_and(|text| {
+                    text.lines()
+                        .all(|line| line.is_empty() || line.starts_with(':'))
+                })
+            }),
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -432,6 +358,7 @@ pub(super) async fn apply_failure(
     {
         tracing::warn!(
             account_id = %account.id(),
+            credential_revision = account.revision().get(),
             error = %error,
             "Failed to persist OpenAI response cookies"
         );
@@ -812,7 +739,6 @@ pub(super) fn stream_transport_allows_pre_delivery_retry(error: &CodexClientErro
 pub(super) fn map_canonical_error(
     error: CodexCanonicalError,
     diagnostics: &CodexUpstreamDiagnostics,
-    set_cookie_headers: &[String],
     rate_limit_headers: &[(String, String)],
     replay_boundary: ReplayBoundary,
 ) -> MappedProviderFailure {
@@ -822,7 +748,8 @@ pub(super) fn map_canonical_error(
             CodexUpstreamFailure::from_sse_failure(
                 &failure,
                 diagnostics,
-                set_cookie_headers,
+                // 响应头在开始消费流时已写回，流内失败不重放同一批 Cookie
+                &[],
                 rate_limit_headers,
                 CodexUpstreamSendPhase::AfterPayload,
             ),
@@ -1314,7 +1241,10 @@ pub(super) fn map_upstream_failure(
         provider_error_kind(category)
     };
     let mut error = provider_error(error_kind, send_state);
-    if category == CodexFailureCategory::FlexUnavailable {
+    if matches!(
+        category,
+        CodexFailureCategory::FlexUnavailable | CodexFailureCategory::TurnRateLimited
+    ) {
         error = error.with_retry_prohibited();
     }
     error = error.with_raw_upstream_error(RawUpstreamError::new(failure.raw_body.clone()));
@@ -1431,7 +1361,9 @@ pub(super) const fn provider_error_kind(category: CodexFailureCategory) -> Provi
             ProviderErrorKind::PermissionDenied
         }
         CodexFailureCategory::UsageLimitExhausted => ProviderErrorKind::QuotaExhausted,
-        CodexFailureCategory::RateLimited => ProviderErrorKind::RateLimited,
+        CodexFailureCategory::RateLimited | CodexFailureCategory::TurnRateLimited => {
+            ProviderErrorKind::RateLimited
+        }
         CodexFailureCategory::QuotaExhausted => ProviderErrorKind::QuotaExhausted,
         CodexFailureCategory::CloudflareChallenge
         | CodexFailureCategory::CloudflarePathBlocked
@@ -1486,6 +1418,7 @@ pub(super) fn account_failure(
             Some(CodexAccountFailure::CloudflarePathBlocked)
         }
         CodexFailureCategory::ModelUnsupported
+        | CodexFailureCategory::TurnRateLimited
         | CodexFailureCategory::InvalidRequest
         | CodexFailureCategory::PermissionDenied
         | CodexFailureCategory::Timeout

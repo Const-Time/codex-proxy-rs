@@ -212,7 +212,9 @@ impl ObservabilityRepository for PgObservabilityRepository {
 
     async fn list_usage_records(&self, query: UsageRecordQuery) -> StoreResult<UsageRecordPage> {
         self.query_budget
-            .run("list usage records", list_usage_records(&self.pool, query))
+            .run_connection(&self.pool, "list usage records", |connection| {
+                list_usage_records(connection, query)
+            })
             .await
     }
 
@@ -287,7 +289,9 @@ impl ObservabilityRepository for PgObservabilityRepository {
 
     async fn list_ops_errors(&self, query: OpsErrorQuery) -> StoreResult<OpsErrorPage> {
         self.query_budget
-            .run("list ops errors", list_ops_errors(&self.pool, query))
+            .run_connection(&self.pool, "list ops errors", |connection| {
+                list_ops_errors(connection, query)
+            })
             .await
     }
 }

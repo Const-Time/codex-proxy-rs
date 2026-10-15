@@ -1009,6 +1009,13 @@ impl CodexCredentialAdminService {
         let id_token = id_token.map(SecretString::from);
         if let Some(access_token) = access_token {
             let access_token_expires_at = parse_access_token_expiration(&access_token);
+            if refresh_token.is_none()
+                && access_token_expires_at
+                    .as_ref()
+                    .is_some_and(|expires_at| expires_at <= &Utc::now())
+            {
+                return Err(CodexCredentialAdminError::InvalidCredential);
+            }
             let secret = CodexOAuthSecret {
                 access_token: SecretString::from(access_token),
                 refresh_token: refresh_token.map(SecretString::from),

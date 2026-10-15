@@ -70,31 +70,33 @@ left join users u on u.id = coalesce(mr.user_id, oe.entry_context->>'userId')
 where true";
 
 pub(crate) async fn list_ops_errors(
-    pool: &PgPool,
+    mut connection: ObservabilityConnection,
     query: OpsErrorQuery,
 ) -> StoreResult<OpsErrorPage> {
     query.filter.validate()?;
-    let total = count_ops_errors(pool, query.range, &query.filter).await?;
+    let mut transaction = super::begin_page_snapshot(&mut connection).await?;
     let offset = observability_page_offset(query.current_page, query.page_size)?;
-    let mut statement = QueryBuilder::<Postgres>::new("select * from (");
-    statement.push(REQUEST_ERROR_SELECT);
-    push_request_error_predicates(&mut statement, query.range, &query.filter);
-    statement.push(" union all ");
-    statement.push(OPS_EVENT_SELECT);
-    push_ops_event_predicates(&mut statement, query.range, &query.filter);
-    statement.push(") e order by occurred_at desc, stable_sort_id desc limit ");
-    statement.push_bind(i64::from(query.page_size.get()));
-    statement.push(" offset ");
-    statement.push_bind(offset);
-    let rows = statement
-        .build()
-        .fetch_all(pool)
+    let (total, page) = if query.current_page == 1 {
+        let total = count_ops_errors(&mut *transaction, query.range, &query.filter).await?;
+        (
+            total,
+            (total > 0).then_some(TimePage {
+                range: query.range,
+                offset,
+                total: Some(total),
+            }),
+        )
+    } else {
+        ops_time_page(&mut transaction, &query, offset).await?
+    };
+    let items = match page {
+        Some(page) => list_ops_error_items_at(&mut transaction, &query, page).await?,
+        None => Vec::new(),
+    };
+    transaction
+        .commit()
         .await
-        .map_err(|_| postgres_unavailable("list ops errors"))?;
-    let items = rows
-        .iter()
-        .map(ops_error_from_row)
-        .collect::<StoreResult<Vec<_>>>()?;
+        .map_err(|_| postgres_unavailable("complete Ops page snapshot"))?;
     Ok(OpsErrorPage {
         items,
         current_page: query.current_page,
@@ -103,8 +105,97 @@ pub(crate) async fn list_ops_errors(
     })
 }
 
-pub(crate) async fn count_ops_errors(
-    pool: &PgPool,
+async fn list_ops_error_items_at(
+    connection: &mut sqlx::PgConnection,
+    query: &OpsErrorQuery,
+    page: TimePage,
+) -> StoreResult<Vec<OpsErrorRecord>> {
+    let total =
+        i64::try_from(page.total.unwrap_or(0)).map_err(|_| invalid("Ops count overflows i64"))?;
+    let limit = i64::from(query.page_size.get()).min(total - page.offset);
+    let reverse_offset = total - page.offset - limit;
+    let ascending = reverse_offset < page.offset;
+    let offset = if ascending {
+        reverse_offset
+    } else {
+        page.offset
+    };
+    let branch_limit = offset + limit;
+    let order = if ascending { " asc" } else { " desc" };
+    let mut statement =
+        QueryBuilder::<Postgres>::new("with candidate_page as materialized (select * from ((");
+    statement.push("select 'model_request'::text as source, mr.id as event_id, mr.completed_at as occurred_at, 'model_request:' || mr.id as stable_sort_id from model_requests mr where true");
+    push_request_error_predicates(&mut statement, page.range, &query.filter);
+    statement
+        .push(" order by mr.completed_at")
+        .push(order)
+        .push(", mr.id")
+        .push(order);
+    statement.push(" limit ").push_bind(branch_limit);
+    statement.push(") union all (");
+    statement.push("select 'ops_event'::text as source, oe.id as event_id, oe.created_at as occurred_at, 'ops_event:' || oe.id as stable_sort_id from ops_events oe left join model_requests mr on mr.id=oe.model_request_id where true");
+    push_ops_event_predicates(&mut statement, page.range, &query.filter);
+    statement
+        .push(" order by oe.created_at")
+        .push(order)
+        .push(", oe.id")
+        .push(order);
+    statement.push(" limit ").push_bind(branch_limit);
+    statement
+        .push(")) e order by occurred_at")
+        .push(order)
+        .push(", stable_sort_id")
+        .push(order);
+    statement
+        .push(" limit ")
+        .push_bind(limit)
+        .push(" offset ")
+        .push_bind(offset);
+    statement.push(") select details.* from candidate_page page cross join lateral (");
+    statement.push(REQUEST_ERROR_SELECT);
+    statement.push(" and page.source='model_request' and mr.id=page.event_id union all ");
+    statement.push(OPS_EVENT_SELECT);
+    statement.push(" and page.source='ops_event' and oe.id=page.event_id) details order by page.occurred_at desc,page.stable_sort_id desc");
+    let rows = statement
+        .build()
+        .fetch_all(connection)
+        .await
+        .map_err(|_| postgres_unavailable("list ops errors"))?;
+    rows.iter().map(ops_error_from_row).collect()
+}
+
+async fn ops_time_page(
+    connection: &mut sqlx::PgConnection,
+    query: &OpsErrorQuery,
+    offset: i64,
+) -> StoreResult<(u64, Option<TimePage>)> {
+    // 两个来源先各自精确分段，合并分钟计数后再定位同一个全局页码
+    let mut statement = QueryBuilder::<Postgres>::new(
+        "select bucket_start, sum(request_count)::bigint as request_count from (
+         select date_bin(interval '1 minute', mr.completed_at, timestamptz 'epoch') as bucket_start,
+                count(*)::bigint as request_count
+         from model_requests mr where true",
+    );
+    push_request_error_predicates(&mut statement, query.range, &query.filter);
+    statement.push(" group by bucket_start union all ");
+    statement.push(
+        "select date_bin(interval '1 minute', oe.created_at, timestamptz 'epoch') as bucket_start,
+                count(*)::bigint as request_count
+         from ops_events oe left join model_requests mr on mr.id=oe.model_request_id where true",
+    );
+    push_ops_event_predicates(&mut statement, query.range, &query.filter);
+    statement
+        .push(" group by bucket_start) counts group by bucket_start order by bucket_start desc");
+    let rows = statement
+        .build()
+        .fetch_all(connection)
+        .await
+        .map_err(|_| postgres_unavailable("locate Ops page"))?;
+    time_page_from_counts(&rows, query.range, offset, query.page_size)
+}
+
+pub(crate) async fn count_ops_errors<'e, E: sqlx::Executor<'e, Database = Postgres>>(
+    pool: E,
     range: ObservabilityRange,
     filter: &OpsErrorFilter,
 ) -> StoreResult<u64> {

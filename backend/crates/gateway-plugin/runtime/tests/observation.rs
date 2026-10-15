@@ -592,11 +592,11 @@ async fn terminal_capacity_is_bounded_and_epoch_cancel_releases_inflight_callbac
         Some(factory(&probe)),
         token.clone(),
     );
-    for n in 0..32 {
+    for n in 0..128 {
         plan.dispatch(terminal(&format!("req_capacity_{n}")));
     }
-    wait_facts(&probe, 16).await;
-    assert_eq!(probe.facts.lock().unwrap().len(), 16);
+    wait_facts(&probe, 64).await;
+    assert_eq!(probe.facts.lock().unwrap().len(), 64);
     token.cancel();
     wait_cancel(&probe).await;
     plan.dispatch(terminal("req_after_epoch"));
@@ -744,10 +744,10 @@ async fn websocket_worker_limit_and_revocation_release_only_relevant_subscribers
         None,
         Default::default(),
     );
-    for n in 0..16 {
+    for n in 0..64 {
         plan.dispatch_websocket_response(json_frame(&format!("req_workers_{n}"), 1));
     }
-    for n in 0..16 {
+    for n in 0..64 {
         a.wait_record(&format!("req_workers_{n}:websocket:1:1"))
             .await;
     }
@@ -793,17 +793,17 @@ async fn websocket_queue_overflow_keeps_order_and_does_not_block_later_frames() 
         Default::default(),
     );
     // No await in this current-thread runtime: the worker cannot receive before
-    // these synchronous dispatches fill the original 16-slot channel.
+    // these synchronous dispatches fill the 64-slot channel.
     for sequence in 1..=200 {
         plan.dispatch_websocket_response(json_frame("req_overflow", sequence));
     }
     wait_facts(&probe, 1).await;
     probe.wait.store(false, Ordering::SeqCst);
-    f.wait_record("req_overflow:websocket:1:16").await;
-    wait_facts(&probe, 16).await;
+    f.wait_record("req_overflow:websocket:1:64").await;
+    wait_facts(&probe, 64).await;
     wait_cancel(&probe).await;
-    assert_eq!(probe.facts.lock().unwrap().len(), 16);
-    for sequence in [17, 100, 200] {
+    assert_eq!(probe.facts.lock().unwrap().len(), 64);
+    for sequence in [65, 100, 200] {
         assert!(
             f.record(&format!("req_overflow:websocket:1:{sequence}"))
                 .await

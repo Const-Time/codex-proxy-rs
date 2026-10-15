@@ -756,9 +756,21 @@ pub struct ProviderEvent {
     wire: Option<Box<ProtocolWireEvent>>,
     observation: Option<Box<ProviderResponseObservation>>,
     session_update: Option<Box<ProviderSessionState>>,
+    replayable_prelude: bool,
 }
 
 impl ProviderEvent {
+    /// Provider proof that the empty prelude can be replaced by a later safe attempt.
+    #[must_use]
+    pub fn with_replayable_prelude(mut self) -> Self {
+        self.replayable_prelude = true;
+        self
+    }
+    #[must_use]
+    pub const fn is_replayable_prelude(&self) -> bool {
+        self.replayable_prelude
+    }
+
     /// Add another fact from the same upstream frame without duplicating its wire projection.
     #[must_use]
     pub fn with_fact(mut self, fact: GatewayEvent) -> Self {
@@ -774,6 +786,7 @@ impl ProviderEvent {
     #[must_use]
     pub fn with_wire_projection(mut self, wire: Option<ProtocolWireEvent>) -> Self {
         self.wire = wire.map(Box::new);
+        self.replayable_prelude = false;
         self
     }
     /// 创建只有一个 canonical fact 的事件。
@@ -784,6 +797,7 @@ impl ProviderEvent {
             wire: None,
             observation: None,
             session_update: None,
+            replayable_prelude: false,
         }
     }
 
@@ -795,6 +809,7 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
+            replayable_prelude: false,
         }
     }
 
@@ -806,6 +821,7 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
+            replayable_prelude: false,
         }
     }
 
@@ -817,6 +833,7 @@ impl ProviderEvent {
             wire: None,
             observation: Some(Box::new(observation)),
             session_update: None,
+            replayable_prelude: false,
         }
     }
 

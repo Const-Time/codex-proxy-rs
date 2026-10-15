@@ -662,6 +662,7 @@ pub(crate) fn post_send_ambiguous(
 ) -> CodexWebSocketExchangeError {
     match error {
         error @ CodexWebSocketExchangeError::Upstream(_)
+        | error @ CodexWebSocketExchangeError::ConnectionLimitReached
         | error @ CodexWebSocketExchangeError::PostSendAmbiguous { .. } => error,
         error => CodexWebSocketExchangeError::PostSendAmbiguous {
             message: error.to_string(),

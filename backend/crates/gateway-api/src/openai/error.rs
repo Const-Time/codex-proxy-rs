@@ -312,6 +312,11 @@ pub const fn gateway_error_contract(
             "server_error",
             "account_capacity_unavailable",
         ),
+        GatewayErrorKind::MiddlewareCapacityUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "middleware_capacity_unavailable",
+        ),
         GatewayErrorKind::ProviderInfrastructureUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "server_error",

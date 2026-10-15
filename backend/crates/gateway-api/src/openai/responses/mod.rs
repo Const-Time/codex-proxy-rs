@@ -77,3 +77,5 @@ pub(super) fn response_header_is_forwardable(name: &str, connection_options: &[S
             | "x-codex-turn-metadata"
     )
 }
+
+pub(in crate::openai) mod keepalive;

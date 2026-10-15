@@ -139,7 +139,7 @@ impl InvocationCalls {
         entries.retain(|_, entry| {
             entry.caller.is_some() || entry.pending.iter().any(|pending| !pending.is_complete())
         });
-        if entries.len() >= 32 || entries.contains_key(&scope) {
+        if entries.len() >= 256 || entries.contains_key(&scope) {
             return Err(PluginFault::new(
                 ErrorCode::Capacity,
                 "native invocation capacity exhausted",

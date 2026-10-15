@@ -109,11 +109,18 @@ impl Plan {
             entries: entries.into(),
             services,
             cancellation,
-            completed_slots: Arc::new(Semaphore::new(limits.maximum_calls)),
-            worker_slots: Arc::new(Semaphore::new(limits.maximum_calls)),
+            completed_slots: Arc::new(Semaphore::new(
+                limits.maximum_calls.min(limits.maximum_executing_calls),
+            )),
+            worker_slots: Arc::new(Semaphore::new(
+                limits.maximum_calls.min(limits.maximum_executing_calls),
+            )),
             payload_slots: Arc::new(Semaphore::new(maximum_payload)),
             queues: Arc::new(Mutex::default()),
-            capacity: limits.maximum_calls.clamp(1, 256),
+            capacity: limits
+                .maximum_calls
+                .min(limits.maximum_executing_calls)
+                .clamp(1, 256),
             maximum_payload,
         })))
     }

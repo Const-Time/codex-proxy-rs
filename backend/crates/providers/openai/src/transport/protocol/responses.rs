@@ -742,3 +742,14 @@ impl CodexResponsesRequest {
         }
     }
 }
+
+/// 仅空响应前导和元数据可在已交付后被下一次尝试替换
+pub(crate) fn is_replaceable_response_prelude(event_type: &str, value: &Value) -> bool {
+    match event_type {
+        "codex.response.metadata" | "codex.rate_limits" => true,
+        "response.created" | "response.in_progress" => value
+            .pointer("/response/output")
+            .is_none_or(|output| output.as_array().is_some_and(Vec::is_empty)),
+        _ => false,
+    }
+}

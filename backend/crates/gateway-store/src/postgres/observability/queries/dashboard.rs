@@ -299,7 +299,7 @@ pub(crate) fn calculated_usage_billing_facts(
             "::interval, mr.started_at, timestamptz '1970-01-01 00:00:00+00') as bucket_start,
                     mr.provider_kind, mr.upstream_model_id, mr.service_tier,
                     mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
-                    mr.billing_snapshot_json, mr.cost_currency, mr.cost_amount::text as amount, mr.billing_multiplier_scope, mr.billing_multiplier::text
+                    count(*)::bigint as request_count, mr.billing_snapshot_json, mr.cost_currency, mr.cost_amount::text as amount, mr.billing_multiplier_scope, mr.billing_multiplier::text
              from model_requests mr where mr.started_at >= ",
         );
         query.push_bind(range.start);
@@ -313,7 +313,12 @@ pub(crate) fn calculated_usage_billing_facts(
         );
         push_completed_usage_fact_filter(&mut query, "mr");
         push_usage_filter(&mut query, &filter, "mr");
-        // 费用逐条累加与行顺序无关，避免全量物化和不必要的数据库排序。
+        // 仅合并每个计费输入完全一致的事实，避免把逐请求舍入改成汇总后舍入。
+        // 所有用户/分组筛选先执行，Provider 继续拥有价格恢复规则。
+        query.push(" group by bucket_start, mr.provider_kind, mr.upstream_model_id, mr.service_tier,
+          mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
+          mr.billing_snapshot_json, mr.cost_currency, mr.cost_amount,
+          mr.billing_multiplier_scope, mr.billing_multiplier");
         let mut rows = query.build().fetch(pool);
         while let Some(row) = rows.try_next().await
             .map_err(|_| postgres_unavailable("load calculated usage billing facts"))?

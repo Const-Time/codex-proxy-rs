@@ -6479,3 +6479,93 @@ fn extension_session_owner_keeps_connection_local_pins_out_of_persisted_scope() 
         assert_eq!(pin.upstream_response_id().as_str(), "adapter-response");
     }
 }
+
+#[test]
+fn replayable_prelude_and_transport_commit_allow_retry_but_semantic_output_does_not() {
+    for replayable in [true, false] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let prelude =
+            ProviderEvent::canonical(GatewayEvent::Started(ResponseMeta::new("old", "gpt-5")));
+        let prelude = if replayable {
+            prelude.with_replayable_prelude()
+        } else {
+            prelude
+        };
+        let (coordinator, store, provider) = coordinator(vec![
+            Script::ObservedStream {
+                account_id: "acct_one",
+                items: vec![
+                    Ok(prelude),
+                    Err(
+                        ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::Sent)
+                            .with_replay_safe(),
+                    ),
+                ],
+            },
+            Script::Stream {
+                account_id: "acct_two",
+                items: complete_stream(None),
+            },
+        ]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        session.response_commit().record(Some(200)); // 首个事件之前的 SSE 注释。
+        assert!(block_on(session.next_event()).unwrap().is_some());
+        block_on(session.commit_downstream(Some(200))).unwrap();
+        if replayable {
+            while block_on(session.next_event()).unwrap().is_some() {}
+            assert_eq!(provider.contexts.lock().unwrap().len(), 2);
+            let state = store.state.lock().unwrap();
+            assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Succeeded);
+            assert_eq!(state.finalizations[0].client_status_code, Some(200));
+        } else {
+            assert!(block_on(session.next_event()).is_err());
+            assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+            let state = store.state.lock().unwrap();
+            assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Incomplete);
+        }
+    }
+}
+
+#[test]
+fn heartbeat_then_upstream_failure_preserves_http_status_and_incomplete_outcome() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, store, _) = coordinator(vec![Script::Stream {
+        account_id: "acct_one",
+        items: vec![Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            UpstreamSendState::Sent,
+        ))],
+    }]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let response_commit = session.response_commit();
+    response_commit.record(Some(200));
+    assert!(block_on(session.next_event()).is_err());
+    block_on(session.record_client_status(400)).unwrap();
+    let state = store.state.lock().unwrap();
+    assert_eq!(state.finalizations.len(), 1);
+    assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Incomplete);
+    assert_eq!(state.finalizations[0].client_status_code, Some(200));
+    assert!(state.finalizations[0].committed);
+    assert_eq!(
+        state.commits, 0,
+        "heartbeat is not a business delivery acknowledgment"
+    );
+}

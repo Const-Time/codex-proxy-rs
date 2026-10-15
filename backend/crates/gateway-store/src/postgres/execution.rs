@@ -645,7 +645,7 @@ impl ModelRequestRepository for PgExecutionStore {
                  end,
                  capacity_used_slots = coalesce($10, capacity_used_slots),
                  capacity_total_slots = coalesce($11, capacity_total_slots)
-             where id = $1 and outcome = 'running' and downstream_committed_at is null
+             where id = $1 and outcome = 'running'
                and $8 = attempt_count + 1
              returning attempt_count",
         )
@@ -678,7 +678,7 @@ impl ModelRequestRepository for PgExecutionStore {
         .ok_or(StoreError::Conflict {
             entity: ENTITY,
             id: attempt.model_request_id,
-            kind: ConflictKind::DownstreamAlreadyCommitted,
+            kind: ConflictKind::InvalidTransition,
         })?;
         u32::try_from(count).map_err(|_| invalid("attempt_count is invalid"))
     }

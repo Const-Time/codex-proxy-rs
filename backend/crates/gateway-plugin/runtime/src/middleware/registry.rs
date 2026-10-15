@@ -103,7 +103,7 @@ impl MiddlewareCallbacks {
             .calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
+        if calls.len() >= 256 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
         self.bind_outbound(context, invocation.cancellation.clone(), Some(graph))?;
@@ -141,7 +141,7 @@ impl MiddlewareCallbacks {
             .calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
+        if calls.len() >= 256 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
         origin.context.cancellation = gateway_core::lifecycle::CancellationToken::linked([
@@ -250,7 +250,7 @@ impl MiddlewareCallbacks {
             .calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
+        if calls.len() >= 256 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
         let service_binding = if let Some(services) = &self.services {
@@ -307,7 +307,7 @@ impl MiddlewareCallbacks {
             .calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if calls.len() >= 32 || calls.contains_key(&context.resource_scope_id) {
+        if calls.len() >= 256 || calls.contains_key(&context.resource_scope_id) {
             return Err(MiddlewareError::Fault);
         }
         let parent = invocation

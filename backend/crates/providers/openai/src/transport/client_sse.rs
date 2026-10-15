@@ -33,10 +33,9 @@ use crate::transport::{
     response_meta,
     websocket::{
         CodexWebSocketConnection, CodexWebSocketExchangeError, CodexWebSocketPool,
-        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, DEFAULT_STREAM_IDLE_TIMEOUT,
-        WEBSOCKET_FAST_PATH_BUDGET, WebSocketFastPath, WebSocketOriginBreaker,
-        execute_prepared_response_create_request_stream, post_send_ambiguous,
-        prepare_response_create_request_with_pool, websocket_audit_dir,
+        CodexWebSocketPoolKey, DEFAULT_STREAM_IDLE_TIMEOUT, WEBSOCKET_FAST_PATH_BUDGET,
+        WebSocketFastPath, WebSocketOriginBreaker, execute_prepared_response_create_request_stream,
+        post_send_ambiguous, prepare_response_create_request_with_pool, websocket_audit_dir,
         write_websocket_audit_artifact_from_env,
     },
 };
@@ -448,19 +447,17 @@ impl CodexBackendClient {
                 .await
                 .map_err(websocket_exchange_error_to_client_error)?;
                 if requirement.allows_connection_restart() {
-                    match await_websocket_delivery_boundary(&mut exchange).await {
-                        Ok(DeliveryBoundary::Ready) => {}
-                        Ok(DeliveryBoundary::ConnectionLimitReached) => {
-                            return Err(CodexClientError::WebSocket(
-                                CodexWebSocketExchangeError::ConnectionLimitReached,
-                            ));
+                    let mut boundary_reached = false;
+                    exchange.body = Box::pin(exchange.body.map(move |frame| {
+                        let frame = frame?;
+                        if !boundary_reached && !is_websocket_replayable_prelude(&frame) {
+                            boundary_reached = true;
+                            if websocket_connection_limit_message(&frame).is_some() {
+                                return Err(CodexWebSocketExchangeError::ConnectionLimitReached);
+                            }
                         }
-                        Err(error) => {
-                            return Err(websocket_exchange_error_to_client_error(
-                                post_send_ambiguous(error),
-                            ));
-                        }
-                    }
+                        Ok(frame)
+                    }));
                 }
                 Ok(CodexBackendStreamingResponse {
                     body: Box::pin(
@@ -556,49 +553,19 @@ impl CodexBackendClient {
     }
 }
 
-/// 首个可投递帧前的交付边界结果。
-enum DeliveryBoundary {
-    /// 已越过边界，可开始向下游投递。
-    Ready,
-    /// 首个可投递帧是上游连接寿命限制错误。
-    ConnectionLimitReached,
-}
-
-async fn await_websocket_delivery_boundary(
-    exchange: &mut CodexWebSocketStreamingExchange,
-) -> Result<DeliveryBoundary, CodexWebSocketExchangeError> {
-    let mut prelude = Vec::new();
-    loop {
-        match exchange.body.next().await {
-            Some(Ok(frame)) if is_websocket_lifecycle_prelude(&frame) => prelude.push(frame),
-            Some(Ok(frame)) => {
-                let connection_limit_reached = websocket_connection_limit_message(&frame).is_some();
-                prelude.push(frame);
-                let remaining =
-                    std::mem::replace(&mut exchange.body, Box::pin(futures::stream::empty()));
-                exchange.body =
-                    Box::pin(futures::stream::iter(prelude.into_iter().map(Ok)).chain(remaining));
-                return Ok(if connection_limit_reached {
-                    DeliveryBoundary::ConnectionLimitReached
-                } else {
-                    DeliveryBoundary::Ready
-                });
-            }
-            Some(Err(error)) => return Err(error),
-            None => {
-                return Err(CodexWebSocketExchangeError::StreamEndedBeforeTerminal {
-                    reason: "stream_eof",
-                    timeout: None,
-                    last_event_type: None,
-                });
-            }
-        }
-    }
-}
-
-fn is_websocket_lifecycle_prelude(frame: &[u8]) -> bool {
-    frame.starts_with(b"event: response.created\n")
-        || frame.starts_with(b"event: response.in_progress\n")
+fn is_websocket_replayable_prelude(frame: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(frame)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|event_type| {
+                    crate::transport::protocol::responses::is_replaceable_response_prelude(
+                        event_type, &value,
+                    )
+                })
+        })
 }
 
 async fn read_model_catalog_body(response: ReqwestResponse) -> CodexClientResult<Vec<u8>> {

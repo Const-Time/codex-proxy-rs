@@ -60,7 +60,7 @@ pub struct RpcStream {
     pub(crate) deadline: gateway_plugin_sdk::client::CallDeadline,
     pub(crate) id: u64,
     pub(crate) shared: Arc<Shared>,
-    pub(crate) _slot: OwnedSemaphorePermit,
+    pub(crate) _slot: Arc<OwnedSemaphorePermit>,
     pub(crate) _session: Arc<RpcSession>,
 }
 
