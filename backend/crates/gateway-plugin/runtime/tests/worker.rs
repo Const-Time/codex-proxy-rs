@@ -9,6 +9,75 @@ mod worker_credentials {
     use serde::de::DeserializeOwned;
     use serde_json::{Value, json};
 
+    pub(super) async fn public_login(
+        host: &HostClient,
+        url: &str,
+        query: &str,
+    ) -> Result<Value, PluginFault> {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let codes = url::form_urlencoded::parse(query.as_bytes())
+            .filter(|(key, _)| key == "code")
+            .map(|(_, value)| value.into_owned())
+            .collect::<Vec<_>>();
+        if codes.len() != 1 || codes[0].is_empty() {
+            return Err(PluginFault::new(
+                ErrorCode::InvalidInput,
+                "one authorization code required",
+            ));
+        }
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "authorization_code")
+            .append_pair("client_id", "public-callback-fixture")
+            .append_pair("code", &codes[0])
+            .finish()
+            .into_bytes();
+        let token = host
+            .http(
+                HttpRequest {
+                    method: "POST".into(),
+                    url: url.into(),
+                    headers: vec![(
+                        "content-type".into(),
+                        "application/x-www-form-urlencoded".into(),
+                    )],
+                },
+                body,
+            )
+            .await?;
+        if token.status != 200 {
+            return Err(PluginFault::new(
+                ErrorCode::Fault,
+                "authorization exchange rejected",
+            ));
+        }
+        let bytes = token.body.collect(1024 * 1024).await?;
+        let token: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| PluginFault::new(ErrorCode::Fault, "invalid token response"))?;
+        let access = token["access_token"]
+            .as_str()
+            .ok_or_else(|| PluginFault::new(ErrorCode::Fault, "missing access token"))?;
+        let claims: Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(access.split('.').nth(1).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let auth = &claims["https://api.openai.com/auth"];
+        let input = json!({"action":"create", "provider_id":"openai", "facts":{
+            "name":"Public callback OAuth", "authentication_kind":"oauth", "has_refresh_token":true,
+            "upstream_user_id":auth["chatgpt_user_id"], "upstream_account_id":auth["chatgpt_account_id"],
+            "access_token_expires_at_ms":claims["exp"].as_i64().unwrap()*1000, "next_refresh_at_ms":null,
+            "material":{"schema_version":1,"installation_id":uuid::Uuid::new_v4().to_string(),
+                "access_token":access, "refresh_token":token["refresh_token"],"id_token":null,"cookies":[]}
+        }});
+        let saved: Value = read(host, "host.auth.save", input).await?;
+        let api_key_exists = host
+            .service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(())
+            .await
+            .map_err(|e| PluginFault::new(ErrorCode::Fault, e.message))?;
+        Ok(json!({"saved":saved,"api_key_exists":api_key_exists}))
+    }
+
     async fn request(
         host: &HostClient,
         method: &str,
@@ -901,6 +970,7 @@ mod upstream_callbacks {
 }
 
 struct Worker {
+    callback_oauth_url: String,
     public_callbacks: bool,
     public_resource: bool,
     command_registration: serde_json::Value,
@@ -1247,6 +1317,10 @@ impl PluginHandler for Worker {
                 let record = call.host.call("host.state.get", json!({"namespace":"counter","key":"callbacks"}), vec![]).await.map_err(|e| e.into_plugin_fault())?;
                 let count = record.result["record"]["value"].as_u64().unwrap_or(0) + 1;
                 call.host.call("host.state.put", json!({"namespace":"counter","key":"callbacks","value":count,"expected_version":record.result["record"]["version"].as_u64()}), vec![]).await.map_err(|e| e.into_plugin_fault())?;
+                if !self.callback_oauth_url.is_empty() {
+                    let value = worker_credentials::public_login(&call.host, &self.callback_oauth_url, call.params["query"].as_str().unwrap()).await?;
+                    return Ok(CallReply::unary(json!({"status":200,"content_type":"application/json"}), serde_json::to_vec(&value).unwrap()));
+                }
                 if call.params["query"].as_str().unwrap().contains("fail=1") {
                     return Err(PluginFault::new(ErrorCode::Fault, "fixture fault after callback write"));
                 }
@@ -1343,6 +1417,10 @@ async fn main() {
     .await
     .unwrap();
     let handler = Worker {
+        callback_oauth_url: session.handshake().configuration["callback_oauth_url"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
         public_callbacks: session.handshake().configuration["public_callbacks"]
             .as_bool()
             .unwrap_or(false),
