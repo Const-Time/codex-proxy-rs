@@ -322,6 +322,8 @@ SDK `ensure_key` 已开放，每个实例最多登记 256 个 Key 资源，只�
 
 迁移 `0027_plugins.sql` 追加制品、实例与私有状态表，不修改已有迁移、用户归属或用户＋分组账本。完整 PostgreSQL 备份包含这些表；运行目录下的插件解包缓存可从数据库制品重建。恢复后仅启动已启用实例，单个插件启动失败不阻止网关启动。
 
+CI 单独执行真实备份恢复验收：使用与测试 PostgreSQL 服务相同的镜像提供 `pg_dump` / `pg_restore`，通过原 Store 导出器创建归档，删除源数据库和解包缓存后恢复到新库，逐表核对行数与内容摘要。验收覆盖原生用户、分组和 Key、插件制品归档与秘密配置、已迁移数据及 CAS 序列、公开资源，以及停用期间换包后等待启用的迁移；恢复已提交版本不会重新转换数据。该用例需要匹配服务版本的客户端，可在设置 `CPR_TEST_DATABASE_URL` 和 `CPR_TEST_REDIS_URL` 后执行 `cargo test -p gateway-plugin-runtime --all-features --test main --locked state::backup:: -- --ignored`。普通测试将其标记为 ignored，不代表已完成归档恢复验收。
+
 ## 后续改造边界
 
 只读事实、实例自有分组/Key、显式共享额度管理和 management 原生模型回调已接入；后续继续接入完整深度扩展与具体业务插件。现有差异功能尚未从主程序移出。用户、共享账本、请求结算和 Provider 凭据归属继续由核心模块负责。

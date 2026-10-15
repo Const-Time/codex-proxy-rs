@@ -1,4 +1,5 @@
 //! Original SDK subprocesses and PostgreSQL prove atomic schema/revision switching.
+mod backup;
 use crate::{services::upstream_sdk::environment::Environment, support::*};
 use gateway_admin::{model::plugins::*, plugins::PluginManager, ports::plugins::PluginService};
 use gateway_plugin_runtime::PluginEngine;

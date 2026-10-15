@@ -146,6 +146,26 @@ jobs:
         working-directory: backend
         run: cargo test --test main --locked
 
+      - name: Native plugin database backup and restore
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use the exact server image for matching pg_dump/pg_restore clients.
+          export CPR_TEST_PG_CLIENT_IMAGE="$(docker inspect --format '{{.Image}}' '${{ job.services.postgres.id }}')"
+          client_bin="$(mktemp -d)"
+          cat > "$client_bin/pg_dump" <<'CLIENT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec docker run --rm --network host --env PGPASSWORD --env PGCONNECT_TIMEOUT \
+            --mount "type=bind,source=${TMPDIR:-/tmp},target=${TMPDIR:-/tmp},readonly" \
+            "$CPR_TEST_PG_CLIENT_IMAGE" "${0##*/}" "$@"
+          CLIENT
+          cp "$client_bin/pg_dump" "$client_bin/pg_restore"
+          chmod +x "$client_bin/pg_dump" "$client_bin/pg_restore"
+          export PATH="$client_bin:$PATH"
+          cargo test -p gateway-plugin-runtime --all-features --test main --locked state::backup:: -- --ignored
+
   frontend:
     if: inputs.run_frontend
     runs-on: ubuntu-latest
