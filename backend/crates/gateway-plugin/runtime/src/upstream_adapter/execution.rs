@@ -111,6 +111,7 @@ impl Execution {
                 &chunk,
                 &self.adapter.registered.declaration.protocol,
                 self.adapter.registered.declaration.transport.as_str(),
+                self.invocation.context.client_transport(),
                 self.invocation.account.as_ref(),
                 active.managed.http.send_state.get(),
             )

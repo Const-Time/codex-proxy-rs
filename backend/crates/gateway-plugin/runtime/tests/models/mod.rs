@@ -837,6 +837,48 @@ async fn native_unary_stream_and_small_reads_commit_and_settle_each_real_executi
     }
     fixture.manager.shutdown().await;
 }
+
+#[tokio::test]
+async fn sdk_unary_and_stream_model_events_preserve_raw_body_chunk_identity_and_native_settlement()
+{
+    let fixture = Fixture::new().await;
+    for (index, mode) in ["unary", "stream"].into_iter().enumerate() {
+        let result = fixture
+            .call(json!({"mode":mode,"key":"key_alice","provider_mode":"raw-body"}))
+            .await;
+        assert!(result.get("error").is_none(), "{result}");
+        let mut body = vec![];
+        let mut chunks = 0;
+        for event in result["batch"].as_array().unwrap() {
+            if event["wire"].is_null() {
+                continue;
+            }
+            assert_eq!(event["wire"]["payload"]["kind"], "raw_body");
+            chunks += 1;
+            body.extend(
+                event["wire"]["payload"]["body"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap()),
+            );
+        }
+        assert_eq!(chunks, 2);
+        assert_eq!(
+            body,
+            "{\"text\":\"雪\",\"future\":9007199254740993}\n".as_bytes()
+        );
+        fixture.clean(index + 1).await;
+        assert_eq!(
+            fixture.core.charges.lock().unwrap()[index]
+                .amount_usd
+                .scaled(),
+            123
+        );
+    }
+    assert_eq!(fixture.core.commits.load(Ordering::SeqCst), 2);
+    fixture.manager.shutdown().await;
+}
 #[tokio::test]
 async fn native_key_listing_catalog_and_model_selection_preserve_personal_ownership() {
     let fixture = Fixture::new().await;

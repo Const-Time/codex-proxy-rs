@@ -40,7 +40,9 @@ impl OpenAiResponsesEncoder {
     /// 消费一个 Provider event，并返回 SSE frames。
     pub fn push_sse(&mut self, event: &ProviderEvent) -> Vec<Bytes> {
         self.observe_canonical_identity(event);
-        let Some(wire) = openai_wire(event) else {
+        let Some(wire) = openai_wire(event)
+            .filter(|wire| wire.has_json_data() || wire.raw_sse_frame().is_some())
+        else {
             return Vec::new();
         };
         self.observe_wire(wire);

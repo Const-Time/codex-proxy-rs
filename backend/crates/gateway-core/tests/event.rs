@@ -89,6 +89,17 @@ fn protocol_wire_event_should_preserve_raw_json_body_without_parsing_it() {
 }
 
 #[test]
+fn raw_body_chunks_preserve_opaque_bytes_without_disclosing_or_promoting_them_to_json() {
+    let bytes = Bytes::from_static(b"private-body\xff\x00");
+    let wire = ProtocolWireEvent::raw_body("openai", bytes.clone()).unwrap();
+    assert_eq!(wire.raw_body_chunk(), Some(&bytes));
+    assert!(wire.raw_json_body().is_none());
+    assert!(wire.raw_sse_frame().is_none());
+    assert!(!wire.has_json_data());
+    assert!(!format!("{wire:?}").contains("private-body"));
+}
+
+#[test]
 fn validator_should_accept_started_content_delta_completed_sequence() {
     let mut validator = EventSequenceValidator::new();
     let events = [

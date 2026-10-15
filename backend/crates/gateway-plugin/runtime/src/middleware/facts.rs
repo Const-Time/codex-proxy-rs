@@ -293,7 +293,11 @@ fn project_fact(event: GatewayEvent) -> Option<Result<CanonicalEvent, PluginFaul
 
 fn project_wire(wire: &ProtocolWireEvent) -> Result<WireEvent, PluginFault> {
     let protocol = wire.protocol().to_owned();
-    let payload = if let Some(body) = wire.raw_json_body() {
+    let payload = if let Some(body) = wire.raw_body_chunk() {
+        WirePayload::RawBody {
+            body: body.to_vec(),
+        }
+    } else if let Some(body) = wire.raw_json_body() {
         WirePayload::RawJson {
             body: body.to_vec(),
         }

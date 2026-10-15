@@ -272,6 +272,11 @@ impl BufferedResponseEncodeError {
 fn encode_collected_events(
     events: &[ProviderEvent],
 ) -> Result<Vec<u8>, BufferedResponseEncodeError> {
+    if let Some(body) = crate::openai::endpoint::raw_json_body(events)
+        .map_err(BufferedResponseEncodeError::Canonical)?
+    {
+        return Ok(body.to_vec());
+    }
     let mut encoder = OpenAiResponsesEncoder::new();
     for event in events {
         encoder.push_sse(event);

@@ -5,12 +5,13 @@ use axum::{
     http::{HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
+use bytes::BytesMut;
 use gateway_core::engine::execution::StartedExecution;
 use gateway_core::event::{ProviderEvent, ProviderResponseHeader};
 
 use super::{
     error::{engine_error_response, protocol_error_response},
-    responses::{PendingExecution, ProtocolError, ProtocolErrorBody},
+    responses::{PendingExecution, ProtocolError, ProtocolErrorBody, ResponseEncodeError},
 };
 
 /// 收集一个 Provider 原生 JSON 响应，并在 Core commit 后按原始 bytes 交付。
@@ -27,8 +28,8 @@ pub(super) async fn collect_raw_json_response(started: StartedExecution) -> Resp
         }
     };
     let body = match raw_json_body(&events) {
-        Some(body) => body,
-        None => {
+        Ok(Some(body)) => body,
+        Ok(None) | Err(_) => {
             let response = invalid_upstream_response();
             let response = execution.record_response_status(response).await;
             execution.cancel_and_finalize().await;
@@ -58,8 +59,13 @@ pub(super) async fn collect_raw_json_response(started: StartedExecution) -> Resp
     response
 }
 
-pub(super) fn raw_json_body(events: &[ProviderEvent]) -> Option<Bytes> {
+pub(super) fn raw_json_body(
+    events: &[ProviderEvent],
+) -> Result<Option<Bytes>, ResponseEncodeError> {
+    const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
     let mut body = None;
+    let mut chunks: Option<BytesMut> = None;
+    let mut other_wire = false;
     for event in events {
         let Some(wire) = event
             .wire_event()
@@ -67,14 +73,28 @@ pub(super) fn raw_json_body(events: &[ProviderEvent]) -> Option<Bytes> {
         else {
             continue;
         };
-        let Some(raw) = wire.raw_json_body() else {
-            continue;
-        };
-        if body.replace(raw.clone()).is_some() {
-            return None;
+        if let Some(raw) = wire.raw_body_chunk() {
+            if other_wire || body.is_some() || raw.len() > MAX_BODY_BYTES {
+                return Err(ResponseEncodeError::InvalidRawBody);
+            }
+            let chunks = chunks.get_or_insert_with(BytesMut::new);
+            if chunks.len().saturating_add(raw.len()) > MAX_BODY_BYTES {
+                return Err(ResponseEncodeError::InvalidRawBody);
+            }
+            chunks.extend_from_slice(raw);
+        } else if let Some(raw) = wire.raw_json_body() {
+            if chunks.is_some() || body.is_some() {
+                return Err(ResponseEncodeError::InvalidRawBody);
+            }
+            body = Some(raw.clone());
+        } else {
+            if chunks.is_some() {
+                return Err(ResponseEncodeError::InvalidRawBody);
+            }
+            other_wire = true;
         }
     }
-    body
+    Ok(body.or_else(|| chunks.map(BytesMut::freeze)))
 }
 
 fn json_body_response(

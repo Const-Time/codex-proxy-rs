@@ -51,7 +51,7 @@ impl ExecutionBody {
                 // An attempt may project a JSON error even for an SSE request.
                 // Its one complete document remains behind the original barrier.
                 let mut events = batch.into_provider_events();
-                let encoded = encode_document(&events, status, format)?;
+                let encoded = encode_document(&events, format)?;
                 let last = events.pop().ok_or(MiddlewareError::InvalidState)?;
                 let (bytes, framing, terminal, envelope) = MiddlewareFrame::from_provider_event(
                     encoded,
@@ -78,7 +78,7 @@ impl ExecutionBody {
         } else {
             let mut events = body.session()?.collect_uncommitted().await?;
             let status = body.response_status()?;
-            let encoded = encode_document(&events, status, format)?;
+            let encoded = encode_document(&events, format)?;
             let last = events.pop().ok_or(MiddlewareError::InvalidState)?;
             let frame = MiddlewareFrame::from_provider_event(
                 encoded,
@@ -283,17 +283,15 @@ impl MiddlewareBody for ExecutionBody {
 
 fn encode_document(
     events: &[ProviderEvent],
-    status: u16,
     format: super::WireFormat,
 ) -> Result<Bytes, MiddlewareError> {
-    if format.raw_json() {
-        return crate::openai::endpoint::raw_json_body(events).ok_or(MiddlewareError::InvalidState);
+    let raw = crate::openai::endpoint::raw_json_body(events)
+        .map_err(|_| MiddlewareError::InvalidState)?;
+    if let Some(raw) = raw {
+        return Ok(raw);
     }
-    if !(200..300).contains(&status)
-        && events.len() == 1
-        && let Some(raw) = events[0].wire_event().and_then(|wire| wire.raw_json_body())
-    {
-        return Ok(raw.clone());
+    if format.raw_json() {
+        return Err(MiddlewareError::InvalidState);
     }
     let mut encoder = OpenAiResponsesEncoder::new();
     for event in events {

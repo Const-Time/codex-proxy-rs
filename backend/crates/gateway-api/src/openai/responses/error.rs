@@ -174,6 +174,9 @@ pub enum ResponseEncodeError {
     /// 终态 response object 无法序列化为完整 HTTP JSON 响应。
     #[error("responses wire terminal serialization failed")]
     Serialization,
+    /// 原始 HTTP 正文过大或混合了互不兼容的 wire 表达。
+    #[error("responses raw body exceeds its limit or mixes wire formats")]
+    InvalidRawBody,
 }
 
 impl ResponseEncodeError {

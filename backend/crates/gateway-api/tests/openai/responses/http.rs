@@ -49,6 +49,78 @@ struct Trace {
     cancelled: AtomicBool,
 }
 
+#[tokio::test]
+async fn buffered_raw_body_chunks_preserve_bytes_and_reject_mixed_or_oversized_documents_before_commit()
+ {
+    let raw = "{ \"future\": 9007199254740993, \"text\": \"雪☃\" }\n";
+    let chunk =
+        |bytes: Bytes| ProviderEvent::wire(ProtocolWireEvent::raw_body("openai", bytes).unwrap());
+    for mode in [
+        "chunks",
+        "boundary",
+        "single-limit",
+        "total-limit",
+        "mixed",
+        "complete-mixed",
+    ] {
+        let trace = Arc::new(Trace::default());
+        let mut events = vec![ProviderEvent::canonical(started())];
+        let expected = match mode {
+            "boundary" => {
+                let body = Bytes::from(vec![b' '; 8 * 1024 * 1024]);
+                events.push(chunk(body.clone()));
+                body
+            }
+            "single-limit" => {
+                events.push(chunk(Bytes::from(vec![b'x'; 8 * 1024 * 1024 + 1])));
+                Bytes::new()
+            }
+            "total-limit" => {
+                let part = Bytes::from(vec![b'x'; 4 * 1024 * 1024 + 1]);
+                events.extend([chunk(part.clone()), chunk(part)]);
+                Bytes::new()
+            }
+            _ => {
+                events.extend(
+                    raw.as_bytes()
+                        .chunks(1)
+                        .map(|part| chunk(Bytes::copy_from_slice(part))),
+                );
+                Bytes::copy_from_slice(raw.as_bytes())
+            }
+        };
+        // A canonical fact is not a second client wire representation.
+        events.push(ProviderEvent::canonical(GatewayEvent::Completed(
+            ResponseMeta::new("resp_1", "smart-code"),
+        )));
+        if mode == "mixed" {
+            events.push(provider_event_for_fact(completed()));
+        }
+        if mode == "complete-mixed" {
+            events.push(ProviderEvent::wire(
+                ProtocolWireEvent::raw_json("openai", Bytes::from_static(b"{}")).unwrap(),
+            ));
+        }
+        let response = collect_execution_response(Box::new(FakeSession::buffered_provider(
+            trace.clone(),
+            events,
+        )))
+        .await;
+        let success = matches!(mode, "chunks" | "boundary");
+        assert_eq!(response.status().is_success(), success, "{mode}");
+        let received = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if success {
+            assert_eq!(received, expected, "{mode}");
+            assert!(!trace.is_cancelled());
+            assert_eq!(trace.client_statuses(), vec![200]);
+        } else {
+            assert!(trace.is_cancelled(), "{mode}");
+            assert!(!trace.snapshot().contains(&"commit"), "{mode}");
+            assert!(!String::from_utf8_lossy(&received).contains("9007199254740993"));
+        }
+    }
+}
+
 impl Trace {
     fn push(&self, event: &'static str) {
         self.events.lock().expect("trace lock").push(event);

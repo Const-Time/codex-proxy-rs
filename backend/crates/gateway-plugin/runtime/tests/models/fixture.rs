@@ -500,6 +500,21 @@ impl Provider for Core {
                 wire,
             )),
         ];
+        if mode == "raw-body" {
+            let chunks = [
+                bytes::Bytes::from_static(b"{\"text\":\"\xe9"),
+                bytes::Bytes::from_static(b"\x9b\xaa\",\"future\":9007199254740993}\n"),
+            ];
+            for (index, event) in events.iter_mut().enumerate() {
+                let event = event.as_mut().unwrap();
+                *event =
+                    event
+                        .clone()
+                        .with_wire_projection(chunks.get(index).map(|chunk| {
+                            ProtocolWireEvent::raw_body("openai", chunk.clone()).unwrap()
+                        }));
+            }
+        }
         if mode == "retry-always"
             || (matches!(mode, "retry-once" | "retry-stall")
                 && metadata.provider_account_id().as_str() == "acct_allowed")
