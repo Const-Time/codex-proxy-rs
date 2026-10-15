@@ -1255,6 +1255,14 @@ impl PluginHandler for Worker {
                 assert_eq!(call.params, json!({}));
                 assert!(call.payload.is_empty());
                 assert_eq!(call.context.request_id.as_deref(), Some(call.context.resource_scope_id.as_str()));
+                if self.adapter_mode == "maintenance-quota" {
+                    let refreshed = worker_models::handle(&call.host, &self.command_result).await;
+                    assert!(refreshed["observed_at_ms"].is_i64(), "{refreshed}");
+                    let mut passive = self.command_result.clone();
+                    passive["method"] = json!("host.data.quota.get");
+                    let cached = worker_models::handle(&call.host, &passive).await;
+                    assert_eq!(cached, refreshed);
+                }
                 if self.adapter_mode == "maintenance-credentials" {
                     use gateway_plugin_sdk::call::host::{AuthSaveResult,AuthGetRequest};
                     let reply=call.host.call("host.auth.save",json!({}),serde_json::to_vec(&self.command_result).unwrap()).await.map_err(|error|error.into_plugin_fault())?;

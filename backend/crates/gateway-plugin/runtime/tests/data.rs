@@ -572,3 +572,448 @@ async fn native_quota_refresh_rechecks_admin_after_native_metadata_wait_before_e
     f.invariant().await;
     f.close().await;
 }
+
+// Native maintenance runs through the published Manager worker and the original
+// Provider/Admin/Store observation pipeline, without a synthetic refresh port.
+struct MaintenanceRefresh {
+    env: Environment,
+    manager: Arc<PluginManager>,
+    instance: PluginView,
+    account: String,
+    server: RefreshServer,
+}
+enum RefreshServer {
+    OpenAi(Server),
+    Xai(support::xai::Proxy),
+}
+impl RefreshServer {
+    fn count(&self) -> usize {
+        match self {
+            Self::OpenAi(server) => server.requests.lock().unwrap().len(),
+            Self::Xai(server) => server
+                .events()
+                .iter()
+                .filter(|e| e["kind"] == "catalog" && e["path"] == "/v1/billing?format=credits")
+                .count(),
+        }
+    }
+    async fn entered(&self) {
+        match self {
+            Self::OpenAi(server) => {
+                tokio::time::timeout(Duration::from_secs(5), server.entered.notified())
+                    .await
+                    .unwrap()
+            }
+            Self::Xai(server) => tokio::time::timeout(Duration::from_secs(5), async {
+                while self.count() == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                assert!(!server.events().iter().any(|e| e["kind"] == "forbidden"));
+            })
+            .await
+            .unwrap(),
+        }
+    }
+    async fn release(&self) {
+        match self {
+            Self::OpenAi(server) => server.release.notify_one(),
+            Self::Xai(server) => {
+                let reply = reqwest::Client::new()
+                    .post(format!("{}/__fixture/release", server.url))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(reply.status(), 200);
+            }
+        }
+    }
+    async fn close(self) {
+        if let Self::Xai(server) = self {
+            server.stop().await;
+        }
+    }
+}
+impl MaintenanceRefresh {
+    async fn new(provider: &str, root: &std::path::Path, wait: bool) -> Self {
+        use gateway_core::account::{OutboundProxy, ProviderAccountId};
+        let account = format!("acct_{}", uuid::Uuid::new_v4().simple());
+        let (env, server) = if provider == "xai" {
+            let proxy = support::xai::Proxy::start(
+                root,
+                &format!("subject-{account}"),
+                "http://127.0.0.1:9",
+                if wait { "quota-wait" } else { "quota" },
+            )
+            .await;
+            (Environment::new().await.unwrap(), RefreshServer::Xai(proxy))
+        } else {
+            let server = Server::new(wait).await;
+            (
+                Environment::with_openai_url(Some(&server.url))
+                    .await
+                    .unwrap(),
+                RefreshServer::OpenAi(server),
+            )
+        };
+        let prepared = if let RefreshServer::Xai(proxy) = &server {
+            let mut prepared = support::xai::account(
+                &ProviderAccountId::new(account.clone()).unwrap(),
+                "fixture-provider-secret",
+            );
+            prepared.account = prepared
+                .account
+                .with_outbound_proxy(Some(OutboundProxy::parse(&proxy.url).unwrap()));
+            prepared
+        } else {
+            use provider_openai::credential::*;
+            CodexCredentialAdmin
+                .prepare_import(ImportCodexOAuthCredential {
+                    account_id: account.clone(),
+                    name: account.clone(),
+                    enabled: true,
+                    secret: CodexOAuthSecret {
+                        access_token: secrecy::SecretString::from("fixture-provider-secret"),
+                        refresh_token: None,
+                        id_token: None,
+                    },
+                    verified_account: CodexAccountProfile {
+                        oauth_subject: "maintenance-native-subject".into(),
+                        poid: None,
+                        chatgpt_account_id: "maintenance-native-account".into(),
+                        chatgpt_user_id: "maintenance-native-user".into(),
+                        email: None,
+                        plan_type: Some("pro".into()),
+                        access_token_expires_at: Some(
+                            chrono::Utc::now() + chrono::Duration::hours(1),
+                        ),
+                    },
+                    next_refresh_at: None,
+                })
+                .unwrap()
+        };
+        env.store
+            .provider_ports()
+            .accounts()
+            .create_account(prepared)
+            .await
+            .unwrap();
+        let store = env.store.plugin_store();
+        let manager = Arc::new(PluginManager::new(
+            store.clone(),
+            Arc::new(
+                PluginEngine::new(
+                    env.cache.path().join("quota-maintenance"),
+                    "3.11.2".parse().unwrap(),
+                    store,
+                )
+                .with_data(env.admin.services().plugin_data()),
+            ),
+        ));
+        let artifact = manager
+            .upload(support::maintenance_archive("1.0.0"), &actor())
+            .await
+            .unwrap();
+        let mut command = support::update(&artifact.sha256, 0, true);
+        command.configuration = json!({"adapter_mode":"maintenance-quota", "command_result":{"operation":"models","mode":"quota","method":"host.quota_observations.refresh","params":{},"request":{"account_id":account}}});
+        let instance = manager.update(None, command, &actor()).await.unwrap();
+        Self {
+            env,
+            manager,
+            instance,
+            account,
+            server,
+        }
+    }
+    fn worker(&self) -> (CancellationToken, tokio::task::JoinHandle<()>) {
+        use gateway_core::task::{WorkerContribution, WorkerRunnable};
+        let WorkerContribution::Registration(registration) = self
+            .manager
+            .maintenance_worker(self.env.core.snapshot_publications())
+            .unwrap()
+        else {
+            panic!("maintenance registration")
+        };
+        let WorkerRunnable::Daemon { task, .. } = registration.runnable else {
+            panic!("maintenance daemon")
+        };
+        let stop = CancellationToken::new();
+        let cancellation = stop.clone();
+        (
+            stop,
+            tokio::spawn(async move {
+                task.run(cancellation).await.unwrap();
+            }),
+        )
+    }
+    async fn completed(&self) {
+        let store = self.env.store.plugin_store();
+        let scope = PluginStateScope {
+            instance_id: self.instance.id.clone(),
+            revision: self.instance.revision,
+            namespace: "counter".into(),
+            schema_version: 1,
+            maximum_records: 10,
+            maximum_bytes: 1024,
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if store
+                    .state_get(&scope, "reconcile")
+                    .await
+                    .unwrap()
+                    .is_some_and(|r| r.value == 1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(
+            "real native refresh and passive read must finish before maintenance state commits",
+        );
+    }
+    async fn invariant(&self) {
+        let quota = self
+            .env
+            .admin
+            .services()
+            .plugin_data()
+            .quota(&self.account)
+            .await
+            .unwrap();
+        assert!(quota.observed_at.is_some());
+        assert!(quota.windows.iter().any(|w| w.used_percent == Some(25.0)));
+        assert_eq!(
+            self.server.count(),
+            1,
+            "maintenance must not replay an accepted refresh"
+        );
+        assert!(self.env.published.lock().unwrap().is_empty());
+        for table in [
+            "model_requests",
+            "user_group_charge_events",
+            "user_group_budget_windows",
+        ] {
+            let count: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&self.env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                count, 0,
+                "quota observation cannot create model execution or local charges"
+            );
+        }
+        let ports = self.env.store.provider_ports();
+        let id = gateway_core::account::ProviderAccountId::new(self.account.clone()).unwrap();
+        assert_eq!(
+            ports
+                .accounts()
+                .load_current_credential(&id)
+                .await
+                .unwrap()
+                .account
+                .revision()
+                .get(),
+            1
+        );
+        if let RefreshServer::Xai(proxy) = &self.server {
+            let events = proxy.events();
+            let requests: Vec<_> = events.iter().filter(|e| e["kind"] == "catalog").collect();
+            assert_eq!(
+                requests.len(),
+                2,
+                "one billing read and one subscription read"
+            );
+            assert!(requests.iter().all(|e| e["authorization"] == true
+                && e["subject"] == true
+                && e["token_auth"] == true));
+            assert!(!events.iter().any(|e| matches!(
+                e["kind"].as_str(),
+                Some("forbidden" | "inference" | "refresh")
+            )));
+            let observations = ports.accounts().get_quotas(&[id]).await.unwrap();
+            assert_eq!(observations.len(), 1);
+            let document = observations[0].quota.expose_to_provider();
+            assert_eq!(document["config"]["futureWindow"]["kind"], "rolling");
+            assert!(document.get("userId").is_none() && document.get("email").is_none());
+            assert_eq!(quota.plan_type.as_deref(), Some("SuperGrokPro"));
+            assert!(
+                quota
+                    .windows
+                    .iter()
+                    .any(|w| w.window_seconds == Some(604800))
+            );
+        }
+    }
+    async fn close(self) {
+        self.manager.shutdown().await;
+        drop(self.manager);
+        self.env.close().await;
+        self.server.close().await;
+    }
+}
+async fn maintenance_trust(name: &str, timeout: Duration) -> Option<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("CPR_NATIVE_XAI_TRUST") {
+        return Some(root.into());
+    }
+    for key in ["CPR_TEST_DATABASE_URL", "CPR_TEST_REDIS_URL"] {
+        if std::env::var_os(key).is_none() {
+            let ci = std::env::var("CI")
+                .ok()
+                .is_some_and(|v| !matches!(v.as_str(), "" | "false" | "0"));
+            assert!(
+                !ci,
+                "{key} is required for native maintenance integration tests in CI"
+            );
+            return None;
+        }
+    }
+    support::xai::Trust::new()
+        .run_with_timeout(&format!("data::{name}"), timeout)
+        .await;
+    None
+}
+#[tokio::test]
+async fn native_maintenance_refresh_uses_published_worker_and_original_openai_xai_observations() {
+    let Some(root) = maintenance_trust(
+        "native_maintenance_refresh_uses_published_worker_and_original_openai_xai_observations",
+        Duration::from_secs(60),
+    )
+    .await
+    else {
+        return;
+    };
+    for provider in ["openai", "xai"] {
+        let f = MaintenanceRefresh::new(provider, &root, false).await;
+        assert!(
+            f.env
+                .admin
+                .services()
+                .plugin_data()
+                .quota(&f.account)
+                .await
+                .unwrap()
+                .observed_at
+                .is_none()
+        );
+        assert_eq!(f.server.count(), 0);
+        let (stop, worker) = f.worker();
+        f.completed().await;
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        f.invariant().await;
+        f.close().await;
+    }
+}
+#[tokio::test]
+async fn native_maintenance_refresh_drains_retired_openai_generations() {
+    retired_maintenance(
+        "openai",
+        "native_maintenance_refresh_drains_retired_openai_generations",
+    )
+    .await;
+}
+#[tokio::test]
+async fn native_maintenance_refresh_drains_retired_xai_generations() {
+    retired_maintenance(
+        "xai",
+        "native_maintenance_refresh_drains_retired_xai_generations",
+    )
+    .await;
+}
+async fn retired_maintenance(provider: &str, name: &str) {
+    let Some(root) = maintenance_trust(name, Duration::from_secs(120)).await else {
+        return;
+    };
+    for action in ["shutdown", "disable", "upgrade", "delete"] {
+        let f = MaintenanceRefresh::new(provider, &root, true).await;
+        let sha = if action == "upgrade" {
+            f.manager
+                .upload(support::maintenance_archive("1.0.1"), &actor())
+                .await
+                .unwrap()
+                .sha256
+        } else {
+            f.instance.artifact.sha256.clone()
+        };
+        let (stop, worker) = f.worker();
+        f.server.entered().await;
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        let manager = f.manager.clone();
+        let access = manager.access(&f.instance.id, f.instance.revision).unwrap();
+        let (id, revision, configuration) = (
+            f.instance.id.clone(),
+            f.instance.revision,
+            f.instance.configuration.clone(),
+        );
+        let finishing = tokio::spawn(async move {
+            match action {
+                "disable" | "upgrade" => {
+                    let mut command = support::update(&sha, revision, action == "upgrade");
+                    command.configuration = configuration;
+                    manager.update(Some(&id), command, &actor()).await.unwrap();
+                }
+                "delete" => {
+                    let mut command = support::update(&sha, revision, false);
+                    command.configuration = configuration;
+                    manager.update(Some(&id), command, &actor()).await.unwrap();
+                    manager.delete(&id, revision + 1, &actor()).await.unwrap();
+                }
+                _ => {}
+            }
+            manager.shutdown().await;
+        });
+        let mut finishing = Box::pin(finishing);
+        tokio::time::timeout(Duration::from_secs(5), access.cancellation().cancelled())
+            .await
+            .expect("old published generation must be revoked before its native work finishes");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), finishing.as_mut())
+                .await
+                .is_err(),
+            "{provider}, action={action}: Manager shutdown must retain accepted native work from retired generations"
+        );
+        if action == "upgrade" {
+            // Losing a shutdown waiter must not lose the original stop future.
+            finishing.as_ref().get_ref().abort();
+            assert!(finishing.await.unwrap_err().is_cancelled());
+            let manager = f.manager.clone();
+            finishing = Box::pin(tokio::spawn(async move {
+                manager.shutdown().await;
+            }));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), finishing.as_mut())
+                    .await
+                    .is_err()
+            );
+        }
+        f.server.release().await;
+        tokio::time::timeout(Duration::from_secs(10), finishing)
+            .await
+            .unwrap()
+            .unwrap();
+        f.invariant().await;
+        let result = f
+            .manager
+            .handle(
+                &f.instance.id,
+                f.instance.revision,
+                support::request("facts"),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "old maintenance generation must remain revoked"
+        );
+        f.close().await;
+    }
+}

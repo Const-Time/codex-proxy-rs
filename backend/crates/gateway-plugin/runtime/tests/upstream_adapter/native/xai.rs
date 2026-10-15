@@ -1,8 +1,7 @@
 use super::fixture::Fixture;
 use async_trait::async_trait;
-use chrono::Utc;
 use gateway_core::{
-    account::{AccountFeedbackStats, CredentialState, ProviderAccountId},
+    account::{AccountFeedbackStats, ProviderAccountId},
     engine::{ExecutionOutcome, provider::Provider},
     provider_ports::ProviderStorePorts,
     routing::ProviderKind,
@@ -14,39 +13,9 @@ use std::{sync::Arc, time::Duration};
 pub(super) async fn seed(ports: &ProviderStorePorts, id: &ProviderAccountId, access: &str) {
     ports
         .accounts()
-        .create_account(account(id, access))
+        .create_account(crate::support::xai::account(id, access))
         .await
         .unwrap();
-}
-
-pub(super) fn account(
-    id: &ProviderAccountId,
-    access: &str,
-) -> gateway_core::account::NewProviderAccount {
-    GrokCredentialAdmin
-        .prepare_import(&CreateGrokCredential {
-            account_id: id.clone(),
-            name: id.to_string(),
-            secret: GrokOAuthSecret {
-                access_token: SecretValue::new(access),
-                refresh_token: SecretValue::new("fixture-refresh-token"),
-                id_token: None,
-                scope: OFFICIAL_SCOPES.join(" "),
-            },
-            account: GrokAccountProfile {
-                subject: format!("subject-{id}"),
-                email: None,
-                upstream_account_id: None,
-                plan_type: Some("pro".into()),
-                access_token_expires_at: Utc::now() + chrono::Duration::hours(1),
-                refresh_token_expires_at: None,
-            },
-            enabled: true,
-            initial_credential_state: CredentialState::Ready,
-            initial_error_reason: None,
-            initial_error_message: None,
-        })
-        .unwrap()
 }
 
 // All native services use their real stores. Only external network ports are replaced:
