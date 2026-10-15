@@ -96,7 +96,9 @@ async fn read(manager: &PluginManager, installed: &PluginView) -> Value {
     serde_json::from_slice(&response.body).unwrap()
 }
 async fn wait_for_signal(path: &std::path::Path) -> u32 {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Candidate package validation and extraction precede migration entry.
+    // The migration deadline and process-reaping bounds are checked separately.
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(text) = tokio::fs::read_to_string(path).await
                 && let Ok(pid) = text.parse()
@@ -107,7 +109,7 @@ async fn wait_for_signal(path: &std::path::Path) -> u32 {
         }
     })
     .await
-    .unwrap()
+    .expect("candidate reaches native migration before testing its lifecycle")
 }
 async fn reaped(pid: u32) {
     if cfg!(target_os = "linux") {

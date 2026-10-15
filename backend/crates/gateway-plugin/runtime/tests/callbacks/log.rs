@@ -464,12 +464,30 @@ async fn host_shutdown_waits_for_failed_and_cancelled_candidate_registration_log
             .await
             .unwrap();
         let block = Block::new(capture.clone(), candidate.id.clone());
+        let registration_signal = f._cache.path().join("registration-started");
         let mut settings = update(&f.digest, candidate.revision, true);
-        settings.configuration = json!({"adapter_mode": if cancelled { "registration-log-pending" } else { "registration-log-fault" }});
+        settings.configuration = json!({
+            "adapter_mode": if cancelled { "registration-log-pending" } else { "registration-log-fault" },
+            "registration_signal": registration_signal,
+        });
         let manager = f.manager.clone();
         let id = candidate.id.clone();
+        let preparation_started = std::time::Instant::now();
         let preparing =
             tokio::spawn(async move { manager.update(Some(&id), settings, &actor()).await });
+        // Package validation, private extraction and process startup precede the
+        // callback. Start the unchanged log deadline at actual registration.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !tokio::fs::try_exists(&registration_signal).await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("candidate reaches real SDK registration before testing log drain");
+        eprintln!(
+            "registration log fixture: cancelled={cancelled}, setup_elapsed={:?}",
+            preparation_started.elapsed()
+        );
         capture.wait_for(&candidate.id, 1, true).await;
         if cancelled {
             assert!(!preparing.is_finished());

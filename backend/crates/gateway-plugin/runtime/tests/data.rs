@@ -950,11 +950,17 @@ async fn retired_maintenance(provider: &str, name: &str) {
             .unwrap();
         let manager = f.manager.clone();
         let access = manager.access(&f.instance.id, f.instance.revision).unwrap();
-        let (id, revision, configuration) = (
+        let (id, revision, mut configuration) = (
             f.instance.id.clone(),
             f.instance.revision,
             f.instance.configuration.clone(),
         );
+        let registration_signal = (action == "upgrade")
+            .then(|| f.env.cache.path().join("replacement-registration-started"));
+        if let Some(path) = &registration_signal {
+            configuration["registration_signal"] = json!(path);
+        }
+        let preparation_started = std::time::Instant::now();
         let finishing = tokio::spawn(async move {
             match action {
                 "disable" | "upgrade" => {
@@ -973,6 +979,21 @@ async fn retired_maintenance(provider: &str, name: &str) {
             manager.shutdown().await;
         });
         let mut finishing = Box::pin(finishing);
+        if let Some(path) = &registration_signal {
+            // The old publication stays valid during candidate preparation.
+            // Measure revocation only after the real replacement SDK is ready.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !tokio::fs::try_exists(path).await.unwrap() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("replacement reaches SDK registration before testing retirement drain");
+            eprintln!(
+                "{provider}, action={action}: replacement setup_elapsed={:?}",
+                preparation_started.elapsed()
+            );
+        }
         tokio::time::timeout(Duration::from_secs(5), access.cancellation().cancelled())
             .await
             .expect("old published generation must be revoked before its native work finishes");
