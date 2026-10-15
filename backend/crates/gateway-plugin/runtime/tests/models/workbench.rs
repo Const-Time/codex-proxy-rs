@@ -363,8 +363,8 @@ async fn official_and_rebuilt_workbench_execute_native_models_and_scoped_affinit
             let foreign =
                 ProviderAccountId::new(format!("acct_foreign_{}", uuid::Uuid::new_v4().simple()))
                     .unwrap();
-            let mut env = Environment::with_login_admin_and_openai_accounts(
-                &server.url,
+            let mut env = Environment::with_login_admin_and_accounts(
+                Some(&server.url),
                 vec![
                     native_account(allowed.as_str(), "native-workbench-allowed"),
                     native_account(foreign.as_str(), "native-workbench-foreign"),

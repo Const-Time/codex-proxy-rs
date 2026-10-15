@@ -3,6 +3,8 @@ import http.client
 import http.server
 import json
 import pathlib
+import select
+import socket
 import ssl
 import sys
 import threading
@@ -46,7 +48,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.reply(status, json.dumps(value).encode())
 
     def do_CONNECT(self):
-        if self.path != "auth.x.ai:443":
+        allowed = {"auth.x.ai:443"}
+        if config["mode"] == "api":
+            allowed.add("cli-chat-proxy.grok.com:443")
+        if self.path not in allowed:
             event("forbidden", target=self.path)
             self.json_reply(403, {})
             return
@@ -76,8 +81,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             event("forbidden", target=self.path)
             self.json_reply(403, {})
             return
-        expected = verified if config["mode"] == "refresh" else candidate
+        if config["mode"] == "api":
+            expected = "fixture-provider-secret"
+        else:
+            expected = verified if config["mode"] == "refresh" else candidate
         event("inference", authorization=self.headers.get("Authorization") == "Bearer " + expected)
+        if config["mode"] == "api" and self.headers.get("Upgrade", "").lower() == "websocket":
+            with socket.create_connection(("127.0.0.1", inference.port), timeout=5) as upstream:
+                head = f"{self.command} {target.path or '/'} HTTP/1.1\r\n"
+                head += "".join(f"{name}: {value}\r\n" for name, value in self.headers.items() if name.lower() != "proxy-connection")
+                upstream.sendall((head + "\r\n").encode("latin-1"))
+                self.bridge(upstream)
+            return
         headers = {name: value for name, value in self.headers.items() if name.lower() not in {"proxy-connection", "connection"}}
         connection = http.client.HTTPConnection("127.0.0.1", inference.port, timeout=5)
         try:
@@ -87,9 +102,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
         finally:
             connection.close()
 
+    def bridge(self, upstream):
+        # Only the exact owned loopback endpoint above can reach this tunnel.
+        peers = [self.connection, upstream]
+        while True:
+            ready, _, _ = select.select(peers, [], [], 30)
+            if not ready:
+                break
+            for peer in ready:
+                data = peer.recv(65536)
+                if not data:
+                    self.close_connection = True
+                    return
+                (upstream if peer is self.connection else self.connection).sendall(data)
+        self.close_connection = True
+
+    def catalog(self):
+        authorization = self.headers.get("Authorization")
+        valid = authorization in {"Bearer fixture-provider-secret", "Bearer fixture-forbidden-secret"}
+        event("catalog", path=self.path, authorization=valid)
+        if not valid:
+            self.json_reply(401, {})
+        elif self.path == "/v1/models":
+            self.json_reply(200, {"object": "list", "data": [{
+                "id": "grok-4.5-catalog-entry", "model": "grok-4.5", "name": "Grok 4.5",
+                "contextWindow": 1000000, "maxCompletionTokens": 131072,
+                "apiBackend": "responses", "supportedInApi": True,
+            }]})
+        elif self.path == "/v1/billing?format=credits":
+            self.json_reply(200, {"config": {"creditUsagePercent": 25}})
+        elif self.path == "/v1/user?include=subscription":
+            self.json_reply(200, {"subscriptionTier": "SuperGrokPro"})
+        else:
+            event("forbidden", target=self.path)
+            self.json_reply(403, {})
+
     def do_GET(self):
         if not isinstance(self.connection, ssl.SSLSocket):
             self.forward()
+            return
+        if config["mode"] == "api" and self.headers.get("Host") == "cli-chat-proxy.grok.com":
+            self.catalog()
             return
         if self.path == "/.well-known/openid-configuration":
             event("discovery")
