@@ -150,7 +150,11 @@ async fn websocket_model(api: &ApiServer, authorization: &str, mut body: Value) 
     socket.close(None).await.unwrap();
 }
 
-async fn settled(env: &Environment, count: i64) {
+async fn settled(env: &Environment, count: i64, key: &str, account: &str) {
+    let ports = env.store.provider_ports();
+    let key = gateway_core::policy::ClientApiKeyId::new(key).unwrap();
+    let provider = gateway_core::identity::ProviderKind::new("openai").unwrap();
+    let accounts = [gateway_core::account::ProviderAccountId::new(account).unwrap()];
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let requests: i64 = sqlx::query_scalar(
@@ -163,7 +167,16 @@ async fn settled(env: &Environment, count: i64) {
                 .fetch_one(&env.pool)
                 .await
                 .unwrap();
-            if requests == count && charges == count {
+            let leases = ports
+                .leases()
+                .load_state(&key, &provider, &accounts)
+                .await
+                .unwrap();
+            let idle = leases
+                .signals()
+                .get(&accounts[0])
+                .is_none_or(|state| state.in_flight == 0);
+            if requests == count && charges == count && idle {
                 break;
             }
             tokio::task::yield_now().await;
@@ -319,7 +332,45 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             http_model(&api, &authorization, body.clone(), false).await;
             http_model(&api, &authorization, body.clone(), true).await;
             websocket_model(&api, &authorization, body.clone()).await;
-            settled(&env, 3).await;
+            settled(&env, 3, key.secret.record.id.as_str(), &allowed).await;
+            let raw = "{ \"future\": 9007199254740993, \"text\": \"雪☃\", \"status\": \"completed\", \"id\": \"adapter-response\" }\n";
+            for (index, (mode, status)) in [("chunks", 200), ("tail-fault", 502)]
+                .into_iter()
+                .enumerate()
+            {
+                let mut raw_input = body.clone();
+                raw_input["stream"] = json!(false);
+                raw_input["raw_body"] = json!(mode);
+                let response = api
+                    .client
+                    .post(format!("http://{}/v1/responses", api.address))
+                    .header("authorization", &authorization)
+                    .json(&raw_input)
+                    .send()
+                    .await
+                    .unwrap();
+                let received_status = response.status().as_u16();
+                let received = response.bytes().await.unwrap();
+                assert_eq!(
+                    received_status,
+                    status,
+                    "raw body {mode}: {}",
+                    String::from_utf8_lossy(&received)
+                );
+                if status == 200 {
+                    assert_eq!(received.as_ref(), raw.as_bytes());
+                } else {
+                    assert!(!String::from_utf8_lossy(&received).contains("private fixture"));
+                    assert!(!String::from_utf8_lossy(&received).contains("9007199254740993"));
+                }
+                settled(
+                    &env,
+                    4 + index as i64,
+                    key.secret.record.id.as_str(),
+                    &allowed,
+                )
+                .await;
+            }
 
             api.close().await;
             drop(api);
@@ -330,7 +381,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             assert_eq!(plugins.list().await.unwrap()[0].status, "ready");
             let mut api = ApiServer::new(&env, plugins.clone()).await;
             http_model(&api, &authorization, body.clone(), false).await;
-            settled(&env, 4).await;
+            settled(&env, 6, key.secret.record.id.as_str(), &allowed).await;
 
             let replacement = plugins
                 .upload(upstream_archive_contract("1.0.1", 3 - contract), &actor())
@@ -346,14 +397,24 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             eprintln!("adapter v{contract}, upstream websocket={websocket}: upgraded/API");
             assert_eq!(upgraded.revision, installed.revision + 1);
             http_model(&api, &authorization, body, false).await;
-            settled(&env, 5).await;
+            settled(&env, 7, key.secret.record.id.as_str(), &allowed).await;
 
             let requests: Vec<(String,String,String,String,bool)> = sqlx::query_as(
                 "SELECT provider_kind,provider_account_id,client_api_key_ref,upstream_transport,\
                  input_tokens=10 AND output_tokens=2 AND billing_multiplier=1.5 AND cost_amount>0 \
                  AND billed_cost_amount=round(cost_amount*1.5,10) FROM model_requests ORDER BY started_at"
             ).fetch_all(&env.pool).await.unwrap();
-            assert_eq!(requests.len(), 5);
+            assert_eq!(requests.len(), 7);
+            let outcomes: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT outcome,count(*) FROM model_requests GROUP BY outcome ORDER BY outcome",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                outcomes,
+                vec![("failed".into(), 1), ("succeeded".into(), 6)]
+            );
             for row in requests {
                 assert_eq!(row.0, "openai");
                 assert_eq!(row.1, allowed);
@@ -366,7 +427,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                  raw_amount_usd>0 AND billing_multiplier=1.5 AND amount_usd=round(raw_amount_usd*1.5,10) \
                  FROM user_group_charge_events"
             ).fetch_all(&env.pool).await.unwrap();
-            assert_eq!(ledger.len(), 5);
+            assert_eq!(ledger.len(), 7);
             for row in ledger {
                 assert_eq!(row.0, user);
                 assert_eq!(row.1, group.id);
@@ -378,7 +439,7 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
                  WHERE e.raw_amount_usd=r.cost_amount AND e.amount_usd=r.billed_cost_amount"
             ).fetch_one(&env.pool).await.unwrap();
             assert_eq!(
-                matching, 5,
+                matching, 7,
                 "each native request must own its exact original charge"
             );
             let balanced: bool = sqlx::query_scalar("SELECT bool_and(w.daily_used_usd=e.amount AND w.weekly_used_usd=e.amount) FROM user_group_budget_windows w JOIN (SELECT user_id,account_group_id,sum(amount_usd) amount FROM user_group_charge_events GROUP BY user_id,account_group_id) e USING(user_id,account_group_id)")
@@ -386,14 +447,14 @@ async fn normal_v1_v2_adapters_survive_restore_and_upgrade_through_api_json_sse_
             assert!(balanced);
             if websocket {
                 assert_eq!(http.requests.lock().unwrap().len(), initial_requests);
-                assert_eq!(socket.pings.load(Ordering::SeqCst), 5);
+                assert_eq!(socket.pings.load(Ordering::SeqCst), 7);
                 for headers in socket.headers.lock().unwrap().iter() {
                     assert_eq!(headers["authorization"], "Bearer fixture-provider-secret");
                     assert_eq!(headers["chatgpt-account-id"], format!("chatgpt-{allowed}"));
                 }
             } else {
                 let requests = http.requests.lock().unwrap();
-                assert_eq!(requests.len(), initial_requests + 5);
+                assert_eq!(requests.len(), initial_requests + 7);
                 for request in &requests[initial_requests..] {
                     assert!(request.contains("authorization: Bearer fixture-provider-secret"));
                     assert!(request.contains("x-fixture: adapter"));

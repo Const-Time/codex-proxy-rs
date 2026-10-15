@@ -27,6 +27,9 @@ pub(super) struct EventDecoder {
     service_tier: Option<String>,
     usage: Usage,
     contents: usize,
+    body_bytes: usize,
+    body_chunks: usize,
+    other_wire: bool,
     pub(super) completed: bool,
 }
 
@@ -52,6 +55,7 @@ impl EventDecoder {
         payload: &[u8],
         protocol: &str,
         transport: &str,
+        client_transport: Option<&str>,
         account: &dyn UpstreamAccountConnection,
         sent: UpstreamSendState,
     ) -> Result<DecodedEvent, EventDecodeError> {
@@ -62,6 +66,24 @@ impl EventDecoder {
         })?;
         if self.completed || message.event.facts.len() > 64 || message.event.host.is_some() {
             return Err(invalid(sent).into());
+        }
+        if let Some(wire) = &message.event.wire {
+            if let WirePayload::RawBody { body } = &wire.payload {
+                self.body_bytes = self.body_bytes.saturating_add(body.len());
+                self.body_chunks += 1;
+                if !matches!(client_transport, Some("http_json" | "internal"))
+                    || self.other_wire
+                    || self.body_bytes > 8 * 1024 * 1024
+                    || self.body_chunks > 16384
+                {
+                    return Err(invalid(sent).into());
+                }
+            } else {
+                if self.body_chunks != 0 {
+                    return Err(invalid(sent).into());
+                }
+                self.other_wire = true;
+            }
         }
         let wire = message
             .event
@@ -336,12 +358,7 @@ fn decode_wire(
             })?;
             ProtocolWireEvent::raw_json(protocol, Bytes::from(body))
         }
-        WirePayload::RawBody { .. } => {
-            return Err(ProviderError::new(
-                gateway_core::error::ProviderErrorKind::Unsupported,
-                sent,
-            ));
-        }
+        WirePayload::RawBody { body } => ProtocolWireEvent::raw_body(protocol, Bytes::from(body)),
     };
     result.map_err(|source| {
         invalid(sent).with_raw_upstream_error(gateway_core::error::RawUpstreamError::new(

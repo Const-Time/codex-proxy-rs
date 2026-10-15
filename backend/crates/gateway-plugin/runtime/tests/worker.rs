@@ -2729,7 +2729,10 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
             ResponseStream::from_chunks(vec![event.encode().unwrap()]),
         ));
     }
-    let api_wire = input["fixture_api"].as_bool().unwrap_or(false);
+    let raw_body = input["raw_body"]
+        .as_str()
+        .or_else(|| (mode == "raw-body").then_some("chunks"));
+    let api_wire = raw_body.is_none() && input["fixture_api"].as_bool().unwrap_or(false);
     let wire = |kind: &str| {
         Some(WireEvent {
             protocol: "openai".into(),
@@ -2751,6 +2754,11 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
         }],
         if api_wire {
             wire("response.created")
+        } else if raw_body.is_some() {
+            Some(WireEvent {
+                protocol: "openai".into(),
+                payload: WirePayload::RawBody { body: vec![b'{'] },
+            })
         } else {
             None
         },
@@ -2803,11 +2811,71 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
             state: json!({"round":1}).as_object().unwrap().clone(),
         });
     }
-    let mut chunks = vec![started, completed.encode().unwrap()];
+    let mut chunks = vec![started];
+    if let Some(raw) = raw_body {
+        completed.event.wire = None;
+        let body = "{ \"future\": 9007199254740993, \"text\": \"雪☃\", \"status\": \"completed\", \"id\": \"adapter-response\" }\n".as_bytes();
+        for part in body.chunks(1).skip(1) {
+            chunks.push(
+                UpstreamAdapterEvent::new(event(
+                    vec![],
+                    Some(WireEvent {
+                        protocol: "openai".into(),
+                        payload: WirePayload::RawBody {
+                            body: part.to_vec(),
+                        },
+                    }),
+                ))
+                .encode()
+                .unwrap(),
+            );
+        }
+        if raw == "limit" {
+            for _ in 0..513 {
+                chunks.push(
+                    UpstreamAdapterEvent::new(event(
+                        vec![],
+                        Some(WireEvent {
+                            protocol: "openai".into(),
+                            payload: WirePayload::RawBody {
+                                body: vec![b' '; 16 * 1024],
+                            },
+                        }),
+                    ))
+                    .encode()
+                    .unwrap(),
+                );
+            }
+        }
+        if raw == "mixed" {
+            chunks.push(
+                UpstreamAdapterEvent::new(event(vec![], wire("response.completed")))
+                    .encode()
+                    .unwrap(),
+            );
+        }
+    }
+    chunks.push(completed.encode().unwrap());
+    if raw_body == Some("wait") {
+        chunks.pop();
+        let (sender, stream) = ResponseStream::channel(std::num::NonZeroUsize::new(1).unwrap());
+        let cancellation = call.cancellation.clone();
+        tokio::spawn(async move {
+            for chunk in chunks {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return,
+                    result = sender.send(chunk) => if result.is_err() { return; },
+                }
+            }
+            cancellation.cancelled().await;
+        });
+        return Ok(CallReply::stream(json!({}), vec![], stream));
+    }
     if mode == "tail" {
         chunks.push(vec![0]);
     }
-    if mode == "tail-fault" {
+    if mode == "tail-fault" || raw_body == Some("tail-fault") {
         let (sender, stream) = ResponseStream::channel(std::num::NonZeroUsize::new(1).unwrap());
         tokio::spawn(async move {
             for chunk in chunks {

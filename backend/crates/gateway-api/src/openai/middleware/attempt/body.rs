@@ -63,14 +63,12 @@ impl SourceBody {
                     return Err(MiddlewareError::InvalidState);
                 }
             } else {
-                if format.raw_json() {
-                    size = size.saturating_add(
-                        event
-                            .wire_event()
-                            .and_then(|wire| wire.raw_json_body())
-                            .map_or(0, Bytes::len),
-                    );
-                } else {
+                if let Some(raw) = event
+                    .wire_event()
+                    .and_then(|wire| wire.raw_json_body().or_else(|| wire.raw_body_chunk()))
+                {
+                    size = size.saturating_add(raw.len());
+                } else if !format.raw_json() {
                     for frame in body.encoder.push_sse(&event) {
                         size = size.saturating_add(frame.len());
                     }
@@ -82,9 +80,12 @@ impl SourceBody {
             }
         }
         if !streaming {
-            let encoded = if format.raw_json() {
-                crate::openai::endpoint::raw_json_body(&events)
-                    .ok_or(MiddlewareError::InvalidState)?
+            let raw = crate::openai::endpoint::raw_json_body(&events)
+                .map_err(|_| MiddlewareError::InvalidState)?;
+            let encoded = if let Some(raw) = raw {
+                raw
+            } else if format.raw_json() {
+                return Err(MiddlewareError::InvalidState);
             } else {
                 Bytes::from(
                     serde_json::to_vec(

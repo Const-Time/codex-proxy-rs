@@ -6,6 +6,7 @@ mod credential_save;
 mod credentials;
 mod fixture;
 mod lifecycle;
+mod raw_body;
 mod websocket;
 mod xai;
 mod xai_save;
