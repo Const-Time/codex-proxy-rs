@@ -118,8 +118,37 @@ fn logs(directory: &std::path::Path) -> String {
         .join("\n")
 }
 
+fn child_processes(gateway: &Gateway) -> Vec<u32> {
+    if cfg!(target_os = "linux") {
+        let children = std::fs::read_dir(format!("/proc/{}/task", gateway.0.id()))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("children")).ok())
+            .flat_map(|text| {
+                text.split_whitespace()
+                    .map(|pid| pid.parse::<u32>().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        children.into_iter().collect::<Vec<_>>()
+    } else {
+        vec![]
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_process_exit() {
+    sigterm_native_work(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actual_gateway_sigterm_drains_retired_maintenance_quota_before_process_exit() {
+    for action in ["disable", "upgrade", "delete"] {
+        sigterm_native_work(Some(action)).await;
+    }
+}
+
+async fn sigterm_native_work(retirement: Option<&str>) {
     use std::os::unix::process::CommandExt as _;
     let Some((database, database_url, redis_url)) = Database::create().await else {
         return;
@@ -140,9 +169,20 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
     }
     let binary = binary();
     let directory = tempfile::tempdir().unwrap();
+    let quota = if retirement.is_some() {
+        Some(support::quota_server::Server::new(true).await)
+    } else {
+        None
+    };
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let log_directory = configure(directory.path(), &database_url, &redis_url, port);
+    if let Some(quota) = &quota {
+        let path = directory.path().join("deploy/config.yaml");
+        let mut settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        settings["openai"]["api"] = json!({"base_url":quota.url});
+        std::fs::write(path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    }
     drop(listener);
     let stderr = directory.path().join("stderr");
     let mut gateway = Gateway(
@@ -183,10 +223,51 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
         .next()
         .unwrap()
         .to_owned();
+    let ports = if retirement.is_some() {
+        use provider_openai::credential::*;
+        let mut config: gateway_store::StoreConfig = serde_json::from_value(
+            json!({"database":connection(&database_url),"redis":connection(&redis_url)}),
+        )
+        .unwrap();
+        config.resolve_and_validate(directory.path()).unwrap();
+        let store = gateway_store::initialize(config).await.unwrap();
+        let ports = store.provider_ports();
+        let prepared = CodexCredentialAdmin
+            .prepare_import(ImportCodexOAuthCredential {
+                account_id: "acct_host-maintenance".into(),
+                name: "Host maintenance fixture".into(),
+                enabled: true,
+                secret: CodexOAuthSecret {
+                    access_token: secrecy::SecretString::from("fixture-provider-secret"),
+                    refresh_token: None,
+                    id_token: None,
+                },
+                verified_account: CodexAccountProfile {
+                    oauth_subject: "host-maintenance-subject".into(),
+                    poid: None,
+                    chatgpt_account_id: "host-maintenance-account".into(),
+                    chatgpt_user_id: "host-maintenance-user".into(),
+                    email: None,
+                    plan_type: Some("pro".into()),
+                    access_token_expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                },
+                next_refresh_at: None,
+            })
+            .unwrap();
+        ports.accounts().create_account(prepared).await.unwrap();
+        Some(ports)
+    } else {
+        None
+    };
+    let archive = if retirement.is_some() {
+        support::maintenance_archive("1.0.0")
+    } else {
+        support::archive("1.0.0", false)
+    };
     let artifact: Value = client
         .post(format!("{base}/api/admin/plugins/artifacts"))
         .header("cookie", &cookie)
-        .body(support::archive("1.0.0", false).as_ref().to_vec())
+        .body(archive.as_ref().to_vec())
         .send()
         .await
         .unwrap()
@@ -200,7 +281,9 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
         .header("cookie", &cookie)
         .json(&json!({
             "revision":0,"name":"Full Host SDK fixture","artifactSha256":artifact["data"]["sha256"],
-            "enabled":true,"trustedProcess":true,"configuration":{},"secrets":{}
+            "enabled":true,"trustedProcess":true,"configuration":if retirement.is_some() {
+                json!({"adapter_mode":"maintenance-quota", "command_result":{"operation":"models","mode":"quota","method":"host.quota_observations.refresh","params":{},"request":{"account_id":"acct_host-maintenance"}}})
+            } else {json!({})},"secrets":{}
         }))
         .send()
         .await
@@ -221,19 +304,91 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
             .fetch_one(&pool)
             .await
             .unwrap();
-    let mut lock = pool.begin().await.unwrap();
-    let lock_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
-        .fetch_one(&mut *lock)
-        .await
-        .unwrap();
-    sqlx::query("select id from runtime_settings where id=1 for update")
-        .fetch_one(&mut *lock)
-        .await
-        .unwrap();
-    let request = json!({"operation":"models", "mode":"credentials", "method":"host.auth.save", "request":create("full-host-drain")});
-    let invocation = tokio::spawn(client.post(format!("{base}/api/admin/plugins/invoke"))
-        .header("cookie", cookie).json(&json!({"id":id,"revision":1,"method":"POST","path":"echo", "contentType":"application/json", "body":STANDARD.encode(serde_json::to_vec(&request).unwrap())})).send());
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let mut plugin_pids = child_processes(&gateway);
+    assert!(
+        !cfg!(target_os = "linux") || !plugin_pids.is_empty(),
+        "real SDK subprocess must be present"
+    );
+    let (lock, invocation) = if let Some(action) = retirement {
+        let quota = quota.as_ref().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), quota.entered.notified())
+            .await
+            .unwrap();
+        let sha = if action == "upgrade" {
+            let artifact: Value = client
+                .post(format!("{base}/api/admin/plugins/artifacts"))
+                .header("cookie", &cookie)
+                .body(support::maintenance_archive("1.0.1").as_ref().to_vec())
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            artifact["data"]["sha256"].clone()
+        } else {
+            artifact["data"]["sha256"].clone()
+        };
+        // The replacement reconciles private state only, so it cannot start a
+        // second quota request while the accepted old-generation task is held.
+        let changed: Value = client
+            .post(format!("{base}/api/admin/plugins/update"))
+            .header("cookie", &cookie)
+            .json(&json!({
+                "id":id,"revision":1,"name":"Full Host SDK fixture","artifactSha256":sha,
+                "enabled":action=="upgrade","trustedProcess":true,"configuration":{},"secrets":{}
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(changed["data"]["revision"], 2);
+        if action == "delete" {
+            client
+                .post(format!("{base}/api/admin/plugins/uninstall"))
+                .header("cookie", &cookie)
+                .json(&json!({"id":id,"revision":2}))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+        }
+        assert_eq!(quota.requests.lock().unwrap().len(), 1);
+        let observations = ports
+            .as_ref()
+            .unwrap()
+            .accounts()
+            .get_quotas(&[
+                gateway_core::account::ProviderAccountId::new("acct_host-maintenance").unwrap(),
+            ])
+            .await
+            .unwrap();
+        assert!(
+            observations.is_empty(),
+            "held native request must not have published an observation"
+        );
+        (None, None)
+    } else {
+        let mut lock = pool.begin().await.unwrap();
+        let lock_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+        sqlx::query("select id from runtime_settings where id=1 for update")
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+        let request = json!({"operation":"models", "mode":"credentials", "method":"host.auth.save", "request":create("full-host-drain")});
+        let invocation = tokio::spawn(client.post(format!("{base}/api/admin/plugins/invoke"))
+        .header("cookie", &cookie).json(&json!({"id":id,"revision":1,"method":"POST","path":"echo", "contentType":"application/json", "body":STANDARD.encode(serde_json::to_vec(&request).unwrap())})).send());
+        tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let blocked: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname=current_database() and query like 'update runtime_settings%' and $1=any(pg_blocking_pids(pid)))")
                 .bind(lock_pid).fetch_one(&pool).await.unwrap();
@@ -242,22 +397,11 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.unwrap();
-    let plugin_pids = if cfg!(target_os = "linux") {
-        let children = std::fs::read_dir(format!("/proc/{}/task", gateway.0.id()))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter_map(|entry| std::fs::read_to_string(entry.path().join("children")).ok())
-            .flat_map(|text| {
-                text.split_whitespace()
-                    .map(|pid| pid.parse::<u32>().unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(!children.is_empty(), "real SDK subprocess must be present");
-        children.into_iter().collect::<Vec<_>>()
-    } else {
-        vec![]
+        (Some(lock), Some(invocation))
     };
+    plugin_pids.extend(child_processes(&gateway));
+    plugin_pids.sort_unstable();
+    plugin_pids.dedup();
     assert!(
         Command::new("kill")
             .args(["-TERM", &gateway.0.id().to_string()])
@@ -282,9 +426,21 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
             .fetch_one(&pool)
             .await
             .unwrap(),
-        0
+        i64::from(retirement.is_some())
     );
-    lock.commit().await.unwrap();
+    if let Some(lock) = lock {
+        lock.commit().await.unwrap();
+    }
+    if let Some(quota) = &quota {
+        // A real shutdown barrier has been reached; it must remain blocked on
+        // the accepted old task even though that process is no longer active.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            gateway.0.try_wait().unwrap().is_none(),
+            "{retirement:?}: Host must retain retired native work"
+        );
+        quota.release.notify_one();
+    }
     let status = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if let Some(status) = gateway.0.try_wait().unwrap() {
@@ -300,7 +456,9 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
         "{}",
         std::fs::read_to_string(&stderr).unwrap()
     );
-    let _ = invocation.await.unwrap();
+    if let Some(invocation) = invocation {
+        let _ = invocation.await.unwrap();
+    }
     assert_eq!(
         sqlx::query_scalar::<_, i64>("select count(*) from provider_accounts")
             .fetch_one(&pool)
@@ -313,7 +471,7 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
             .fetch_one(&pool)
             .await
             .unwrap(),
-        revision + 1
+        revision + i64::from(retirement.is_none())
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -322,8 +480,62 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
         .fetch_one(&pool)
         .await
         .unwrap(),
-        1
+        i64::from(retirement.is_none())
     );
+    if let Some(ports) = &ports {
+        let id = gateway_core::account::ProviderAccountId::new("acct_host-maintenance").unwrap();
+        let observations = ports
+            .accounts()
+            .get_quotas(std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].quota.expose_to_provider()["rate_limits_by_limit_id"]["codex"]["primary_window"]
+                ["used_percent"],
+            25.0
+        );
+        assert_eq!(
+            ports
+                .accounts()
+                .load_current_credential(&id)
+                .await
+                .unwrap()
+                .account
+                .revision()
+                .get(),
+            1
+        );
+        assert_eq!(
+            quota.as_ref().unwrap().requests.lock().unwrap().len(),
+            1,
+            "retired refresh cannot be replayed"
+        );
+        assert!(
+            quota
+                .as_ref()
+                .unwrap()
+                .catalog_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request
+                    .to_lowercase()
+                    .contains("authorization: bearer fixture-provider-secret"))
+        );
+        for table in [
+            "model_requests",
+            "user_group_charge_events",
+            "user_group_budget_windows",
+        ] {
+            let count: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 0, "quota refresh cannot create model charges");
+        }
+    }
     for pid in plugin_pids {
         assert!(
             !std::path::Path::new(&format!("/proc/{pid}")).exists(),
@@ -331,6 +543,7 @@ async fn actual_gateway_sigterm_drains_accepted_sdk_account_commit_before_proces
         );
     }
     drop(gateway);
+    drop(ports);
     pool.close().await;
     database.close().await;
 }

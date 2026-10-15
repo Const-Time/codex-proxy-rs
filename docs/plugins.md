@@ -2,7 +2,7 @@
 
 管理员可在侧栏「插件」上传 `.tar.gz` 制品，创建实例、填写配置和敏感字段、启用或停用、切换版本、打开管理页面，以及卸载实例。普通用户不能安装或调用插件。
 
-当前已接入 **B：协议与安装管理** 以及 **C：管理页面、私有状态与选 Key 推理**。SDK、CLI、包校验、RPC 和页面桥来自上游 v3.21.2 固定快照 `fb15f3e3`；本地 Admin、Store、API 和运行时接入保持现有职责划分。SDK 包含完整上游类型并不代表本地宿主已实现所有能力。
+当前已接入插件协议、安装管理、管理页面、私有状态及下表列出的运行能力。SDK、CLI、包校验、RPC 和页面桥来自上游 v3.21.2 固定快照 `fb15f3e3`；本地 Admin、Store、API 和运行时接入保持现有职责划分。SDK 包含完整上游类型并不代表本地宿主已实现所有能力。
 
 ## 支持范围
 
@@ -37,7 +37,8 @@
 | 命令行 | command_line v1；实例帮助、类型化参数、执行和零退出后的原生账号提交，宿主系统根调用选择现有 Key |
 | 中间件 | middleware v4；HTTP、独立 WebSocket、service、request/attempt 挂载，冻结绑定、单次 next、正文透传/改写及私有状态回调 |
 | 上游适配器 | upstream_adapter v1/v2；正常上传、启用与恢复，绑定原生 OpenAI/xAI 账号，受管 HTTP/SSE/WS 及原 Core 结算 |
-| 未开放的能力 | Key 预算写入；未绑定宿主模型调用权限的阶段回调 |
+| 本地预算差异 | 用户＋分组共享额度使用 `host.cpr.shared_budgets.v1.*`；上游独立 Key 预算接口保持 unsupported，不能将单 Key 操作隐式扩大为共享额度操作 |
+| 未开放的能力 | 未绑定宿主模型调用权限的阶段回调 |
 
 第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。middleware v4 已开放正常启用；该原包及仅替换 SDK 的重建包通过生产校验器、七项声明能力的基本联合调用和原生模型验收。完整业务变体及其他目标平台仍须验收。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
 
@@ -468,4 +469,6 @@ retry 阶段允许实例私有状态与通用外部 HTTP，仍禁止原生模型
 
 原生额度刷新经实际 PluginManager 发布、Core 可用期和维护工作线程验证：OpenAI 使用受控 HTTP，xAI 使用原账号代理和受控 TLS 官方 billing/subscription 端点；Provider、Admin 与 PostgreSQL 观测仍由原 owner 解释和持久化。被动读取不会发起请求，刷新不创建模型执行、共享扣费或本地额度窗口，也不推进凭据 revision。xAI 保留动态 billing 文档及有效订阅层级，用户资料不进入额度文档。
 
-停用、换版和卸载立即撤销旧发布，旧进程继续异步收尾。PluginManager 保管同一次旧进程停止 future，关闭时同时等待活跃及已撤销进程，再结束 Runtime；取消关闭等待后再次关闭仍等待原任务。两家 Provider 的维护刷新均验证工作线程取消后，关闭、停用、升级及卸载不会丢弃已接受的原生任务或重复发送；升级期间丢弃关闭等待者也保留原收尾。以上是原管理器与原生数据库链路的证据，不替代所有入口的完整 Host 信号验收。
+停用、换版和卸载立即撤销旧发布，旧进程继续异步收尾。PluginManager 保管同一次旧进程停止 future，关闭时同时等待活跃及已撤销进程，再结束 Runtime；取消关闭等待后再次关闭仍等待原任务。两家 Provider 的维护刷新均验证工作线程取消后，关闭、停用、升级及卸载不会丢弃已接受的原生任务或重复发送；升级期间丢弃关闭等待者也保留原收尾。
+
+完整网关进程另验证原生 OpenAI 维护刷新已发送后，经实际管理员 HTTP 停用、升级或卸载，再发送 SIGTERM：原维护任务及额度观测落库前进程保持存活，释放受控 HTTP 回包后正常退出并回收 SDK 子进程；同一刷新只发送一次，不创建模型费用、不修改凭据版本。升级后的实例只对账私有状态，避免将新一代合法刷新误计为旧任务重放。本项验证这些维护退出路径，不代表其他 Provider 或所有宿主写入入口的完整信号验收。

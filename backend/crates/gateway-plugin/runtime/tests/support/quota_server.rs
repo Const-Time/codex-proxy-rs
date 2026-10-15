@@ -1,4 +1,4 @@
-//! Only the actual native OpenAI usage GET reaches this owned loopback server.
+//! Owned native OpenAI usage and catalog endpoints; no external forwarding.
 use serde_json::json;
 use std::{
     sync::{Arc, Mutex},
@@ -12,6 +12,7 @@ use tokio::{
 pub(crate) struct Server {
     pub url: String,
     pub requests: Arc<Mutex<Vec<String>>>,
+    pub catalog_requests: Arc<Mutex<Vec<String>>>,
     pub entered: Arc<Notify>,
     pub release: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
@@ -26,13 +27,19 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/backend-api", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let catalog_requests = Arc::new(Mutex::new(Vec::new()));
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let state = (requests.clone(), entered.clone(), release.clone());
+        let state = (
+            requests.clone(),
+            catalog_requests.clone(),
+            entered.clone(),
+            release.clone(),
+        );
         let task = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let (requests, entered, release) = state.clone();
+                let (requests, catalog_requests, entered, release) = state.clone();
                 tokio::spawn(async move {
                     let mut bytes = Vec::new();
                     loop {
@@ -47,8 +54,15 @@ impl Server {
                     }
                     let request = String::from_utf8(bytes).unwrap();
                     assert!(request.starts_with("GET "));
-                    assert!(request.contains("/wham/usage"));
                     assert!(request.to_lowercase().contains("authorization: bearer "));
+                    let path = request.split_whitespace().nth(1).unwrap();
+                    if path.split('?').next() == Some("/backend-api/codex/models") {
+                        catalog_requests.lock().unwrap().push(request);
+                        let body = json!({"models":[{"slug":"gpt-5","display_name":"Host quota fixture","supported_in_api":true,"input_modalities":["text"]}]}).to_string();
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                        return;
+                    }
+                    assert_eq!(path, "/backend-api/wham/usage");
                     requests.lock().unwrap().push(request);
                     entered.notify_one();
                     if wait {
@@ -66,6 +80,7 @@ impl Server {
         Self {
             url,
             requests,
+            catalog_requests,
             entered,
             release,
             task,
