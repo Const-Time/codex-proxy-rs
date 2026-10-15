@@ -1,0 +1,93 @@
+name: Plugin platforms
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'codex/plugin-*'
+    paths:
+      - 'backend/**'
+      - 'release/platforms.yaml'
+      - '.github/workflows/plugin-platforms.yml'
+      - '.github/scripts/check-plugin-platform'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'release/platforms.yaml'
+      - '.github/workflows/plugin-platforms.yml'
+      - '.github/scripts/check-plugin-platform'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-platforms-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  platforms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: platforms
+        name: Read release platform list
+        run: |
+          ruby -rjson -ryaml -e 'puts "matrix=" + JSON.generate({include: YAML.load_file("release/platforms.yaml").fetch("platforms")})' >> "$GITHUB_OUTPUT"
+
+  native:
+    name: Plugin runtime (${{ matrix.os }}-${{ matrix.arch }})
+    needs: platforms
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.platforms.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_MIN_STACK: 16777216
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup native Rust
+        if: runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20 # 1.97
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            backend/target
+          key: plugin-platforms-${{ matrix.target }}-${{ hashFiles('backend/Cargo.lock', 'backend/**/Cargo.toml', 'backend/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            plugin-platforms-${{ matrix.target }}-${{ hashFiles('backend/Cargo.lock', 'backend/**/Cargo.toml', 'backend/rust-toolchain.toml') }}-
+      - name: Check Linux release environment
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.cargo"
+          docker run --rm \
+            --platform "${{ matrix.dockerPlatform }}" \
+            --user "$(id -u):$(id -g)" \
+            -e CARGO_HOME=/cargo -e HOME=/tmp -e RUST_MIN_STACK -e CARGO_TERM_COLOR -e TARGET \
+            -v "$HOME/.cargo:/cargo" -v "$PWD:/workspace" -w /workspace \
+            rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa \
+            bash .github/scripts/check-plugin-platform
+      - name: Check macOS release environment
+        if: runner.os == 'macOS'
+        run: bash .github/scripts/check-plugin-platform
+      - name: Upload checked binaries and results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-platform-${{ matrix.target }}
+          path: dist/plugin-platform-${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 7
