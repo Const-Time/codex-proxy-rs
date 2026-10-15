@@ -304,10 +304,23 @@ impl PricingSource for NoExternalOperations {
 #[async_trait]
 impl SystemOperations for NoExternalOperations {
     async fn version(&self) -> Result<SystemVersion, SystemOperationError> {
-        unreachable!()
+        Ok(SystemVersion {
+            version: "3.12.0".into(),
+            git_sha: "isolated-fixture".into(),
+            build_time: "fixture".into(),
+            deployment_mode: "binary".into(),
+            update_channel: "fixture".into(),
+            latest_version: "3.12.0".into(),
+            has_update: false,
+            update_cached: true,
+            update_warning: Some("Isolated browser acceptance; external updates disabled".into()),
+        })
     }
     async fn update_detail(&self, _: bool) -> Result<SystemUpdateDetail, SystemOperationError> {
-        unreachable!()
+        Err(SystemOperationError::new(
+            SystemOperationErrorKind::Invalid,
+            "External updates disabled in the isolated fixture",
+        ))
     }
     fn update_events(&self) -> SystemUpdateEventStream {
         Box::pin(futures::stream::pending())
