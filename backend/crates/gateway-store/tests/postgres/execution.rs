@@ -1674,9 +1674,11 @@ async fn recovery_renewal_does_not_revive_a_lease_that_expires_while_waiting_for
     seed_running_request(&database.pool, "req_locked")
         .await
         .unwrap();
-    sqlx::query("update model_requests set deadline_at = now() + interval '1 second' where id = 'req_locked'").execute(&database.pool).await.unwrap();
-    let expiry = recovery_expiry(&database.pool, "req_locked").await;
     let mut transaction = database.pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
     sqlx::query("select id from model_requests where id = 'req_locked' for update")
         .fetch_one(&mut *transaction)
         .await
@@ -1688,11 +1690,23 @@ async fn recovery_renewal_does_not_revive_a_lease_that_expires_while_waiting_for
     });
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            let blocked: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock')").fetch_one(&database.pool).await.unwrap();
+            // The holder and renewal occupy both pool connections. Observe from
+            // the holder, and match its PID rather than another test's lock.
+            let blocked: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where $1 = any(pg_blocking_pids(pid)))")
+                .bind(blocker_pid)
+                .fetch_one(&mut *transaction)
+                .await
+                .unwrap();
             if blocked { break; }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }).await.expect("renewal is waiting on the row lock");
+    // Arm expiry only after the renewal's SQL statement has started waiting.
+    // A statement-start timestamp would then incorrectly revive this lease.
+    let expiry: chrono::DateTime<Utc> = sqlx::query_scalar("update model_requests set deadline_at = clock_timestamp() + interval '1 second' where id = 'req_locked' returning deadline_at")
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     transaction.commit().await.unwrap();
     assert!(!renewal.await.unwrap().unwrap());
