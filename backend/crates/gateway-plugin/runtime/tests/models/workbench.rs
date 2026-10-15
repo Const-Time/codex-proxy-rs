@@ -1,6 +1,6 @@
 //! Official and locally rebuilt artifacts exercise native PostgreSQL-backed business calls.
 use crate::services::upstream_sdk::environment::Environment;
-use crate::support::{actor, update as fixture_update};
+use crate::support::{actor, api::ApiServer, update as fixture_update};
 use gateway_admin::{
     model::{
         MutationActor, MutationContext, auth::LoginCommand, client_keys::CreateClientKey,
@@ -240,57 +240,7 @@ async fn settled(env: &Environment, count: i64) {
     .expect("original PostgreSQL requests and shared ledger must settle once");
 }
 
-struct ApiServer {
-    address: std::net::SocketAddr,
-    client: reqwest::Client,
-    cancellation: gateway_core::lifecycle::CancellationToken,
-    task: tokio::task::JoinHandle<()>,
-    _workers: gateway_host::workers::WorkerSupervisor,
-}
 impl ApiServer {
-    async fn new(env: &Environment, manager: Arc<PluginManager>) -> Self {
-        let cancellation = gateway_core::lifecycle::CancellationToken::new();
-        let connections = Arc::new(gateway_host::serve::ConnectionTracker::new(
-            cancellation.clone(),
-        ));
-        let workers = gateway_host::workers::WorkerSupervisor::new(cancellation.clone());
-        let app = gateway_api::initialize(
-            gateway_api::ApiConfig {
-                asset_directory: env.cache.path().into(),
-                cors_allowed_origins: vec![],
-                request_timeout_seconds: None,
-                request_id_header: "x-request-id".into(),
-            },
-            env.core.execution_service(),
-            env.admin.services().with_plugins(manager),
-            vec![],
-            workers.health_source(),
-            connections,
-        )
-        .unwrap();
-        // Real API routes and Host connection guards; this fixture does not
-        // claim to run the full Host worker/signal supervisor.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let shutdown = cancellation.clone();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app.router())
-                .with_graceful_shutdown(async move { shutdown.cancelled().await })
-                .await
-                .unwrap();
-        });
-        Self {
-            address,
-            client: reqwest::Client::builder()
-                .no_proxy()
-                .timeout(std::time::Duration::from_secs(20))
-                .build()
-                .unwrap(),
-            cancellation,
-            task,
-            _workers: workers,
-        }
-    }
     async fn get(&self, path: &str, authorization: &str) -> reqwest::Response {
         self.client
             .get(format!("http://{}{path}", self.address))
@@ -363,19 +313,6 @@ impl ApiServer {
         } else {
             Err(seen)
         }
-    }
-    async fn close(&mut self) {
-        self.cancellation.cancel();
-        tokio::time::timeout(std::time::Duration::from_secs(5), &mut self.task)
-            .await
-            .expect("API connection drain")
-            .unwrap();
-    }
-}
-impl Drop for ApiServer {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        self.task.abort();
     }
 }
 
