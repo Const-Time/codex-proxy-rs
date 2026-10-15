@@ -1,0 +1,59 @@
+{
+  "manifestVersion": 2,
+  "name": "shared-budget-manager",
+  "displayName": "共享额度管理",
+  "publisher": "cpr",
+  "version": "0.1.0",
+  "description": "管理用户与分组共享额度，保留网关权限、订阅和原生账本",
+  "license": "Apache-2.0",
+  "engines": {
+    "codex-proxy-rs": ">=3.12.0, <4.0.0"
+  },
+  "main": "bin/plugin",
+  "runtime": "trustedProcess",
+  "contributes": {
+    "management": {}
+  },
+  "configurationSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "resources": {
+    "web/index.html": "text/html",
+    "web/app.js": "text/javascript",
+    "web/app.css": "text/css"
+  },
+  "state": [
+    {
+      "namespace": "reset-draft",
+      "schemaVersion": 1,
+      "schema": {
+        "type": "object",
+        "required": [
+          "command",
+          "receipt",
+          "archived"
+        ],
+        "properties": {
+          "command": {
+            "type": "object"
+          },
+          "receipt": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "archived": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "maximumRecords": 1,
+      "maximumBytes": 8192,
+      "maximumValueBytes": 8192
+    }
+  ]
+}

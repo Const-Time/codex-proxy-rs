@@ -149,6 +149,9 @@ jobs:
       - name: Native xAI command account creation
         run: bash .github/scripts/check-native-xai-create
 
+      - name: Packaged shared-budget plugin
+        run: bash .github/scripts/check-shared-budget-plugin
+
       - name: Native plugin database backup and restore
         working-directory: backend
         shell: bash

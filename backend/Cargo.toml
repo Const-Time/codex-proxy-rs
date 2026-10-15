@@ -2,6 +2,7 @@
 members = [
     "apps/gateway",
     "apps/plugin-cli",
+    "apps/shared-budget-plugin",
     "crates/gateway-plugin/sdk",
     "crates/gateway-plugin/runtime",
     "crates/gateway-admin",
