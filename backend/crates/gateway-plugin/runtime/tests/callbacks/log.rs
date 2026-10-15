@@ -63,7 +63,7 @@ impl Subscriber for Capture {
         let id = visitor.0["instance_id"].clone();
         let mut state = self.state.lock().unwrap();
         *state.entering.entry(id.clone()).or_default() += 1;
-        self.changed.notify_one();
+        self.changed.notify_waiters();
         while state.blocked.contains(&id) {
             state = self.released.wait(state).unwrap();
         }
@@ -71,7 +71,7 @@ impl Subscriber for Capture {
             level: event.metadata().level().to_string(),
             fields: visitor.0,
         });
-        self.changed.notify_one();
+        self.changed.notify_waiters();
     }
 }
 pub(crate) fn initialize_capture() {
@@ -93,6 +93,10 @@ impl Capture {
             (SystemTime::now() + Duration::from_secs(5)).into();
         loop {
             let changed = self.changed.notified();
+            tokio::pin!(changed);
+            // Each instance waits on its own predicate. Register before reading
+            // it, and wake every waiter so another instance cannot steal a log.
+            changed.as_mut().enable();
             let current = {
                 let state = self.state.lock().unwrap();
                 if entering {
@@ -109,7 +113,14 @@ impl Capture {
                 return;
             }
             tokio::select! { biased;
-                () = deadline.wait() => panic!("bounded host log wait expired"),
+                () = deadline.wait() => {
+                    let (entered, recorded) = {
+                        let state = self.state.lock().unwrap();
+                        (state.entering.get(id).copied().unwrap_or_default(),
+                            state.records.iter().filter(|r| r.fields["instance_id"] == id).count())
+                    };
+                    panic!("bounded host log wait expired: instance={id}, entering={entering}, expected={count}, entered={entered}, recorded={recorded}");
+                },
                 () = changed => {},
             }
         }
@@ -124,6 +135,30 @@ impl Capture {
             .cloned()
             .collect()
     }
+}
+#[tokio::test]
+async fn log_waiters_for_distinct_instances_observe_their_own_event() {
+    let capture = Arc::new(Capture::default());
+    let unrelated = capture.wait_for("unrelated", 1, true);
+    tokio::pin!(unrelated);
+    assert!(futures::poll!(unrelated.as_mut()).is_pending());
+    let matching = capture.wait_for("matching", 1, true);
+    tokio::pin!(matching);
+    assert!(futures::poll!(matching.as_mut()).is_pending());
+    let block = Block::new(capture.clone(), "matching".into());
+    let writer_capture = capture.clone();
+    let write = tokio::task::spawn_blocking(move || {
+        tracing::subscriber::with_default(writer_capture, || {
+            tracing::info!(target: "gateway_plugin", instance_id = "matching", "fixture log");
+        });
+    });
+    tokio::time::timeout(Duration::from_secs(1), matching)
+        .await
+        .expect("an unrelated instance must not consume this instance's wakeup");
+    assert!(futures::poll!(unrelated.as_mut()).is_pending());
+    drop(block);
+    write.await.unwrap();
+    assert_eq!(capture.records("matching").len(), 1);
 }
 struct Block {
     capture: Arc<Capture>,
