@@ -535,7 +535,13 @@ impl MiddlewareInvocation {
                     || framing_for_response(self.transport, status),
                     |(_, _, _, _, body, _)| body.expected_framing(),
                 );
-                if framing != expected {
+                // A standalone HTTP rejection may be a JSON document (as in
+                // the upstream SDK examples) or opaque bytes. Existing next
+                // bodies must still retain their host-issued framing exactly.
+                let json_rejection = downstream.is_none()
+                    && !(200..300).contains(&status)
+                    && framing == MiddlewareFraming::JsonDocument;
+                if framing != expected && !json_rejection {
                     return Err(MiddlewareError::InvalidState);
                 }
                 MiddlewareCompletionBody::Stream {
