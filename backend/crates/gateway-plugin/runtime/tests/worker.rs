@@ -1022,7 +1022,7 @@ impl PluginHandler for Worker {
                 if self.adapter_mode=="command-unknown" {result["unexpected"]=json!(true);}
                 Ok(CallReply::unary(if self.adapter_mode=="command-envelope" {json!({"extra":true})} else {json!({})}, if self.adapter_mode=="command-invalid" {vec![255]} else {serde_json::to_vec(&result).unwrap()}))
             }
-            "upstream_adapter.execute" => upstream_execution(call).await,
+            "upstream_adapter.execute" => upstream_execution(call, self.contributes["upstream_adapter"]["version"] == 1).await,
             "upstream_adapter.register" => {
                 assert_eq!(call.context.stage, gateway_plugin_sdk::Stage::Registration);
                 assert_eq!(call.params, json!({}));
@@ -2551,7 +2551,7 @@ async fn typed_service<O: gateway_plugin_sdk::call::services::Operation>(
     }
 }
 
-async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> {
+async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply, PluginFault> {
     use gateway_plugin_sdk::{
         call::{
             model::{CanonicalEvent, ExecutionEvent, FinishReason, Usage, WireEvent, WirePayload},
@@ -2566,7 +2566,31 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
             host: None,
         }
     }
-    let (metadata, body) = UpstreamAdapterRequest::decode(&call.payload).unwrap();
+    let (metadata, body) = if legacy {
+        // v1 carries disable_fast rather than the v2 Fast tri-state. Check its
+        // actual wire before projecting into the shared fixture assertions.
+        assert_eq!(&call.payload[..4], b"GPAQ");
+        let metadata_len = u32::from_be_bytes(call.payload[4..8].try_into().unwrap()) as usize;
+        let body_len = u32::from_be_bytes(call.payload[8..12].try_into().unwrap()) as usize;
+        assert_eq!(call.payload.len(), 12 + metadata_len + body_len);
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&call.payload[12..12 + metadata_len]).unwrap();
+        assert!(metadata.get("fast_mode").is_none());
+        let disabled = metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("disable_fast")
+            .unwrap()
+            .as_bool()
+            .unwrap();
+        metadata["fast_mode"] = json!(if disabled { "disabled" } else { "default" });
+        (
+            serde_json::from_value::<UpstreamAdapterRequest>(metadata).unwrap(),
+            call.payload[12 + metadata_len..].to_vec(),
+        )
+    } else {
+        UpstreamAdapterRequest::decode(&call.payload).unwrap()
+    };
     let input: serde_json::Value = serde_json::from_slice(&body).unwrap();
     if let Some(expected) = input["expect_continuation"].as_bool() {
         assert_eq!(metadata.continuation.is_some(), expected);
@@ -2705,12 +2729,31 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
             ResponseStream::from_chunks(vec![event.encode().unwrap()]),
         ));
     }
+    let api_wire = input["fixture_api"].as_bool().unwrap_or(false);
+    let wire = |kind: &str| {
+        Some(WireEvent {
+            protocol: "openai".into(),
+            payload: WirePayload::Json {
+                event: Some(kind.into()),
+                data: json!({"type":kind,"response":{"id":"adapter-response","object":"response",
+                "model":metadata.upstream_model,"status":if kind=="response.completed" {"completed"} else {"in_progress"},
+                "output":[],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}),
+                id: None,
+                retry: None,
+                raw_sse: None,
+            },
+        })
+    };
     let started = UpstreamAdapterEvent::new(event(
         vec![CanonicalEvent::Started {
             id: "adapter-response".into(),
             model: Some(metadata.upstream_model.clone()),
         }],
-        None,
+        if api_wire {
+            wire("response.created")
+        } else {
+            None
+        },
     ))
     .encode()
     .unwrap();
@@ -2734,12 +2777,16 @@ async fn upstream_execution(call: PluginCall) -> Result<CallReply, PluginFault> 
                 reason: FinishReason::Stop,
             },
         ],
-        Some(WireEvent {
-            protocol: "openai".into(),
-            payload: WirePayload::RawJson {
-                body: br#"{"id":"adapter-response","status":"completed"}"#.to_vec(),
-            },
-        }),
+        if api_wire {
+            wire("response.completed")
+        } else {
+            Some(WireEvent {
+                protocol: "openai".into(),
+                payload: WirePayload::RawJson {
+                    body: br#"{"id":"adapter-response","status":"completed"}"#.to_vec(),
+                },
+            })
+        },
     ));
     completed.service_tier = Some("priority".into());
     if mode == "continuation" || mode.starts_with("websocket") {

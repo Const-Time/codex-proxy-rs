@@ -1,6 +1,8 @@
 use super::*;
 use futures::{StreamExt, future::BoxFuture};
-use gateway_admin::ports::plugins::PluginProcess;
+use gateway_admin::model::plugins::{
+    PluginAccess, PluginExecutionScope, PluginUpstreamAdapterBinding,
+};
 use gateway_core::{
     account::{
         AccountSelectionPolicy, CredentialRevision, OutboundProxy, ProviderAccountId,
@@ -10,7 +12,10 @@ use gateway_core::{
         AccountAttemptContext, AttemptContext, ModelRequestId, RequestAttemptContext,
         middleware::MiddlewareHeader,
         provider::ProviderCallMetadata,
-        upstream_adapter::{UpstreamAccountConnection, UpstreamAdapterInvocation},
+        upstream_adapter::{
+            UpstreamAccountConnection, UpstreamAdapter, UpstreamAdapterInvocation,
+            UpstreamAdapterPlan,
+        },
     },
     error::{
         ContinuationFailure, ContinuationRecoveryDisposition, ProviderError, ProviderErrorKind,
@@ -87,7 +92,8 @@ impl UpstreamAccountConnection for Account {
 struct Fixture {
     _cache: tempfile::TempDir,
     manager: PluginManager,
-    process: Arc<dyn PluginProcess>,
+    adapter: Arc<dyn UpstreamAdapter>,
+    access: PluginAccess,
 }
 impl Fixture {
     async fn new(url: &str, transport: &str) -> Self {
@@ -98,30 +104,37 @@ impl Fixture {
             "3.11.2".parse().unwrap(),
             store.clone(),
         ));
-        let manager = PluginManager::new(store.clone(), runtime.clone());
+        let manager = PluginManager::new(store, runtime);
         let artifact = manager
             .upload(upstream_archive("1.0.0"), &actor())
             .await
             .unwrap();
-        let mut input = update(&artifact.sha256, 0, false);
+        let mut input = update(&artifact.sha256, 0, true);
         input.configuration = json!({"adapter_url":url,"adapter_transport":transport});
-        manager.update(None, input, &actor()).await.unwrap();
-        let process = runtime
-            .prepare(
-                &store.list().await.unwrap()[0],
-                store.artifact(&artifact.sha256).await.unwrap(),
+        input.upstream_adapter = Some(PluginUpstreamAdapterBinding {
+            scope: PluginExecutionScope::All {},
+        });
+        let installed = manager.update(None, input, &actor()).await.unwrap();
+        let access = manager.access(&installed.id, installed.revision).unwrap();
+        let selection = invocation("synthetic", Account::new(), None, CancellationToken::new());
+        let adapter = manager
+            .middleware_registry()
+            .unwrap()
+            .select(
+                &selection.context,
+                selection.metadata.provider(),
+                selection.metadata.upstream_model().unwrap(),
             )
-            .await
+            .unwrap()
             .unwrap();
-        process.activate();
         Self {
             _cache: cache,
             manager,
-            process,
+            adapter,
+            access,
         }
     }
     async fn stop(self) {
-        self.process.stop().await;
         self.manager.shutdown().await;
     }
     fn stream(
@@ -131,8 +144,7 @@ impl Fixture {
         state: Option<ProviderSessionState>,
         cancellation: CancellationToken,
     ) -> gateway_core::engine::provider::EventStream {
-        invocation(behavior, account, state, cancellation)
-            .into_stream(self.process.upstream_adapter("adapter").unwrap())
+        invocation(behavior, account, state, cancellation).into_stream(self.adapter.clone())
     }
 }
 pub(super) fn invocation(
@@ -317,7 +329,7 @@ async fn sdk_adapter_tail_error_keeps_metering_but_never_delivers_completed_wire
         );
         assert_eq!(account.failures.load(Ordering::SeqCst), 1);
         if mode == "tail" {
-            assert!(f.process.access().is_revoked());
+            assert!(f.access.is_revoked());
         }
         assert!(!format!("{error:?}").contains("private fixture tail fault"));
         f.stop().await;
@@ -352,7 +364,7 @@ async fn sdk_adapter_validates_sequence_and_preserves_host_send_state_on_failure
         assert_eq!(account.failures.load(Ordering::SeqCst), 1);
         if mode == "failure" {
             assert_eq!(error.retry_after(), Some(Duration::from_millis(1200)));
-            assert_eq!(f.process.status(), "ready");
+            assert_eq!(f.manager.list().await.unwrap()[0].status, "ready");
         }
         f.stop().await;
     }
@@ -424,7 +436,7 @@ async fn sdk_adapter_continuation_is_owned_by_instance_key_account_and_credentia
                 .with_extension_owner(state.extension_owner().unwrap().clone());
         }
         call.operation.set_provider_session_state(modified);
-        let mut stream = call.into_stream(f.process.upstream_adapter("adapter").unwrap());
+        let mut stream = call.into_stream(f.adapter.clone());
         let error = stream.next().await.unwrap().unwrap_err();
         assert_eq!(
             error.kind(),
@@ -448,13 +460,13 @@ async fn sdk_adapter_revocation_cancels_a_pending_call_and_rejects_retained_adap
     let server = Server::new().await;
     let f = Fixture::new(&server.url, "http_sse").await;
     let account = Account::new();
-    let adapter = f.process.upstream_adapter("adapter").unwrap();
+    let adapter = f.adapter.clone();
     let mut stream = f.stream("wait", account.clone(), None, CancellationToken::new());
     let waiting = tokio::spawn(async move { stream.next().await.unwrap() });
     tokio::time::timeout(Duration::from_secs(5), server.entered.notified())
         .await
         .unwrap();
-    f.process.access().revoke();
+    f.access.revoke();
     let error = tokio::time::timeout(Duration::from_secs(3), waiting)
         .await
         .unwrap()
@@ -534,7 +546,7 @@ async fn sdk_adapter_websocket_continuation_reuses_one_connection_and_revocation
                 "idle connections must not hold the prior account lease"
             );
         }
-        f.process.access().revoke();
+        f.access.revoke();
         tokio::time::timeout(Duration::from_secs(3), closed)
             .await
             .unwrap()
@@ -590,7 +602,7 @@ async fn upstream_generic_http_inherits_selected_proxy_without_account_authentic
             )
             .unwrap(),
         ));
-        let mut stream = input.into_stream(f.process.upstream_adapter("adapter").unwrap());
+        let mut stream = input.into_stream(f.adapter.clone());
         while let Some(event) = stream.next().await {
             event.unwrap();
         }

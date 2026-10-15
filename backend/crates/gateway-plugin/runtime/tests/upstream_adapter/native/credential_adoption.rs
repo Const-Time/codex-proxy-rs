@@ -9,14 +9,7 @@ use std::{sync::Arc, time::Duration};
 async fn live(f: &Fixture) -> (StartedExecution, Arc<dyn UpstreamAccountConnection>) {
     let (plan, selected) = super::capture::plan(f);
     let mut started = f.start_with_adapter_plan("wait", plan).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), started.session.next_event())
-            .await
-            .is_err()
-    );
-    tokio::time::timeout(Duration::from_secs(5), f.server.entered.notified())
-        .await
-        .unwrap();
+    super::fixture::drive_until(&mut started, &f.server.entered, Duration::from_secs(5)).await;
     let account = selected
         .lock()
         .unwrap()

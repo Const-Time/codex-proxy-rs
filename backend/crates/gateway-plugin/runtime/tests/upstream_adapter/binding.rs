@@ -1,11 +1,7 @@
 use super::execution::{Account, invocation};
 use super::*;
-use async_trait::async_trait;
 use futures::StreamExt;
-use gateway_admin::{
-    model::{AdminError, plugins::*},
-    ports::plugins::PluginProcess,
-};
+use gateway_admin::model::plugins::*;
 use gateway_core::{
     account::{AccountSelectionPolicy, RotationStrategy, scope::*},
     engine::{
@@ -23,46 +19,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-// Exercise real preparation/publication while production enablement remains gated.
-// The only bypass is enabled=false during validation; declarations and schemas still validate.
-pub(crate) struct CandidateRuntime(pub(crate) Arc<PluginEngine>);
-#[async_trait]
-impl PluginRuntime for CandidateRuntime {
-    async fn prepare_state(
-        &self,
-        record: &PluginRecord,
-        artifact: &PluginArtifact,
-        process: Option<&Arc<dyn PluginProcess>>,
-    ) -> Result<Option<PluginStateCommit>, AdminError> {
-        self.0.prepare_state(record, artifact, process).await
-    }
-    async fn shutdown(&self) {
-        self.0.shutdown().await;
-    }
-    fn describe(&self, info: PluginArtifactInfo) -> Result<PluginArtifactInfo, AdminError> {
-        self.0.describe(info)
-    }
-    async fn inspect(&self, archive: Arc<[u8]>) -> Result<PluginArtifact, AdminError> {
-        self.0.inspect(archive).await
-    }
-    async fn validate(
-        &self,
-        record: &PluginRecord,
-        artifact: &PluginArtifact,
-        previous: Option<&PluginArtifact>,
-    ) -> Result<(), AdminError> {
-        let mut record = record.clone();
-        record.enabled = false;
-        self.0.validate(&record, artifact, previous).await
-    }
-    async fn prepare(
-        &self,
-        record: &PluginRecord,
-        artifact: PluginArtifact,
-    ) -> Result<Arc<dyn PluginProcess>, AdminError> {
-        self.0.prepare(record, artifact).await
-    }
-}
 struct Fixture {
     manager: PluginManager,
     store: Arc<MemoryStore>,
@@ -73,12 +29,12 @@ impl Fixture {
     async fn new() -> Self {
         let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(MemoryStore::default());
-        let runtime = Arc::new(CandidateRuntime(Arc::new(PluginEngine::new(
+        let runtime = Arc::new(PluginEngine::new(
             cache.path().into(),
             "3.11.2".parse().unwrap(),
             store.clone(),
-        ))));
-        let manager = PluginManager::new(store.clone(), runtime.clone());
+        ));
+        let manager = PluginManager::new(store.clone(), runtime);
         let digest = manager
             .upload(upstream_archive("1.0.0"), &actor())
             .await
@@ -91,12 +47,12 @@ impl Fixture {
             _cache: cache,
         }
     }
-    fn restart_runtime(&self) -> Arc<CandidateRuntime> {
-        Arc::new(CandidateRuntime(Arc::new(PluginEngine::new(
+    fn restart_runtime(&self) -> Arc<PluginEngine> {
+        Arc::new(PluginEngine::new(
             self._cache.path().into(),
             "3.11.2".parse().unwrap(),
             self.store.clone(),
-        ))))
+        ))
     }
     fn command(&self, revision: u64, scope: PluginExecutionScope) -> PluginUpdate {
         let mut command = update(&self.digest, revision, true);

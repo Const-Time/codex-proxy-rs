@@ -1,7 +1,7 @@
 use crate::support::{MemoryStore, actor, archive, command_archive, update};
 use async_trait::async_trait;
 use futures::{StreamExt as _, future::BoxFuture};
-use gateway_admin::ports::plugins::{PluginRuntime, PluginService};
+use gateway_admin::ports::plugins::PluginService;
 use gateway_admin::{
     ClientKeyService,
     model::{AdminError, MutationContext, Revision, client_keys::*},
@@ -831,31 +831,27 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new() -> Self {
-        Self::build(false, false, &["acct_allowed"], None, false).await
+        Self::build(false, false, &["acct_allowed"], None).await
     }
     pub async fn with_middleware() -> Self {
-        Self::build(true, false, &["acct_allowed"], None, false).await
+        Self::build(true, false, &["acct_allowed"], None).await
     }
     pub async fn with_command() -> Self {
-        Self::build(false, true, &["acct_allowed"], None, false).await
+        Self::build(false, true, &["acct_allowed"], None).await
     }
     pub async fn with_accounts(accounts: &[&str]) -> Self {
-        Self::build(true, false, accounts, None, false).await
-    }
-    pub async fn with_upstream_accounts(accounts: &[&str]) -> Self {
-        Self::build(true, false, accounts, None, true).await
+        Self::build(true, false, accounts, None).await
     }
     pub async fn with_affinity(
         affinity: Arc<dyn gateway_core::provider_ports::ProviderSessionAffinityPort>,
     ) -> Self {
-        Self::build(false, false, &["acct_allowed"], Some(affinity), false).await
+        Self::build(false, false, &["acct_allowed"], Some(affinity)).await
     }
     async fn build(
         middleware: bool,
         command_line: bool,
         accounts: &[&str],
         affinity: Option<Arc<dyn gateway_core::provider_ports::ProviderSessionAffinityPort>>,
-        upstream_adapter: bool,
     ) -> Self {
         let core = Arc::new(Core::default());
         let mut providers: Vec<Arc<dyn Provider>> = vec![core.clone()];
@@ -895,14 +891,7 @@ impl Fixture {
                 )),
                 Arc::new(Keys),
             );
-            let runtime: Arc<dyn PluginRuntime> = if upstream_adapter {
-                Arc::new(crate::upstream_adapter::binding::CandidateRuntime(
-                    Arc::new(engine),
-                ))
-            } else {
-                Arc::new(engine)
-            };
-            PluginManager::new(store.clone(), runtime)
+            PluginManager::new(store.clone(), Arc::new(engine))
                 .with_model_catalog(Arc::new(snapshot.clone()))
         });
         let artifact = manager

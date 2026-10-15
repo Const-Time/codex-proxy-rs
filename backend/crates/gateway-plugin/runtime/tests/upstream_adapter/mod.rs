@@ -5,7 +5,7 @@ mod native;
 use crate::support::*;
 use gateway_admin::{
     plugins::PluginManager,
-    ports::plugins::{PluginRuntime, PluginService, PluginStore},
+    ports::plugins::{PluginService, PluginStore},
 };
 use gateway_plugin_runtime::{PluginEngine, upstream_adapter::RegisteredAdapter};
 use gateway_plugin_sdk::{ContributionDeclaration, Stage, call::upstream_adapter::*};
@@ -107,74 +107,65 @@ fn upstream_adapter_registration_rejects_ambiguous_base_paths_and_model_ranges()
 }
 #[tokio::test]
 async fn sdk_upstream_adapter_registration_is_validated_before_the_instance_can_be_published() {
-    let cache = tempfile::tempdir().unwrap();
-    let store = Arc::new(MemoryStore::default());
-    let runtime = Arc::new(PluginEngine::new(
-        cache.path().into(),
-        "3.11.2".parse().unwrap(),
-        store.clone(),
-    ));
-    let manager = PluginManager::new(store.clone(), runtime.clone());
-    let artifact = manager
-        .upload(upstream_archive("1.0.0"), &actor())
-        .await
-        .unwrap();
-    assert!(
-        artifact
-            .unsupported_capabilities
-            .contains(&"upstream_adapter".into())
-    );
-    assert!(
-        manager
-            .update(None, update(&artifact.sha256, 0, true), &actor())
+    for contract in [1, 2] {
+        let cache = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(PluginEngine::new(
+            cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            store.clone(),
+        ));
+        let manager = PluginManager::new(store.clone(), runtime);
+        let artifact = manager
+            .upload(upstream_archive_contract("1.0.0", contract), &actor())
             .await
-            .is_err()
-    );
-    let installed = manager
-        .update(None, update(&artifact.sha256, 0, false), &actor())
-        .await
-        .unwrap();
-    let original = store.list().await.unwrap().remove(0);
-    let package = store.artifact(&artifact.sha256).await.unwrap();
-    let process = runtime.prepare(&original, package.clone()).await.unwrap();
-    process.activate();
-    let registered = process.upstream_adapters();
-    assert_eq!(registered.len(), 1);
-    assert_eq!(registered[0].id, "adapter");
-    assert_eq!(registered[0].provider, "openai");
-    assert_eq!(registered[0].models, ["public-model"]);
-    assert_eq!(registered[0].authentication_kinds, ["oauth"]);
-    assert_eq!(registered[0].transport, "http_sse");
-    for mode in [
-        "id",
-        "provider",
-        "base",
-        "path",
-        "path-purpose",
-        "auth",
-        "auth-id",
-        "protocol",
-        "transport",
-        "models",
-        "unknown",
-        "empty",
-        "too-many",
-        "duplicate",
-        "oversized",
-        "envelope",
-    ] {
-        let mut record = original.clone();
-        record.revision += 1;
-        record.configuration["adapter_mode"] = json!(mode);
+            .unwrap();
         assert!(
-            runtime.prepare(&record, package.clone()).await.is_err(),
-            "{mode}"
+            artifact.unsupported_capabilities.is_empty(),
+            "contract v{contract}"
         );
-        assert_eq!(process.status(), "ready");
-        assert!(!process.access().is_revoked());
-        assert!(store.list().await.unwrap()[0] == original);
+        let mut command = update(&artifact.sha256, 0, true);
+        command.upstream_adapter = Some(
+            gateway_admin::model::plugins::PluginUpstreamAdapterBinding {
+                scope: gateway_admin::model::plugins::PluginExecutionScope::All {},
+            },
+        );
+        let installed = manager.update(None, command, &actor()).await.unwrap();
+        assert_eq!(installed.status, "ready");
+        let original = store.list().await.unwrap().remove(0);
+        let access = manager.access(&installed.id, installed.revision).unwrap();
+        for mode in [
+            "id",
+            "provider",
+            "base",
+            "path",
+            "path-purpose",
+            "auth",
+            "auth-id",
+            "protocol",
+            "transport",
+            "models",
+            "unknown",
+            "empty",
+            "too-many",
+            "duplicate",
+            "oversized",
+            "envelope",
+        ] {
+            let mut command = update(&artifact.sha256, installed.revision, true);
+            command.upstream_adapter = installed.upstream_adapter.clone();
+            command.configuration["adapter_mode"] = json!(mode);
+            assert!(
+                manager
+                    .update(Some(&installed.id), command, &actor())
+                    .await
+                    .is_err(),
+                "v{contract}: {mode}"
+            );
+            assert!(!access.is_revoked());
+            assert!(store.list().await.unwrap()[0] == original);
+            assert_eq!(manager.list().await.unwrap()[0].status, "ready");
+        }
+        manager.shutdown().await;
     }
-    assert_eq!(store.list().await.unwrap()[0].revision, installed.revision);
-    process.stop().await;
-    manager.shutdown().await;
 }

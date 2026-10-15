@@ -64,7 +64,7 @@ impl UpstreamAccountConnection for Connection {
 }
 
 pub(crate) async fn fixture() -> (Fixture, Server) {
-    let f = Fixture::with_upstream_accounts(&["acct_allowed", "acct_alternative"]).await;
+    let f = Fixture::with_accounts(&["acct_allowed", "acct_alternative"]).await;
     f.snapshot
         .publish(crate::models::fixture::snapshot_with_attempts(
             2,

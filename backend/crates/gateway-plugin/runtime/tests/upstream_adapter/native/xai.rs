@@ -189,14 +189,7 @@ async fn real_core_xai_adapter_key_revocation_releases_native_account_and_settle
         return;
     };
     let mut started = f.start("wait").await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), started.session.next_event())
-            .await
-            .is_err()
-    );
-    tokio::time::timeout(Duration::from_secs(3), f.server.entered.notified())
-        .await
-        .unwrap();
+    super::fixture::drive_until(&mut started, &f.server.entered, Duration::from_secs(3)).await;
     assert_eq!(f.in_flight().await, 1);
     f.revoke_key();
     assert!(
@@ -226,14 +219,7 @@ async fn real_core_xai_adapter_cancel_and_plugin_disable_release_native_lease() 
     };
     for (index, revoke) in [false, true].into_iter().enumerate() {
         let mut started = f.start("wait").await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), started.session.next_event())
-                .await
-                .is_err()
-        );
-        tokio::time::timeout(Duration::from_secs(3), f.server.entered.notified())
-            .await
-            .unwrap();
+        super::fixture::drive_until(&mut started, &f.server.entered, Duration::from_secs(3)).await;
         assert_eq!(f.in_flight().await, 1);
         if revoke {
             f.disable().await;

@@ -203,6 +203,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
         .iter()
         .filter(|(cap, decl)| match cap {
             Capability::Middleware => decl.version != 4,
+            Capability::UpstreamAdapter => !matches!(decl.version, 1 | 2),
             Capability::Management
             | Capability::FrontendAuthentication
             | Capability::ModelCatalog
@@ -212,7 +213,6 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
             | Capability::Maintenance
             | Capability::Observer
             | Capability::CommandLine => decl.version != 1,
-            _ => true,
         })
         .map(|(cap, _)| cap.identifier().into())
         .collect()
