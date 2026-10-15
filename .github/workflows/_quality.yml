@@ -146,13 +146,17 @@ jobs:
         working-directory: backend
         run: cargo test --test main --locked
 
+      - name: Native xAI command account creation
+        run: bash .github/scripts/check-native-xai-create
+
       - name: Native plugin database backup and restore
         working-directory: backend
         shell: bash
         run: |
           set -euo pipefail
           # Use the exact server image for matching pg_dump/pg_restore clients.
-          export CPR_TEST_PG_CLIENT_IMAGE="$(docker inspect --format '{{.Image}}' '${{ job.services.postgres.id }}')"
+          CPR_TEST_PG_CLIENT_IMAGE="$(docker inspect --format '{{.Image}}' '${{ job.services.postgres.id }}')"
+          export CPR_TEST_PG_CLIENT_IMAGE
           client_bin="$(mktemp -d)"
           cat > "$client_bin/pg_dump" <<'CLIENT'
           #!/usr/bin/env bash
