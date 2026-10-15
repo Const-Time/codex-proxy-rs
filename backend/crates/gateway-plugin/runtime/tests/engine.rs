@@ -168,11 +168,84 @@ async fn sigterm_native_work(retirement: Option<&str>) {
         );
     }
     let binary = binary();
+    // Preparing a debug executable archive is CPU-heavy. Complete it before
+    // holding an upstream response whose timeout measures native shutdown work.
+    let archive = if retirement.is_some() {
+        support::maintenance_archive("1.0.0")
+    } else {
+        support::archive("1.0.0", false)
+    };
+    let upgrade_archive =
+        (retirement == Some("upgrade")).then(|| support::maintenance_archive("1.0.1"));
     let directory = tempfile::tempdir().unwrap();
     let quota = if retirement.is_some() {
         Some(support::quota_server::Server::new(true).await)
     } else {
         None
+    };
+    let (ports, initial_observations) = if retirement.is_some() {
+        use gateway_core::account::{
+            OpaqueProviderData, QuotaObservation, QuotaState, QuotaWriteOutcome,
+        };
+        use provider_openai::credential::*;
+        let mut config: gateway_store::StoreConfig = serde_json::from_value(
+            json!({"database":connection(&database_url),"redis":connection(&redis_url)}),
+        )
+        .unwrap();
+        config.resolve_and_validate(directory.path()).unwrap();
+        let store = gateway_store::initialize(config).await.unwrap();
+        let ports = store.provider_ports();
+        let prepared = CodexCredentialAdmin
+            .prepare_import(ImportCodexOAuthCredential {
+                account_id: "acct_host-maintenance".into(),
+                name: "Host maintenance fixture".into(),
+                enabled: true,
+                secret: CodexOAuthSecret {
+                    access_token: secrecy::SecretString::from("fixture-provider-secret"),
+                    refresh_token: None,
+                    id_token: None,
+                },
+                verified_account: CodexAccountProfile {
+                    oauth_subject: "host-maintenance-subject".into(),
+                    poid: None,
+                    chatgpt_account_id: "host-maintenance-account".into(),
+                    chatgpt_user_id: "host-maintenance-user".into(),
+                    email: None,
+                    plan_type: Some("pro".into()),
+                    access_token_expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                },
+                next_refresh_at: None,
+            })
+            .unwrap();
+        let account_id = prepared.account.id().clone();
+        let revision = prepared.account.revision();
+        ports.accounts().create_account(prepared).await.unwrap();
+        // A new account without observations is also refreshed by the native
+        // 30-second worker. Seed its baseline before Host startup so this test
+        // counts only the plugin's explicit refresh, regardless of setup speed.
+        let observed_at = std::time::SystemTime::now();
+        let quota = json!({"plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,
+            "primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":(chrono::Utc::now()+chrono::Duration::hours(5)).timestamp()}}});
+        assert_eq!(
+            ports
+                .accounts()
+                .compare_and_swap_quota(QuotaObservation {
+                    account_id: account_id.clone(),
+                    expected_revision: revision,
+                    quota: OpaqueProviderData::new(quota.as_object().unwrap().clone()),
+                    plan_type: None,
+                    observed_at,
+                    state: QuotaState::allowed(observed_at),
+                })
+                .await
+                .unwrap(),
+            QuotaWriteOutcome::Updated
+        );
+        let initial = ports.accounts().get_quotas(&[account_id]).await.unwrap();
+        assert_eq!(initial.len(), 1);
+        (Some(ports), initial)
+    } else {
+        (None, vec![])
     };
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -223,47 +296,6 @@ async fn sigterm_native_work(retirement: Option<&str>) {
         .next()
         .unwrap()
         .to_owned();
-    let ports = if retirement.is_some() {
-        use provider_openai::credential::*;
-        let mut config: gateway_store::StoreConfig = serde_json::from_value(
-            json!({"database":connection(&database_url),"redis":connection(&redis_url)}),
-        )
-        .unwrap();
-        config.resolve_and_validate(directory.path()).unwrap();
-        let store = gateway_store::initialize(config).await.unwrap();
-        let ports = store.provider_ports();
-        let prepared = CodexCredentialAdmin
-            .prepare_import(ImportCodexOAuthCredential {
-                account_id: "acct_host-maintenance".into(),
-                name: "Host maintenance fixture".into(),
-                enabled: true,
-                secret: CodexOAuthSecret {
-                    access_token: secrecy::SecretString::from("fixture-provider-secret"),
-                    refresh_token: None,
-                    id_token: None,
-                },
-                verified_account: CodexAccountProfile {
-                    oauth_subject: "host-maintenance-subject".into(),
-                    poid: None,
-                    chatgpt_account_id: "host-maintenance-account".into(),
-                    chatgpt_user_id: "host-maintenance-user".into(),
-                    email: None,
-                    plan_type: Some("pro".into()),
-                    access_token_expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-                },
-                next_refresh_at: None,
-            })
-            .unwrap();
-        ports.accounts().create_account(prepared).await.unwrap();
-        Some(ports)
-    } else {
-        None
-    };
-    let archive = if retirement.is_some() {
-        support::maintenance_archive("1.0.0")
-    } else {
-        support::archive("1.0.0", false)
-    };
     let artifact: Value = client
         .post(format!("{base}/api/admin/plugins/artifacts"))
         .header("cookie", &cookie)
@@ -276,6 +308,37 @@ async fn sigterm_native_work(retirement: Option<&str>) {
         .json()
         .await
         .unwrap();
+    // Upload both candidates before enabling the maintenance task.
+    let sha = if let Some(upgrade_archive) = &upgrade_archive {
+        let artifact: Value = client
+            .post(format!("{base}/api/admin/plugins/artifacts"))
+            .header("cookie", &cookie)
+            .body(upgrade_archive.as_ref().to_vec())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        artifact["data"]["sha256"].clone()
+    } else {
+        artifact["data"]["sha256"].clone()
+    };
+    if retirement == Some("upgrade") {
+        // Cross the native worker's 30-second cycle before activating a plugin:
+        // an already observed, unexpired account must not trigger a query.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(31),
+                quota.as_ref().unwrap().entered.notified()
+            )
+            .await
+            .is_err(),
+            "native initial synchronization must not compete with plugin refresh"
+        );
+    }
     let installed: Value = client
         .post(format!("{base}/api/admin/plugins"))
         .header("cookie", &cookie)
@@ -314,23 +377,6 @@ async fn sigterm_native_work(retirement: Option<&str>) {
         tokio::time::timeout(Duration::from_secs(5), quota.entered.notified())
             .await
             .unwrap();
-        let sha = if action == "upgrade" {
-            let artifact: Value = client
-                .post(format!("{base}/api/admin/plugins/artifacts"))
-                .header("cookie", &cookie)
-                .body(support::maintenance_archive("1.0.1").as_ref().to_vec())
-                .send()
-                .await
-                .unwrap()
-                .error_for_status()
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            artifact["data"]["sha256"].clone()
-        } else {
-            artifact["data"]["sha256"].clone()
-        };
         // The replacement reconciles private state only, so it cannot start a
         // second quota request while the accepted old-generation task is held.
         let changed: Value = client
@@ -360,7 +406,11 @@ async fn sigterm_native_work(retirement: Option<&str>) {
                 .error_for_status()
                 .unwrap();
         }
-        assert_eq!(quota.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            quota.requests.lock().unwrap().len(),
+            1,
+            "{action}: only the accepted plugin refresh may be sent"
+        );
         let observations = ports
             .as_ref()
             .unwrap()
@@ -370,9 +420,9 @@ async fn sigterm_native_work(retirement: Option<&str>) {
             ])
             .await
             .unwrap();
-        assert!(
-            observations.is_empty(),
-            "held native request must not have published an observation"
+        assert_eq!(
+            observations, initial_observations,
+            "held native request must not change the baseline observation"
         );
         (None, None)
     } else {

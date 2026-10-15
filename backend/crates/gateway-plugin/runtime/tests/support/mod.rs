@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
@@ -379,13 +379,57 @@ pub fn command_archive(version: &str) -> Arc<[u8]> {
         (false, false, false, 0, false, false, true),
     )
 }
+type ArchiveModes = (bool, bool, bool, u32, bool, bool, bool);
+type ArchiveKey = (String, bool, bool, bool, bool, ArchiveModes);
+type CachedArchive = Arc<OnceLock<Arc<[u8]>>>;
+
 fn build_archive(
     version: &str,
     extra_capability: bool,
     authentication: bool,
     routing: bool,
     scheduling: bool,
-    modes: (bool, bool, bool, u32, bool, bool, bool),
+    modes: ArchiveModes,
+) -> Arc<[u8]> {
+    // Only immutable package bytes are shared. Every test still installs and
+    // validates the archive in its own store, manager and subprocess.
+    static ARCHIVES: OnceLock<Mutex<BTreeMap<ArchiveKey, CachedArchive>>> = OnceLock::new();
+    let key = (
+        version.to_owned(),
+        extra_capability,
+        authentication,
+        routing,
+        scheduling,
+        modes,
+    );
+    let cached = ARCHIVES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_default()
+        .clone();
+    cached
+        .get_or_init(|| {
+            pack_archive(
+                version,
+                extra_capability,
+                authentication,
+                routing,
+                scheduling,
+                modes,
+            )
+        })
+        .clone()
+}
+
+fn pack_archive(
+    version: &str,
+    extra_capability: bool,
+    authentication: bool,
+    routing: bool,
+    scheduling: bool,
+    modes: ArchiveModes,
 ) -> Arc<[u8]> {
     let (retry, http, catalog, upstream, maintenance, observer, command_line) = modes;
     let executable = std::fs::read(env!("CARGO_BIN_EXE_gateway-plugin-test-worker")).unwrap();
