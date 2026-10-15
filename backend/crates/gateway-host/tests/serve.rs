@@ -44,7 +44,8 @@ impl DaemonTask for DrainWriter {
 
 #[test]
 fn host_bundle_serve_is_a_consuming_process_entrypoint() {
-    let _serve = HostBundle::serve;
+    let _serve =
+        |host: HostBundle, router: axum::Router| host.serve(router, std::future::ready(()));
 
     assert_eq!(std::mem::size_of_val(&_serve), 0);
 }
@@ -60,10 +61,14 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
             "operation_timeout",
             "workers",
             "serve_workers",
+            "extension_workers",
+            "serve_extension_workers",
+            "serve_error_extension_workers",
+            "startup_error_extension_workers",
         ] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "serve::command_terminal_preserves_results_cancels_and_drains_without_binding_http"])
-                .env(CASE, case).env("RUST_LOG", "off").output().unwrap();
+                .env(CASE, case).env("RUST_LOG", "info").output().unwrap();
             assert!(
                 output.status.success(),
                 "{case}: {} {}",
@@ -73,39 +78,41 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
         }
         #[cfg(unix)]
         {
-            let directory = tempfile::tempdir().unwrap();
-            let ready = directory.path().join("ready");
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            for signal_case in ["sigterm", "sigterm_extension_workers"] {
+                let directory = tempfile::tempdir().unwrap();
+                let ready = directory.path().join("ready");
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "serve::command_terminal_preserves_results_cancels_and_drains_without_binding_http"])
-                .env(CASE, "sigterm").env("CPR_TEST_COMMAND_TERMINAL_READY", &ready)
-                .env("RUST_LOG", "off").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
-            let until = std::time::Instant::now() + Duration::from_secs(5);
-            while !ready.exists() && std::time::Instant::now() < until {
+                .env(CASE, signal_case).env("CPR_TEST_COMMAND_TERMINAL_READY", &ready)
+                .env("RUST_LOG", "info").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+                let until = std::time::Instant::now() + Duration::from_secs(5);
+                while !ready.exists() && std::time::Instant::now() < until {
+                    assert!(
+                        child.try_wait().unwrap().is_none(),
+                        "signal child exited before ready"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if !ready.exists() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("signal child did not become ready");
+                }
                 assert!(
-                    child.try_wait().unwrap().is_none(),
-                    "signal child exited before ready"
+                    std::process::Command::new("kill")
+                        .args(["-TERM", &child.id().to_string()])
+                        .status()
+                        .unwrap()
+                        .success()
                 );
-                std::thread::sleep(Duration::from_millis(5));
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
-            if !ready.exists() {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("signal child did not become ready");
-            }
-            assert!(
-                std::process::Command::new("kill")
-                    .args(["-TERM", &child.id().to_string()])
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "{} {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
         }
         return;
     };
@@ -122,6 +129,7 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
         config.listen.port = listener.as_ref().unwrap().local_addr().unwrap().port();
         config.drain_timeout_seconds = 1;
         config.worker_shutdown_timeout_seconds = 1;
+        config.logging.level = "info".into();
         let host = gateway_host::initialize(config).await.unwrap();
         let cancellation = host.cancellation();
         let graph = gateway_core::engine::nested::ExtensionCallScope::default();
@@ -132,7 +140,9 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     drop(child);
                 });
-                let completion = host.command(async { "returned" }, graph.clone()).await;
+                let completion = host
+                    .command(async { "returned" }, graph.clone(), async {})
+                    .await;
                 assert_eq!(completion.result, Some("returned"));
                 assert!(completion.graph_drained);
             }
@@ -149,6 +159,7 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
                             "cancelled"
                         },
                         graph.clone(),
+                        async {},
                     )
                     .await;
                 assert_eq!(completion.result, Some("cancelled"));
@@ -166,14 +177,14 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
                     cancellation.cancelled().await;
                     "signal cancelled"
                 };
-                let completion = host.command(operation, graph.clone()).await;
+                let completion = host.command(operation, graph.clone(), async {}).await;
                 assert_eq!(completion.result, Some("signal cancelled"));
                 assert!(completion.graph_drained);
             }
             "drain_timeout" => {
                 let held = graph.fork_http("host-command".into()).unwrap();
                 let completion = host
-                    .command(async { "confirmed effects" }, graph.clone())
+                    .command(async { "confirmed effects" }, graph.clone(), async {})
                     .await;
                 assert_eq!(completion.result, Some("confirmed effects"));
                 assert!(!completion.graph_drained);
@@ -187,7 +198,7 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
                     let _held = held;
                     std::future::pending::<String>().await
                 };
-                let completion = host.command(operation, graph.clone()).await;
+                let completion = host.command(operation, graph.clone(), async {}).await;
                 assert!(completion.result.is_none());
                 assert!(
                     completion.graph_drained,
@@ -195,7 +206,13 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
                 );
                 graph.wait_until_idle().await;
             }
-            "workers" | "serve_workers" => {
+            "workers"
+            | "serve_workers"
+            | "extension_workers"
+            | "serve_extension_workers"
+            | "serve_error_extension_workers"
+            | "sigterm_extension_workers"
+            | "startup_error_extension_workers" => {
                 let entered = Arc::new(Notify::new());
                 let stopped = Arc::new(AtomicBool::new(false));
                 let (sender, receiver) = mpsc::channel(1);
@@ -223,7 +240,8 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
                 host.start_workers(plan, Arc::new(crate::workers::FakeLeasePort::default()))
                     .unwrap();
                 entered.notified().await;
-                let child = graph.fork_http("host-command".into()).unwrap();
+                let extension = case.to_str().unwrap().contains("extension");
+                let child = (!extension).then(|| graph.fork_http("host-command".into()).unwrap());
                 let connection = (case == "serve_workers")
                     .then(|| host.connection_lifecycle().try_register().unwrap());
                 let observed = cancellation.clone();
@@ -242,22 +260,54 @@ fn command_terminal_preserves_results_cancels_and_drains_without_binding_http() 
                     drop(child);
                     drop(connection);
                 });
-                if case == "workers" {
-                    let completion = host.command(async { "confirmed" }, graph.clone()).await;
+                let finalize = async {
+                    cleanup
+                        .await
+                        .expect("late cleanup finishes before worker shutdown");
+                    assert!(!stopped.load(Ordering::SeqCst));
+                    tracing::info!("extension cleanup finished before writer shutdown");
+                };
+                if case == "startup_error_extension_workers" {
+                    host.shutdown(finalize).await;
+                } else if !case.to_str().unwrap().starts_with("serve_") {
+                    let operation = async {
+                        if case == "sigterm_extension_workers" {
+                            let ready =
+                                std::env::var_os("CPR_TEST_COMMAND_TERMINAL_READY").unwrap();
+                            tokio::spawn(async move {
+                                std::fs::write(ready, b"ready").unwrap();
+                            });
+                            cancellation.cancelled().await;
+                        }
+                        "confirmed"
+                    };
+                    let completion = host.command(operation, graph.clone(), finalize).await;
                     assert_eq!(completion.result, Some("confirmed"));
                     assert!(completion.graph_drained);
                 } else {
-                    drop(listener.take());
-                    let stop = cancellation.clone();
-                    tokio::spawn(async move {
-                        tokio::task::yield_now().await;
-                        stop.cancel();
-                    });
-                    host.serve(axum::Router::new()).await.unwrap();
+                    let bind_error = case == "serve_error_extension_workers";
+                    if !bind_error {
+                        drop(listener.take());
+                        let stop = cancellation.clone();
+                        tokio::spawn(async move {
+                            tokio::task::yield_now().await;
+                            stop.cancel();
+                        });
+                    }
+                    assert_eq!(
+                        host.serve(axum::Router::new(), finalize).await.is_err(),
+                        bind_error
+                    );
                 }
-                cleanup
-                    .await
-                    .expect("late cleanup finishes before worker shutdown");
+                assert!(
+                    std::fs::read_dir(directory.path())
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .any(|entry| std::fs::read_to_string(entry.path())
+                            .unwrap_or_default()
+                            .contains("extension cleanup finished before writer shutdown")),
+                    "logging must remain live until extension finalization completes"
+                );
                 assert!(
                     stopped.load(Ordering::SeqCst),
                     "worker must join after drain"

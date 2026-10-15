@@ -164,7 +164,7 @@ jobs:
           cp "$client_bin/pg_dump" "$client_bin/pg_restore"
           chmod +x "$client_bin/pg_dump" "$client_bin/pg_restore"
           export PATH="$client_bin:$PATH"
-          cargo test -p gateway-plugin-runtime --all-features --test main --locked state::backup:: -- --ignored
+          cargo test -p gateway-plugin-runtime --all-features --test main --locked state::native_archive_restores_plugin_data_secrets_and_pending_upgrade_without_original_cache -- --ignored
 
   frontend:
     if: inputs.run_frontend

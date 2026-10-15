@@ -75,10 +75,12 @@ pub async fn initialize(config: HostConfig) -> Result<HostBundle, HostError> {
 impl HostBundle {
     /// A CLI terminal owns signal handling and worker shutdown without binding HTTP.
     /// The operation must use this bundle's cancellation token and the same root graph.
+    /// Finalization stops extension work before the original writers and logging close.
     pub async fn command<T>(
         self,
         operation: impl std::future::Future<Output = T>,
         graph: gateway_core::engine::nested::ExtensionCallScope,
+        finalize: impl std::future::Future<Output = ()>,
     ) -> CommandCompletion<T> {
         let mut operation = Box::pin(operation);
         let mut deadline = None;
@@ -99,9 +101,7 @@ impl HostBundle {
         let graph_drained = tokio::time::timeout_at(drain_at, graph.wait_until_idle())
             .await
             .is_ok();
-        self.workers
-            .shutdown(self.config.worker_shutdown_timeout())
-            .await;
+        self.shutdown(finalize).await;
         CommandCompletion {
             result,
             graph_drained,
@@ -169,8 +169,12 @@ impl HostBundle {
         Ok(())
     }
 
-    /// 进程唯一阻塞点；返回前完成 HTTP drain 与 worker join。
-    pub async fn serve(self, router: Router) -> Result<(), HostError> {
+    /// 进程唯一阻塞点；返回前完成 HTTP drain、扩展收尾与 worker join。
+    pub async fn serve(
+        self,
+        router: Router,
+        finalize: impl std::future::Future<Output = ()>,
+    ) -> Result<(), HostError> {
         let result = serve_router(
             router,
             &self.config.listen.host,
@@ -180,12 +184,21 @@ impl HostBundle {
             self.config.drain_timeout(),
         )
         .await;
+        self.shutdown(finalize).await;
+        result?;
+        Ok(())
+    }
+    /// Also closes a partially initialized process before any terminal starts.
+    /// The finalizer must stop extension producers and retain their accepted work.
+    pub async fn shutdown(self, finalize: impl std::future::Future<Output = ()>) {
         self.cancellation.cancel();
+        // Extension-owned work may outlive the terminal's request graph. Stop
+        // its producers and drain accepted work while writers/logging are live.
+        tracing::info!(target: "gateway_shutdown", "开始等待扩展任务退出");
+        finalize.await;
         self.workers
             .shutdown(self.config.worker_shutdown_timeout())
             .await;
-        result?;
-        Ok(())
     }
 }
 

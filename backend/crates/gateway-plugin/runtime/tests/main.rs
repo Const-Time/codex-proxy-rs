@@ -25,4 +25,6 @@ mod command_line;
 mod credentials;
 mod observation;
 
+#[cfg(unix)]
+mod engine;
 mod state;

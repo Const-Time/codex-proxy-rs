@@ -1812,6 +1812,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "config",
  "flate2",
  "futures",
  "gateway-admin",

@@ -169,41 +169,55 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
             )
         },
     );
-    plugins.restore().await?;
-    host.report_startup_ready("Plugins");
+    let ready = async {
+        plugins.restore().await?;
+        host.report_startup_ready("Plugins");
 
-    let mut probes = store.health_probes();
-    probes.extend(core.health_probes());
-    probes.push(host.logging_health_probe());
-    let api = gateway_api::initialize(
-        api,
-        core.execution_service(),
-        admin
-            .services()
-            .with_turn_state(openai.turn_state_service())
-            .with_plugins(plugins.clone()),
-        probes,
-        host.worker_health(),
-        host.connection_lifecycle(),
-    )?;
-    host.report_startup_ready("API");
-    let dispatcher = api.dispatcher();
-    http.attach(&dispatcher);
+        let mut probes = store.health_probes();
+        probes.extend(core.health_probes());
+        probes.push(host.logging_health_probe());
+        let api = gateway_api::initialize(
+            api,
+            core.execution_service(),
+            admin
+                .services()
+                .with_turn_state(openai.turn_state_service())
+                .with_plugins(plugins.clone()),
+            probes,
+            host.worker_health(),
+            host.connection_lifecycle(),
+        )?;
+        host.report_startup_ready("API");
+        let dispatcher = api.dispatcher();
+        http.attach(&dispatcher);
 
-    let mut plan = store.take_worker_contributions();
-    plan.extend(core.take_worker_contributions());
-    plan.extend(openai.take_worker_contributions());
-    plan.extend(xai.take_worker_contributions());
-    plan.extend(admin.take_worker_contributions());
-    plan.push(
-        plugins
-            .maintenance_worker(core.snapshot_publications())
-            .map_err(gateway_core::CoreError::from)?,
-    );
-    host.start_workers(plan, store.worker_leader_lease())?;
-    host.report_startup_ready("Workers");
+        let mut plan = store.take_worker_contributions();
+        plan.extend(core.take_worker_contributions());
+        plan.extend(openai.take_worker_contributions());
+        plan.extend(xai.take_worker_contributions());
+        plan.extend(admin.take_worker_contributions());
+        plan.push(
+            plugins
+                .maintenance_worker(core.snapshot_publications())
+                .map_err(gateway_core::CoreError::from)?,
+        );
+        host.start_workers(plan, store.worker_leader_lease())?;
+        host.report_startup_ready("Workers");
+        Ok::<_, BootstrapError>(api)
+    }
+    .await;
+    let api = match ready {
+        Ok(api) => api,
+        Err(error) => {
+            host.shutdown(plugins.shutdown()).await;
+            return Err(error);
+        }
+    };
     let result = match invocation {
-        Invocation::Serve => host.serve(api.router()).await.map(|()| RunOutput::Served),
+        Invocation::Serve => host
+            .serve(api.router(), plugins.shutdown())
+            .await
+            .map(|()| RunOutput::Served),
         Invocation::Plugin {
             instance,
             operation,
@@ -215,10 +229,11 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
                 host.cancellation(),
                 graph.clone(),
             );
-            Ok(RunOutput::Command(host.command(command, graph).await))
+            Ok(RunOutput::Command(
+                host.command(command, graph, plugins.shutdown()).await,
+            ))
         }
     };
-    plugins.shutdown().await;
     result.map_err(Into::into)
 }
 
