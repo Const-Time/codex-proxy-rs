@@ -207,6 +207,14 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
-server = Server(("127.0.0.1", 0), Handler)
-print(json.dumps({"url": "http://127.0.0.1:" + str(server.server_port)}), flush=True)
+if config.get("direct"):
+    # This address exists only on the offline test container's loopback device.
+    # Keep official DNS policy and TLS verification active in the native client.
+    server = Server(("93.184.216.34", 443), Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    url = "https://auth.x.ai"
+else:
+    server = Server(("127.0.0.1", 0), Handler)
+    url = "http://127.0.0.1:" + str(server.server_port)
+print(json.dumps({"url": url}), flush=True)
 server.serve_forever()

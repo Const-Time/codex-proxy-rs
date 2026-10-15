@@ -69,6 +69,12 @@ impl Trust {
         self.run_with_timeout(name, Duration::from_secs(60)).await;
     }
     pub async fn run_with_timeout(&self, name: &str, timeout: Duration) {
+        self.run_case(name, timeout, false).await;
+    }
+    pub async fn run_ignored(&self, name: &str) {
+        self.run_case(name, Duration::from_secs(120), true).await;
+    }
+    async fn run_case(&self, name: &str, timeout: Duration, ignored: bool) {
         let root = self.directory.path();
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
         child
@@ -77,6 +83,9 @@ impl Trust {
             .env("SSL_CERT_FILE", root.join("ca.pem"))
             .env("SSL_CERT_DIR", root.join("empty-roots"))
             .kill_on_drop(true);
+        if ignored {
+            child.arg("--ignored");
+        }
         let output = tokio::time::timeout(timeout, child.output())
             .await
             .expect("isolated native xAI case must finish")
@@ -102,6 +111,19 @@ impl Drop for Proxy {
 }
 impl Proxy {
     pub async fn start(root: &Path, subject: &str, inference: &str, mode: &str) -> Self {
+        Self::start_server(root, subject, inference, mode, false).await
+    }
+    pub async fn start_direct(root: &Path, subject: &str, mode: &str) -> Self {
+        assert_eq!(std::env::var("CPR_NATIVE_XAI_OFFLINE").as_deref(), Ok("1"));
+        Self::start_server(root, subject, "http://127.0.0.1:9", mode, true).await
+    }
+    async fn start_server(
+        root: &Path,
+        subject: &str,
+        inference: &str,
+        mode: &str,
+        direct: bool,
+    ) -> Self {
         let script = root.join("proxy.py");
         std::fs::write(&script, include_str!("xai.py")).unwrap();
         let id = uuid::Uuid::new_v4().simple();
@@ -110,7 +132,7 @@ impl Proxy {
         std::fs::write(
             &config,
             serde_json::to_vec(
-                &json!({"root":root,"log":log,"subject":subject,"inference":inference,"mode":mode}),
+                &json!({"root":root,"log":log,"subject":subject,"inference":inference,"mode":mode,"direct":direct}),
             )
             .unwrap(),
         )

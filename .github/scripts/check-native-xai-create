@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$root/backend"
+output="$root/.runtime/native-xai-create"
+mkdir -p "$output"
+if [ "$#" -eq 1 ]; then
+  binary="$(realpath "$1")"
+else
+  cargo test --locked -p gateway-plugin-runtime --all-features --test main --no-run --message-format=json > "$output/compile.jsonl"
+  binary="$(python3 - "$output/compile.jsonl" <<'PY'
+import json,sys
+executables=[]
+for line in open(sys.argv[1]):
+    item=json.loads(line)
+    if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="main" and "gateway-plugin-runtime" in item["package_id"]:
+        executables.append(item["executable"])
+assert len(executables)==1,executables
+print(executables[0])
+PY
+)"
+fi
+test -x "$binary"
+# Cargo embeds the sibling fixture worker's absolute path in the test binary.
+worker="$(dirname "$(dirname "$binary")")/gateway-plugin-test-worker"
+test -x "$worker"
+docker build --tag cpr-native-xai-fixture "$root/.github/fixtures/native-xai"
+name="cpr-native-xai-$(openssl rand -hex 6)"
+network="$name-network"
+postgres="$name-pg"
+redis="$name-redis"
+fixture="$name-fixture"
+cleanup() {
+  docker rm -f "$fixture" "$redis" "$postgres" >/dev/null 2>&1 || true
+  docker network rm "$network" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+# No route to external networks. The official hostname resolves to a local
+# interface only inside this container, retaining native DNS and TLS checks.
+docker network create --internal "$network" >/dev/null
+password="$(openssl rand -hex 24)"
+docker run -d --name "$postgres" --network "$network" --network-alias postgres \
+  -e POSTGRES_PASSWORD="$password" \
+  postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818 >/dev/null
+docker run -d --name "$redis" --network "$network" --network-alias redis \
+  redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005 \
+  redis-server --requirepass "$password" >/dev/null
+for _ in $(seq 1 30); do
+  if docker exec "$postgres" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+docker exec "$postgres" pg_isready -U postgres >/dev/null
+docker run --name "$fixture" --network "$network" --cap-add NET_ADMIN \
+  --add-host auth.x.ai:93.184.216.34 \
+  --mount "type=bind,source=$binary,target=/fixture/runtime-tests,readonly" \
+  --mount "type=bind,source=$worker,target=$worker,readonly" \
+  -e CPR_NATIVE_XAI_OFFLINE=1 \
+  -e CPR_TEST_DATABASE_URL="postgres://postgres:$password@postgres:5432/postgres" \
+  -e CPR_TEST_REDIS_URL="redis://:$password@redis:6379/" \
+  cpr-native-xai-fixture bash -euo pipefail -c '
+    ip address add 93.184.216.34/32 dev lo
+    test -z "$(ip route show default)"
+    exec /fixture/runtime-tests --exact command_line::native_create::command_xai_creation_uses_official_oauth_before_native_commit --ignored --nocapture --test-threads=1
+  ' 2>&1 | tee "$output/result.log"
