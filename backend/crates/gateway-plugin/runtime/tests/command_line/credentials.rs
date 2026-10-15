@@ -685,19 +685,16 @@ async fn xai(name: &str, mode: &str) {
     let original = ports.accounts().load_current_credential(&id).await.unwrap();
     let mut material = original.credential.expose_to_provider().clone();
     material["access_token"] = json!("fixture-xai-candidate-token");
+    // A cold child process compresses the debug executable here. Issue the
+    // near-expiry candidate afterwards so packaging cannot expire it first.
+    let archive = command_archive("1.0.0");
     let expiry =
         chrono::Utc::now() + chrono::Duration::seconds(if mode == "refresh" { 20 } else { 3600 });
     let account = json!({"action":"replace", "account_id":id.as_str(), "credential_revision":original.account.revision().get(),
         "facts":{"name":"SDK candidate name", "authentication_kind":"oauth", "has_refresh_token":true,
             "upstream_user_id":subject, "access_token_expires_at_ms":expiry.timestamp_millis(), "next_refresh_at_ms":1,
             "material":material}});
-    let f = Native::with_environment(
-        configuration(vec![account]),
-        None,
-        command_archive("1.0.0"),
-        env,
-    )
-    .await;
+    let f = Native::with_environment(configuration(vec![account]), None, archive, env).await;
     let before: i64 = sqlx::query_scalar("select config_revision from runtime_settings where id=1")
         .fetch_one(&f.env.pool)
         .await
