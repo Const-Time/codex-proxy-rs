@@ -72,7 +72,33 @@ impl Environment {
         accounts: Vec<gateway_core::account::NewProviderAccount>,
     ) -> Option<Self> {
         let (database, database_url, redis_url) = Database::create().await?;
-        Some(Self::initialize(database, database_url, redis_url, url, username, accounts).await)
+        Some(
+            Self::initialize(
+                database,
+                database_url,
+                redis_url,
+                url,
+                username,
+                accounts,
+                None,
+            )
+            .await,
+        )
+    }
+    pub async fn with_pricing_source(source: Arc<dyn PricingSource>) -> Option<Self> {
+        let (database, database_url, redis_url) = Database::create().await?;
+        Some(
+            Self::initialize(
+                database,
+                database_url,
+                redis_url,
+                None,
+                "sdk-fixture@fixture.test",
+                vec![],
+                Some(source),
+            )
+            .await,
+        )
     }
     pub(crate) async fn from_database(
         database: Database,
@@ -80,7 +106,16 @@ impl Environment {
         redis_url: String,
         username: &str,
     ) -> Self {
-        Self::initialize(database, database_url, redis_url, None, username, vec![]).await
+        Self::initialize(
+            database,
+            database_url,
+            redis_url,
+            None,
+            username,
+            vec![],
+            None,
+        )
+        .await
     }
     async fn initialize(
         database: Database,
@@ -89,6 +124,7 @@ impl Environment {
         url: Option<&str>,
         username: &str,
         accounts: Vec<gateway_core::account::NewProviderAccount>,
+        pricing_source: Option<Arc<dyn PricingSource>>,
     ) -> Self {
         let cache = tempfile::tempdir().unwrap();
         for name in [
@@ -164,7 +200,7 @@ impl Environment {
                 probes: (core.account_probe(), outside.clone()),
                 client_distribution: outside.clone(),
                 system: outside.clone(),
-                pricing_source: outside,
+                pricing_source: pricing_source.unwrap_or(outside),
             },
         )
         .await
