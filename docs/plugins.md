@@ -371,7 +371,9 @@ request/attempt 两层已接入 `/v1/images/generations`、`/v1/images/edits` �
 未改写的响应保留原始 JSON 字节、空白和字段次序，不包装成 Responses 对象。插件可修改客户端状态及正文，但不能修改原上游状态、费用和结算身份。请求取消、插件撤销、非法输出和超限均沿用同一 Core 清理路径。middleware v4 已允许正常启用；经过中间件的 JSON 文档仍受 8 MiB 上限约束，大图响应可能超限，无匹配中间件时保留原有大响应合同。
 
 
-官方 workbench 0.3.1 原包和本地 SDK 重建包已通过真实 API、原生 OpenAI Provider 及 PostgreSQL/Redis 图片验收：multipart 双图上传转换为正确的 base64 JSON，JSON 编辑与生成请求保持原始字节，成功/错误响应保留状态、媒体类型和大整数；无效 multipart 返回插件的 JSON 400，未鉴权请求不进入上游。修复前宿主将插件直接返回的 JSON 错误误判为格式违规，导致进程失效和连接断开；现在接受合法独立 JSON 错误，仍严格校验已有下游正文的格式。此记录覆盖 Images API，workbench 页面的 Responses 图片会话另行验收。
+官方 workbench 0.3.1 原包和本地 SDK 重建包已通过真实 API、原生 OpenAI Provider 及 PostgreSQL/Redis 图片验收：multipart 双图上传转换为正确的 base64 JSON，JSON 编辑与生成请求保持原始字节，成功/错误响应保留状态、媒体类型和大整数；无效 multipart 返回插件的 JSON 400，未鉴权请求不进入上游。修复前宿主将插件直接返回的 JSON 错误误判为格式违规，导致进程失效和连接断开；现在接受合法独立 JSON 错误，仍严格校验已有下游正文的格式。此记录覆盖 Images API。
+
+同一原包与重建包还已在实际插件页面完成 Responses 图片生成和第二轮修改；宿主使用真实管理员登录、本人 Key、原生 OpenAI Provider 和 PostgreSQL/Redis，仅模型回包来自隔离夹具，不产生真实图片费用。原生请求记录确认 `generate:false` 预热与 `previous_response_id` 续接，页面画布显示两版图片。自动回归固定生成、预热和续聊的响应 ID 传递；手工页面模式需设置 `CPR_WORKBENCH_UI_DIR`（全新目录）和 `CPR_WORKBENCH_WEB_DIST`（已构建前端），运行 `models::workbench::official_and_rebuilt_workbench_page_images_preserve_native_continuation` 的 ignored 测试。依次按 `ready-0.json`、`ready-1.json` 打开原包与重建包页面，完成两轮图片对话后分别创建 `finish-0`、`finish-1`；测试核对实际上游请求并保存脱离请求头的夹具请求记录。
 
 ### WebSocket request/attempt 接入进度
 

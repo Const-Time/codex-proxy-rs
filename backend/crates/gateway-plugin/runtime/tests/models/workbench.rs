@@ -92,7 +92,7 @@ impl ModelServer {
                                     let event: Value = serde_json::from_str(&body).unwrap();
                                     assert_eq!(event["type"],"response.create");
                                     captured.lock().unwrap().push(format!("{headers}\r\n\r\n{event}"));
-                                    for event in response_events() {
+                                    for event in response_events_for_request(&event) {
                                         websocket.send(tokio_tungstenite::tungstenite::Message::Text(event.to_string().into())).await.unwrap();
                                     }
                                 }
@@ -118,7 +118,7 @@ impl ModelServer {
                     let end = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap();
                     let request = String::from_utf8(bytes[..end].to_vec()).unwrap();
                     let (status, content_type, body) = if request.starts_with("GET /codex/models?") {
-                        (200, "application/json", json!({"models":[{"slug":"gpt-5.4","display_name":"Native fixture model","supported_in_api":true,"input_modalities":["text"]}]}).to_string())
+                        (200, "application/json", json!({"models":[{"slug":"gpt-5.4","display_name":"Native fixture model","supported_in_api":true,"input_modalities":["text","image"]}]}).to_string())
                     } else if request.starts_with("POST /codex/images/edits ") || request.starts_with("POST /codex/images/generations ") {
                         let body = &bytes[end + 4..];
                         let document: Value = serde_json::from_slice(body).expect("native image provider must receive JSON");
@@ -130,8 +130,8 @@ impl ModelServer {
                         let body = if request.to_ascii_lowercase().contains("content-encoding: zstd") {
                             zstd::stream::decode_all(&bytes[end + 4..]).unwrap()
                         } else { bytes[end + 4..].to_vec() };
-                        captured.lock().unwrap().push(format!("{request}\r\n\r\n{}",String::from_utf8(body).unwrap()));
-                        (200, "text/event-stream", response_events().into_iter().map(|event| format!("event: {}\ndata: {event}\n\n",event["type"].as_str().unwrap())).collect())
+                        captured.lock().unwrap().push(format!("{request}\r\n\r\n{}",String::from_utf8_lossy(&body)));
+                        (200, "text/event-stream", response_events_for_request(&serde_json::from_slice::<Value>(&body).unwrap()).into_iter().map(|event| format!("event: {}\ndata: {event}\n\n",event["type"].as_str().unwrap())).collect())
                     };
                     socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
                 });
@@ -152,6 +152,26 @@ fn response_events() -> [Value; 2] {
         json!({"type":"response.completed","response":{"id":id,"object":"response","status":"completed","model":"gpt-5.4","output":[],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cached_tokens":0}}}}),
     ]
 }
+// A valid fixture PNG; the upstream is controlled and never incurs real image costs.
+const IMAGE_PIXEL: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1sAAAAASUVORK5CYII=";
+fn response_events_for_request(input: &Value) -> Vec<Value> {
+    let mut events = response_events().to_vec();
+    if input["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["type"] == "image_generation"))
+        && input["generate"] != false
+    {
+        let item = json!({"id":"image_fixture","type":"image_generation_call","status":"completed","result":IMAGE_PIXEL});
+        events[1]["response"]["output"] = json!([item]);
+        events.insert(
+            1,
+            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+        );
+    }
+    events
+}
+
 impl Drop for ModelServer {
     fn drop(&mut self) {
         self.task.abort();
@@ -1418,5 +1438,235 @@ async fn official_and_rebuilt_workbench_convert_uploaded_images_through_native_a
         manager.shutdown().await;
         drop(manager);
         env.close().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires verified original/rebuilt artifacts and isolated PostgreSQL/Redis"]
+async fn official_and_rebuilt_workbench_page_images_preserve_native_continuation() {
+    for (artifact_index, archive) in verified_workbench_archives().into_iter().enumerate() {
+        let upstream = ModelServer::new(true).await;
+        let account_id = format!("acct_image_{}", uuid::Uuid::new_v4().simple());
+        let mut env = Environment::with_login_admin_and_accounts(
+            Some(&upstream.url),
+            vec![native_account(&account_id, "native-image-account")],
+        )
+        .await
+        .expect("isolated database required");
+        env.start_store_writers();
+        let store = env.store.plugin_store();
+        let manager = Arc::new_cyclic(|plugins| {
+            PluginManager::new(
+                store.clone(),
+                Arc::new(
+                    PluginEngine::new(
+                        env.cache.path().join("workbench-page-images"),
+                        "3.12.0".parse().unwrap(),
+                        store.clone(),
+                    )
+                    .with_data(env.admin.services().plugin_data())
+                    .with_models(
+                        Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
+                            env.core.execution_service(),
+                            plugins.clone(),
+                        )),
+                        env.admin.services().client_keys(),
+                    ),
+                ),
+            )
+        });
+        let artifact = manager.upload(archive, &actor()).await.unwrap();
+        let mut command = update(&artifact.sha256, 0, true);
+        command.middleware = Some(PluginMiddlewareBinding {
+            order: 1,
+            mounts: vec![
+                PluginMiddlewareMount::Request,
+                PluginMiddlewareMount::Attempt,
+            ],
+            scope: PluginExecutionScope::All {},
+        });
+        let installed = manager.update(None, command, &actor()).await.unwrap();
+        let scope = PluginMutationScope {
+            instance_id: installed.id.clone(),
+            revision: installed.revision,
+            actor: actor(),
+        };
+        let resources = env.admin.services().plugin_resources();
+        let group = resources
+            .ensure_group(
+                scope.clone(),
+                PluginGroupEnsure {
+                    resource_key: "native-images".into(),
+                    name: "Native workbench images".into(),
+                    color: "#2563EBFF".into(),
+                    description: None,
+                },
+            )
+            .await
+            .unwrap();
+        resources
+            .change_members(
+                scope,
+                PluginGroupMembers {
+                    resource_key: "native-images".into(),
+                    add: vec![account_id],
+                    remove: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let login = env
+            .admin
+            .services()
+            .auth()
+            .login(LoginCommand {
+                username: Some("sdk-fixture@fixture.test".into()),
+                password: "sdk-business-fixture-password".into(),
+            })
+            .await
+            .unwrap();
+        let user = env
+            .admin
+            .services()
+            .auth()
+            .resolve_admin_user_id(Some(&login.session_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let context = MutationContext {
+            actor: MutationActor::AdminSession {
+                admin_user_id: user,
+            },
+            request_id: "workbench-page-images".into(),
+        };
+        let key = env
+            .admin
+            .services()
+            .client_keys()
+            .create(
+                &context,
+                CreateClientKey {
+                    name: "Native image key".into(),
+                    label: None,
+                    group_ids: vec![AccountGroupId::new(group.id).unwrap()],
+                    limits: RateLimits::unlimited(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let browser_root = std::env::var_os("CPR_WORKBENCH_UI_DIR").map(std::path::PathBuf::from);
+        if browser_root.is_some() {
+            let assets = std::env::var_os("CPR_WORKBENCH_WEB_DIST")
+                .expect("compiled frontend required for browser acceptance");
+            copy_browser_assets(std::path::Path::new(&assets), env.cache.path());
+        }
+        let mut api = ApiServer::new(&env, manager.clone()).await;
+        let cookie = format!("cpr_admin_session={}", login.session_id);
+        let mut previous = None;
+        let mut response_ids = Vec::new();
+        for warmup in [false, true, false] {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            let mut body = json!({"model":"gpt-5.4","instructions":"Create or edit one image","input":[{"role":"user","content":[{"type":"input_text","text":"fixture image"}]}],"tools":[{"type":"image_generation","model":"gpt-image-2","action":"auto","quality":"low","size":"1024x1024","output_format":"png"}],"stream":true,"store":false});
+            if warmup {
+                body["generate"] = json!(false);
+            }
+            if let Some(previous) = &previous {
+                body["previous_response_id"] = json!(previous);
+            }
+            let response=api.client.post(format!("http://{}/api/admin/plugins/models/responses",api.address)).header("cookie",&cookie).json(&json!({"id":installed.id,"revision":installed.revision,"clientKeyId":key.secret.record.id.as_str(),"body":body})).send().await.unwrap();
+            let status = response.status();
+            let output = response.text().await.unwrap();
+            assert_eq!(status, 200, "{output}");
+            let completed = output
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                .find(|event| event["type"] == "response.completed")
+                .expect("completed image response");
+            let document = &completed["response"];
+            let response_id = document["id"].as_str().unwrap().to_owned();
+            response_ids.push(response_id.clone());
+            previous = Some(response_id);
+            if warmup {
+                assert_eq!(document["output"], json!([]));
+            } else {
+                assert_eq!(document["output"][0]["type"], "image_generation_call");
+                assert_eq!(document["output"][0]["result"], IMAGE_PIXEL);
+            }
+        }
+        let captures = upstream.requests.lock().unwrap().clone();
+        assert_eq!(captures.len(), 3);
+        let bodies: Vec<Value> = captures
+            .iter()
+            .map(|request| serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap())
+            .collect();
+        assert_eq!(bodies[1]["previous_response_id"], response_ids[0]);
+        assert_eq!(bodies[1]["generate"], false);
+        assert_eq!(bodies[2]["previous_response_id"], response_ids[1]);
+        if let Some(directory) = browser_root {
+            std::fs::create_dir_all(&directory).unwrap();
+            let ready = directory.join(format!("ready-{artifact_index}.json"));
+            std::fs::write(&ready,serde_json::to_vec_pretty(&json!({"url":format!("http://{}/plugins",api.address),"plugin_id":installed.id,"revision":installed.revision,"artifact_sha256":artifact.sha256,"key_id":key.secret.record.id.as_str()})).unwrap()).unwrap();
+            let finish = directory.join(format!("finish-{artifact_index}"));
+            // Explicit manual acceptance mode only; no production pause or fixture hook.
+            tokio::time::timeout(std::time::Duration::from_secs(1800), async {
+                while !finish.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            })
+            .await
+            .expect("browser acceptance must finish within 30 minutes");
+            let captured = upstream.requests.lock().unwrap().clone();
+            let page_bodies: Vec<Value> = captured[3..]
+                .iter()
+                .map(|request| {
+                    serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+                })
+                .collect();
+            assert!(
+                page_bodies
+                    .iter()
+                    .filter(|body| body["generate"] != false)
+                    .count()
+                    >= 2,
+                "browser must generate then continue the image conversation"
+            );
+            assert!(page_bodies.iter().all(|body| {
+                body["tools"].as_array().is_some_and(|tools| {
+                    tools.iter().any(|tool| tool["type"] == "image_generation")
+                })
+            }));
+            assert!(
+                page_bodies
+                    .iter()
+                    .skip(1)
+                    .any(|body| body["previous_response_id"].is_string()),
+                "browser continuation must reach native Provider"
+            );
+            std::fs::write(
+                directory.join(format!("requests-{artifact_index}.json")),
+                serde_json::to_vec_pretty(&page_bodies).unwrap(),
+            )
+            .unwrap();
+        }
+        api.close().await;
+        drop(api);
+        manager.shutdown().await;
+        drop(manager);
+        env.close().await;
+    }
+}
+
+fn copy_browser_assets(source: &std::path::Path, destination: &std::path::Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_browser_assets(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
     }
 }
