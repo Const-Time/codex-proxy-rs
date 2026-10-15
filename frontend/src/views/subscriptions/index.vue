@@ -100,25 +100,31 @@ onMounted(load)
 <template>
   <div class="flex flex-col gap-5">
     <BasePageHeader title="订阅管理" description="查看用户的分组额度与用量。额度倍率由用户管理配置，历史消费在使用统计中保留。" />
-    <div class="flex flex-wrap items-center gap-3">
-      <BaseInput v-model="search" aria-label="搜索邮箱或用户名" placeholder="搜索邮箱或用户名" class="w-full sm:w-80">
-        <template #prefix>
-          <Search class="size-4" />
-        </template>
-      </BaseInput>
-      <BaseSelect v-model="groupId" aria-label="筛选分组" class="w-full sm:w-40" :options="[{ label: '全部分组', value: '' }, ...groups.map(([value, label]) => ({ value, label }))]" />
-      <BaseButton variant="secondary" :loading="loading" @click="load">
-        刷新
-      </BaseButton>
-      <BaseButton variant="destructive" :disabled="loading || !selected.length || selected.length > 500" @click="openReset">
-        重置选中订阅（{{ selected.length }}）
-      </BaseButton>
-    </div>
+
     <p v-if="error" role="alert" class="text-cp-error">
       {{ error }}
     </p>
     <BaseCard class="cp-mobile-table-host min-w-0">
       <BaseTable table-id="subscriptions" class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="visible" :row-key="rowKey" :selected-row-keys="selected" empty-text="没有匹配的订阅">
+        <template #toolbar-actions>
+          <BaseButton variant="secondary" :loading="loading" @click="load">
+            刷新
+          </BaseButton>
+          <BaseButton variant="destructive" :disabled="loading || !selected.length || selected.length > 500" @click="openReset">
+            重置选中订阅（{{ selected.length }}）
+          </BaseButton>
+        </template>
+
+        <template #toolbar>
+          <div class="flex min-w-0 flex-wrap items-center gap-3">
+            <BaseInput v-model="search" aria-label="搜索邮箱或用户名" placeholder="搜索邮箱或用户名" class="w-full sm:w-80">
+              <template #prefix>
+                <Search class="size-4" />
+              </template>
+            </BaseInput>
+            <BaseSelect v-model="groupId" aria-label="筛选分组" class="w-full sm:w-40" :options="[{ label: '全部分组', value: '' }, ...groups.map(([value, label]) => ({ value, label }))]" />
+          </div>
+        </template>
         <template #header-selection>
           <BaseCheckbox label="选择当前页订阅" :model-value="pageSelected" :indeterminate="!pageSelected && visible.some(item => selected.includes(rowKey(item)))" :disabled="loading || !visible.length" @update:model-value="togglePage" />
         </template>

@@ -356,14 +356,14 @@ attempt 挂载已连接 Responses HTTP 和真实 SDK 子进程：每次重试独
 
 request/attempt 两层已接入 `/v1/images/generations`、`/v1/images/edits` 和 `/v1/alpha/search`，并通过真实 SDK 子进程的透传、事实读取、正文改写和错误短路测试。它们固定使用 OpenAI Provider 原生端点；图片生成/编辑类型由入口保持，正文中的模型不参与文本模型映射。插件输入与输出继续过滤受管身份头；attempt 仅重建原端点已有的 session、thread、turn metadata 和 image turn 请求头。
 
-未改写的响应保留原始 JSON 字节、空白和字段次序，不包装成 Responses 对象。插件可修改客户端状态及正文，但不能修改原上游状态、费用和结算身份。请求取消、插件撤销、非法输出和超限均沿用同一 Core 清理路径。生产 middleware 门禁仍关闭，其余声明范围尚待接入；经过中间件的 JSON 文档仍受 8 MiB 上限约束，大图响应可能超限，无匹配中间件时保留原有大响应合同。
+未改写的响应保留原始 JSON 字节、空白和字段次序，不包装成 Responses 对象。插件可修改客户端状态及正文，但不能修改原上游状态、费用和结算身份。请求取消、插件撤销、非法输出和超限均沿用同一 Core 清理路径。middleware v4 已允许正常启用；经过中间件的 JSON 文档仍受 8 MiB 上限约束，大图响应可能超限，无匹配中间件时保留原有大响应合同。
 
 
 ### WebSocket request/attempt 接入进度
 
 Responses WebSocket 的 attempt 挂载已接入原 Core 执行与控制帧转发链。每个插件正文帧是一条完整 JSON 消息，不使用 SSE 字节；插件可改写消息内容或展开消息，宿主按整批校验后交付。原响应 ID、冻结模型、续接、stream 语义、连接 ID、上游传输标记与 Provider 私有状态保持原归属，避免把响应中断或下一轮续接指向其他执行。错误短路的 JSON 对象投影为带非 2xx status 的 WebSocket error 消息。
 
-真实连接验证覆盖响应中断、错误 ID 拒绝、排队 create 串行执行、断连/撤销、原生续接状态和改写批次失败；SDK 子进程验证 JSON 消息透传、改写、展开及错误短路。等待 WebSocket 写入时仍检查插件撤销；Core 启动后、首次轮询转发前发生撤销也会释放并发并完成唯一结算。request 与 attempt 现已同时接通，共用同一根请求、交付屏障和费用 owner。生产 middleware 能力仍未开放，后续继续接入执行设置、嵌套宿主调用与其余声明范围。
+真实连接验证覆盖响应中断、错误 ID 拒绝、排队 create 串行执行、断连/撤销、原生续接状态和改写批次失败；SDK 子进程验证 JSON 消息透传、改写、展开及错误短路。等待 WebSocket 写入时仍检查插件撤销；Core 启动后、首次轮询转发前发生撤销也会释放并发并完成唯一结算。request 与 attempt 现已同时接通，共用同一根请求、交付屏障和费用 owner。middleware v4 已允许正常启用，执行设置与嵌套宿主调用的范围见下文。
 
 
 request 插件获得不含 `response.create` 类型字段的请求 JSON，可以在正常 Core 权限与路由检查前改写模型和正文；客户端流式语义、连接身份、上游传输标记仍由入口保持。宿主按改写后的续接 ID 选择连接内私有状态，不从插件正文恢复状态。响应以完整 JSON 消息批次校验，不发送 SSE 的 `[DONE]`，只有通过校验才确认原交付；原始响应 ID 和费用不能被改写。
@@ -391,7 +391,7 @@ Core 已建立与持久化快照共用的 `SettingsValues`，覆盖本地已有�
 
 请求设置新增按 Key 隔离的 `ExecutionSettings`。Fast 和 Key 并发/RPM 改写保留实际插件来源及顺序；切换 Key 时清除旧 Key 的执行覆盖，原客户端策略及用户共享准入限制保持原权威。Core 在原准入/预算/结算路径中使用有效 Key 限额，并在每次真实 attempt 中传递冻结的 Fast 模式。
 
-OpenAI Provider 在 attempt 插件之前形成应用 Fast 策略的原生正文：`default` 原样保留，`enabled` 只在冻结模型目录明确提供 priority 且客户端未指定档位或使用 default/null 时改为 priority，`disabled` 把 priority/fast 改为 default；flex、auto 和其他显式值保留。attempt 插件的后续显式改写不再被 Fast 覆盖。原协议上下文、私有续接和继承能力约束保留；其他协议及 Images/Search 不应用 OpenAI 文本档位规则。费用仍取上游实际档位，缺少实际档位时按最终发送档位计算。
+OpenAI Provider 在 attempt 插件之前形成应用 Fast 策略的原生正文：`default` 原样保留，`enabled` 只在冻结模型目录明确提供 priority 且客户端未指定档位或使用 default/null 时改为 priority，`disabled` 把 priority/fast 改为 default；flex、auto 和其他显式值保留。attempt 插件的后续显式改写不再被 Fast 覆盖。原协议上下文、私有续接和继承能力约束保留；其他协议及 Images/Search 不应用 OpenAI 文本档位规则。本地费用与统计使用最终发送档位；上游响应档位单独保留为诊断事实，不覆盖计价依据。
 
 HTTP、WebSocket wire 与费用回归已覆盖这些规则，Core 验证重试、唯一结算和共享用户限额。SDK 执行设置入口已接入；生产 middleware 门禁仍保留。超时支持非负毫秒数或 null，0 在终端准入前立即到期，null 表示不设总期限。
 

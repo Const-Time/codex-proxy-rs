@@ -876,10 +876,14 @@ Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`
 返回模型仅代表上游声明，不证明模型真实性。迁移 `0021` 仅回填历史 OpenAI 记录中已保存的合法
 `upstreamReportedModel`，其余旧记录保持空值。
 
-OpenAI 的 `serviceTier` 只接受上游响应生命周期事件确认的实际 `response.service_tier`；请求里的
-期望档位只保留在 request summary，不能冒充响应事实。计费展示把 `priority`/`fast` 映射为 `Fast`，
-`flex` 映射为 `Flex`，缺失或 `default` 映射为 `Default`；未知非空值原样展示。Fast 优先使用模型的
-priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex 为 `0.50x`，Default 为 `1.00x`。
+OpenAI Responses 的 `serviceTier` 与本地费用估算统一采用 Provider 最终发给上游的请求
+`service_tier`，响应回显不覆盖或回填该值。例如发送 `priority`、响应返回 `default` 或 `auto` 时，
+仍按 Priority 价格估算并显示 `Fast`。未发送档位时，`serviceTier` 保持缺失，费用按标准档估算。
+计费展示把 `priority`/`fast` 映射为 `Fast`，`flex` 映射为 `Flex`，缺失或 `default`/`standard`
+映射为 `Standard`。各档位与长上下文区间使用已登记价格；请求 `auto`、未知档位或缺少对应价格时
+不估算，不用固定倍数兜底。系统模型定价倍率、分组分项倍率在档位选价后沿现有冻结规则应用。
+上游返回档位独立保留为诊断事实，原始响应不改写。这里的 Fast 表示发送档位，不证明上游实际加速，
+本地费用估算不能替代官方账单。新口径仅作用于新请求，不回填历史档位或重算已存储费用。
 
 ## 11. 版本、更新与重启
 
@@ -976,11 +980,11 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 
 `observer` 为 null 或 `{order, requestCompleted, websocketResponse}`。`order` 为 -10000～10000 的整数；两种事件分别为 null 或上文全部请求/Key/分组的 scope，至少选择一种。指定范围须为 1～256 个唯一有效 ID；省略/null 清除绑定，保存时提交完整订阅。制品须声明 observer v1 和 observation 阶段；绑定随原 revision、备份和重启恢复。终态与实际上游 WebSocket 原始帧通过有界后台 RPC 投递，不控制业务结果；停用仅撤销观察计划，同实例其他业务能力仍使用原撤销规则。详见 [插件支持矩阵](plugins.md)。
 
-`upstreamAdapter` 为 null 或 `{scope}`，scope 使用全部请求、Key 或分组的同一格式；指定范围须为 1～256 个唯一有效 ID。更新时需提交完整绑定，省略/null 清除绑定。绑定覆盖实例注册的全部上游适配器，按 Provider 和公开模型匹配；重叠范围拒绝发布。缺少 upstream_adapter v1/v2 声明的制品不能保存绑定；当前生产启用门禁仍保留，可保存停用配置。完整能力与验收进度见 [受管上游适配器](plugins.md#受管上游适配器接入进度)。
+`upstreamAdapter` 为 null 或 `{scope}`，scope 使用全部请求、Key 或分组的同一格式；指定范围须为 1～256 个唯一有效 ID。更新时需提交完整绑定，省略/null 清除绑定。绑定覆盖实例注册的全部上游适配器，按 Provider 和公开模型匹配；重叠范围拒绝发布。缺少 upstream_adapter v1/v2 声明的制品不能保存绑定；当前允许正常启用与恢复。完整能力与验收进度见 [受管上游适配器](plugins.md#受管上游适配器接入进度)。
 
 `frontendAuthentication` 为 null 或 `{failurePolicy: "reject" | "delegate", identities: {"外部身份": "本地 Key ID"}}`，列表返回当前绑定。省略该字段与 null 一样表示不使用此实例认证，更新时需提交完整绑定。只允许声明 frontend_authentication v1 的插件设置它，且最多一个启用实例。数据面 Authorization 由插件解释；仅明确 not_matched 且选择 delegate 时回退普通 Key。拒绝或映射 Key 无效返回 401，认证器失败返回 503。管理登录与插件页面本人选 Key 入口不受该绑定影响；完整范围和撤销语义见 [外部认证](plugins.md#外部认证)。
 
-`middleware` 为 null 或 `{order, mounts, scope}`：order 是 -10000～10000 的整数，mounts 是不重复且非空的 http/websocket/service/request/attempt 列表，scope 是 `{kind: "all"}`、`{kind: "keys", ids: [...]}` 或 `{kind: "groups", ids: [...]}`，指定范围包含 1～256 个唯一有效 ID。包含 http、websocket 或 service 时必须使用 all 范围；Key/分组范围只适用于 request/attempt。更新时需提交完整绑定，省略/null 清除绑定。仅允许与制品 middleware v4 声明一致的挂载；当前支持保存停用配置，数据面尚未开放启用。HTTP Runtime RPC 已通过真实 SDK 验证，API 入口和原始 WebSocket 升级传输已接入本地合同验证；HTTP、管理和 request/attempt 阶段的宿主主动分派已接通；独立 WebSocket 消息层已接入原生及插件自有会话，service Runtime 执行桥已通过真实 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项业务已接入；管理与已授权 service 层的 host.services.call 可调用这些服务，继承宿主身份、冻结发布和原调用图；HTTP、独立 WebSocket、注册、认证及原 Core 的 request/attempt、routing/scheduling/retry/upstream 主动调用使用宿主签发的插件实例与 revision。注册和认证不由此获得管理登录、模型或资源管理权限。公共 settings 的传输操作者保持上游三类 DTO，插件主动调用投影为 System；实际持久化和审计单独保留宿主签发的 Plugin 身份与 request ID。local.settings.v1 使用独立的插件操作者扩展，后续层不得改写操作者或请求关联。本地设置/定价使用显式 local.settings.v1 合同，保留订阅开关、定价来源校验和分项倍率，管理 HTTP DTO 不变；其他阶段继续实施。宿主登录和插件安装管理接口保留独立恢复入口，仍执行原鉴权、审计和版本校验；插件资源、invoke 与模型调用不在豁免范围。门禁、撤销及固定恢复路径见 [插件说明](plugins.md)。
+`middleware` 为 null 或 `{order, mounts, scope}`：order 是 -10000～10000 的整数，mounts 是不重复且非空的 http/websocket/service/request/attempt 列表，scope 是 `{kind: "all"}`、`{kind: "keys", ids: [...]}` 或 `{kind: "groups", ids: [...]}`，指定范围包含 1～256 个唯一有效 ID。包含 http、websocket 或 service 时必须使用 all 范围；Key/分组范围只适用于 request/attempt。更新时需提交完整绑定，省略/null 清除绑定。仅允许与制品 middleware v4 声明一致的挂载；当前允许正常启用与恢复。HTTP Runtime RPC 已通过真实 SDK 验证，API 入口和原始 WebSocket 升级传输已接入本地合同验证；HTTP、管理和 request/attempt 阶段的宿主主动分派已接通；独立 WebSocket 消息层已接入原生及插件自有会话，service Runtime 执行桥已通过真实 SDK 验证，管理员 API Key 查询、生成、删除，以及本地设置和定价七项业务已接入；管理与已授权 service 层的 host.services.call 可调用这些服务，继承宿主身份、冻结发布和原调用图；HTTP、独立 WebSocket、注册、认证及原 Core 的 request/attempt、routing/scheduling/retry/upstream 主动调用使用宿主签发的插件实例与 revision。注册和认证不由此获得管理登录、模型或资源管理权限。公共 settings 的传输操作者保持上游三类 DTO，插件主动调用投影为 System；实际持久化和审计单独保留宿主签发的 Plugin 身份与 request ID。local.settings.v1 使用独立的插件操作者扩展，后续层不得改写操作者或请求关联。本地设置/定价使用显式 local.settings.v1 合同，保留订阅开关、定价来源校验和分项倍率，管理 HTTP DTO 不变；其他阶段继续实施。宿主登录和插件安装管理接口保留独立恢复入口，仍执行原鉴权、审计和版本校验；插件资源、invoke 与模型调用不在豁免范围。门禁、撤销及固定恢复路径见 [插件说明](plugins.md)。
 
 资源列表增加布尔字段 `public`。无需登录的 `GET /api/plugins/resource` 使用相同的 query `id, revision, path`，仅读取当前启用代次明确公开的静态资源；私有或未登记路径返回 404，失效代次返回 409。管理资源入口仍要求管理员鉴权。
 
@@ -1010,3 +1014,7 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 并发/频率错误保留 HTTP 429，并通过 `user_concurrency_limited`、`user_rate_limited`、
 `client_key_concurrency_limited`、`client_key_rate_limited` 区分原因。未进入上游执行的准入拒绝标记为 `not_sent`，页面显示“未调用上游”。
 升级仅从旧入口事件的结构化消息恢复已保存的请求/Key ID 和可确认归属；缺失的模型、IP、具体限流类别不猜测。
+
+### 请求档位与上游档位
+
+Usage 列表和详情（含个人视图）返回 `requestedServiceTier` 与 `upstreamServiceTier` 两个可空字段，分别表示最终出站请求档位与上游响应回显。新请求的 `serviceTier` 和本地计费使用出站档位；请求 `priority` 不会改写独立的上游 `default`/`auto` 事实，也不代表已确认加速。历史记录保持原有 `serviceTier` 与冻结计费明细；没有请求或响应档位事实时对应字段返回 null。

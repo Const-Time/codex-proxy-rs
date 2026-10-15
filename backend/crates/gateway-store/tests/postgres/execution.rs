@@ -87,7 +87,13 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
     .await
     .expect("seed provider account");
     let request = NewModelRequest {
-        billing: None,
+        billing: Some(
+            gateway_core::engine::budget::ClientBudgetBilling::new(
+                "2.5".parse().unwrap(),
+                serde_json::from_value(json!({"components":["cacheRead"]})).unwrap(),
+            )
+            .unwrap(),
+        ),
         parent_request_id: Some("req_parent_not_yet_written".into()),
         initiating_plugin_instance_id: Some("plugin-fixture".into()),
         user_id: None,
@@ -131,6 +137,9 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
         http_version: None,
     };
 
+    let mut sequential = request.clone();
+    sequential.id = "req_sequential".into();
+    repository.insert_model_request(sequential).await.unwrap();
     repository
         .insert_model_request_with_first_attempt(request, attempt)
         .await
@@ -163,6 +172,16 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
         (1, "not_sent", "openai", "running", None, None)
     );
 
+    let frozen: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "select billing_multiplier::text,billing_multiplier_scope from model_requests order by id",
+    )
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        frozen,
+        vec![("2.5000000000".into(), json!({"components":["cacheRead"]})); 2]
+    );
     // 后续 attempt 沿用常规 CAS 递增路径；已持久化的 sent 水位不被重试重置。
     repository
         .mark_upstream_send_state(
@@ -741,7 +760,8 @@ async fn core_adapter_should_persist_only_object_provider_observation() {
         .expect("seed model request");
     let store = PgExecutionStore::new(database.pool.clone());
     let mut finalization = successful_core_finalization("req_provider_observation");
-    finalization.provider_metadata_json = Some("{\"effectiveModel\":\"gpt-test\"}".to_owned());
+    finalization.downstream_committed_at = Some(std::time::SystemTime::now());
+    finalization.provider_metadata_json = Some(json!({"effectiveModel":"gpt-test", "requestedServiceTier":"priority", "upstreamServiceTier":"default"}).to_string());
 
     ExecutionStore::finalize_model_request(&store, finalization)
         .await
@@ -753,6 +773,40 @@ async fn core_adapter_should_persist_only_object_provider_observation() {
     .await
     .expect("load provider observation");
     assert_eq!(persisted["effectiveModel"], "gpt-test");
+    let page = observability_repository(&database.pool)
+        .list_usage_records(UsageRecordQuery {
+            range: ObservabilityRange::new(
+                Utc::now() - Duration::hours(1),
+                Utc::now() + Duration::hours(1),
+            )
+            .unwrap(),
+            filter: UsageRecordFilter::default(),
+            current_page: 1,
+            page_size: ObservabilityPageSize::new(10).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items[0].requested_service_tier.as_deref(),
+        Some("priority")
+    );
+    assert_eq!(
+        page.items[0].upstream_service_tier.as_deref(),
+        Some("default")
+    );
+
+    let detail = admin_observability_store(&database.pool)
+        .usage_record_detail("req_provider_observation", None)
+        .await
+        .unwrap();
+    assert!(
+        detail
+            .request
+            .provider_metadata_json
+            .as_deref()
+            .unwrap()
+            .contains("priority")
+    );
 
     database.close().await;
 }

@@ -107,8 +107,9 @@ impl OpenAiResponseObservationState {
         if let Some(metadata) = self.provider_metadata() {
             observation = observation.with_provider_metadata(metadata);
         }
-        if let Some(service_tier) = self.effective_service_tier() {
-            observation = observation.with_service_tier_if_valid(service_tier.to_owned());
+        // 统计与计费采用最终发送档位；响应回显只作为独立诊断事实保留。
+        if let Some(service_tier) = &self.requested_service_tier {
+            observation = observation.with_service_tier_if_valid(service_tier.clone());
         }
         if let Some(model) = &self.upstream_response_model {
             observation = observation.with_upstream_response_model_if_valid(model);
@@ -163,12 +164,6 @@ impl OpenAiResponseObservationState {
         }
         self.upstream_service_tier = Some(service_tier);
         true
-    }
-
-    pub(super) fn effective_service_tier(&self) -> Option<&str> {
-        self.upstream_service_tier
-            .as_deref()
-            .or(self.requested_service_tier.as_deref())
     }
 
     pub(super) fn merge_rate_limit_headers(&mut self, updates: &[(String, String)]) -> bool {

@@ -116,16 +116,9 @@ watch(timeRange, () => {
         <UsageRecordFiltersBar v-model="recordFilters" class="mb-4" />
         <div
           v-show="recordView === 'success'"
-          class="grid min-h-130 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-3"
+          class="flex min-h-130 min-w-0 flex-1 flex-col"
         >
-          <UsageFilters
-
-            :loading="loading"
-            :refreshing="refreshingList"
-            @refresh="refreshUsageRecords"
-          />
-
-          <div class="flex min-h-0 min-w-0 flex-col">
+          <div class="flex min-h-0 min-w-0 flex-1 flex-col">
             <UsageRecordsTable
               class="min-h-0 flex-1"
               :columns="visibleColumns"
@@ -133,6 +126,14 @@ watch(timeRange, () => {
               :loading="loading"
               empty-text="暂无使用记录"
             >
+              <template #toolbar-actions>
+                <UsageFilters
+
+                  :loading="loading"
+                  :refreshing="refreshingList"
+                  @refresh="refreshUsageRecords"
+                />
+              </template>
               <template #actions="{ row }">
                 <div class="flex items-center justify-start">
                   <BaseIconButton

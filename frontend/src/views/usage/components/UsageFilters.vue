@@ -14,8 +14,8 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="flex w-full items-center gap-3" role="group" aria-label="使用记录筛选与操作">
-    <div class="ml-auto flex shrink-0 items-center justify-end">
+  <div class="flex items-center gap-2" role="group" aria-label="使用记录筛选与操作">
+    <div class="flex shrink-0 items-center justify-end">
       <BaseIconButton
         variant="ghost"
         size="md"

@@ -174,7 +174,7 @@ async fn fast_policy_uses_frozen_catalog_evidence_preserves_explicit_tiers_and_h
 }
 
 #[tokio::test]
-async fn fast_http_wire_and_fallback_pricing_follow_the_effective_tier() {
+async fn fast_http_wire_and_pricing_follow_the_outbound_tier_preserving_response_diagnostics() {
     let pricing: gateway_core::metering::PricingOverrides =
         serde_json::from_value(json!({"openai":{"gpt-5.4":{"multiplierBps":10000,"bands":{
             "standard":{"input":"1","output":"1","cacheRead":"0","cacheWrite":"0"},
@@ -185,13 +185,13 @@ async fn fast_http_wire_and_fallback_pricing_follow_the_effective_tier() {
         (FastMode::Enabled, None, "priority", None, 40000),
         (FastMode::Disabled, Some("priority"), "default", None, 20000),
         (FastMode::Default, Some("priority"), "priority", None, 40000),
-        (FastMode::Enabled, None, "priority", Some("default"), 20000),
+        (FastMode::Enabled, None, "priority", Some("default"), 40000),
         (
             FastMode::Disabled,
             Some("priority"),
             "default",
             Some("priority"),
-            40000,
+            20000,
         ),
     ] {
         let store = Arc::new(MemoryAccountStore::default());
@@ -235,8 +235,14 @@ async fn fast_http_wire_and_fallback_pricing_follow_the_effective_tier() {
             .await
             .unwrap();
         let mut costs = vec![];
+        let mut observation = None;
         while let Some(event) = stream.next().await {
-            for fact in event.unwrap().canonical_facts() {
+            let event = event.unwrap();
+            if let Some(value) = event.response_observation() {
+                assert_eq!(value.service_tier(), Some(expected));
+                observation = Some(value.clone());
+            }
+            for fact in event.canonical_facts() {
                 if let GatewayEvent::CalculatedCost(value) = fact {
                     costs.push(value.total().amount().scaled());
                 }
@@ -249,6 +255,17 @@ async fn fast_http_wire_and_fallback_pricing_follow_the_effective_tier() {
             expected
         );
         assert_eq!(costs, vec![cost]);
+        let observation = observation.expect("final provider observation");
+        let metadata: Value =
+            serde_json::from_str(observation.provider_metadata().unwrap().as_json()).unwrap();
+        assert_eq!(
+            metadata.get("requestedServiceTier").and_then(Value::as_str),
+            Some(expected)
+        );
+        assert_eq!(
+            metadata.get("upstreamServiceTier").and_then(Value::as_str),
+            response_tier
+        );
     }
 }
 

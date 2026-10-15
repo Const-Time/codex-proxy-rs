@@ -104,15 +104,6 @@ watch(
     <BaseCard
       class="cp-mobile-auto-height cp-mobile-table-host mt-5 flex h-[calc(100dvh-136px)] min-h-125 flex-col"
     >
-      <template #header>
-        <ApiKeyFilters
-          :batch-deleting="batchDeleting"
-          :selected-count="selectedIds.size"
-          @create="openCreate"
-          @delete-selected="showDeleteModal = true"
-        />
-      </template>
-
       <template #body>
         <div class="flex h-full min-h-0 flex-col">
           <BaseTable
@@ -126,6 +117,14 @@ watch(
             empty-text="暂无 API Key"
             @sort-change="handleSortChange"
           >
+            <template #toolbar-actions>
+              <ApiKeyFilters
+                :batch-deleting="batchDeleting"
+                :selected-count="selectedIds.size"
+                @create="openCreate"
+                @delete-selected="showDeleteModal = true"
+              />
+            </template>
             <template #header-selection>
               <BaseCheckbox
                 :model-value="allSelected"

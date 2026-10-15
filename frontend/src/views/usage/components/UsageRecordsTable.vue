@@ -46,6 +46,12 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
     :loading="loading"
     :empty-text="emptyText"
   >
+    <template v-if="$slots.toolbar" #toolbar>
+      <slot name="toolbar" />
+    </template>
+    <template v-if="$slots['toolbar-actions']" #toolbar-actions>
+      <slot name="toolbar-actions" />
+    </template>
     <template #userEmail="{ row }">
       <div class="grid min-w-0 gap-1">
         <span class="truncate text-cp-sm font-bold" :title="usageUserDisplay(row).description">

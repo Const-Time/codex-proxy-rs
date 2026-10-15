@@ -77,30 +77,8 @@ function upstreamSendStateText(value: string | null | undefined) {
 </script>
 
 <template>
-  <div class="grid min-h-130 min-w-0 w-full flex-1 grid-rows-[auto_minmax(0,1fr)] gap-3">
-    <div
-      class="flex w-full flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center"
-      role="group"
-      aria-label="错误筛选与操作"
-    >
-      <div class="flex shrink-0 self-end items-center justify-end gap-2 lg:ml-auto">
-        <BaseIconButton
-          variant="ghost"
-          size="md"
-          label="刷新错误明细"
-          :loading="refreshing"
-          :disabled="loading || refreshing"
-          @click="refresh"
-        >
-          <template #loading>
-            <RefreshCw class="size-4.5 animate-spin motion-reduce:animate-none" />
-          </template>
-          <RefreshCw class="size-4.5" />
-        </BaseIconButton>
-      </div>
-    </div>
-
-    <div class="flex min-h-0 min-w-0 flex-col">
+  <div class="flex min-h-130 min-w-0 w-full flex-1 flex-col">
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <BaseTable
         class="min-h-0 flex-1"
         :columns="columns"
@@ -108,6 +86,21 @@ function upstreamSendStateText(value: string | null | undefined) {
         :loading="loading"
         empty-text="当前时段没有错误"
       >
+        <template #toolbar-actions>
+          <BaseIconButton
+            variant="ghost"
+            size="md"
+            label="刷新错误明细"
+            :loading="refreshing"
+            :disabled="loading || refreshing"
+            @click="refresh"
+          >
+            <template #loading>
+              <RefreshCw class="size-4.5 animate-spin motion-reduce:animate-none" />
+            </template>
+            <RefreshCw class="size-4.5" />
+          </BaseIconButton>
+        </template>
         <template #userEmail="{ row }">
           <div class="grid min-w-0 gap-1">
             <span class="truncate text-cp-sm font-bold" :title="usageUserDisplay(row).description">
