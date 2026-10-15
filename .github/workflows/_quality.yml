@@ -30,7 +30,9 @@ jobs:
   backend:
     if: inputs.run_backend
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Native subprocess and database integration tests exceed 30 minutes on
+    # two-core runners. Keep the complete gate and allow its diagnostics to finish.
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
       # Rust 1.97 编译 AWS SDK 调试信息需要更大的 codegen 线程栈。
@@ -144,7 +146,8 @@ jobs:
 
       - name: Rust tests
         working-directory: backend
-        run: cargo test --test main --locked
+        # Print failures when they happen, even if a later test or the job times out.
+        run: cargo test --test main --locked -- --nocapture
 
       - name: Native xAI command account creation
         run: bash .github/scripts/check-native-xai-create
