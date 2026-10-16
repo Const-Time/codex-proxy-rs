@@ -523,9 +523,10 @@ export function getUsageRecords(data: UsagePageQuery, signal?: AbortSignal) {
   })
 }
 
-export function getOpsErrors(data: OpsErrorPageQuery) {
+export function getOpsErrors(data: OpsErrorPageQuery, signal?: AbortSignal) {
   return request<OpsErrorsResponse>({
     url: '/api/admin/operations/errors',
+    signal,
     method: 'GET',
     params: data,
   })

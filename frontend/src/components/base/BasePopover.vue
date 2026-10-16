@@ -353,7 +353,11 @@ watch(
   },
 )
 
-onClickOutside(rootRef, closePopover, { ignore: [popoverRef] })
+// Tables contain many closed detail popovers; only open panels need global input.
+watch(open, (visible, _previous, onCleanup) => {
+  if (visible)
+    onCleanup(onClickOutside(rootRef, closePopover, { ignore: [popoverRef] }))
+}, { immediate: true, flush: 'post' })
 useEventListener(rootRef, 'click', (event) => {
   event.stopPropagation()
   togglePopover()

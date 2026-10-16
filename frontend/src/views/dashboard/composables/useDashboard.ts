@@ -4,7 +4,7 @@ import { useIntervalFn } from '@vueuse/core'
 import { computed, onMounted, onScopeDispose, shallowRef } from 'vue'
 
 import { getDashboardSummary, getDashboardTrend } from '@/api'
-import { errorMessage, withMinimumDuration } from '@/utils/async'
+import { errorMessage } from '@/utils/async'
 import { formatDateTime } from '@/utils/date'
 import { formatCompactNumber, formatInteger } from '@/utils/number'
 
@@ -19,6 +19,8 @@ export function useDashboard() {
   const lastRefreshedAt = shallowRef('')
   let trendRequestId = 0
   let disposed = false
+  let summaryAbort: AbortController | undefined
+  let trendAbort: AbortController | undefined
 
   const metrics = computed(() => snapshot.value.metrics)
   const healthTimeline = computed(() => snapshot.value.healthTimeline)
@@ -36,7 +38,8 @@ export function useDashboard() {
 
   const { resume: startAutoRefresh } = useIntervalFn(
     () => {
-      void loadDashboardData()
+      if (!document.hidden)
+        void loadDashboardData()
     },
     30_000,
     { immediate: false },
@@ -62,7 +65,7 @@ export function useDashboard() {
       return
     refreshing.value = true
     try {
-      await withMinimumDuration(loadDashboardSnapshot)
+      await loadDashboardSnapshot()
     }
     catch {
       // 手动刷新失败时保留当前数据，不打断概览操作。
@@ -76,10 +79,12 @@ export function useDashboard() {
     const trendKind = normalizeDashboardTrendKind(kind)
     activeTrendKind.value = trendKind
     const requestId = ++trendRequestId
+    trendAbort?.abort()
+    trendAbort = new AbortController()
     trendLoading.value = true
     trendError.value = ''
     try {
-      const result = await getDashboardTrend({ kind: trendKind })
+      const result = await getDashboardTrend({ kind: trendKind }, trendAbort.signal)
       if (isCurrentTrendRequest(requestId, trendKind))
         trend.value = result
     }
@@ -96,10 +101,13 @@ export function useDashboard() {
   async function loadDashboardSnapshot() {
     const trendKind = activeTrendKind.value
     const requestId = ++trendRequestId
+    summaryAbort?.abort()
+    summaryAbort = new AbortController()
+    trendAbort?.abort()
     trendLoading.value = true
     trendError.value = ''
     try {
-      const summary = await getDashboardSummary({ kind: trendKind })
+      const summary = await getDashboardSummary({ kind: trendKind }, summaryAbort.signal)
       if (disposed)
         return
       snapshot.value = dashboardSnapshotView(summary)
@@ -134,6 +142,8 @@ export function useDashboard() {
   onScopeDispose(() => {
     disposed = true
     trendRequestId += 1
+    summaryAbort?.abort()
+    trendAbort?.abort()
   })
 
   return {

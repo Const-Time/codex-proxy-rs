@@ -164,12 +164,20 @@ pub fn initialize(
         health: HealthStatus::new(probes, worker_health),
     };
     let index = config.asset_directory.join("index.html");
+    let static_files = Router::new()
+        // A missing versioned chunk must be a 404, never the SPA document.
+        .nest_service(
+            "/assets",
+            ServeDir::new(config.asset_directory.join("assets")),
+        )
+        .fallback_service(ServeDir::new(config.asset_directory).fallback(ServeFile::new(index)))
+        .layer(axum::middleware::from_fn(static_cache_headers));
     let mut router = Router::new()
         .route("/healthz", get(health::healthz))
         .merge(openai::router::router())
         .merge(admin::router::<ApiState>())
         .merge(admin::plugin_models::router())
-        .fallback_service(ServeDir::new(config.asset_directory).fallback(ServeFile::new(index)));
+        .merge(static_files);
     if !config.cors_allowed_origins.is_empty() {
         let origins = config
             .cors_allowed_origins
@@ -269,6 +277,28 @@ impl admin::AdminSessionState for ApiState {
     fn admin_services(&self) -> &AdminServices {
         &self.admin
     }
+}
+
+async fn static_cache_headers(
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let versioned_asset = request.uri().path().starts_with("/assets/");
+    let mut response = next.run(request).await;
+    let cache = if response.status().is_client_error() || response.status().is_server_error() {
+        "no-store"
+    } else if versioned_asset {
+        "public, max-age=31536000, immutable"
+    } else {
+        // Revalidate the entry document on every visit so deployments cannot
+        // leave a cached entry pointing at removed chunks.
+        "no-cache"
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static(cache),
+    );
+    response
 }
 
 fn validate_origin(raw: &str) -> Result<String, ApiConfigError> {

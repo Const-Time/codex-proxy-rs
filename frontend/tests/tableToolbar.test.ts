@@ -33,6 +33,17 @@ test('tables and usage wrapper keep actions and column settings in one toolbar, 
       assert.equal((html.match(/cp-table-toolbar/g) || []).length, 1)
     }
     const { default: Table } = await server.ssrLoadModule('/src/components/base/BaseTable/index.vue')
+    const { default: Rate } = await server.ssrLoadModule('/src/views/usage/components/UsageRateCell.vue')
+    const { default: Latency } = await server.ssrLoadModule('/src/views/usage/components/UsageLatencyCell.vue')
+    const record = { tokenDetails: { outputTokens: 100 }, latencyMs: 3000, firstTokenLatencyMs: 1000, logicalOutcome: 'succeeded' }
+    const rateHtml = await renderToString(createSSRApp({ render: () => h(Rate, { record }) }))
+    assert.ok(rateHtml.includes('50 tok/s'))
+    assert.ok(rateHtml.includes('TTFT 1 s'))
+    const latencyHtml = await renderToString(createSSRApp({ render: () => h(Latency, { record }) }))
+    assert.ok(!latencyHtml.includes('tok/s') && !latencyHtml.includes('生成速率'))
+    const missingHtml = await renderToString(createSSRApp({ render: () => h(Rate, { record: { ...record, firstTokenLatencyMs: null, latencyDetails: { firstEventMs: 100 } } }) }))
+    assert.ok(missingHtml.includes('TTFT —'), 'first event must not masquerade as TTFT')
+    assert.ok(!missingHtml.includes('50 tok/s'))
     for (const withActions of [false, true]) {
       const app = createSSRApp({ render: () => h(Table, { columns: [], rows: [] }, withActions ? { 'toolbar-actions': () => h('button', '刷新') } : {}) })
       app.provide('personalUsage', ref(false))

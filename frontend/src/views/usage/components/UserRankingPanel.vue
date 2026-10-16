@@ -2,7 +2,8 @@
 import type { UsageDiagnosticItem } from '@/api/modules/usage'
 import type { User } from '@/api/modules/users'
 import { ArrowDown } from '@lucide/vue'
-import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
+import { watchDebounced } from '@vueuse/core'
+import { computed, onMounted, onScopeDispose, ref } from 'vue'
 import { getUsageRecordInsightsDiagnostics } from '@/api/modules/usage'
 import { getUsers } from '@/api/modules/users'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
@@ -29,14 +30,25 @@ const user = (id: string) => userIndex.value.get(id)
 const displayName = (item: UsageDiagnosticItem) => user(item.key)?.username || user(item.key)?.email || (item.key === 'unknown' ? UNOWNED_USAGE_USER_LABEL : item.name !== item.key ? item.name : `用户 ${item.key}`)
 const money = (value: string | null) => value === null ? '—' : `$${Number(value).toLocaleString('en-US', { maximumFractionDigits: 4 })}`
 let revision = 0
+let abort: AbortController | undefined
+let catalog: Promise<User[]> | undefined
+function loadUsers() {
+  catalog ??= getUsers().catch((cause) => {
+    catalog = undefined
+    throw cause
+  })
+  return catalog
+}
 async function load() {
   const current = ++revision
+  abort?.abort()
+  abort = new AbortController()
   loading.value = true
   error.value = ''
   try {
     const [result, catalog] = await Promise.all([
-      getUsageRecordInsightsDiagnostics({ ...props.range, ...props.filters, provider: props.provider || undefined, dimension: 'user' }),
-      getUsers(),
+      getUsageRecordInsightsDiagnostics({ ...props.range, ...props.filters, provider: props.provider || undefined, dimension: 'user' }, abort.signal),
+      loadUsers(),
     ])
     if (current !== revision)
       return
@@ -55,9 +67,10 @@ async function load() {
   }
 }
 onMounted(load)
-watch([() => props.range, () => props.provider, () => props.filters], load)
+watchDebounced([() => props.range, () => props.provider, () => props.filters], load, { debounce: 250 })
 onScopeDispose(() => {
   revision++
+  abort?.abort()
 })
 </script>
 

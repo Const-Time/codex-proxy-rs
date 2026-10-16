@@ -415,8 +415,13 @@ async fn api_should_serve_resolved_assets_with_relative_environment_override() {
     let Ok(directory) = std::env::var(CHILD_ENV) else {
         let directory = std::env::temp_dir().join(format!("cpr-assets-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(directory.join("deploy")).expect("config directory");
-        fs::create_dir_all(directory.join("web/dist")).expect("asset directory");
+        fs::create_dir_all(directory.join("web/dist/assets")).expect("asset directory");
         fs::write(directory.join("web/dist/index.html"), "resolved-web-assets").expect("index");
+        fs::write(
+            directory.join("web/dist/assets/app-v1.js"),
+            "export default 1;",
+        )
+        .expect("chunk");
         let output = Command::new(std::env::current_exe().expect("test executable"))
             .args([
                 "--exact",
@@ -447,15 +452,50 @@ async fn api_should_serve_resolved_assets_with_relative_environment_override() {
         .resolve_and_validate(&std::path::Path::new(&directory).join("deploy"))
         .expect("resolved API config");
     let admin = crate::admin::AdminTestFixture::new().await;
-    let response = api_router_with_config(admin.services, config)
+    let router = api_router_with_config(admin.services, config);
+    let response = router
+        .clone()
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
         .expect("static response");
     assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-cache");
     let body = axum::body::to_bytes(response.into_body(), 1024)
         .await
         .unwrap();
     assert_eq!(body.as_ref(), b"resolved-web-assets");
+    for (path, status, cache, expected) in [
+        ("/usage", 200, "no-cache", "resolved-web-assets"),
+        (
+            "/assets/app-v1.js",
+            200,
+            "public, max-age=31536000, immutable",
+            "export default 1;",
+        ),
+        ("/assets/removed-v0.js", 404, "no-store", ""),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .expect("static response");
+        assert_eq!(response.status().as_u16(), status, "{path}");
+        assert_eq!(response.headers()["cache-control"], cache, "{path}");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), expected.as_bytes(), "{path}");
+    }
+    let health = router
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!health.headers().contains_key("cache-control"));
 }
 
 struct TestAdmissionLease;

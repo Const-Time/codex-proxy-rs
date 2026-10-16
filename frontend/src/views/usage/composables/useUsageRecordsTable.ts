@@ -12,7 +12,7 @@ import {
 } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 
-import { errorMessage, withMinimumDuration } from '@/utils/async'
+import { errorMessage } from '@/utils/async'
 
 interface UseUsageRecordsTableOptions {
   personal?: boolean
@@ -33,6 +33,7 @@ interface UsageLoadOptions {
 export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   const loading = shallowRef(true)
   const analyticsLoading = shallowRef(true)
+  const diagnosticsLoading = shallowRef(true)
   const records = shallowRef<UsageDisplayRecord[]>([])
   const summary = shallowRef(emptySummary())
   const insights = shallowRef(emptyInsights())
@@ -124,53 +125,40 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
 
   async function loadUsageAnalytics(globalParams: ReturnType<typeof scopedParams>, background: boolean) {
     const requestId = ++analyticsRequestId
-    const diagnosticsId = ++diagnosticRequestId
     analyticsAbort?.abort()
-    diagnosticAbort?.abort()
     analyticsAbort = new AbortController()
-    diagnosticAbort = new AbortController()
-    const dimension = diagnosticDimension.value
+    const signal = analyticsAbort.signal
     analyticsLoading.value = !background
-    try {
-      const [nextSummary, overview, diagnostics] = await Promise.all([
-        getUsageRecordSummary(globalParams, analyticsAbort.signal),
-        getUsageRecordInsightsOverview(globalParams, analyticsAbort.signal),
-        getUsageRecordInsightsDiagnostics({
-          ...globalParams,
-          dimension,
-        }, diagnosticAbort.signal).catch((error: unknown) => {
-          if (diagnosticsId !== diagnosticRequestId)
-            return insights.value.diagnostics
-          throw error
-        }),
-      ])
-      if (requestId !== analyticsRequestId)
-        return
-
-      summary.value = nextSummary
-      insights.value = {
-        overview,
-        diagnostics:
-          diagnosticsId === diagnosticRequestId && dimension === diagnosticDimension.value
-            ? diagnostics
-            : insights.value.diagnostics,
-      }
-    }
-    catch (error: unknown) {
-      if (requestId !== analyticsRequestId)
-        return
-      summary.value = emptySummary()
-      insights.value = emptyInsights()
-      toast.error(errorMessage(error, '加载失败'))
-    }
-    finally {
-      if (requestId === analyticsRequestId) {
-        analyticsLoading.value = false
-      }
-    }
+    // Each panel publishes its own result: slow diagnostics must not hold back
+    // summary cards or clear an already successful overview on failure.
+    await Promise.all([
+      getUsageRecordSummary(globalParams, signal).then((value) => {
+        if (requestId === analyticsRequestId)
+          summary.value = value
+      }).catch((error: unknown) => {
+        if (requestId === analyticsRequestId) {
+          summary.value = emptySummary()
+          toast.error(errorMessage(error, '加载汇总失败'))
+        }
+      }),
+      getUsageRecordInsightsOverview(globalParams, signal).then((overview) => {
+        if (requestId === analyticsRequestId)
+          insights.value = { ...insights.value, overview }
+      }).catch((error: unknown) => {
+        if (requestId === analyticsRequestId) {
+          insights.value = { ...insights.value, overview: emptyOverview() }
+          toast.error(errorMessage(error, '加载趋势失败'))
+        }
+      }).finally(() => {
+        if (requestId === analyticsRequestId)
+          analyticsLoading.value = false
+      }),
+      loadDiagnostics(background),
+    ])
   }
 
-  async function loadDiagnostics() {
+  async function loadDiagnostics(background = false) {
+    diagnosticsLoading.value = !background
     const requestId = ++diagnosticRequestId
     diagnosticAbort?.abort()
     diagnosticAbort = new AbortController()
@@ -193,6 +181,10 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
         return
       toast.error(errorMessage(error, '加载失败'))
     }
+    finally {
+      if (requestId === diagnosticRequestId)
+        diagnosticsLoading.value = false
+    }
   }
 
   async function refreshUsageRecords() {
@@ -201,7 +193,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     refreshingList.value = true
     try {
       options.refreshTimeRangeEnd()
-      await withMinimumDuration(() => loadUsageRecords())
+      await loadUsageRecords()
     }
     finally {
       refreshingList.value = false
@@ -257,6 +249,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     usagePagination,
     loading,
     analyticsLoading,
+    diagnosticsLoading,
     records,
     summary,
     insights,

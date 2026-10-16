@@ -280,9 +280,13 @@ watch(
   },
 )
 
-onClickOutside(rootRef, closeMenu, { ignore: [popoverRef] })
-useEventListener(window, 'resize', updatePopoverPositionThrottled)
-useEventListener(window, 'scroll', updatePopoverPositionThrottled, { capture: true })
+watch(open, (visible, _previous, onCleanup) => {
+  if (visible)
+    onCleanup(onClickOutside(rootRef, closeMenu, { ignore: [popoverRef] }))
+}, { flush: 'post' })
+const viewportTarget = computed(() => open.value ? window : null)
+useEventListener(viewportTarget, 'resize', updatePopoverPositionThrottled)
+useEventListener(viewportTarget, 'scroll', updatePopoverPositionThrottled, { capture: true })
 </script>
 
 <template>

@@ -1,11 +1,18 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
+import { toast } from '@/components/base/BaseToast'
 import { useAuthStore } from '@/stores/modules/auth'
 import { routes } from './routes'
 
 export const router = createRouter({
   history: createWebHistory('/'),
   routes,
+})
+
+router.onError((error: Error) => {
+  if (/Failed to fetch dynamically imported module|Importing a module script failed|Loading chunk .* failed|Unable to preload CSS/i.test(error.message)) {
+    toast.error('页面资源加载失败，可能已更新或网络异常。请刷新页面后重试。', { duration: 10000 })
+  }
 })
 
 // 路由守卫

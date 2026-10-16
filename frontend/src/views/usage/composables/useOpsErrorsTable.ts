@@ -2,26 +2,31 @@ import type { Ref } from 'vue'
 import type { UsageTimeRangeParams } from './useUsageTimeRange'
 import { watchDebounced } from '@vueuse/core'
 
-import { computed, inject, onMounted, shallowRef, watch } from 'vue'
+import { computed, inject, onMounted, onScopeDispose, shallowRef, watch } from 'vue'
 import { getOpsErrors } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 import { useStablePagedQuery } from '@/composables/useStablePagedQuery'
-import { errorMessage, withMinimumDuration } from '@/utils/async'
+import { errorMessage } from '@/utils/async'
 
 export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>, filters?: Readonly<Ref<Record<string, string | undefined>>>) {
   const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
   const refreshing = shallowRef(false)
   const searchQuery = shallowRef('')
+  let abort: AbortController | undefined
   const query = useStablePagedQuery({
     initialPageSize: 10,
-    load: ({ currentPage, pageSize }) => getOpsErrors({
-      personal: personal?.value,
-      currentPage,
-      pageSize,
-      search: searchQuery.value.trim() || undefined,
-      ...timeRangeParams.value,
-      ...filters?.value,
-    }),
+    load: ({ currentPage, pageSize }) => {
+      abort?.abort()
+      abort = new AbortController()
+      return getOpsErrors({
+        personal: personal?.value,
+        currentPage,
+        pageSize,
+        search: searchQuery.value.trim() || undefined,
+        ...timeRangeParams.value,
+        ...filters?.value,
+      }, abort.signal)
+    },
     onError: error => toast.error(errorMessage(error, '加载错误明细失败')),
   })
   // 首屏进入即处于加载态；首次 execute 完成后由 usePagedQuery 维护。
@@ -47,7 +52,7 @@ export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangePa
       return
     refreshing.value = true
     try {
-      await withMinimumDuration(() => query.execute(query.currentPage.value))
+      await query.execute(query.currentPage.value)
     }
     finally {
       refreshing.value = false
@@ -67,6 +72,7 @@ export function useOpsErrorsTable(timeRangeParams: Readonly<Ref<UsageTimeRangePa
   })
 
   onMounted(() => void query.execute(1))
+  onScopeDispose(() => abort?.abort())
 
   return {
     loading: query.loading,

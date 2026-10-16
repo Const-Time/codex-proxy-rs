@@ -96,13 +96,9 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
         provider_openai::build_reqwest_client_with_custom_ca,
         Arc::new(provider_openai::transport::websocket::CodexProxyWebSocketProbe::default()),
     );
-    let mut openai = provider_openai::initialize_with_state_probe(
-        openai,
-        provider_ports.clone(),
-        store.turn_state_store(),
-        proxy_probe.clone(),
-    )
-    .await?;
+    // Retired proactive state maintenance must not resume from persisted policies.
+    // Normal request session identity and native continuation remain provider-owned.
+    let mut openai = provider_openai::initialize(openai, provider_ports.clone()).await?;
     host.report_startup_ready("OpenAI Provider");
     let mut xai = provider_xai::initialize(xai, provider_ports).await?;
     host.report_startup_ready("xAI Provider");
@@ -179,10 +175,7 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
         let api = gateway_api::initialize(
             api,
             core.execution_service(),
-            admin
-                .services()
-                .with_turn_state(openai.turn_state_service())
-                .with_plugins(plugins.clone()),
+            admin.services().with_plugins(plugins.clone()),
             probes,
             host.worker_health(),
             host.connection_lifecycle(),

@@ -48,31 +48,24 @@ async function load() {
   loading.value = true
   error.value = ''
   const failures: string[] = []
-  try {
-    keys.value = (await getUsageKeyOptions(Boolean(personal?.value))).map(key => ({ value: key.id, label: `${key.name} · ${key.id.slice(-8)}` }))
-  }
-  catch (cause) { failures.push(`密钥选项加载失败：${errorMessage(cause, '请重试')}`) }
-  if (personal?.value) {
-    try {
-      groups.value = (await getUserGroups()).map(group => ({ label: group.name, value: group.id }))
-    }
-    catch (cause) { failures.push(`分组选项加载失败：${errorMessage(cause, '请重试')}`) }
-    finally {
-      error.value = failures.join('；')
-      loading.value = false
-    }
-    return
-  }
+  const catalogs = personal?.value
+    ? [
+        getUserGroups().then(rows => rows.map(group => ({ label: group.name, value: group.id }))),
+      ]
+    : [
+        loadCatalog(page => getAccountGroups({ page, pageSize: 200 }), row => ({ label: row.name, value: row.id })),
+        loadCatalog(page => getAccounts({ page, pageSize: 200 }), row => ({ label: row.email || row.name || row.id, value: row.id })),
+        getUsers().then((rows) => {
+          usernames.value = rows.map(row => ({ label: row.username ? `${row.username} · ${row.email}` : `${row.email}（未设用户名）`, value: row.id }))
+          return rows.map(row => ({ label: row.email, value: row.id }))
+        }),
+      ]
   const results = await Promise.allSettled([
-    loadCatalog(page => getAccountGroups({ page, pageSize: 200 }), row => ({ label: row.name, value: row.id })),
-    loadCatalog(page => getAccounts({ page, pageSize: 200 }), row => ({ label: row.email || row.name || row.id, value: row.id })),
-    getUsers().then((rows) => {
-      usernames.value = rows.map(row => ({ label: row.username ? `${row.username} · ${row.email}` : `${row.email}（未设用户名）`, value: row.id }))
-      return rows.map(row => ({ label: row.email, value: row.id }))
-    }),
+    getUsageKeyOptions(Boolean(personal?.value)).then(rows => rows.map(key => ({ value: key.id, label: `${key.name} · ${key.id.slice(-8)}` }))),
+    ...catalogs,
   ])
-  const targets = [groups, accounts, users]
-  const labels = ['分组', '账号', '邮箱 / 用户名']
+  const targets = [keys, groups, accounts, users]
+  const labels = ['密钥', '分组', '账号', '邮箱 / 用户名']
   results.forEach((result, index) => {
     if (result.status === 'fulfilled')
       targets[index]!.value = result.value

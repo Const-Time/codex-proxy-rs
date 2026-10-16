@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>独立速率列预览</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <output
+      id="listeners"
+      style="
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        font: 12px monospace;
+        background: white;
+        color: black;
+        padding: 8px;
+      "
+    ></output>
+    <script type="module">
+      import { createApp } from 'vue'
+      import { createPinia } from 'pinia'
+      import Preview from './UsageRatePreview.vue'
+      import { loading } from '../../src/directives/loading'
+      import { useThemeStore } from '../../src/stores/modules/theme'
+      import '../../src/styles/index.css'
+      // Fixture-only counter: verify closed popovers do not retain global listeners.
+      const tracked = new Map(['click', 'pointerdown', 'scroll', 'resize'].map((type) => [type, new Set()]))
+      const add = window.addEventListener.bind(window)
+      const remove = window.removeEventListener.bind(window)
+      window.addEventListener = (type, listener, options) => {
+        tracked.get(type)?.add(listener)
+        add(type, listener, options)
+      }
+      window.removeEventListener = (type, listener, options) => {
+        tracked.get(type)?.delete(listener)
+        remove(type, listener, options)
+      }
+      setInterval(() => {
+        document.getElementById('listeners').textContent = [...tracked]
+          .map(([type, listeners]) => `${type}: ${listeners.size}`)
+          .join(' · ')
+      }, 100)
+      const app = createApp(Preview)
+      const pinia = createPinia()
+      app.use(pinia)
+      useThemeStore(pinia).initializeTheme()
+      app.provide('personalUsage', { value: false })
+      app.directive('loading', loading)
+      app.mount('#app')
+    </script>
+  </body>
+</html>

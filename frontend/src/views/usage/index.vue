@@ -43,6 +43,7 @@ const {
   usagePagination,
   loading,
   analyticsLoading,
+  diagnosticsLoading,
   records,
   summary,
   insights,
@@ -87,6 +88,7 @@ watch(timeRange, () => {
       :overview="insights.overview"
       :diagnostics="insights.diagnostics"
       :loading="analyticsLoading"
+      :diagnostics-loading="diagnosticsLoading"
     >
       <template v-if="!personal" #ranking>
         <UserRankingPanel :range="timeRangeParams" :provider="providerQuery" :filters="recordFilterParams" />
@@ -156,7 +158,7 @@ watch(timeRange, () => {
           </div>
         </div>
 
-        <div v-show="recordView === 'errors'" class="min-h-130 min-w-0 flex-1">
+        <div v-if="recordView === 'errors'" class="min-h-130 min-w-0 flex-1">
           <OpsErrorPanel :time-range-params="timeRangeParams" :record-filters="recordFilterParams" :provider="providerQuery" />
         </div>
       </template>

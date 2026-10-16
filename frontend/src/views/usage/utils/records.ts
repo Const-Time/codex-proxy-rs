@@ -287,6 +287,8 @@ export function usageLatencyDetails(record: UsageCommonRecord) {
 
   return {
     generationRateDisplay: rate === null ? '—' : `${rate.toFixed(1)} tokens/s`,
+    generationRateCompactDisplay: rate === null ? '—' : `${Math.round(rate)} tok/s`,
+    firstTokenDisplay: formatDuration(firstTokenMs),
     // SSE 可能先收到生命周期事件而没有文本或推理增量；这不是首字，须保留原始语义。
     firstOutputLabel: firstTokenMs === null && firstEventMs !== null ? '首事件' : '首字',
     firstOutputDisplay: formatDuration(firstTokenMs ?? firstEventMs),

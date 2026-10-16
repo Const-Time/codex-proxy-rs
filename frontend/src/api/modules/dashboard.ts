@@ -187,18 +187,20 @@ interface DashboardQuery {
   kind: string
 }
 
-export function getDashboardSummary(data: DashboardQuery) {
+export function getDashboardSummary(data: DashboardQuery, signal?: AbortSignal) {
   return request<DashboardSummaryResponse>({
     url: '/api/admin/dashboard/summary',
     method: 'GET',
     params: data,
+    signal,
   })
 }
 
-export function getDashboardTrend(data: DashboardQuery) {
+export function getDashboardTrend(data: DashboardQuery, signal?: AbortSignal) {
   return request<DashboardTrendResponse>({
     url: '/api/admin/dashboard/trend',
     method: 'GET',
     params: data,
+    signal,
   })
 }

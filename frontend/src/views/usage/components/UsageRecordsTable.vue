@@ -17,6 +17,7 @@ import UsageBillingCell from './UsageBillingCell.vue'
 import UsageClientIpCell from './UsageClientIpCell.vue'
 import UsageLatencyCell from './UsageLatencyCell.vue'
 import UsageModelCell from './UsageModelCell.vue'
+import UsageRateCell from './UsageRateCell.vue'
 import UsageReasoningEffortCell from './UsageReasoningEffortCell.vue'
 import UsageTokenCell from './UsageTokenCell.vue'
 import UsageTransportBadge from './UsageTransportBadge.vue'
@@ -128,6 +129,10 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
 
     <template #latency="{ row }">
       <UsageLatencyCell :record="row" />
+    </template>
+
+    <template #generationRate="{ row }">
+      <UsageRateCell :record="row" />
     </template>
 
     <template #turnState="{ row }">
