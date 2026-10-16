@@ -1265,7 +1265,7 @@ async fn model_billing_for_endpoint(endpoint: &str) {
         )
     );
     let summary = super::admin_observability_store(&db.pool)
-        .usage_summary(
+        .usage_card_summary(
             gateway_admin::model::observability::TimeRange {
                 start: Utc::now() - chrono::Duration::hours(1),
                 end: Utc::now() + chrono::Duration::hours(1),

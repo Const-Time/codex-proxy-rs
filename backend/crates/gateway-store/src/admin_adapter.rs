@@ -266,6 +266,14 @@ pub(crate) fn store_model_mappings(
 
 #[async_trait::async_trait]
 impl AuthStore for UserAuthStore {
+    async fn usage_catalog_options(
+        &self,
+        kind: gateway_admin::model::operations::UsageCatalogKind,
+        owner: Option<&str>,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::operations::UsageCatalogOption>> {
+        self.usage_catalog_options_stored(kind, owner).await
+    }
+
     async fn record_operation(
         &self,
         event: gateway_admin::model::operations::OperationLog,

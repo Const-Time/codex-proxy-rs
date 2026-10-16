@@ -294,6 +294,12 @@ pub trait AuthStore: Send + Sync {
             "store not configured",
         ))
     }
+    async fn usage_catalog_options(
+        &self,
+        kind: crate::model::operations::UsageCatalogKind,
+        owner: Option<&str>,
+    ) -> AdminStoreResult<Vec<crate::model::operations::UsageCatalogOption>>;
+
     async fn usage_key_options(
         &self,
         _owner: Option<&str>,
@@ -612,6 +618,12 @@ pub trait ObservabilityStore: Send + Sync {
         request_id: &str,
         owner: Option<&str>,
     ) -> AdminStoreResult<UsageDetail>;
+
+    async fn usage_card_summary(
+        &self,
+        range: TimeRange,
+        filter: UsageFilter,
+    ) -> AdminStoreResult<crate::model::observability::UsageSummary>;
 
     async fn usage_summary(
         &self,

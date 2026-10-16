@@ -28,6 +28,8 @@ mod mapping;
 mod model;
 mod queries;
 mod query_budget;
+mod rollup;
+pub use rollup::PgUsageRollupRepository;
 
 pub use admin_adapter::*;
 pub(crate) use mapping::*;

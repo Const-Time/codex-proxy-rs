@@ -56,6 +56,16 @@ async fn repeated_login_attempts_are_bounded_before_password_work() {
 
 #[async_trait]
 impl AuthStore for MemoryAuthStore {
+    async fn usage_catalog_options(
+        &self,
+        _kind: gateway_admin::model::operations::UsageCatalogKind,
+        _owner: Option<&str>,
+    ) -> gateway_admin::ports::store::AdminStoreResult<
+        Vec<gateway_admin::model::operations::UsageCatalogOption>,
+    > {
+        Ok(Vec::new())
+    }
+
     async fn set_user_password(
         &self,
         _: &str,

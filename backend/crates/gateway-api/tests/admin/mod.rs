@@ -224,6 +224,7 @@ impl AdminSessionState for AdminTestState {
 }
 
 pub(super) struct MemoryAuthStore {
+    catalog_owners: Mutex<Vec<Option<String>>>,
     operations: Mutex<Vec<gateway_admin::model::operations::OperationLog>>,
     password_hash: Mutex<Option<String>>,
     sessions: Mutex<BTreeMap<String, AdminSession>>,
@@ -235,6 +236,7 @@ pub(super) struct MemoryAuthStore {
 impl MemoryAuthStore {
     fn new(api_key: Arc<Mutex<Option<AdminApiKey>>>) -> Self {
         Self {
+            catalog_owners: Mutex::new(Vec::new()),
             operations: Mutex::new(Vec::new()),
             password_hash: Mutex::new(None),
             sessions: Mutex::new(BTreeMap::new()),
@@ -278,6 +280,20 @@ impl MemoryAuthStore {
 
 #[async_trait]
 impl AuthStore for MemoryAuthStore {
+    async fn usage_catalog_options(
+        &self,
+        _kind: gateway_admin::model::operations::UsageCatalogKind,
+        _owner: Option<&str>,
+    ) -> gateway_admin::ports::store::AdminStoreResult<
+        Vec<gateway_admin::model::operations::UsageCatalogOption>,
+    > {
+        self.catalog_owners
+            .lock()
+            .unwrap()
+            .push(_owner.map(str::to_owned));
+        Ok(Vec::new())
+    }
+
     async fn record_operation(
         &self,
         event: gateway_admin::model::operations::OperationLog,
@@ -1165,6 +1181,14 @@ impl ObservabilityStore for UnusedStore {
             .expect("usage detail")
             .clone()
             .ok_or_else(|| unavailable("usage detail"))
+    }
+
+    async fn usage_card_summary(
+        &self,
+        _: TimeRange,
+        _: UsageFilter,
+    ) -> AdminStoreResult<gateway_admin::model::observability::UsageSummary> {
+        Err(unavailable("usage cards"))
     }
 
     async fn usage_summary(&self, _: TimeRange, _: UsageFilter) -> AdminStoreResult<UsageOverview> {

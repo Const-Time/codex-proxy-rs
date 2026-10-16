@@ -1235,3 +1235,25 @@ async fn request_filter_routes_accept_new_dimensions_and_reject_invalid_values()
         }
     }
 }
+
+#[test]
+fn usage_summary_contains_only_the_eight_card_fields() {
+    let value = serde_json::to_value(gateway_api::admin::observability::UsageSummaryView {
+        total_cost_usd: "1.5".into(),
+        total_requests: "2".into(),
+        input_tokens: "100".into(),
+        output_tokens: "20".into(),
+        cached_tokens: "40".into(),
+        cache_write_tokens: "3".into(),
+        total_tokens: "120".into(),
+        average_latency_ms: "900 ms".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "totalCostUsd": "1.5", "totalRequests": "2", "inputTokens": "100", "outputTokens": "20",
+            "cachedTokens": "40", "cacheWriteTokens": "3", "totalTokens": "120", "averageLatencyMs": "900 ms",
+        })
+    );
+}

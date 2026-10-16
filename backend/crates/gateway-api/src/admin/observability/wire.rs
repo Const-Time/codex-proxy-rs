@@ -440,24 +440,6 @@ pub struct DashboardCapacityInfoView {
     pub available_slots: Option<u64>,
 }
 
-/// 逻辑请求指标展示。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RequestMetricsView {
-    pub request_count: u64,
-    pub success_count: u64,
-    pub failure_count: u64,
-    pub cancelled_count: u64,
-    pub incomplete_count: u64,
-    pub caller_error_count: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cached_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub reasoning_tokens: u64,
-    pub total_tokens: u64,
-}
-
 /// 上游尝试指标展示。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -601,8 +583,6 @@ pub struct UsageSummaryView {
     pub cache_write_tokens: String,
     pub total_tokens: String,
     pub average_latency_ms: String,
-    pub logical_requests: RequestMetricsView,
-    pub attempts: AttemptMetricsView,
 }
 
 /// 洞察健康趋势点。

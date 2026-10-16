@@ -510,12 +510,12 @@ pub(crate) async fn request_costs(
 }
 
 /// Actual user consumption includes billable interrupted requests and retries.
-pub(crate) async fn total_billed_consumption(
-    pool: &PgPool,
+fn push_billed_consumption_query(
+    query: &mut QueryBuilder<Postgres>,
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
-) -> StoreResult<DecimalAmount> {
-    let mut query = QueryBuilder::<Postgres>::new(
+) {
+    query.push(
         "select coalesce(sum(coalesce(charge.amount_usd, case when mr.cost_currency = 'USD' then mr.billed_cost_amount end)), 0)::text as amount
          from model_requests mr left join user_group_charge_events charge on charge.request_id = mr.id
          where mr.started_at >= ",
@@ -524,7 +524,16 @@ pub(crate) async fn total_billed_consumption(
         .push_bind(range.start)
         .push(" and mr.started_at < ")
         .push_bind(range.end);
-    push_usage_filter(&mut query, filter, "mr");
+    push_usage_filter(query, filter, "mr");
+}
+
+pub(crate) async fn total_billed_consumption(
+    pool: &PgPool,
+    range: ObservabilityRange,
+    filter: &UsageRecordFilter,
+) -> StoreResult<DecimalAmount> {
+    let mut query = QueryBuilder::<Postgres>::new("");
+    push_billed_consumption_query(&mut query, range, filter);
     let row = query
         .build()
         .fetch_one(pool)
@@ -685,4 +694,58 @@ pub(crate) fn fill_metric_gaps(
             .ok_or_else(|| invalid("metric range exceeds supported timestamps"))?;
     }
     Ok(result)
+}
+
+/// Cards retain the exact request/usage/billing scopes without sorting percentiles.
+pub(crate) async fn usage_card_summary(
+    pool: &PgPool,
+    range: ObservabilityRange,
+    filter: &UsageRecordFilter,
+) -> StoreResult<UsageCardSummary> {
+    filter.validate()?;
+    if let Some(summary) = super::super::rollup::card_summary(pool, range, filter).await? {
+        return Ok(summary);
+    }
+    let fact = completed_usage_fact_predicate("mr");
+    // Aggregate usage separately so a wide request/ledger hash join cannot spill all
+    // token and latency columns. Both aggregates still share one statement snapshot.
+    // Billing includes interrupted/recovered attempts; usage deliberately does not.
+    let mut query = QueryBuilder::<Postgres>::new(format!(
+        "with metrics as (select count(*) filter (where mr.outcome = 'succeeded')::bigint as success_count,
+                coalesce(sum(mr.input_tokens) filter (where {fact}), 0)::bigint as input_tokens,
+                coalesce(sum(mr.output_tokens) filter (where {fact}), 0)::bigint as output_tokens,
+                coalesce(sum(mr.cached_tokens) filter (where {fact}), 0)::bigint as cached_tokens,
+                coalesce(sum(mr.cache_write_tokens) filter (where {fact}), 0)::bigint as cache_write_tokens,
+                coalesce(sum(mr.total_tokens) filter (where {fact}), 0)::bigint as total_tokens,
+                coalesce(sum(mr.latency_ms) filter (where {fact}), 0)::bigint as latency_sum,
+                count(mr.latency_ms) filter (where {fact})::bigint as latency_count
+         from model_requests mr
+         where mr.started_at >= "
+    ));
+    query
+        .push_bind(range.start)
+        .push(" and mr.started_at < ")
+        .push_bind(range.end);
+    push_unrecovered_request_filter(&mut query, "mr");
+    push_usage_filter(&mut query, filter, "mr");
+    query.push("), billed as (");
+    push_billed_consumption_query(&mut query, range, filter);
+    query.push(") select metrics.*, billed.amount from metrics cross join billed");
+    let row = query
+        .build()
+        .fetch_one(pool)
+        .await
+        .map_err(|_| postgres_unavailable("load usage cards"))?;
+    let latency_count = unsigned(&row, "latency_count")?;
+    let latency_sum = unsigned(&row, "latency_sum")?;
+    Ok(UsageCardSummary {
+        total_cost_usd: DecimalAmount::from_str(&get::<String>(&row, "amount")?)?,
+        success_count: unsigned(&row, "success_count")?,
+        input_tokens: unsigned(&row, "input_tokens")?,
+        output_tokens: unsigned(&row, "output_tokens")?,
+        cached_tokens: unsigned(&row, "cached_tokens")?,
+        cache_write_tokens: unsigned(&row, "cache_write_tokens")?,
+        total_tokens: unsigned(&row, "total_tokens")?,
+        average_latency_ms: (latency_count > 0).then(|| latency_sum / latency_count),
+    })
 }

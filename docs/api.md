@@ -229,7 +229,7 @@ Responses 编码时仅为缺失的顶层 `store` 补齐 `false`；显式提供�
 | GET | /api/admin/users | — | 管理员；用户列表，无密码或密钥 |
 | POST | /api/admin/users/create | { username, password, groupIds, maxConcurrency?, requestsPerMinute? } | 管理员；创建已启用的普通用户，不能指定角色 |
 | POST | /api/admin/users/update | { id, username?, enabled, groupIds, quotaMultipliers?, maxConcurrency?, requestsPerMinute? } | 管理员；修改邮箱、分组授权、额度倍率及用户限流，不能禁用管理员 |
-| GET | /api/admin/subscriptions | — | 管理员；当前用户分组订阅、有效日周限额、已用额度、刷新时间及最近重置 |
+| GET | /api/admin/subscriptions | — | 管理员；当前授权的用户分组订阅、有效日周限额、已用额度、刷新时间及最近重置；撤销授权后旧密钥绑定不再产生订阅，历史消费保留 |
 | POST | /api/admin/subscriptions/reset | { requestId, targets: [{ userId, groupId }] } | 管理员；幂等重置指定订阅，targets 必填且为 1–500 项，返回影响数量；不提供全体重置入口 |
 | GET | /api/profile | — | 本人会话；个人资料 |
 | GET | /api/profile/groups | — | 本人会话；获授权分组及本人的共享额度，不含上游账号资料 |
@@ -830,7 +830,8 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 | `GET` | `/api/admin/dashboard/trend` | Dashboard 趋势；`kind=usage|latency|errors` |
 | `GET` | `/api/admin/usage/records` | 请求记录分页列表 |
 | `GET` | `/api/admin/usage/records/detail` | 按 `id` 查询请求详情 |
-| `GET` | `/api/admin/usage/records/summary` | 当前筛选条件的请求汇总 |
+| `GET` | `/api/admin/usage/records/summary` | 当前筛选条件的轻量卡片汇总（不计算分位数与 attempt 统计） |
+| `GET` | `/api/admin/usage/catalog-options` | 筛选目录；`kind=groups/accounts`、可选 `personal`，只返回 `{id,name}[]` |
 | `GET` | `/api/admin/usage/insights/overview` | 用量、成本与成功率洞察 |
 | `GET` | `/api/admin/usage/insights/diagnostics` | 按维度聚合诊断 |
 | `GET` | `/api/admin/operations/errors` | 运维错误分页列表 |
@@ -839,8 +840,16 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 request/response/upstream ID、outcome 与搜索文本。诊断 `dimension` 可取 `model`、`account`、
 `apiKey`、`provider`、`transport`、`failureClass`、`status`。
 
-汇总与洞察中的请求数与 outcome 分布覆盖筛选范围内全部请求；token、缓存、延迟与成本聚合仅统计
-已完整交付客户端的成功响应。
+卡片汇总只返回 `totalCostUsd / totalRequests / inputTokens / outputTokens / cachedTokens /
+cacheWriteTokens / totalTokens / averageLatencyMs` 八个展示字段，不再附带未使用的
+`logicalRequests / attempts`。复杂健康、分位数与重试统计仍由洞察接口提供。
+`totalRequests` 保持成功请求数口径；洞察的请求数与 outcome 分布覆盖筛选范围内全部未被恢复的请求。
+Token、缓存与延迟聚合仅统计未被恢复、且已完整交付客户端的成功用量事实；
+`totalCostUsd` 保持实际消费口径，优先使用结算账本，包含已产生费用的失败/中断与内部重试，不重复相加。
+
+筛选目录要求用户会话认证。普通用户始终限定自身分组；管理员 `personal=true` 也只查询自身授权，
+隐式全分组管理员保持现有规则。账号目录仅允许管理员非个人模式读取；不返回 credential、quota、
+账号用量或分组成员。撤销授权后的分组不会出现在个人目录中，各筛选目录独立加载，不等待慢目录。
 
 详情接口按 `id` 可读取成功、失败或未完成请求。新增 `trace`（历史未采集记录为 `null`）和
 `relatedRequests[]`（`requestId / relation / outcome / completedAt`）；`relation` 为 `recovered_by` 或

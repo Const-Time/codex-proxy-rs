@@ -39,7 +39,7 @@ fn external_observability_range_accepts_exactly_366_days() {
 }
 
 #[tokio::test]
-async fn concurrent_summary_and_insights_share_work_only_for_the_same_authorized_filter() {
+async fn concurrent_insights_share_work_only_for_the_same_authorized_filter() {
     let range = observation_range(Utc::now());
     let store = Arc::new(FixtureObservabilityStore::new(range));
     let services = observability_services(store.clone()).await;
@@ -50,7 +50,7 @@ async fn concurrent_summary_and_insights_share_work_only_for_the_same_authorized
     let (summary, insights) = tokio::join!(
         services
             .observability()
-            .usage_summary(range, filter.clone()),
+            .usage_insights(range, filter.clone()),
         services
             .observability()
             .usage_insights(range, filter.clone())
@@ -70,7 +70,7 @@ async fn concurrent_summary_and_insights_share_work_only_for_the_same_authorized
     ] {
         services
             .observability()
-            .usage_summary(range, filter)
+            .usage_insights(range, filter)
             .await
             .unwrap();
     }
@@ -78,7 +78,7 @@ async fn concurrent_summary_and_insights_share_work_only_for_the_same_authorized
     tokio::time::sleep(StdDuration::from_millis(2100)).await;
     services
         .observability()
-        .usage_summary(range, filter)
+        .usage_insights(range, filter)
         .await
         .unwrap();
     assert_eq!(store.usage_summary_calls.load(Ordering::Relaxed), 4);
@@ -891,6 +891,25 @@ impl ObservabilityStore for FixtureObservabilityStore {
         Err(super::unavailable("usage detail"))
     }
 
+    async fn usage_card_summary(
+        &self,
+        _: TimeRange,
+        _: UsageFilter,
+    ) -> AdminStoreResult<gateway_admin::model::observability::UsageSummary> {
+        let overview = self.overview.lock().expect("overview");
+        let r = &overview.requests;
+        Ok(gateway_admin::model::observability::UsageSummary {
+            total_cost_usd: overview.total_cost_usd.clone(),
+            success_count: r.success_count,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cached_tokens: r.cached_tokens,
+            cache_write_tokens: r.cache_write_tokens,
+            total_tokens: r.total_tokens,
+            average_latency_ms: (r.latency_count > 0).then(|| r.latency_sum_ms / r.latency_count),
+        })
+    }
+
     async fn usage_summary(&self, _: TimeRange, _: UsageFilter) -> AdminStoreResult<UsageOverview> {
         self.usage_summary_calls.fetch_add(1, Ordering::Relaxed);
         tokio::task::yield_now().await;
@@ -1165,4 +1184,20 @@ async fn grouped_billing_scenarios_match_repeated_per_request_rounding() {
         results.push(format!("{:?}", insights.cost));
     }
     assert_eq!(results[0], results[1]);
+}
+
+#[tokio::test]
+async fn cards_do_not_load_expensive_insights_aggregates() {
+    let range = observation_range(Utc::now());
+    let store = Arc::new(FixtureObservabilityStore::new(range));
+    let services = observability_services(store.clone()).await;
+    let cards = services
+        .observability()
+        .usage_summary(range, UsageFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(store.usage_summary_calls.load(Ordering::Relaxed), 0);
+    let overview = store.overview.lock().unwrap();
+    assert_eq!(cards.success_count, overview.requests.success_count);
+    assert_eq!(cards.total_cost_usd, overview.total_cost_usd);
 }

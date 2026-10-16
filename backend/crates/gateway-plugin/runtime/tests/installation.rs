@@ -737,3 +737,144 @@ async fn active_uninstall_revokes_access_and_handles_commit_uncertainty() {
         manager.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn authenticated_management_can_finish_after_thirty_seconds_with_live_callbacks() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Arc::new(PluginEngine::new(
+        cache.path().to_owned(),
+        "3.12.3".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store, runtime);
+    let artifact = manager
+        .upload(archive("1.0.0", false), &actor())
+        .await
+        .unwrap();
+    let installed = manager
+        .update(None, update(&artifact.sha256, 0, true), &actor())
+        .await
+        .unwrap();
+    let mut req = request("management_budget");
+    req.body =
+        serde_json::to_vec(&json!({"operation":"management_budget","delay_ms":31_000})).unwrap();
+    let response = manager
+        .handle(&installed.id, installed.revision, req)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(value["timeout_ms"], 120_000);
+    assert_eq!(value["callback_completed"], true);
+    manager
+        .delete(&installed.id, installed.revision, &actor())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn background_continuations_are_bounded_stop_on_failure_and_keep_callbacks_live() {
+    use gateway_admin::model::MutationActor;
+    for (limit, fail, expected) in [(3, false, 3), (3, true, 1), (200, false, 162)] {
+        let cache = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(PluginEngine::new(
+            cache.path().to_owned(),
+            "3.12.3".parse().unwrap(),
+            store.clone(),
+        ));
+        let manager = PluginManager::new(store, runtime);
+        let artifact = manager
+            .upload(archive("1.0.0", false), &actor())
+            .await
+            .unwrap();
+        let installed = manager
+            .update(None, update(&artifact.sha256, 0, true), &actor())
+            .await
+            .unwrap();
+        let mut req = request("background");
+        req.body = serde_json::to_vec(&json!({"operation":"background","limit":limit,"fail":fail}))
+            .unwrap();
+        req.actor.actor = MutationActor::AdminSession {
+            admin_user_id: "alice".into(),
+        };
+        let result = manager
+            .handle(&installed.id, installed.revision, req)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&result.body).unwrap()["count"],
+            0
+        );
+        // No browser step calls: only read status, while host-owned invocations advance.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let result = manager.handle(&installed.id, installed.revision, request("state_read")).await.unwrap();
+                if serde_json::from_slice::<serde_json::Value>(&result.body).unwrap()["record"]["value"] == expected { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let result = manager
+            .handle(&installed.id, installed.revision, request("state_read"))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&result.body).unwrap()["record"]["value"],
+            expected
+        );
+        manager.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn background_continuations_require_session_authority_and_cancel_on_disable() {
+    use gateway_admin::model::MutationActor;
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Arc::new(PluginEngine::new(
+        cache.path().to_owned(),
+        "3.12.3".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store, runtime);
+    let artifact = manager
+        .upload(archive("1.0.0", false), &actor())
+        .await
+        .unwrap();
+    let installed = manager
+        .update(None, update(&artifact.sha256, 0, true), &actor())
+        .await
+        .unwrap();
+    assert!(
+        manager
+            .handle(&installed.id, 1, request("background"))
+            .await
+            .is_err()
+    );
+    let make_request = || {
+        let mut req = request("background");
+        req.body =
+            serde_json::to_vec(&json!({"operation":"background","limit":3,"delay":5000})).unwrap();
+        req.actor.actor = MutationActor::AdminSession {
+            admin_user_id: "alice".into(),
+        };
+        req
+    };
+    manager
+        .handle(&installed.id, 1, make_request())
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .handle(&installed.id, 1, make_request())
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        AdminErrorKind::Conflict
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(3), manager.shutdown())
+        .await
+        .unwrap();
+}

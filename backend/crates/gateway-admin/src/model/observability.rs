@@ -790,7 +790,13 @@ pub struct UsageOverview {
 /// 用量摘要的用例结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageSummary {
-    pub overview: UsageOverview,
+    pub total_cost_usd: DecimalAmount,
+    pub success_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
     pub average_latency_ms: Option<u64>,
 }
 

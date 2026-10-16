@@ -143,3 +143,66 @@ async fn audit_records_user_actor_on_logout_and_failed_mutations_but_not_read_on
     assert_eq!(events[0].status, 422);
     assert_eq!(events[1].path, "/api/admin/auth/logout");
 }
+
+#[tokio::test]
+async fn usage_catalog_enforces_session_role_and_personal_scope() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("admin-session");
+    fixture.auth.insert_user_session("user-session", "ordinary");
+    for (session, query, expected, owner) in [
+        ("missing", "kind=groups", StatusCode::UNAUTHORIZED, None),
+        ("user-session", "kind=accounts", StatusCode::FORBIDDEN, None),
+        (
+            "admin-session",
+            "kind=accounts&personal=true",
+            StatusCode::FORBIDDEN,
+            None,
+        ),
+        ("admin-session", "kind=accounts", StatusCode::OK, Some(None)),
+        (
+            "admin-session",
+            "kind=groups&personal=true",
+            StatusCode::OK,
+            Some(Some("admin_1")),
+        ),
+        (
+            "user-session",
+            "kind=groups&personal=false",
+            StatusCode::OK,
+            Some(Some("ordinary")),
+        ),
+        (
+            "admin-session",
+            "kind=credentials",
+            StatusCode::BAD_REQUEST,
+            None,
+        ),
+        (
+            "admin-session",
+            "kind=groups&owner=ordinary",
+            StatusCode::BAD_REQUEST,
+            None,
+        ),
+    ] {
+        fixture.auth.catalog_owners.lock().unwrap().clear();
+        let response = app(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/admin/usage/catalog-options?{query}"))
+                    .header("cookie", format!("cpr_admin_session={session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{query}");
+        let calls = fixture.auth.catalog_owners.lock().unwrap();
+        assert_eq!(
+            *calls,
+            owner
+                .into_iter()
+                .map(|v| v.map(str::to_owned))
+                .collect::<Vec<_>>()
+        );
+    }
+}

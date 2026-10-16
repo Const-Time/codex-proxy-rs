@@ -615,6 +615,16 @@ impl FakeAuthStore {
 
 #[async_trait]
 impl AuthStore for FakeAuthStore {
+    async fn usage_catalog_options(
+        &self,
+        _kind: gateway_admin::model::operations::UsageCatalogKind,
+        _owner: Option<&str>,
+    ) -> gateway_admin::ports::store::AdminStoreResult<
+        Vec<gateway_admin::model::operations::UsageCatalogOption>,
+    > {
+        Ok(Vec::new())
+    }
+
     async fn find_user(
         &self,
         username: &str,

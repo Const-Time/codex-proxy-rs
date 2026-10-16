@@ -164,11 +164,7 @@ impl UserAuthStore {
     pub(crate) async fn subscription_records(
         &self,
     ) -> AdminStoreResult<Vec<gateway_admin::model::users::UserSubscription>> {
-        let rows = sqlx::query("with scopes as (
-            select user_id, account_group_id from user_account_groups
-            union select k.owner_user_id, kg.account_group_id from client_api_keys k
-            join client_api_key_groups kg on kg.client_api_key_id = k.id)
-            select u.id as user_id, u.username, u.display_name, u.enabled and g.enabled as enabled,
+        let rows = sqlx::query("select u.id as user_id, u.username, u.display_name, u.enabled and g.enabled as enabled,
             g.id as group_id, g.name as group_name, coalesce(ug.quota_multiplier, 1)::text as quota_multiplier,
             user_group_quota_limit(g.daily_limit_usd, u.id, g.id)::text as daily_limit_usd,
             user_group_quota_limit(g.weekly_limit_usd, u.id, g.id)::text as weekly_limit_usd,
@@ -177,7 +173,7 @@ impl UserAuthStore {
             w.daily_end as daily_resets_at,
             w.weekly_end as weekly_resets_at,
             w.last_reset_at, w.last_reset_reason
-            from scopes s join users u on u.id = s.user_id join account_groups g on g.id = s.account_group_id
+            from current_user_subscription_scopes s join users u on u.id = s.user_id join account_groups g on g.id = s.account_group_id
             left join user_account_groups ug on ug.user_id = u.id and ug.account_group_id = g.id
             left join user_group_budget_windows w on w.user_id = u.id and w.account_group_id = g.id
             where u.deleted_at is null

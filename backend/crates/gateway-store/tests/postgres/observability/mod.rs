@@ -2413,9 +2413,10 @@ async fn clone_request_facts(
         .map(|column| format!("(copied).{column}"))
         .collect::<Vec<_>>()
         .join(",");
-    let statement = format!("insert into model_requests ({}) select {selected} from (
+    let statement = format!("with copies as materialized (
         select jsonb_populate_record(null::model_requests,to_jsonb(mr)||({patch})) as copied
-        from model_requests mr cross join generate_series(1,$1) n where mr.id=$2 and $3::timestamptz is not null) copies",columns.join(","));
+        from model_requests mr cross join generate_series(1,$1) n where mr.id=$2 and $3::timestamptz is not null)
+        insert into model_requests ({}) select {selected} from copies",columns.join(","));
     sqlx::query(sqlx::AssertSqlSafe(statement))
         .bind(count)
         .bind(source)
@@ -2424,3 +2425,70 @@ async fn clone_request_facts(
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn lightweight_cards_match_full_summary_scopes_and_empty_results() {
+    let Some(db) = TestDatabase::create("usage_cards").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    sqlx::query("update model_requests set user_id = 'test-owner'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let store = admin_observability_store(&db.pool);
+    let range = admin_observability::TimeRange {
+        start: now - TimeDelta::hours(1),
+        end: now,
+    };
+    for recovered in [false, true] {
+        if recovered {
+            sqlx::query("update model_requests set recovered_at = $1, recovery_request_id = 'req_observe_uncommitted', recovery_attempt_count = 1, recovery_retry_delay_ms = 0, recovery_total_latency_ms = 900 where id = 'req_observe_success'")
+                .bind(now).execute(&db.pool).await.unwrap();
+        }
+        for filter in [
+            admin_observability::UsageFilter::default(),
+            admin_observability::UsageFilter {
+                owner_user_id: Some("test-owner".into()),
+                ..Default::default()
+            },
+            admin_observability::UsageFilter {
+                owner_user_id: Some("other-owner".into()),
+                ..Default::default()
+            },
+            admin_observability::UsageFilter {
+                group_id: Some("grp_history".into()),
+                ..Default::default()
+            },
+            admin_observability::UsageFilter {
+                client_api_key_ref: Some("key_observe".into()),
+                ..Default::default()
+            },
+            admin_observability::UsageFilter {
+                provider_account_ref: Some("acct_observe".into()),
+                model: Some("public-model".into()),
+                client_transport: Some("http_sse".into()),
+                ..Default::default()
+            },
+        ] {
+            let full = store.usage_summary(range, filter.clone()).await.unwrap();
+            let cards = store.usage_card_summary(range, filter).await.unwrap();
+            assert_eq!(cards.total_cost_usd, full.total_cost_usd);
+            assert_eq!(cards.success_count, full.requests.success_count);
+            assert_eq!(cards.input_tokens, full.requests.input_tokens);
+            assert_eq!(cards.output_tokens, full.requests.output_tokens);
+            assert_eq!(cards.cached_tokens, full.requests.cached_tokens);
+            assert_eq!(cards.cache_write_tokens, full.requests.cache_write_tokens);
+            assert_eq!(cards.total_tokens, full.requests.total_tokens);
+            assert_eq!(
+                cards.average_latency_ms,
+                (full.requests.latency_count > 0)
+                    .then(|| full.requests.latency_sum_ms / full.requests.latency_count)
+            );
+        }
+    }
+    db.close().await;
+}
+
+mod rollup;

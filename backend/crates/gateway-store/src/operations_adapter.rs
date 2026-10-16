@@ -15,6 +15,35 @@ fn error(_: sqlx::Error) -> AdminStoreError {
 }
 
 impl UserAuthStore {
+    pub(crate) async fn usage_catalog_options_stored(
+        &self,
+        kind: UsageCatalogKind,
+        owner: Option<&str>,
+    ) -> AdminStoreResult<Vec<UsageCatalogOption>> {
+        let sql = match kind {
+            UsageCatalogKind::Groups => "select g.id, g.name from account_groups g
+                where $1::text is null or exists (
+                    select 1 from users u where u.id = $1 and u.enabled and u.deleted_at is null
+                    and ((u.role = 'admin' and not u.group_grants_configured) or exists (
+                        select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id)))
+                order by g.name, g.id",
+            UsageCatalogKind::Accounts => "select id, coalesce(nullif(email, ''), nullif(name, ''), id) as name
+                from provider_accounts where $1::text is null order by name, id",
+        };
+        let rows = sqlx::query(sql)
+            .bind(owner)
+            .fetch_all(&self.security.pool)
+            .await
+            .map_err(error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| UsageCatalogOption {
+                id: row.get("id"),
+                name: row.get("name"),
+            })
+            .collect())
+    }
+
     pub(crate) async fn record_operation_stored(
         &self,
         mut event: OperationLog,

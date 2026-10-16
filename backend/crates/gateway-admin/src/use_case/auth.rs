@@ -63,6 +63,12 @@ pub trait AuthService: Send + Sync {
     ) -> Result<crate::model::operations::OperationLogPage, AdminError> {
         Err(AdminError::new(AdminErrorKind::Unavailable, "服务不可用"))
     }
+    async fn usage_catalog_options(
+        &self,
+        kind: crate::model::operations::UsageCatalogKind,
+        owner: Option<&str>,
+    ) -> Result<Vec<crate::model::operations::UsageCatalogOption>, AdminError>;
+
     async fn usage_key_options(
         &self,
         _owner: Option<&str>,
@@ -190,6 +196,23 @@ impl DefaultAuthService {
 
 #[async_trait]
 impl AuthService for DefaultAuthService {
+    async fn usage_catalog_options(
+        &self,
+        kind: crate::model::operations::UsageCatalogKind,
+        owner: Option<&str>,
+    ) -> Result<Vec<crate::model::operations::UsageCatalogOption>, AdminError> {
+        if owner.is_some() && kind == crate::model::operations::UsageCatalogKind::Accounts {
+            return Err(AdminError::new(
+                AdminErrorKind::Forbidden,
+                "账号目录仅管理员可见",
+            ));
+        }
+        self.store
+            .usage_catalog_options(kind, owner)
+            .await
+            .map_err(|e| map_store_error(e, "usage catalog"))
+    }
+
     async fn record_operation(
         &self,
         event: crate::model::operations::OperationLog,

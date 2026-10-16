@@ -835,3 +835,16 @@ pub trait ObservabilityRepository: Send + Sync {
     ) -> StoreResult<Vec<DiagnosticObservation>>;
     async fn list_ops_errors(&self, query: OpsErrorQuery) -> StoreResult<OpsErrorPage>;
 }
+
+/// Lightweight usage cards; no percentile, provider or attempt aggregation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UsageCardSummary {
+    pub total_cost_usd: DecimalAmount,
+    pub success_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub average_latency_ms: Option<u64>,
+}

@@ -58,23 +58,6 @@ pub(crate) fn outcome_name(outcome: &domain::RequestOutcome) -> &str {
     outcome.as_str()
 }
 
-pub(crate) fn request_metrics_view(metrics: &domain::RequestMetrics) -> RequestMetricsView {
-    RequestMetricsView {
-        request_count: metrics.request_count,
-        success_count: metrics.success_count,
-        failure_count: metrics.failure_count,
-        cancelled_count: metrics.cancelled_count,
-        incomplete_count: metrics.incomplete_count,
-        caller_error_count: metrics.caller_error_count,
-        input_tokens: metrics.input_tokens,
-        output_tokens: metrics.output_tokens,
-        cached_tokens: metrics.cached_tokens,
-        cache_write_tokens: metrics.cache_write_tokens,
-        reasoning_tokens: metrics.reasoning_tokens,
-        total_tokens: metrics.total_tokens,
-    }
-}
-
 pub(crate) fn cost_coverage_view(coverage: &domain::CostCoverage) -> CostCoverageView {
     CostCoverageView {
         known: coverage.known_count(),
@@ -1057,18 +1040,15 @@ pub(crate) fn dashboard_view(
 }
 
 pub(crate) fn usage_summary_view(summary: domain::UsageSummary) -> UsageSummaryView {
-    let overview = summary.overview;
     UsageSummaryView {
-        total_cost_usd: overview.total_cost_usd.as_str().to_owned(),
-        total_requests: format_compact_number(overview.requests.success_count),
-        input_tokens: format_compact_number(overview.requests.input_tokens),
-        output_tokens: format_compact_number(overview.requests.output_tokens),
-        cached_tokens: format_compact_number(overview.requests.cached_tokens),
-        cache_write_tokens: format_compact_number(overview.requests.cache_write_tokens),
-        total_tokens: format_compact_number(overview.requests.total_tokens),
+        total_cost_usd: summary.total_cost_usd.as_str().to_owned(),
+        total_requests: format_compact_number(summary.success_count),
+        input_tokens: format_compact_number(summary.input_tokens),
+        output_tokens: format_compact_number(summary.output_tokens),
+        cached_tokens: format_compact_number(summary.cached_tokens),
+        cache_write_tokens: format_compact_number(summary.cache_write_tokens),
+        total_tokens: format_compact_number(summary.total_tokens),
         average_latency_ms: display_duration(summary.average_latency_ms),
-        logical_requests: request_metrics_view(&overview.requests),
-        attempts: attempt_metrics_view(&overview.attempts),
     }
 }
 

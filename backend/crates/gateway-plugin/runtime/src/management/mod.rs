@@ -1,4 +1,6 @@
 //! The public login RPC borrows the original authenticated invocation and process scope.
+pub(crate) mod tasks;
+
 use crate::{RpcSession, resources::InvocationCalls};
 use gateway_admin::model::{AdminError, plugins::*};
 use gateway_plugin_sdk::{Stage, call::management::*};

@@ -267,6 +267,16 @@ struct BootstrapAuthStore {
 
 #[async_trait]
 impl AuthStore for BootstrapAuthStore {
+    async fn usage_catalog_options(
+        &self,
+        _kind: gateway_admin::model::operations::UsageCatalogKind,
+        _owner: Option<&str>,
+    ) -> gateway_admin::ports::store::AdminStoreResult<
+        Vec<gateway_admin::model::operations::UsageCatalogOption>,
+    > {
+        Ok(Vec::new())
+    }
+
     async fn find_user(
         &self,
         username: &str,
@@ -658,6 +668,14 @@ impl ObservabilityStore for UnavailableStore {
         _owner: Option<&str>,
     ) -> AdminStoreResult<UsageDetail> {
         Err(unavailable("usage detail"))
+    }
+
+    async fn usage_card_summary(
+        &self,
+        _: TimeRange,
+        _: UsageFilter,
+    ) -> AdminStoreResult<gateway_admin::model::observability::UsageSummary> {
+        Err(unavailable("usage cards"))
     }
 
     async fn usage_summary(&self, _: TimeRange, _: UsageFilter) -> AdminStoreResult<UsageOverview> {

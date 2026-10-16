@@ -229,6 +229,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         admission_release_writer,
         retention,
         budgets,
+        Arc::new(postgres::PgUsageRollupRepository::new(pool.clone())),
     )?;
     Ok(StoreBundle {
         plugins: Arc::new(postgres::PgPluginStore::new(pool.clone())),

@@ -1374,7 +1374,27 @@ impl PluginHandler for Worker {
             },
             "management.handle"=>{
                 let input:serde_json::Value=serde_json::from_slice(&call.payload).unwrap();
-                let result=if input["operation"]=="state_read" {
+                if input["operation"]=="background" {
+                    let mut count = 0;
+                    if input["step"] == true {
+                        tokio::time::sleep(std::time::Duration::from_millis(input["delay"].as_u64().unwrap_or(0))).await;
+                        let existing = call.host.call("host.state.get",json!({"namespace":"counter","key":"value"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                        count = existing.result["record"]["value"].as_u64().unwrap_or(0) + 1;
+                        call.host.call("host.state.put",json!({"namespace":"counter","key":"value","value":count,"expected_version":existing.result["record"]["version"]}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                    }
+                    let mut next = input.clone(); next["step"] = json!(true);
+                    let failed = input["step"] == true && input["fail"] == true;
+                    let headers = if !failed && count < input["limit"].as_u64().unwrap_or(3) {
+                        json!([{"name":"x-cpr-background-next","value":serde_json::to_vec(&json!({"id":"fixture","path":"echo","body":next.to_string()})).unwrap()}])
+                    } else { json!([]) };
+                    return Ok(CallReply::unary(json!({"status":if failed {500}else{200},"content_type":"application/json","headers":headers}),serde_json::to_vec(&json!({"count":count,"headers":call.params["headers"]})).unwrap()));
+                }
+                let result=if input["operation"]=="management_budget" {
+                    let delay = input["delay_ms"].as_u64().unwrap_or(0).min(31_000);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    let saved = call.host.call("host.state.get",json!({"namespace":"counter","key":"count"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                    json!({"timeout_ms":call.context.timeout_ms,"callback_completed":saved.result.is_object()})
+                } else if input["operation"]=="state_read" {
                     call.host.call("host.state.get",json!({"namespace":"counter","key":"value"}),vec![]).await.map_err(|e|e.into_plugin_fault())?.result
                 } else if input["operation"]=="state" {
                     let existing=call.host.call("host.state.get",json!({"namespace":"counter","key":"value"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;

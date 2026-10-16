@@ -49,3 +49,17 @@ pub struct UsageKeyOption {
     pub name: String,
     pub user_id: Option<String>,
 }
+
+/// Allowlisted, non-sensitive catalogs for usage filters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCatalogKind {
+    Groups,
+    Accounts,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UsageCatalogOption {
+    pub id: String,
+    pub name: String,
+}

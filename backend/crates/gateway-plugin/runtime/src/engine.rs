@@ -590,6 +590,7 @@ impl PluginRuntime for PluginEngine {
             }
         }
         Ok(Arc::new(LivePlugin {
+            background_tasks: crate::management::tasks::Tasks::new(),
             logs,
             credentials: self.credentials.clone(),
             commands,
@@ -610,6 +611,7 @@ impl PluginRuntime for PluginEngine {
     }
 }
 struct LivePlugin {
+    background_tasks: Arc<crate::management::tasks::Tasks>,
     logs: Arc<crate::callbacks::PluginLog>,
     credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     commands: Vec<CommandDescriptor>,
@@ -1004,6 +1006,7 @@ impl PluginProcess for LivePlugin {
         self.revoke();
         self.session.shutdown(Duration::from_secs(5)).await;
         self.calls.drain().await;
+        self.background_tasks.drain().await;
         self.logs.drain().await;
     }
     async fn resource(&self, path: &str) -> Result<PluginHttpResponse, AdminError> {
@@ -1063,73 +1066,14 @@ impl PluginProcess for LivePlugin {
         if self.status() != "ready" {
             return Err(AdminError::conflict("插件已失效"));
         }
-        let route = self
-            .management
-            .routes
-            .iter()
-            .find(|r| r.method == request.method && r.path == request.path)
-            .ok_or_else(|| AdminError::not_found("插件路由未注册"))?;
-        if request.body.len() > 1024 * 1024 || request.query.len() > 8192 {
-            return Err(AdminError::invalid("插件请求过大"));
+        crate::management::tasks::Executor {
+            session: self.session.clone(),
+            calls: self.calls.clone(),
+            access: self.access.clone(),
+            registration: self.management.clone(),
+            tasks: self.background_tasks.clone(),
         }
-        if request
-            .content_type
-            .as_ref()
-            .is_some_and(|t| !route.request_content_types.contains(t))
-            || (!request.body.is_empty() && request.content_type.is_none())
-        {
-            return Err(AdminError::invalid("插件路由未声明此请求类型"));
-        }
-        let params = serde_json::to_value(ManagementRequest {
-            method: request.method,
-            path: request.path,
-            query: request.query,
-            content_type: request.content_type,
-            headers: vec![],
-        })
-        .map_err(|_| AdminError::invalid("插件请求无效"))?;
-        let mut context = self.session.context(
-            Stage::Management,
-            self.session
-                .maximum_call_timeout()
-                .min(Duration::from_secs(30)),
-        );
-        context.request_id = Some(request.actor.request_id.clone());
-        let _caller = self
-            .calls
-            .enter(
-                context.clone(),
-                request.actor,
-                request.invocation,
-                self.access.cancellation(),
-                None,
-            )
-            .map_err(|_| AdminError::unavailable("管理调用容量已耗尽"))?;
-        let reply = self
-            .session
-            .call("management.handle", context, params, request.body)
-            .await
-            .map_err(|_| AdminError::bad_gateway("插件调用失败，结果可能已生效，请查询后再重试"))?;
-        let response: ManagementResponse = self
-            .session
-            .decode_response(Stage::Management, reply.result)
-            .map_err(|_| AdminError::bad_gateway("插件响应无效"))?;
-        if !(200..=599).contains(&response.status)
-            || !route
-                .response_content_types
-                .contains(&response.content_type)
-            || !response.headers.is_empty()
-            || reply.payload.len() > 1024 * 1024
-        {
-            self.session.invalid_response(Stage::Management);
-            return Err(AdminError::bad_gateway(
-                "插件响应状态、类型、头部或大小不受支持",
-            ));
-        }
-        Ok(PluginHttpResponse {
-            status: response.status,
-            content_type: response.content_type,
-            body: reply.payload,
-        })
+        .handle(request)
+        .await
     }
 }

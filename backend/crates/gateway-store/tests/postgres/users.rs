@@ -1064,3 +1064,290 @@ async fn upgrade_preserves_legacy_key_ownership_permissions_and_budget_windows()
     );
     db.close().await;
 }
+
+#[tokio::test]
+async fn revoked_group_subscriptions_disappear_without_erasing_history_after_upgrade() {
+    let Some(db) = TestDatabase::create_at_version("subscription_grants_upgrade", 41).await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    auth.create_password_hash_if_absent("admin", "hash")
+        .await
+        .unwrap();
+    seed_group(&db).await;
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    for user in ["alice", "disabled", "retained"] {
+        auth.create_user(
+            user,
+            gateway_admin::model::users::UserIdentity::new(user, ""),
+            "hash",
+            &[GROUP.into()],
+            RateLimits::unlimited(),
+            &context("admin"),
+        )
+        .await
+        .unwrap();
+        keys.create_client_key(key(&format!("{user}-subscription-key")), &context(user))
+            .await
+            .unwrap();
+    }
+    keys.create_client_key(key("admin-subscription-key"), &context("admin"))
+        .await
+        .unwrap();
+    sqlx::query("select reset_user_subscriptions('seed-grants',null,null,'manual',now())")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update user_group_budget_windows set daily_used_usd=7,weekly_used_usd=7")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for (user, enabled, groups) in [
+        ("alice", true, vec![]),
+        ("disabled", false, vec![]),
+        ("retained", false, vec![GROUP.into()]),
+    ] {
+        auth.update_user(
+            UpdateUser {
+                id: user.into(),
+                username: None,
+                display_name: None,
+                enabled,
+                group_ids: groups,
+                limits: RateLimits::unlimited(),
+                quota_multipliers: None,
+            },
+            &context("admin"),
+        )
+        .await
+        .unwrap();
+    }
+    let before: serde_json::Value = sqlx::query_scalar(
+        "select jsonb_agg(to_jsonb(w) order by user_id) from user_group_budget_windows w",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
+    let after: serde_json::Value = sqlx::query_scalar(
+        "select jsonb_agg(to_jsonb(w) order by user_id) from user_group_budget_windows w",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(before, after, "upgrade must not rewrite historical windows");
+    let subscriptions = auth.subscriptions().await.unwrap();
+    assert_eq!(
+        subscriptions.len(),
+        2,
+        "only implicit admin and retained grant remain"
+    );
+    assert!(subscriptions.iter().any(|s| s.user_id == "admin"));
+    assert!(
+        subscriptions
+            .iter()
+            .any(|s| s.user_id == "retained" && !s.enabled)
+    );
+    assert!(auth.user_groups("alice").await.unwrap().is_empty());
+    let revoked: Vec<_> = ["alice", "disabled"]
+        .into_iter()
+        .map(|id| SubscriptionTarget {
+            user_id: id.into(),
+            group_id: GROUP.into(),
+        })
+        .collect();
+    assert_eq!(
+        auth.reset_subscriptions("stale-selection", &revoked, &context("admin"))
+            .await
+            .unwrap(),
+        0,
+        "stale browser selections cannot reset revoked subscriptions"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "select reset_user_subscriptions('automatic-grants',null,null,'upstream_manual',now())"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    for id in ["alice", "disabled"] {
+        let amount: String = sqlx::query_scalar(
+            "select weekly_used_usd::text from user_group_budget_windows where user_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(amount.parse::<f64>().unwrap(), 7.0);
+    }
+    // Explicitly configuring even an empty administrator grant disables the legacy fallback.
+    auth.update_user(
+        UpdateUser {
+            id: "admin".into(),
+            username: None,
+            display_name: None,
+            enabled: true,
+            group_ids: vec![],
+            limits: RateLimits::unlimited(),
+            quota_multipliers: None,
+        },
+        &context("admin"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        auth.subscriptions()
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.user_id != "admin")
+    );
+    let admin_target = [SubscriptionTarget {
+        user_id: "admin".into(),
+        group_id: GROUP.into(),
+    }];
+    assert_eq!(
+        auth.reset_subscriptions("revoked-admin", &admin_target, &context("admin"))
+            .await
+            .unwrap(),
+        0
+    );
+    auth.update_user(
+        UpdateUser {
+            id: "alice".into(),
+            username: None,
+            display_name: None,
+            enabled: true,
+            group_ids: vec![GROUP.into()],
+            limits: RateLimits::unlimited(),
+            quota_multipliers: None,
+        },
+        &context("admin"),
+    )
+    .await
+    .unwrap();
+    let restored = auth
+        .subscriptions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.user_id == "alice")
+        .unwrap();
+    assert_eq!(restored.weekly_used_usd.parse::<f64>().unwrap(), 7.0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select count(*) from client_api_key_groups")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        4,
+        "historical key bindings are preserved"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn usage_catalog_is_minimal_and_respects_current_grants() {
+    use gateway_admin::model::operations::UsageCatalogKind as Kind;
+    let Some(db) = TestDatabase::create("usage_catalog").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    seed_group(&db).await;
+    auth.create_password_hash_if_absent("catalog-admin", "hash")
+        .await
+        .unwrap();
+    auth.create_user(
+        "catalog-user",
+        gateway_admin::model::users::UserIdentity::new("catalog@example.com", "Catalog"),
+        "hash",
+        &[GROUP.into()],
+        RateLimits::unlimited(),
+        &context("catalog-admin"),
+    )
+    .await
+    .unwrap();
+    for owner in [None, Some("catalog-admin"), Some("catalog-user")] {
+        let rows = auth
+            .usage_catalog_options(Kind::Groups, owner)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, GROUP);
+        assert_eq!(
+            serde_json::to_value(&rows[0])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    sqlx::query("delete from user_account_groups where user_id = 'catalog-user'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        auth.usage_catalog_options(Kind::Groups, Some("catalog-user"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("update users set group_grants_configured = true where id = 'catalog-admin'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        auth.usage_catalog_options(Kind::Groups, Some("catalog-admin"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        auth.usage_catalog_options(Kind::Groups, Some("missing"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query(
+        "insert into user_account_groups(user_id, account_group_id) values ('catalog-user', $1)",
+    )
+    .bind(GROUP)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("update users set enabled = false where id = 'catalog-user'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        auth.usage_catalog_options(Kind::Groups, Some("catalog-user"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("insert into provider_accounts(id,provider_kind,name,email,authentication_kind,provider_credentials_json,has_refresh_token,credential_observed_at,created_at,updated_at) values ('acct_catalog','openai','Catalog account','catalog-account@example.com','oauth','{\"secret\":\"must-not-leak\"}',false,now(),now(),now())").execute(&db.pool).await.unwrap();
+    let accounts = auth
+        .usage_catalog_options(Kind::Accounts, None)
+        .await
+        .unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].name, "catalog-account@example.com");
+    let json = serde_json::to_value(accounts).unwrap();
+    assert_eq!(json[0].as_object().unwrap().len(), 2);
+    assert!(!json.to_string().contains("must-not-leak"));
+    assert!(
+        auth.usage_catalog_options(Kind::Accounts, Some("catalog-user"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    db.close().await;
+}

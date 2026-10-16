@@ -33,6 +33,7 @@ pub fn router<S: AdminSessionState + Clone + Send + Sync + 'static>() -> Router<
     Router::new()
         .route("/api/admin/operation-logs", get(list::<S>))
         .route("/api/admin/usage/key-options", get(keys::<S>))
+        .route("/api/admin/usage/catalog-options", get(catalog::<S>))
 }
 
 async fn list<S: AdminSessionState + Send + Sync>(
@@ -62,6 +63,30 @@ async fn list<S: AdminSessionState + Send + Sync>(
         .admin_services()
         .auth()
         .operation_logs(query)
+        .await
+        .map_err(super::wire::map_admin_service_error)?;
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogQuery {
+    kind: UsageCatalogKind,
+    #[serde(default)]
+    personal: bool,
+}
+
+async fn catalog<S: AdminSessionState + Send + Sync>(
+    State(state): State<S>,
+    auth: UserAuth,
+    AdminQuery(query): AdminQuery<CatalogQuery>,
+) -> Result<impl IntoResponse, AdminError> {
+    let owner = (query.personal || auth.user.role != gateway_admin::model::users::UserRole::Admin)
+        .then_some(auth.user.id.as_str());
+    let data = state
+        .admin_services()
+        .auth()
+        .usage_catalog_options(query.kind, owner)
         .await
         .map_err(super::wire::map_admin_service_error)?;
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))

@@ -443,6 +443,34 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
         admin_usage_detail(detail)
     }
 
+    async fn usage_card_summary(
+        &self,
+        range: admin_observability::TimeRange,
+        filter: admin_observability::UsageFilter,
+    ) -> AdminStoreResult<admin_observability::UsageSummary> {
+        let range = store_range(range)?;
+        let filter = store_usage_filter(filter);
+        let summary = self
+            .repository
+            .query_budget
+            .run(
+                "load usage cards",
+                usage_card_summary(&self.repository.pool, range, &filter),
+            )
+            .await
+            .map_err(observability_error)?;
+        Ok(admin_observability::UsageSummary {
+            total_cost_usd: admin_decimal_amount(summary.total_cost_usd)?,
+            success_count: summary.success_count,
+            input_tokens: summary.input_tokens,
+            output_tokens: summary.output_tokens,
+            cached_tokens: summary.cached_tokens,
+            cache_write_tokens: summary.cache_write_tokens,
+            total_tokens: summary.total_tokens,
+            average_latency_ms: summary.average_latency_ms,
+        })
+    }
+
     async fn usage_summary(
         &self,
         range: admin_observability::TimeRange,

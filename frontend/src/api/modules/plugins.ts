@@ -1,7 +1,8 @@
 import { API_BASE_URL } from '../constants'
 import request from '../request'
 
-export const PLUGIN_MANAGEMENT_TIMEOUT_MS = 35_000
+// Runtime: up to 30s admission + 120s execution, with 5s response allowance.
+export const PLUGIN_MANAGEMENT_TIMEOUT_MS = 155_000
 export interface PluginArtifact {
   sha256: string
   pluginId: string

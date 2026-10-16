@@ -9,6 +9,7 @@ pub(crate) fn store_worker_contributions(
     admission_release_writer: redis::ClientAdmissionReleaseWriter,
     retention: Arc<postgres::PgRetentionRepository>,
     budgets: Arc<postgres::PgClientBudgetStore>,
+    rollups: Arc<postgres::PgUsageRollupRepository>,
 ) -> StoreResult<Vec<WorkerContribution>> {
     let stale_id = WorkerId::try_new(WorkerKind::StaleModelRequestRecovery, "postgres")
         .map_err(worker_definition_error)?;
@@ -25,6 +26,13 @@ pub(crate) fn store_worker_contributions(
         DaemonRestartPolicy::try_new(Duration::from_secs(1), Duration::from_secs(60))
             .map_err(worker_definition_error)?;
     Ok(vec![
+        WorkerContribution::Registration(scheduled_worker(
+            WorkerId::try_new(WorkerKind::OpsFlush, "postgres_usage_rollup")
+                .map_err(worker_definition_error)?,
+            Duration::from_secs(30),
+            true,
+            Box::new(UsageRollupTask { rollups }),
+        )?),
         WorkerContribution::Registration(scheduled_worker(
             WorkerId::try_new(WorkerKind::OpsFlush, "postgres_client_budget")
                 .map_err(worker_definition_error)?,
@@ -117,6 +125,23 @@ pub(crate) fn worker_definition_error(
 
 pub(crate) struct StaleModelRequestRecoveryTask {
     execution: Arc<postgres::PgExecutionStore>,
+}
+
+struct UsageRollupTask {
+    rollups: Arc<postgres::PgUsageRollupRepository>,
+}
+impl ScheduledTask for UsageRollupTask {
+    fn run_cycle(
+        &self,
+        context: WorkerCycleContext,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
+            tokio::select! {
+                () = context.cancellation().cancelled() => Ok(()),
+                result = self.rollups.refresh_batch(chrono::Utc::now()) => result.map(|_| ()).map_err(|_| WorkerTaskError::safe("usage rollup refresh failed")),
+            }
+        })
+    }
 }
 
 struct BudgetSettlementTask {
