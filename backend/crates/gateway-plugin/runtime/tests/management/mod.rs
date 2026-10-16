@@ -1,4 +1,5 @@
 //! Real Redis tickets and SDK subprocesses share the original administrator and process owner.
+mod background;
 mod oauth;
 use crate::{services::upstream_sdk::environment::Environment, support::*};
 use gateway_admin::{

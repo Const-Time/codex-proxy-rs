@@ -501,7 +501,7 @@ onMounted(() => perform(async () => { }))
     </BaseCard>
     <BaseCard v-if="selected" class="space-y-3 p-4">
       <p class="text-sm text-cp-text-secondary">
-        推理使用本人 Key 的权限与额度，按现有倍率计费。更换 Key 或关闭页面会取消进行中的调用。
+        推理使用本人 Key 的权限与额度，按现有倍率计费。更换 Key 或关闭页面会取消页面直接发起的推理；已启动的后台检测不受影响，请在插件内暂停或结束。
       </p>
       <div class="flex flex-wrap gap-3">
         <BaseInput v-model="keySearch" aria-label="搜索本人推理 Key" placeholder="搜索本人 Key" class="max-w-xs" />

@@ -1374,16 +1374,23 @@ impl PluginHandler for Worker {
             },
             "management.handle"=>{
                 let input:serde_json::Value=serde_json::from_slice(&call.payload).unwrap();
+                if input["operation"]=="background_capability" {
+                    return Ok(CallReply::unary(json!({"status":200,"content_type":"application/json"}), serde_json::to_vec(&call.params["headers"]).unwrap()));
+                }
                 if input["operation"]=="background" {
                     let mut count = 0;
+                    let mut model_failed = false;
                     if input["step"] == true {
                         tokio::time::sleep(std::time::Duration::from_millis(input["delay"].as_u64().unwrap_or(0))).await;
                         let existing = call.host.call("host.state.get",json!({"namespace":"counter","key":"value"}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
                         count = existing.result["record"]["value"].as_u64().unwrap_or(0) + 1;
                         call.host.call("host.state.put",json!({"namespace":"counter","key":"value","value":count,"expected_version":existing.result["record"]["version"]}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                        if input["model_probe"] == true {
+                            model_failed = worker_models::handle(&call.host, &input).await.get("error").is_some();
+                        }
                     }
                     let mut next = input.clone(); next["step"] = json!(true);
-                    let failed = input["step"] == true && input["fail"] == true;
+                    let failed = model_failed || (input["step"] == true && input["fail"] == true);
                     let headers = if !failed && count < input["limit"].as_u64().unwrap_or(3) {
                         json!([{"name":"x-cpr-background-next","value":serde_json::to_vec(&json!({"id":"fixture","path":"echo","body":next.to_string()})).unwrap()}])
                     } else { json!([]) };

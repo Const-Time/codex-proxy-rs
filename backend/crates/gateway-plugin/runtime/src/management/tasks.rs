@@ -15,6 +15,19 @@ const SUPPORT: &str = "x-cpr-background-version";
 const ACTIVE: &str = "x-cpr-background-active";
 const MAX_STEPS: usize = 162;
 
+fn background_authorized(request: &PluginHttpRequest) -> bool {
+    matches!(request.actor.actor, MutationActor::AdminSession { .. })
+        && request.invocation.as_ref().is_none_or(|invocation| {
+            // HTTP placement also binds direct browser requests. Only actual
+            // descendants borrow authority/lifetime that cannot be detached.
+            let context = &invocation.context;
+            context.parent_call_id.is_none()
+                && context.model_parent.is_none()
+                && context.call_scope.is_root()
+                && context.validate().is_ok()
+        })
+}
+
 pub(crate) struct Tasks {
     active: Mutex<Option<(String, MutationActor)>>,
     capacity: Arc<Semaphore>,
@@ -65,10 +78,7 @@ impl Executor {
         &self,
         request: PluginHttpRequest,
     ) -> Result<PluginHttpResponse, AdminError> {
-        // A nested service invocation cannot detach from its parent authority/lifetime.
-        let eligible = request.method == "POST"
-            && request.invocation.is_none()
-            && matches!(request.actor.actor, MutationActor::AdminSession { .. });
+        let eligible = request.method == "POST" && background_authorized(&request);
         let actor = request.actor.clone();
         let (response, next) = self.invoke(request).await?;
         if let Some(next) = next {
@@ -104,6 +114,10 @@ impl Executor {
                         break;
                     }
                     let request = PluginHttpRequest {
+                        // A newly accepted administrator-owned root, not a clone
+                        // of the completed HTTP scope (including its cancellation,
+                        // graph and scoped dispatchers). Model callbacks recheck
+                        // personal Key authority using the retained host actor.
                         invocation: None,
                         actor: actor.clone(),
                         method: "POST".into(),
@@ -147,8 +161,7 @@ impl Executor {
         {
             return Err(AdminError::invalid("插件路由未声明此请求类型"));
         }
-        let eligible = request.invocation.is_none()
-            && matches!(request.actor.actor, MutationActor::AdminSession { .. });
+        let eligible = background_authorized(&request);
         let mut headers = vec![];
         if eligible {
             headers.push(MiddlewareHeader {
