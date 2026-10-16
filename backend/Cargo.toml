@@ -36,6 +36,24 @@ needless_collect = { level = "deny", priority = 7 }
 [profile.dev]
 debug = true
 
+# Native plugin tests repeatedly hash and (de)compress real executable archives.
+# Optimize those CPU kernels in dev/test too; keep workspace code, debug symbols,
+# overflow checks and assertions unchanged. Release already optimizes all crates.
+[profile.dev.package."sha2@0.11.0"]
+opt-level = 3
+
+[profile.dev.package."miniz_oxide@0.9.1"]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+[profile.dev.package.zlib-rs]
+opt-level = 3
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+
 [profile.release]
 debug = false
 strip = "symbols"

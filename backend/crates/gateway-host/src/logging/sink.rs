@@ -1,4 +1,4 @@
-//! 有界文件日志队列：拥堵时背压，正常退出时排空；写入失败显式影响健康状态。
+//! 有界文件日志队列：普通日志拥堵时丢弃整条事件，关键诊断背压；退出排空并报告健康状态。
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +20,7 @@ enum Command {
 
 #[derive(Default)]
 pub(super) struct LogHealth {
+    dropped_records: AtomicU64,
     write_failures: AtomicU64,
     maintenance_failures: AtomicU64,
 }
@@ -57,6 +58,12 @@ impl HealthProbe for LogHealth {
                     "log archive/retention maintenance failed {failures} times since startup"
                 ));
             }
+            let dropped = self.dropped_records.load(Ordering::Relaxed);
+            if dropped > 0 {
+                return HealthState::Degraded(format!(
+                    "application log overload: {dropped} records dropped since startup"
+                ));
+            }
             HealthState::Healthy
         })
     }
@@ -66,6 +73,7 @@ impl HealthProbe for LogHealth {
 pub(super) struct FileLogSink {
     sender: mpsc::SyncSender<Command>,
     health: Arc<LogHealth>,
+    lossless: bool,
 }
 
 pub(super) struct FileLogGuard {
@@ -79,6 +87,7 @@ impl FileLogSink {
         mut writer: RotatingLogWriter,
         name: &'static str,
         health: Arc<LogHealth>,
+        lossless: bool,
     ) -> io::Result<(Self, FileLogGuard)> {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let worker_health = Arc::clone(&health);
@@ -103,6 +112,7 @@ impl FileLogSink {
             Self {
                 sender: sender.clone(),
                 health: Arc::clone(&health),
+                lossless,
             },
             FileLogGuard {
                 sender,
@@ -114,27 +124,71 @@ impl FileLogSink {
 }
 
 impl<'a> MakeWriter<'a> for FileLogSink {
-    type Writer = Self;
+    type Writer = FileLogRecord;
 
     fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
+        FileLogRecord {
+            sink: self.clone(),
+            bytes: Vec::new(),
+            oversized: false,
+        }
     }
 }
 
-impl Write for FileLogSink {
+pub(super) struct FileLogRecord {
+    sink: FileLogSink,
+    bytes: Vec<u8>,
+    oversized: bool,
+}
+
+impl Write for FileLogRecord {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.sender
-            .send(Command::Write(buffer.to_vec()))
-            .map_err(|_| {
-                self.health.write_failed(io::ErrorKind::BrokenPipe);
-                io::Error::new(io::ErrorKind::BrokenPipe, "file log worker unavailable")
-            })?;
+        if !self.sink.lossless
+            && (self.oversized || self.bytes.len().saturating_add(buffer.len()) > 64 * 1024)
+        {
+            self.oversized = true;
+            self.bytes.clear();
+        } else {
+            self.bytes.extend_from_slice(buffer);
+        }
         Ok(buffer.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         // Files are unbuffered. The guard is the lifecycle owner of queue drain and sync.
         Ok(())
+    }
+}
+
+impl Drop for FileLogRecord {
+    fn drop(&mut self) {
+        // Enqueue a whole event, never fragments which could corrupt adjacent JSON lines.
+        if self.oversized {
+            self.sink
+                .health
+                .dropped_records
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let command = Command::Write(std::mem::take(&mut self.bytes));
+        if self.sink.lossless {
+            if self.sink.sender.send(command).is_err() {
+                self.sink.health.write_failed(io::ErrorKind::BrokenPipe);
+            }
+        } else {
+            match self.sink.sender.try_send(command) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    self.sink
+                        .health
+                        .dropped_records
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.sink.health.write_failed(io::ErrorKind::BrokenPipe)
+                }
+            }
+        }
     }
 }
 

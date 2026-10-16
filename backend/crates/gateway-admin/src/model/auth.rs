@@ -81,6 +81,8 @@ pub struct LoginResult {
 /// 登录状态机可被 API 精确映射的失败类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LoginError {
+    #[error("administrator login rate limit exceeded")]
+    RateLimited,
     #[error("invalid administrator credentials")]
     InvalidCredentials,
     #[error("administrator authentication is unavailable")]

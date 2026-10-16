@@ -72,7 +72,10 @@ impl Native {
             observer: None,
         };
         store.save(&record, 0, &actor(), None).await.unwrap();
-        engine.validate(&record, &artifact, None).await.unwrap();
+        engine
+            .validate(&record, &artifact.info, None)
+            .await
+            .unwrap();
         let process = engine.prepare(&record, artifact.clone()).await.unwrap();
         process.activate();
         Self {

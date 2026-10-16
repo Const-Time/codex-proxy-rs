@@ -488,7 +488,7 @@ onMounted(() => perform(async () => { }))
           <BaseButton v-if="item.enabled" variant="secondary" :disabled="busy" @click="disable(item)">
             停用
           </BaseButton>
-          <BaseButton v-else variant="secondary" :disabled="busy" @click="removing = item; confirmDelete = true">
+          <BaseButton variant="secondary" :disabled="busy" @click="removing = item; confirmDelete = true">
             卸载
           </BaseButton>
         </div>
@@ -525,6 +525,6 @@ onMounted(() => perform(async () => { }))
       </div>
     </details>
     <BaseConfirmModal v-model="confirmArtifactDelete" title="删除制品" description="仅能删除没有实例使用的制品。删除后需要重新上传才能安装该版本。" destructive :loading="busy" @confirm="perform(async () => { await removePluginArtifact(removingArtifact); confirmArtifactDelete = false })" />
-    <BaseConfirmModal v-model="confirmDelete" title="卸载插件" description="将删除该实例的配置和私有状态。已上传制品保留，重新安装不会恢复旧状态。" destructive :loading="busy" @confirm="perform(async () => { if (removing) await uninstallPlugin(removing); confirmDelete = false })" />
+    <BaseConfirmModal v-model="confirmDelete" title="卸载插件" description="将停止该插件并删除实例配置和私有状态，进行中的调用会被取消。已上传制品保留，重新安装不会恢复旧状态。" destructive :loading="busy" @confirm="perform(async () => { if (removing) await uninstallPlugin(removing); confirmDelete = false })" />
   </div>
 </template>

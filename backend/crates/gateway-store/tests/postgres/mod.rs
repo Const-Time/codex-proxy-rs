@@ -38,6 +38,7 @@ mod users;
 static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 pub(super) struct TestDatabase {
+    pub(super) budget_directory: tempfile::TempDir,
     admin: PgPool,
     pub(super) pool: PgPool,
     schema: String,
@@ -108,6 +109,7 @@ impl TestDatabase {
                 .execute(&pool).await.expect("seed fixture key owner");
         }
         Some(Self {
+            budget_directory: tempfile::tempdir().unwrap(),
             admin,
             pool,
             schema,

@@ -3,6 +3,7 @@ mod endpoint;
 mod error;
 mod execution;
 mod images;
+mod ingress;
 pub(crate) mod middleware;
 mod models;
 mod responses;
@@ -77,6 +78,7 @@ async fn api_router_with_origins_and_worker_health(
     let admin = crate::admin::AdminTestFixture::new().await;
     gateway_api::initialize(
         gateway_api::ApiConfig {
+            ingress: Default::default(),
             asset_directory: std::env::temp_dir(),
             cors_allowed_origins,
             request_timeout_seconds: None,
@@ -435,6 +437,7 @@ async fn api_should_serve_resolved_assets_with_relative_environment_override() {
         return;
     };
     let mut config = gateway_api::ApiConfig {
+        ingress: Default::default(),
         asset_directory: "unused".into(),
         cors_allowed_origins: Vec::new(),
         request_timeout_seconds: None,

@@ -500,6 +500,43 @@ impl Provider for Core {
                 wire,
             )),
         ];
+        if mode == "scoped-cost" {
+            use gateway_core::metering::{
+                CalculatedCostAmounts, CalculatedCostBreakdown, CalculatedCostRates, CostComponent,
+                CurrencyCode, Decimal, Money, MultiplierScope,
+            };
+            let money = |ticks| {
+                Money::new(
+                    Decimal::from_scaled(ticks).unwrap(),
+                    CurrencyCode::new("USD").unwrap(),
+                )
+            };
+            let scope = MultiplierScope::Components([CostComponent::Input].into_iter().collect());
+            let breakdown = CalculatedCostBreakdown::new(
+                CalculatedCostAmounts::new(
+                    money(3),
+                    money(5),
+                    money(0),
+                    money(0),
+                    money(8),
+                    money(8),
+                ),
+                CalculatedCostRates::new(money(3), money(5), money(0), money(0)),
+                None,
+                100,
+            )
+            .with_custom_multiplier(20_000, scope.clone())
+            .unwrap();
+            assert_eq!(breakdown.custom_multiplier_scope(), &scope);
+            events[1] = Ok(ProviderEvent::canonical_with_wire(
+                vec![GatewayEvent::CalculatedCost(breakdown.calculated_cost())],
+                ProtocolWireEvent::raw_sse(
+                    "openai",
+                    bytes::Bytes::from_static(b": scoped cost\n\n"),
+                )
+                .unwrap(),
+            ));
+        }
         if mode == "raw-body" {
             let chunks = [
                 bytes::Bytes::from_static(b"{\"text\":\"\xe9"),

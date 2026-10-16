@@ -127,30 +127,6 @@ fn breakdown(value: &CalculatedCostBreakdown) -> facts::CostBreakdown {
         service_tier: value.service_tier().map(str::to_owned),
         multiplier_percent: value.multiplier_percent(),
         custom_multiplier_bps: value.custom_multiplier_bps(),
-        custom_multiplier_scope: multiplier_scope(value.custom_multiplier_scope()),
-    }
-}
-
-fn multiplier_scope(
-    value: &gateway_core::metering::MultiplierScope,
-) -> gateway_plugin_sdk::call::services::settings::MultiplierScope {
-    use gateway_core::metering::{CostComponent as Core, MultiplierScope};
-    use gateway_plugin_sdk::call::services::settings::{
-        CostComponent as Wire, MultiplierScope as Scope,
-    };
-    match value {
-        MultiplierScope::All => Scope::All,
-        MultiplierScope::Components(items) => Scope::Components(
-            items
-                .iter()
-                .map(|item| match item {
-                    Core::Input => Wire::Input,
-                    Core::Output => Wire::Output,
-                    Core::CacheRead => Wire::CacheRead,
-                    Core::CacheWrite => Wire::CacheWrite,
-                })
-                .collect(),
-        ),
     }
 }
 

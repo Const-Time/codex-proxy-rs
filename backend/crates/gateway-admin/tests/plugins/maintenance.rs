@@ -72,8 +72,8 @@ impl PluginRuntime for Unused {
     async fn validate(
         &self,
         _: &PluginRecord,
-        _: &PluginArtifact,
-        _: Option<&PluginArtifact>,
+        _: &PluginArtifactInfo,
+        _: Option<&PluginArtifactInfo>,
     ) -> Result<(), AdminError> {
         unreachable!()
     }

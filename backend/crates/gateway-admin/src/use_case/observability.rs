@@ -72,6 +72,13 @@ struct DashboardQueryCache {
     entries: tokio::sync::Mutex<HashMap<DashboardQueryKey, DashboardQueryEntry>>,
 }
 
+struct UsageSummaryEntry {
+    range: TimeRange,
+    filter: UsageFilter,
+    created_at: Instant,
+    result: Arc<tokio::sync::OnceCell<Result<UsageOverview, AdminError>>>,
+}
+
 impl DashboardQueryCache {
     async fn result_cell(
         &self,
@@ -135,6 +142,7 @@ pub(crate) struct DefaultObservabilityService {
     settings: Arc<dyn SettingsStore>,
     providers: ProviderAdminRegistry,
     dashboard_queries: DashboardQueryCache,
+    usage_summaries: tokio::sync::Mutex<Vec<UsageSummaryEntry>>,
 }
 
 impl DefaultObservabilityService {
@@ -151,7 +159,47 @@ impl DefaultObservabilityService {
             settings,
             providers,
             dashboard_queries: DashboardQueryCache::default(),
+            usage_summaries: tokio::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    async fn shared_usage_summary(
+        &self,
+        range: TimeRange,
+        filter: UsageFilter,
+    ) -> Result<UsageOverview, AdminError> {
+        let cell = {
+            let mut entries = self.usage_summaries.lock().await;
+            entries.retain(|entry| entry.created_at.elapsed() < DASHBOARD_QUERY_CACHE_RETENTION);
+            if let Some(entry) = entries
+                .iter()
+                .find(|entry| entry.range == range && entry.filter == filter)
+            {
+                entry.result.clone()
+            } else {
+                let cell = Arc::new(tokio::sync::OnceCell::new());
+                // Full filters include the authenticated owner; never share across principals.
+                // Bound memory even when every caller supplies a different range.
+                if entries.len() >= 64 {
+                    entries.remove(0);
+                }
+                entries.push(UsageSummaryEntry {
+                    range,
+                    filter: filter.clone(),
+                    created_at: Instant::now(),
+                    result: cell.clone(),
+                });
+                cell
+            }
+        };
+        cell.get_or_init(|| async {
+            self.store
+                .usage_summary(range, filter)
+                .await
+                .map_err(|error| map_store_error(error, "usage summary"))
+        })
+        .await
+        .clone()
     }
 
     async fn load_dashboard_summary(
@@ -298,11 +346,7 @@ impl ObservabilityService for DefaultObservabilityService {
         range: TimeRange,
         filter: UsageFilter,
     ) -> Result<UsageSummary, AdminError> {
-        let overview = self
-            .store
-            .usage_summary(range, filter)
-            .await
-            .map_err(|error| map_store_error(error, "usage summary"))?;
+        let overview = self.shared_usage_summary(range, filter).await?;
         let average_latency_ms = average(
             overview.requests.latency_sum_ms,
             overview.requests.latency_count,
@@ -319,11 +363,12 @@ impl ObservabilityService for DefaultObservabilityService {
         filter: UsageFilter,
     ) -> Result<UsageInsights, AdminError> {
         let aggregates = async {
-            futures::try_join!(
-                self.store.usage_summary(range, filter.clone()),
-                self.store.usage_trend(range, filter.clone()),
-            )
-            .map_err(|error| map_store_error(error, "usage insights"))
+            futures::try_join!(self.shared_usage_summary(range, filter.clone()), async {
+                self.store
+                    .usage_trend(range, filter.clone())
+                    .await
+                    .map_err(|error| map_store_error(error, "usage insights"))
+            },)
         };
         let ((overview, trend), standard_costs) = futures::try_join!(
             aggregates,

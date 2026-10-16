@@ -31,10 +31,13 @@ pub mod admin;
 mod health;
 mod middleware;
 pub mod openai;
+pub use openai::ingress::IngressConfig;
 
 /// API-owned HTTP 与静态资源配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ApiConfig {
+    #[serde(default)]
+    pub ingress: IngressConfig,
     pub asset_directory: PathBuf,
     pub cors_allowed_origins: Vec<String>,
     pub request_timeout_seconds: Option<u64>,
@@ -66,6 +69,9 @@ impl ApiConfig {
     }
 
     fn validate(&mut self) -> Result<(), ApiConfigError> {
+        if !self.ingress.valid() {
+            return Err(ApiConfigError::InvalidIngressBudget);
+        }
         if self.asset_directory.as_os_str().is_empty() {
             return Err(ApiConfigError::InvalidAssetDirectory);
         }
@@ -93,6 +99,8 @@ impl ApiConfig {
 /// API 配置非法的稳定分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ApiConfigError {
+    #[error("API ingress resource budget is invalid")]
+    InvalidIngressBudget,
     #[error("API asset directory is invalid")]
     InvalidAssetDirectory,
     #[error("API CORS origin is invalid")]
@@ -147,8 +155,9 @@ pub fn initialize(
                 .and_then(|plugins| plugins.middleware_registry())
         })
     };
-    let openai =
-        OpenAiService::new(execution, lifecycle.clone()).with_administration(admin.clone());
+    let openai = OpenAiService::new(execution, lifecycle.clone())
+        .with_administration(admin.clone())
+        .with_ingress(&config.ingress);
     let state = ApiState {
         admin,
         openai,

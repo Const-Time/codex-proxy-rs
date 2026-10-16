@@ -176,7 +176,7 @@ impl PluginRuntime for Runtime {
             cancellation,
         })))
     }
-    fn contributes_model_catalog(&self, _: &PluginArtifact) -> AdminResult<bool> {
+    fn contributes_model_catalog(&self, _: &PluginArtifactInfo) -> AdminResult<bool> {
         Ok(matches!(self.0.mode, Mode::Catalog))
     }
     fn describe(&self, info: PluginArtifactInfo) -> AdminResult<PluginArtifactInfo> {
@@ -188,8 +188,8 @@ impl PluginRuntime for Runtime {
     async fn validate(
         &self,
         _: &PluginRecord,
-        _: &PluginArtifact,
-        _: Option<&PluginArtifact>,
+        _: &PluginArtifactInfo,
+        _: Option<&PluginArtifactInfo>,
     ) -> AdminResult<()> {
         Ok(())
     }
@@ -1186,6 +1186,7 @@ impl Fixture {
         let lifecycle = Arc::new(TestLifecycle::default());
         let app = gateway_api::initialize(
             gateway_api::ApiConfig {
+                ingress: Default::default(),
                 asset_directory: assets.unwrap_or_else(std::env::temp_dir),
                 cors_allowed_origins: vec![],
                 request_timeout_seconds: None,

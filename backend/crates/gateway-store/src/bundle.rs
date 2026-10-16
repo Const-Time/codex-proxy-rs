@@ -146,6 +146,16 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
     );
 
     let execution_repository = Arc::new(postgres::PgExecutionStore::new(pool.clone()));
+    let budgets = Arc::new(
+        postgres::PgClientBudgetStore::open(pool.clone(), config.budget_journal_dir.clone())
+            .await
+            .map_err(|_| postgres_unavailable("open budget settlement journal"))?,
+    );
+    // Hydrate the authoritative ledger before accepting new requests.
+    budgets
+        .recover_pending()
+        .await
+        .map_err(|_| postgres_unavailable("recover budget settlements"))?;
     let (execution, execution_writer) =
         postgres::BufferedExecutionStore::new(Arc::clone(&execution_repository));
     let execution = Arc::new(execution);
@@ -181,7 +191,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         ),
         Arc::new(client_key_usage),
     )
-    .with_budget(Arc::new(postgres::PgClientBudgetStore::new(pool.clone())))
+    .with_budget(budgets.clone())
     .with_session_affinity(provider_session_affinity.clone());
 
     let provider_ports = ProviderStorePorts::new(
@@ -203,6 +213,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         credential_leases,
     ));
     let health_probes: Vec<Arc<dyn HealthProbe>> = vec![
+        budgets.clone(),
         Arc::new(PostgresHealthProbe::new(
             pool.clone(),
             config.pool.max_connections,
@@ -217,6 +228,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         client_key_usage_writer,
         admission_release_writer,
         retention,
+        budgets,
     )?;
     Ok(StoreBundle {
         plugins: Arc::new(postgres::PgPluginStore::new(pool.clone())),

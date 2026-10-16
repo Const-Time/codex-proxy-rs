@@ -624,7 +624,7 @@ impl RpcSession {
         {
             return Err(RpcError::Context(None));
         }
-        let manifest = package.package().manifest();
+        let manifest = package.manifest();
         let plugin_id = manifest
             .plugin_id()
             .map_err(|source| RpcError::Handshake(Some(super::ErrorSource::new(source))))?;
@@ -635,7 +635,7 @@ impl RpcSession {
                 .map(|package| package.protocol_version)
                 != Some(handshake.protocol_version)
             || handshake.plugin_id != plugin_id
-            || handshake.artifact_sha256 != package.package().digest()
+            || handshake.artifact_sha256 != package.digest()
             || handshake.contributes != manifest.contributes
             || handshake.instance_id.is_empty()
             || handshake.incarnation.is_empty()

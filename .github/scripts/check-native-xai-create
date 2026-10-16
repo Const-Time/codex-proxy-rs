@@ -7,7 +7,9 @@ mkdir -p "$output"
 if [ "$#" -eq 1 ]; then
   binary="$(realpath "$1")"
 else
-  cargo test --locked -p gateway-plugin-runtime --all-features --test main --no-run --message-format=json > "$output/compile.jsonl"
+  # Match the quality gate's workspace feature unification instead of rebuilding
+  # shared dependencies for a narrower package selection.
+  cargo test --locked --workspace --all-features --test main --no-run --message-format=json > "$output/compile.jsonl"
   binary="$(python3 - "$output/compile.jsonl" <<'PY'
 import json,sys
 executables=[]

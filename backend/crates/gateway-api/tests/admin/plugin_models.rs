@@ -311,6 +311,12 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub(crate) async fn new(pending_json: bool) -> Self {
+        Self::with_ingress(pending_json, Default::default()).await
+    }
+    pub(crate) async fn with_ingress(
+        pending_json: bool,
+        ingress: gateway_api::IngressConfig,
+    ) -> Self {
         let admin = AdminTestFixture::new().await;
         admin.auth.insert_session("admin");
         admin.auth.insert_user_session("ordinary", "ordinary");
@@ -325,6 +331,7 @@ impl Fixture {
         let plugin = PluginAccess::default();
         let app = gateway_api::initialize(
             gateway_api::ApiConfig {
+                ingress,
                 asset_directory: std::env::temp_dir(),
                 cors_allowed_origins: Vec::new(),
                 request_timeout_seconds: None,

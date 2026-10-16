@@ -49,6 +49,9 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   let tableRequestId = 0
   let analyticsRequestId = 0
   let diagnosticRequestId = 0
+  let tableAbort: AbortController | undefined
+  let analyticsAbort: AbortController | undefined
+  let diagnosticAbort: AbortController | undefined
   const scopedParams = () => ({
     personal: options.personal,
     ...options.recordFilters?.value,
@@ -89,6 +92,8 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
 
   async function loadUsagePage(background: boolean) {
     const requestId = ++tableRequestId
+    tableAbort?.abort()
+    tableAbort = new AbortController()
     loading.value = !background
     try {
       const result = await getUsageRecords({
@@ -96,7 +101,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
         pageSize: pageSize.value,
         ...tableTimeRangeParams.value,
         ...filterParams(),
-      })
+      }, tableAbort.signal)
       if (requestId !== tableRequestId)
         return
 
@@ -120,15 +125,23 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   async function loadUsageAnalytics(globalParams: ReturnType<typeof scopedParams>, background: boolean) {
     const requestId = ++analyticsRequestId
     const diagnosticsId = ++diagnosticRequestId
+    analyticsAbort?.abort()
+    diagnosticAbort?.abort()
+    analyticsAbort = new AbortController()
+    diagnosticAbort = new AbortController()
     const dimension = diagnosticDimension.value
     analyticsLoading.value = !background
     try {
       const [nextSummary, overview, diagnostics] = await Promise.all([
-        getUsageRecordSummary(globalParams),
-        getUsageRecordInsightsOverview(globalParams),
+        getUsageRecordSummary(globalParams, analyticsAbort.signal),
+        getUsageRecordInsightsOverview(globalParams, analyticsAbort.signal),
         getUsageRecordInsightsDiagnostics({
           ...globalParams,
           dimension,
+        }, diagnosticAbort.signal).catch((error: unknown) => {
+          if (diagnosticsId !== diagnosticRequestId)
+            return insights.value.diagnostics
+          throw error
         }),
       ])
       if (requestId !== analyticsRequestId)
@@ -159,13 +172,15 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
 
   async function loadDiagnostics() {
     const requestId = ++diagnosticRequestId
+    diagnosticAbort?.abort()
+    diagnosticAbort = new AbortController()
     const dimension = diagnosticDimension.value
     const params = scopedParams()
     try {
       const diagnostics = await getUsageRecordInsightsDiagnostics({
         ...params,
         dimension,
-      })
+      }, diagnosticAbort.signal)
       if (requestId !== diagnosticRequestId || dimension !== diagnosticDimension.value)
         return
       insights.value = {
@@ -229,6 +244,9 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     tableRequestId += 1
     analyticsRequestId += 1
     diagnosticRequestId += 1
+    tableAbort?.abort()
+    analyticsAbort?.abort()
+    diagnosticAbort?.abort()
   })
 
   return {

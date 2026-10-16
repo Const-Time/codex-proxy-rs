@@ -244,14 +244,19 @@ async fn administrator_can_scope_own_keys_without_losing_management_or_session()
     );
     use gateway_core::engine::budget::ClientBudgetPort as _;
     assert!(
-        gateway_store::postgres::PgClientBudgetStore::new(db.pool.clone())
-            .admit(
-                ClientApiKeyId::new("admin-own").unwrap(),
-                Some(AccountGroupId::new(GROUP).unwrap()),
-                None
-            )
-            .await
-            .is_err()
+        gateway_store::postgres::PgClientBudgetStore::open(
+            db.pool.clone(),
+            db.budget_directory.path().to_owned()
+        )
+        .await
+        .unwrap()
+        .admit(
+            ClientApiKeyId::new("admin-own").unwrap(),
+            Some(AccountGroupId::new(GROUP).unwrap()),
+            None
+        )
+        .await
+        .is_err()
     );
     // System administration remains available even with no personal group grants.
     auth.create_user(

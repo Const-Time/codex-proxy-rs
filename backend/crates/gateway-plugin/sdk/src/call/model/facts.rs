@@ -35,6 +35,8 @@ pub enum ExecutionCost {
     },
 }
 
+// Keep this upstream wire schema closed: older SDKs reject additional fields.
+// Local multiplier scope belongs to Core/Admin; amounts here are already priced.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CostBreakdown {
@@ -53,8 +55,6 @@ pub struct CostBreakdown {
     pub service_tier: Option<String>,
     pub multiplier_percent: u32,
     pub custom_multiplier_bps: u32,
-    #[serde(default)]
-    pub custom_multiplier_scope: crate::call::services::settings::MultiplierScope,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

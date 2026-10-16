@@ -18,6 +18,42 @@ struct MemoryAuthStore {
     audits: Mutex<Vec<AdminAuditEvent>>,
 }
 
+#[tokio::test]
+async fn repeated_login_attempts_are_bounded_before_password_work() {
+    use gateway_admin::model::auth::LoginError;
+    let store = std::sync::Arc::new(MemoryAuthStore::default());
+    let services = super::AdminHarness::new().auth(store).build().await;
+    for attempt in 0..11 {
+        let result = services
+            .auth()
+            .login(LoginCommand {
+                username: Some("Admin@Example.com".into()),
+                password: "wrong-password".into(),
+            })
+            .await;
+        assert_eq!(
+            result.err(),
+            Some(if attempt < 10 {
+                LoginError::InvalidCredentials
+            } else {
+                LoginError::RateLimited
+            })
+        );
+    }
+    // Case variants must not reset the same account's budget.
+    assert_eq!(
+        services
+            .auth()
+            .login(LoginCommand {
+                username: Some("admin@example.com".into()),
+                password: "strong-test-password".into()
+            })
+            .await
+            .err(),
+        Some(LoginError::RateLimited)
+    );
+}
+
 #[async_trait]
 impl AuthStore for MemoryAuthStore {
     async fn set_user_password(

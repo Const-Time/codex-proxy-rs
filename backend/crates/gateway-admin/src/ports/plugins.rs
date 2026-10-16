@@ -210,7 +210,7 @@ pub trait PluginRuntime: Send + Sync {
     async fn prepare_state(
         &self,
         _record: &PluginRecord,
-        _artifact: &PluginArtifact,
+        _artifact: &PluginArtifactInfo,
         _process: Option<&Arc<dyn PluginProcess>>,
     ) -> Result<Option<PluginStateCommit>> {
         Ok(None)
@@ -227,7 +227,7 @@ pub trait PluginRuntime: Send + Sync {
         Err(AdminError::unavailable("插件观察执行入口未接入"))
     }
     /// Manifest interpretation stays with the package/protocol owner.
-    fn contributes_model_catalog(&self, _artifact: &PluginArtifact) -> Result<bool> {
+    fn contributes_model_catalog(&self, _artifact: &PluginArtifactInfo) -> Result<bool> {
         Ok(false)
     }
     fn describe(&self, info: PluginArtifactInfo) -> Result<PluginArtifactInfo>;
@@ -235,8 +235,8 @@ pub trait PluginRuntime: Send + Sync {
     async fn validate(
         &self,
         record: &PluginRecord,
-        artifact: &PluginArtifact,
-        previous: Option<&PluginArtifact>,
+        artifact: &PluginArtifactInfo,
+        previous: Option<&PluginArtifactInfo>,
     ) -> Result<()>;
     async fn prepare(
         &self,

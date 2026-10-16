@@ -1,12 +1,15 @@
 use super::support::*;
 use gateway_admin::{
-    model::AdminErrorKind,
+    model::{AdminErrorKind, plugins::*},
     plugins::PluginManager,
     ports::plugins::{PluginRuntime, PluginService},
 };
 use gateway_plugin_runtime::{PackageLimits, PluginEngine, ValidatedPackage};
 use serde_json::json;
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, atomic::Ordering},
+};
 
 #[tokio::test]
 async fn public_resources_follow_registered_visibility_and_actual_instance_revision() {
@@ -164,7 +167,10 @@ async fn official_workbench_archive_registers_public_resources_without_rewriting
         observer: None,
     };
     store.save(&record, 0, &actor(), None).await.unwrap();
-    runtime.validate(&record, &artifact, None).await.unwrap();
+    runtime
+        .validate(&record, &artifact.info, None)
+        .await
+        .unwrap();
     let process = runtime.prepare(&record, artifact).await.unwrap();
     process.activate();
     assert!(
@@ -550,4 +556,184 @@ fn archive_rejects_traversal_links_duplicate_paths_and_expansion_bombs() {
         ValidatedPackage::read(bomb, None, limits).err().unwrap(),
         PackageError::Limit
     );
+    // Tar iteration stops at its end marker; the budget still covers any later
+    // gzip members, rather than trusting that early EOF as the archive size.
+    let mut trailing = raw(&[]).to_vec();
+    let mut extra = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut extra, &vec![0; 8192]).unwrap();
+    trailing.extend(extra.finish().unwrap());
+    assert_eq!(
+        ValidatedPackage::read(Arc::from(trailing), None, limits)
+            .err()
+            .unwrap(),
+        PackageError::Limit
+    );
+}
+
+#[test]
+fn prepared_package_releases_archive_and_unpacked_executable() {
+    let cache = tempfile::tempdir().unwrap();
+    // The fixture cache owns its archive for the whole test process.
+    let bytes: Arc<[u8]> = Arc::from(archive("1.0.0", false).as_ref());
+    let archive_ref = Arc::downgrade(&bytes);
+    let package = Arc::new(ValidatedPackage::read(bytes, None, PackageLimits::default()).unwrap());
+    let package_ref = Arc::downgrade(&package);
+    let prepared = package.prepare(cache.path()).unwrap();
+    let digest = package.digest().to_owned();
+    drop(package);
+    assert!(package_ref.upgrade().is_none());
+    assert!(archive_ref.upgrade().is_none());
+    assert_eq!(prepared.digest(), digest);
+    assert!(prepared.executable().is_file());
+    assert!(prepared.directory().join("index.html").is_file());
+}
+
+#[tokio::test]
+async fn failed_instance_can_stop_with_invalid_configuration_and_unavailable_archive() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let engine = Arc::new(PluginEngine::new(
+        cache.path().into(),
+        "3.11.2".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store.clone(), engine);
+    let artifact = manager
+        .upload(archive("1.0.0", false), &actor())
+        .await
+        .unwrap();
+    let installed = manager
+        .update(None, update(&artifact.sha256, 0, true), &actor())
+        .await
+        .unwrap();
+    manager
+        .handle(&installed.id, 1, request("state"))
+        .await
+        .unwrap();
+    manager.shutdown().await;
+    // A previously persisted configuration can become invalid after a host upgrade.
+    store
+        .records
+        .lock()
+        .unwrap()
+        .get_mut(&installed.id)
+        .unwrap()
+        .configuration = json!({"token":"legacy-secret"});
+    let engine = Arc::new(PluginEngine::new(
+        cache.path().into(),
+        "3.11.2".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store.clone(), engine);
+    manager.restore().await.unwrap();
+    assert_eq!(manager.list().await.unwrap()[0].status, "failed");
+    store.archive_unavailable.store(true, Ordering::SeqCst);
+    let mut stop = update(&artifact.sha256, 1, false);
+    stop.configuration = json!({"token":"legacy-secret"});
+    let stopped = manager
+        .update(Some(&installed.id), stop, &actor())
+        .await
+        .unwrap();
+    assert_eq!(stopped.status, "disabled");
+    assert_eq!(stopped.revision, 2);
+    store.archive_unavailable.store(false, Ordering::SeqCst);
+    let enabled = manager
+        .update(
+            Some(&installed.id),
+            update(&artifact.sha256, 2, true),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    let response = manager
+        .handle(&enabled.id, 3, request("state"))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["count"],
+        2
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn active_uninstall_revokes_access_and_handles_commit_uncertainty() {
+    for fault in [0, 1, 2, 3] {
+        let cache = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let engine = Arc::new(PluginEngine::new(
+            cache.path().into(),
+            "3.11.2".parse().unwrap(),
+            store.clone(),
+        ));
+        let manager = PluginManager::new(store.clone(), engine);
+        let artifact = manager
+            .upload(authentication_archive("1.0.0"), &actor())
+            .await
+            .unwrap();
+        let mut create = update(&artifact.sha256, 0, true);
+        create.frontend_authentication = Some(PluginAuthenticationBinding {
+            failure_policy: PluginAuthenticationPolicy::Reject,
+            identities: BTreeMap::from([("alice".into(), "key_alice".into())]),
+        });
+        let installed = manager.update(None, create, &actor()).await.unwrap();
+        let PluginAuthenticationDecision::Authenticated { access, .. } = manager
+            .authenticate("Bearer external-alice".into(), None)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            manager
+                .delete(&installed.id, 0, &actor())
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            AdminErrorKind::Conflict
+        );
+        assert!(!access.is_revoked());
+        store.archive_unavailable.store(true, Ordering::SeqCst);
+        store.delete_fault.store(fault, Ordering::SeqCst);
+        let result = manager.delete(&installed.id, 1, &actor()).await;
+        if fault == 1 {
+            assert!(result.is_err());
+            assert!(!access.is_revoked());
+            assert!(matches!(
+                manager
+                    .authenticate("Bearer local".into(), None)
+                    .await
+                    .unwrap(),
+                PluginAuthenticationDecision::Rejected
+            ));
+        } else {
+            assert!(access.is_revoked());
+            assert!(manager.access(&installed.id, 1).is_err());
+            if fault == 3 {
+                assert_eq!(
+                    result.err().unwrap().kind(),
+                    AdminErrorKind::UpstreamResultUnknown
+                );
+                assert!(
+                    manager
+                        .authenticate("Bearer local".into(), None)
+                        .await
+                        .is_err()
+                );
+                manager.delete(&installed.id, 1, &actor()).await.unwrap();
+            } else {
+                result.unwrap();
+            }
+            assert!(matches!(
+                manager
+                    .authenticate("Bearer local".into(), None)
+                    .await
+                    .unwrap(),
+                PluginAuthenticationDecision::Builtin { .. }
+            ));
+            assert!(manager.list().await.unwrap().is_empty());
+        }
+        manager.shutdown().await;
+    }
 }

@@ -38,6 +38,52 @@ fn external_observability_range_accepts_exactly_366_days() {
     assert_eq!(range.end, end);
 }
 
+#[tokio::test]
+async fn concurrent_summary_and_insights_share_work_only_for_the_same_authorized_filter() {
+    let range = observation_range(Utc::now());
+    let store = Arc::new(FixtureObservabilityStore::new(range));
+    let services = observability_services(store.clone()).await;
+    let filter = UsageFilter {
+        owner_user_id: Some("alice".into()),
+        ..Default::default()
+    };
+    let (summary, insights) = tokio::join!(
+        services
+            .observability()
+            .usage_summary(range, filter.clone()),
+        services
+            .observability()
+            .usage_insights(range, filter.clone())
+    );
+    summary.unwrap();
+    insights.unwrap();
+    assert_eq!(store.usage_summary_calls.load(Ordering::Relaxed), 1);
+    for filter in [
+        UsageFilter {
+            owner_user_id: Some("bob".into()),
+            ..Default::default()
+        },
+        UsageFilter {
+            client_api_key_ref: Some("other-key".into()),
+            ..filter.clone()
+        },
+    ] {
+        services
+            .observability()
+            .usage_summary(range, filter)
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.usage_summary_calls.load(Ordering::Relaxed), 3);
+    tokio::time::sleep(StdDuration::from_millis(2100)).await;
+    services
+        .observability()
+        .usage_summary(range, filter)
+        .await
+        .unwrap();
+    assert_eq!(store.usage_summary_calls.load(Ordering::Relaxed), 4);
+}
+
 #[test]
 fn external_observability_range_rejects_over_366_days_and_reversed_range() {
     let end = Utc::now();
@@ -677,6 +723,7 @@ async fn usage_insights_should_reject_partial_costs_when_billing_stream_fails() 
 }
 
 struct FixtureObservabilityStore {
+    usage_summary_calls: AtomicUsize,
     trend: Mutex<Vec<RequestMetricPoint>>,
     overview: Mutex<UsageOverview>,
     calculated_billing_facts: Mutex<Vec<UsageCalculatedBillingFact>>,
@@ -693,6 +740,7 @@ struct FixtureObservabilityStore {
 impl FixtureObservabilityStore {
     fn new(range: TimeRange) -> Self {
         Self {
+            usage_summary_calls: AtomicUsize::new(0),
             trend: Mutex::new(Vec::new()),
             overview: Mutex::new(UsageOverview {
                 total_cost_usd: "0".parse().unwrap(),
@@ -844,6 +892,8 @@ impl ObservabilityStore for FixtureObservabilityStore {
     }
 
     async fn usage_summary(&self, _: TimeRange, _: UsageFilter) -> AdminStoreResult<UsageOverview> {
+        self.usage_summary_calls.fetch_add(1, Ordering::Relaxed);
+        tokio::task::yield_now().await;
         Ok(self.overview.lock().expect("overview").clone())
     }
 

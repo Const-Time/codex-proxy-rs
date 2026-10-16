@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-fn binary() -> &'static PathBuf {
+pub(crate) fn binary() -> &'static PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY.get_or_init(|| {
         let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

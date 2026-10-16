@@ -1933,7 +1933,7 @@ struct AdmissionLease {
 
 async fn settle_budget(port: &dyn ClientBudgetPort, charge: ClientBudgetCharge) {
     if let Err(error) = port.settle(charge).await {
-        tracing::error!(%error, "Client budget settlement failed; storage will retry on the next request");
+        tracing::error!(%error, "Client budget settlement failed; inspect settlement health and durable recovery");
     }
 }
 

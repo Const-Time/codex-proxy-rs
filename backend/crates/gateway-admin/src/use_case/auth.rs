@@ -1,6 +1,10 @@
 //! 管理员认证状态机。
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
@@ -140,6 +144,9 @@ pub(crate) struct DefaultAuthService {
     session_ttl: Duration,
     store: Arc<dyn AuthStore>,
     snapshot: Arc<dyn gateway_core::runtime::SnapshotControl>,
+    password_executor: PasswordExecutor,
+    password_queue: Arc<tokio::sync::Semaphore>,
+    login_attempts: Mutex<LoginAttempts>,
 }
 
 impl DefaultAuthService {
@@ -158,6 +165,9 @@ impl DefaultAuthService {
             session_ttl: Duration::minutes(minutes),
             store,
             snapshot,
+            password_executor: PasswordExecutor::new(),
+            password_queue: Arc::new(tokio::sync::Semaphore::new(18)),
+            login_attempts: Mutex::new(LoginAttempts::default()),
         }
     }
 
@@ -292,7 +302,7 @@ impl AuthService for DefaultAuthService {
             return Err(AdminError::invalid("请输入有效的邮箱地址作为登录账号"));
         }
         validate_grants(&command.group_ids)?;
-        let hash = hash_admin_password(&command.password)?;
+        let hash = self.hash_admin_password(&command.password).await?;
         self.store
             .create_user(
                 &format!("user_{}", Uuid::now_v7().simple()),
@@ -391,7 +401,7 @@ impl AuthService for DefaultAuthService {
             .or(generated.as_deref())
             .ok_or_else(|| AdminError::internal("密码生成失败"))?;
         validate_password(value)?;
-        let hash = hash_admin_password(value)?;
+        let hash = self.hash_admin_password(value).await?;
         self.store
             .set_user_password(id, &hash, generated.is_some(), context)
             .await
@@ -413,14 +423,14 @@ impl AuthService for DefaultAuthService {
             .await
             .map_err(|e| map_store_error(e, "user"))?
             .ok_or_else(|| AdminError::not_found("用户不存在"))?;
-        if !verify_admin_password(current_password, &hash)? {
+        if !self.verify_admin_password(current_password, &hash).await? {
             return Err(AdminError::invalid("当前密码不正确"));
         }
         self.store
             .change_password(
                 &user.id,
                 user.auth_version,
-                &hash_admin_password(new_password)?,
+                &self.hash_admin_password(new_password).await?,
                 context,
             )
             .await
@@ -428,7 +438,7 @@ impl AuthService for DefaultAuthService {
     }
 
     async fn ensure_default_admin(&self, password: &str) -> Result<bool, AdminError> {
-        let hash = hash_admin_password(password)?;
+        let hash = self.hash_admin_password(password).await?;
         self.store
             .create_password_hash_if_absent(&self.default_admin_user_id, &hash)
             .await
@@ -470,6 +480,10 @@ impl AuthService for DefaultAuthService {
         if !crate::model::users::is_login_email(username) {
             return Err(LoginError::InvalidCredentials);
         }
+        self.login_attempts
+            .lock()
+            .map_err(|_| LoginError::Unavailable)?
+            .admit(username)?;
         let user = self
             .store
             .find_user(username)
@@ -483,7 +497,11 @@ impl AuthService for DefaultAuthService {
             .await
             .map_err(|_| LoginError::Unavailable)?
             .ok_or(LoginError::InvalidCredentials)?;
-        if !verify_admin_password(&command.password, &hash).map_err(|_| LoginError::Unavailable)? {
+        if !self
+            .verify_admin_password(&command.password, &hash)
+            .await
+            .map_err(|_| LoginError::Unavailable)?
+        {
             return Err(LoginError::InvalidCredentials);
         }
 
@@ -538,19 +556,130 @@ impl AuthService for DefaultAuthService {
     }
 }
 
-fn hash_admin_password(password: &str) -> Result<String, AdminError> {
-    Argon2::default()
-        .hash_password(password.as_bytes())
-        .map(|hash| hash.to_string())
-        .map_err(|_| AdminError::internal("管理员密码哈希失败"))
+impl DefaultAuthService {
+    async fn password_work<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T, AdminError> + Send + 'static,
+    ) -> Result<T, AdminError> {
+        let queued = self
+            .password_queue
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                AdminError::new(AdminErrorKind::Unavailable, "密码服务繁忙，请稍后重试")
+            })?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.password_executor
+            .sender
+            .as_ref()
+            .ok_or_else(|| AdminError::internal("密码服务不可用"))?
+            .try_send(Box::new(move || {
+                // A cancelled HTTP request must not release capacity while Argon2 is still running.
+                let _queued = queued;
+                let _ = sender.send(work());
+            }))
+            .map_err(|_| AdminError::internal("密码服务不可用"))?;
+        receiver
+            .await
+            .map_err(|_| AdminError::internal("密码服务不可用"))?
+    }
+
+    async fn hash_admin_password(&self, password: &str) -> Result<String, AdminError> {
+        let password = password.to_owned();
+        self.password_work(move || {
+            Argon2::default()
+                .hash_password(password.as_bytes())
+                .map(|hash| hash.to_string())
+                .map_err(|_| AdminError::internal("管理员密码哈希失败"))
+        })
+        .await
+    }
+
+    async fn verify_admin_password(
+        &self,
+        password: &str,
+        encoded: &str,
+    ) -> Result<bool, AdminError> {
+        let (password, encoded) = (password.to_owned(), encoded.to_owned());
+        self.password_work(move || {
+            let hash = PasswordHash::new(&encoded)
+                .map_err(|_| AdminError::internal("已保存的管理员密码哈希不合法"))?;
+            Ok(Argon2::default()
+                .verify_password(password.as_bytes(), &hash)
+                .is_ok())
+        })
+        .await
+    }
 }
 
-fn verify_admin_password(password: &str, encoded: &str) -> Result<bool, AdminError> {
-    let hash = PasswordHash::new(encoded)
-        .map_err(|_| AdminError::internal("已保存的管理员密码哈希不合法"))?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &hash)
-        .is_ok())
+type PasswordJob = Box<dyn FnOnce() + Send>;
+struct PasswordExecutor {
+    sender: Option<std::sync::mpsc::SyncSender<PasswordJob>>,
+}
+impl PasswordExecutor {
+    fn new() -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<PasswordJob>(18);
+        let receiver = Arc::new(Mutex::new(receiver));
+        // Keep large Argon2 allocations on fixed workers instead of spreading retained
+        // allocator arenas across Tokio's general-purpose blocking pool.
+        let workers = std::thread::available_parallelism().map_or(1, |cpus| cpus.get().min(2));
+        for index in 0..workers {
+            let receiver = receiver.clone();
+            if std::thread::Builder::new()
+                .name(format!("password-{index}"))
+                .spawn(move || {
+                    loop {
+                        let next = match receiver.lock() {
+                            Ok(receiver) => receiver.recv(),
+                            Err(_) => break,
+                        };
+                        match next {
+                            Ok(job) => job(),
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .is_err()
+            {
+                // Dropping the last sender also shuts down any workers already created.
+                return Self { sender: None };
+            }
+        }
+        Self {
+            sender: Some(sender),
+        }
+    }
+}
+
+#[derive(Default)]
+struct LoginAttempts {
+    window: Option<Instant>,
+    total: u32,
+    accounts: HashMap<String, u32>,
+}
+impl LoginAttempts {
+    fn admit(&mut self, username: &str) -> Result<(), LoginError> {
+        let now = Instant::now();
+        if self
+            .window
+            .is_none_or(|start| now.duration_since(start).as_secs() >= 60)
+        {
+            self.window = Some(now);
+            self.total = 0;
+            self.accounts.clear();
+        }
+        // The global budget also bounds untrusted account names retained in memory.
+        if self.total >= 60 {
+            return Err(LoginError::RateLimited);
+        }
+        let count = self.accounts.entry(username.to_lowercase()).or_default();
+        if *count >= 10 {
+            return Err(LoginError::RateLimited);
+        }
+        *count += 1;
+        self.total += 1;
+        Ok(())
+    }
 }
 
 fn random_session_token() -> String {

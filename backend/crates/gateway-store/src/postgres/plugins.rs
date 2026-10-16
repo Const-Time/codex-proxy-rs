@@ -4,7 +4,7 @@ use gateway_admin::{
     model::{AdminError, MutationContext, plugins::*},
     ports::plugins::PluginStore,
 };
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{Connection as _, PgPool, Postgres, Row, Transaction};
 use std::sync::Arc;
 
 pub struct PgPluginStore {
@@ -115,18 +115,25 @@ impl PluginStore for PgPluginStore {
         serde_json::from_value(info).map_err(|_| unavailable())
     }
     async fn artifact(&self, digest: &str) -> Result<PluginArtifact, AdminError> {
-        let row = sqlx::query("select info, archive from plugin_artifacts where sha256=$1")
-            .bind(digest)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|_| unavailable())?
-            .ok_or_else(|| AdminError::not_found("插件制品不存在"))?;
-        let archive: Vec<u8> = row.try_get("archive").map_err(|_| unavailable())?;
-        Ok(PluginArtifact {
-            info: serde_json::from_value(row.try_get("info").map_err(|_| unavailable())?)
-                .map_err(|_| unavailable())?,
-            archive: Arc::from(archive),
-        })
+        let mut connection = self.pool.acquire().await.map_err(|_| unavailable())?;
+        let result = async {
+            let row = sqlx::query("select info, archive from plugin_artifacts where sha256=$1")
+                .bind(digest)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(|_| unavailable())?
+                .ok_or_else(|| AdminError::not_found("插件制品不存在"))?;
+            let archive: &[u8] = row.try_get("archive").map_err(|_| unavailable())?;
+            Ok(PluginArtifact {
+                info: serde_json::from_value(row.try_get("info").map_err(|_| unavailable())?)
+                    .map_err(|_| unavailable())?,
+                archive: Arc::from(archive),
+            })
+        }
+        .await;
+        // A 32 MiB archive must not leave a 32 MiB buffer on every pooled connection.
+        connection.shrink_buffers();
+        result
     }
     async fn put_artifact(
         &self,
@@ -156,13 +163,16 @@ impl PluginStore for PgPluginStore {
         if count >= 128 || size.saturating_add(artifact.archive.len() as i64) > 512 * 1024 * 1024 {
             return Err(AdminError::invalid("插件制品存储达到上限"));
         }
-        sqlx::query("insert into plugin_artifacts(sha256,info,archive) values($1,$2,$3)")
-            .bind(&artifact.info.sha256)
-            .bind(serde_json::to_value(&artifact.info).map_err(|_| unavailable())?)
-            .bind(artifact.archive.as_ref())
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| unavailable())?;
+        let inserted =
+            sqlx::query("insert into plugin_artifacts(sha256,info,archive) values($1,$2,$3)")
+                .bind(&artifact.info.sha256)
+                .bind(serde_json::to_value(&artifact.info).map_err(|_| unavailable())?)
+                .bind(artifact.archive.as_ref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| unavailable());
+        tx.as_mut().shrink_buffers();
+        inserted?;
         audit(&mut tx, actor, &artifact.info.sha256, "plugin.upload").await?;
         tx.commit().await.map_err(|_| unavailable())
     }
@@ -365,15 +375,16 @@ impl PluginStore for PgPluginStore {
         actor: &MutationContext,
     ) -> Result<(), AdminError> {
         let mut tx = self.pool.begin().await.map_err(|_| unavailable())?;
-        let result =
-            sqlx::query("delete from plugin_instances where id=$1 and revision=$2 and not enabled")
-                .bind(id)
-                .bind(signed(expected)?)
-                .execute(&mut *tx)
-                .await
-                .map_err(|_| unavailable())?;
+        let result = sqlx::query("delete from plugin_instances where id=$1 and revision=$2")
+            .bind(id)
+            .bind(signed(expected)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| unavailable())?;
         if result.rows_affected() != 1 {
-            return Err(AdminError::conflict("请先停用插件并刷新版本后卸载"));
+            return Err(AdminError::conflict(
+                "插件版本已变更或实例不存在，请刷新后卸载",
+            ));
         }
         audit(&mut tx, actor, id, "plugin.uninstall").await?;
         tx.commit().await.map_err(|_| unavailable())

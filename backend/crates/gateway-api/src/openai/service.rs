@@ -20,6 +20,7 @@ use super::responses::{ContinuationIntent, DecodedResponsesRequest};
 /// OpenAI HTTP/WS adapter 共享的 Core 与连接生命周期能力。
 #[derive(Clone)]
 pub(crate) struct OpenAiService {
+    pub(crate) ingress: Arc<super::ingress::IngressBudget>,
     administration: Option<gateway_admin::AdminServices>,
     execution: Arc<dyn ExecutionService>,
     lifecycle: Arc<dyn ConnectionLifecycle>,
@@ -27,11 +28,12 @@ pub(crate) struct OpenAiService {
 
 impl OpenAiService {
     #[must_use]
-    pub(crate) const fn new(
+    pub(crate) fn new(
         execution: Arc<dyn ExecutionService>,
         lifecycle: Arc<dyn ConnectionLifecycle>,
     ) -> Self {
         Self {
+            ingress: Arc::new(super::ingress::IngressBudget::new(&Default::default())),
             administration: None,
             execution,
             lifecycle,
@@ -43,6 +45,10 @@ impl OpenAiService {
         administration: gateway_admin::AdminServices,
     ) -> Self {
         self.administration = Some(administration);
+        self
+    }
+    pub(crate) fn with_ingress(mut self, config: &super::ingress::IngressConfig) -> Self {
+        self.ingress = Arc::new(super::ingress::IngressBudget::new(config));
         self
     }
     pub(crate) async fn authenticate_ingress(

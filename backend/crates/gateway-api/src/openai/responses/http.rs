@@ -34,7 +34,7 @@ use crate::openai::{
 
 use super::{
     OpenAiResponsesEncoder, ProtocolErrorBody, ResponseEncodeError,
-    request::decode_request_with_headers,
+    request::decode_request_with_headers_accounted,
 };
 
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -45,15 +45,16 @@ pub(crate) async fn responses(
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     ingress_id: Option<Extension<tower_http::request_id::RequestId>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: crate::openai::ingress::AuthenticatedBody,
 ) -> Response {
-    responses_at_endpoint(
+    respond_authenticated(
         State(state),
         connect_info,
         ingress_id,
         headers,
-        body,
+        body.body,
         "/v1/responses",
+        (body.client, Some(body.memory)),
     )
     .await
 }
@@ -75,9 +76,44 @@ pub(crate) async fn responses_at_endpoint(
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
+    respond_authenticated(
+        State(state),
+        connect_info,
+        ingress_id,
+        headers,
+        body,
+        endpoint,
+        (client, None),
+    )
+    .await
+}
+
+async fn respond_authenticated(
+    State(state): State<ApiState>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    ingress_id: Option<Extension<tower_http::request_id::RequestId>>,
+    headers: HeaderMap,
+    body: Bytes,
+    endpoint: &'static str,
+    authenticated: (
+        gateway_core::engine::execution::AuthenticatedClient,
+        Option<crate::openai::ingress::IngressMemory>,
+    ),
+) -> Response {
+    let (client, mut memory) = authenticated;
+    let service = state.openai();
     let access = client.bound_access();
-    let decoded = match decode_request_with_headers(&body, &headers) {
+    let mut capacity_exhausted = false;
+    let decoded = match decode_request_with_headers_accounted(&body, &headers, |bytes| {
+        if memory.as_mut().is_none_or(|memory| memory.reserve(bytes)) {
+            Ok(())
+        } else {
+            capacity_exhausted = true;
+            Err(super::error::RequestDecodeError::DecompressedBodyTooLarge)
+        }
+    }) {
         Ok(decoded) => decoded,
+        Err(_) if capacity_exhausted => return crate::openai::ingress::exhausted(),
         Err(error) => {
             return protocol_error_response(StatusCode::BAD_REQUEST, error.protocol_body());
         }

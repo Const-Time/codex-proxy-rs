@@ -73,6 +73,7 @@ pub struct RuntimeSnapshotHandle {
 struct PublishedSnapshot {
     snapshot: Option<Arc<RuntimeSnapshot>>,
     access: Vec<Weak<ClientAccess>>,
+    next_access_cleanup: usize,
     publication: u64,
     availability: CancellationToken,
 }
@@ -83,6 +84,7 @@ impl Default for PublishedSnapshot {
         Self {
             snapshot: None,
             access: Vec::new(),
+            next_access_cleanup: 64,
             publication: 0,
             availability,
         }
@@ -168,6 +170,7 @@ impl RuntimeSnapshotHandle {
             current: Arc::new(RwLock::new(PublishedSnapshot {
                 snapshot: Some(Arc::new(initial)),
                 access: Vec::new(),
+                next_access_cleanup: 64,
                 publication: 0,
                 availability: CancellationToken::new(),
             })),
@@ -189,14 +192,12 @@ impl RuntimeSnapshotHandle {
             let Some(access) = weak.upgrade() else {
                 return false;
             };
-            if !snapshot
-                .client_policies()
-                .any(|policy| policy == &access.policy)
-            {
+            if !snapshot.contains_client_policy(&access.policy) {
                 access.cancellation.cancel();
             }
             !access.cancellation.is_cancelled()
         });
+        current.next_access_cleanup = current.access.len().saturating_mul(2).max(64);
         if current.snapshot.is_none() {
             current.availability = CancellationToken::new();
         }
@@ -210,6 +211,7 @@ impl RuntimeSnapshotHandle {
         for access in current.access.drain(..).filter_map(|weak| weak.upgrade()) {
             access.cancellation.cancel();
         }
+        current.next_access_cleanup = 64;
         current.snapshot = None;
         current.availability.cancel();
         current.publication = current.publication.wrapping_add(1);
@@ -243,11 +245,14 @@ impl RuntimeSnapshotHandle {
         if !current
             .snapshot
             .as_ref()
-            .is_some_and(|snapshot| snapshot.client_policies().any(|p| p == policy))
+            .is_some_and(|snapshot| snapshot.contains_client_policy(policy))
         {
             return Err(RuntimeSnapshotUnavailable);
         }
-        current.access.retain(|weak| weak.strong_count() != 0);
+        if current.access.len() >= current.next_access_cleanup {
+            current.access.retain(|weak| weak.strong_count() != 0);
+            current.next_access_cleanup = current.access.len().saturating_mul(2).max(64);
+        }
         let access = Arc::new(ClientAccess {
             policy: policy.clone(),
             cancellation: CancellationToken::new(),

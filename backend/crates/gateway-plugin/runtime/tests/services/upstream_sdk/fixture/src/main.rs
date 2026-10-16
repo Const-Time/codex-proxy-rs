@@ -130,6 +130,15 @@ impl PluginHandler for Worker {
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--decode-model-batch") {
+        use std::io::Read as _;
+        let mut payload = Vec::new();
+        std::io::stdin().read_to_end(&mut payload).unwrap();
+        let batch = gateway_plugin_sdk::call::host::ModelEventBatch::decode(&payload)
+            .expect("host model events must decode with the original upstream SDK");
+        println!("{}", serde_json::to_string(&batch.events).unwrap());
+        return;
+    }
     let session = PluginSession::accept(
         tokio::io::stdin(),
         tokio::io::stdout(),

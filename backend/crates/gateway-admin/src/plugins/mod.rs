@@ -128,11 +128,11 @@ impl PluginManager {
             let catalog = artifact
                 .as_ref()
                 .ok()
-                .and_then(|artifact| self.runtime.contributes_model_catalog(artifact).ok())
+                .and_then(|artifact| self.runtime.contributes_model_catalog(&artifact.info).ok())
                 .unwrap_or(true);
             let restored = async {
                 let artifact = artifact?;
-                self.runtime.validate(&record, &artifact, None).await?;
+                self.runtime.validate(&record, &artifact.info, None).await?;
                 let process = self.runtime.prepare(&record, artifact).await?;
                 if let Err(error) = self.validate_candidate(&record, Some(&process), catalog) {
                     process.stop().await;
@@ -445,9 +445,13 @@ impl PluginService for PluginManager {
         if id.is_none() && records.len() >= 64 {
             return Err(AdminError::invalid("最多安装 64 个插件实例"));
         }
-        let artifact = self.store.artifact(&update.artifact_sha256).await?;
+        let artifact = self.store.artifact_info(&update.artifact_sha256).await?;
         let old_artifact = if let Some(previous) = previous {
-            Some(self.store.artifact(&previous.artifact_sha256).await?)
+            Some(if previous.artifact_sha256 == update.artifact_sha256 {
+                artifact.clone()
+            } else {
+                self.store.artifact_info(&previous.artifact_sha256).await?
+            })
         } else {
             None
         };
@@ -509,12 +513,24 @@ impl PluginService for PluginManager {
             configuration: update.configuration,
             secrets,
         };
-        self.runtime
-            .validate(&record, &artifact, old_artifact.as_ref())
-            .await?;
+        // Stopping an unchanged instance must not depend on its configuration,
+        // executable, registration or private state being healthy.
+        let stopping_only = !record.enabled
+            && previous.is_some_and(|previous| {
+                let mut stopped = previous.clone();
+                stopped.enabled = false;
+                stopped.revision = record.revision;
+                stopped == record
+            });
+        if !stopping_only {
+            self.runtime
+                .validate(&record, &artifact, old_artifact.as_ref())
+                .await?;
+        }
         let catalog = self.runtime.contributes_model_catalog(&artifact)?;
         let candidate = if record.enabled {
-            Some(self.runtime.prepare(&record, artifact.clone()).await?)
+            let package = self.store.artifact(&record.artifact_sha256).await?;
+            Some(self.runtime.prepare(&record, package).await?)
         } else {
             None
         };
@@ -656,10 +672,12 @@ impl PluginService for PluginManager {
     ) -> Result<(), AdminError> {
         let _guard = self.changes.lock().await;
         let result = self.store.delete(id, revision, actor).await;
+        let mut uncertain = false;
         if let Err(error) = result {
-            let records = self.store.list().await?;
-            if records.iter().any(|r| r.id == id) {
-                return Err(error);
+            match self.store.list().await {
+                Ok(records) if records.iter().any(|r| r.id == id) => return Err(error),
+                Ok(_) => (),
+                Err(_) => uncertain = true,
             }
         }
         {
@@ -667,8 +685,33 @@ impl PluginService for PluginManager {
                 .middleware
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            publication.remove(id);
+            if uncertain {
+                publication.block_removal(id);
+            } else {
+                publication.remove(id);
+            }
             publication.rebuild_observers(self.runtime.as_ref(), self.services.clone());
+        }
+        {
+            let mut authentication = self
+                .authentication
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if authentication
+                .entry
+                .as_ref()
+                .is_some_and(|entry| entry.id == id)
+                || authentication.blocked_id.as_deref() == Some(id)
+            {
+                authentication.epoch.revoke();
+                if uncertain {
+                    authentication.blocked_id = Some(id.to_owned());
+                } else {
+                    authentication.epoch = PluginAccess::default();
+                    authentication.entry = None;
+                    authentication.blocked_id = None;
+                }
+            }
         }
         let old = self
             .active
@@ -680,7 +723,13 @@ impl PluginService for PluginManager {
             self.retire(old);
         }
         self.maintenance_changed.notify_one();
-        Ok(())
+        if uncertain {
+            Err(AdminError::upstream_result_unknown(
+                "插件卸载结果未能确认，实例已停止；请刷新后重试卸载",
+            ))
+        } else {
+            Ok(())
+        }
     }
     async fn resource(
         &self,

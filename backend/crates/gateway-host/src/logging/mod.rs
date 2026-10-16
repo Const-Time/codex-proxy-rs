@@ -226,5 +226,10 @@ fn create_file_writer(
         retention_days,
         Arc::clone(&health),
     )?;
-    Ok(FileLogSink::spawn(writer, thread_name, health)?)
+    Ok(FileLogSink::spawn(
+        writer,
+        thread_name,
+        health,
+        prefix != APPLICATION_LOG_FILE_PREFIX,
+    )?)
 }

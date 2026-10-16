@@ -911,6 +911,11 @@ impl RuntimeSnapshot {
         self.client_policies.values()
     }
 
+    /// Match the complete frozen policy, including grants and limits, by its indexed ID.
+    pub fn contains_client_policy(&self, policy: &ClientPolicy) -> bool {
+        self.client_policies.get(policy.key_id()) == Some(policy)
+    }
+
     pub fn providers_for_scope(&self, scope: &FrozenAccountScope) -> BTreeSet<ProviderKind> {
         self.providers
             .intersection(scope.provider_kinds())

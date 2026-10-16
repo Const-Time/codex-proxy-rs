@@ -72,6 +72,12 @@ OpenSSL，也不新增 TLS 配置开关。
 
 ## 启动
 
+应用容器默认 CPU 上限为 1 核、内存上限为 1 GiB。多核机器可按负载调整
+`deploy/compose.yaml` 中应用服务的 `cpus`，但不能超过 Docker 可用的 CPU 核数。
+旧模板使用 `cpus: '2.0'`，在 1 核机器部署时需改为 `'1.0'`，否则容器会在创建阶段失败。
+内存上限仅针对应用容器，宿主机还需要供 PostgreSQL、Redis 和操作系统使用；
+1 核 2 GiB 的实际承载能力需结合并发、请求大小和运行时内存观察。
+
 ```bash
 docker compose -f deploy/compose.yaml config --quiet
 docker compose -f deploy/compose.yaml pull
@@ -277,12 +283,16 @@ cargo run -p codex-proxy-rs
 
 Compose 使用以下绑定目录：
 
-- `.runtime/data` → OpenAI 会话锚点密钥、更新状态、临时更新目录与备份暂存区
+- `.runtime/data` → OpenAI 会话锚点密钥、待结算费用投递日志、更新状态、临时更新目录与备份暂存区
 - `.runtime/logs` → 应用文件日志
 - `.runtime/postgres` → PostgreSQL
 - `.runtime/redis` → Redis AOF
 
 普通 `docker compose down` 不会删除这些目录。删除 `.runtime` 会永久清除本地状态。
+
+`host.runtime_data_dir/budget-settlements` 保存尚未确认写入 PostgreSQL 的精确费用。重启会自动补扣且不会重复计费；启动回放失败时服务拒绝监听，检查数据库、目录权限和 `client_budget_settlement` 健康状态。迁机、备份和恢复时需要同时保留此目录，单独的 PostgreSQL 备份不包含尚未投递的费用；不要为恢复启动而清空它。
+
+HTTP Responses、Images 和 Search 在鉴权后缓冲正文。`api.ingress` 默认允许 32 个并行上传、128 MiB 总缓冲预算（含拼接副本，压缩 Responses 按解压缓冲增长计入预算）和 60 秒上传期限。容量不足返回可重试的 503，上传超时返回 408；该期限不限制上游生成或 SSE 时长。大正文场景可按服务器内存调高 `memory_budget_mib`，不要关闭入口预算。
 
 PostgreSQL 是账号、Client Key、运行设置、请求记录与审计的权威存储；账号 credential 当前按
 Provider schema 以明文 JSON 保存于 PostgreSQL。Redis 只保存可重建、可过期的协调状态，例如
@@ -321,7 +331,9 @@ OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 Postgr
 报文开关仍为 `host.logging.request_dump`，默认关闭；开启时原始报文按块完整写入独立文件，
 数据库请求诊断仍是有界摘要，不能用摘要事件数代替全量报文完整性。
 
-文件写入使用有界队列背压，正常退出会排空队列并同步文件。`file_logging` 健康探针在写入/同步失败后
+普通应用日志使用非阻塞队列，最多排队 64 条、单条最多 64 KiB。队列满或单条过大时整条丢弃，
+不会留下半条 JSON；`file_logging` 报告 `Degraded` 和累计丢弃数。OAuth 恢复日志和显式启用的报文转储
+仍使用有界队列背压以保留完整记录。正常退出会排空已接收记录并同步文件。`file_logging` 在写入/同步失败后
 报告 `Unhealthy`，本次进程内恢复写入也不会清除已有缺口；压缩或清理失败报告 `Degraded`。
 这不是断电、强杀或磁盘故障下的零丢失承诺；已删除的历史文件也不能靠升级恢复。
 容量不足时不会提前删除保留窗口内日志，必须根据完整日期的压缩后实际用量规划空间，并监控磁盘余量和

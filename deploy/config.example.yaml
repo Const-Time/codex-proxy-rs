@@ -60,6 +60,11 @@ api:
   cors_allowed_origins: []
   request_timeout_seconds: null
   request_id_header: 'x-request-id'
+  # HTTP 正文在鉴权后读取；预算覆盖并行上传缓冲和拼接副本，不限制 SSE 生成时长。
+  ingress:
+    memory_budget_mib: 128
+    maximum_uploads: 32
+    upload_timeout_seconds: 60
 
 openai:
   # 上游地址、WebSocket 池、额度刷新和 OAuth 使用 Provider 内置默认值；模板只保留画像启动基线。

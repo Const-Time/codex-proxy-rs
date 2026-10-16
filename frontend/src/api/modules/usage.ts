@@ -514,9 +514,10 @@ interface UsageDetailQuery {
 
 type UsageDiagnosticsQuery = UsageRangeQuery & { dimension: string }
 
-export function getUsageRecords(data: UsagePageQuery) {
+export function getUsageRecords(data: UsagePageQuery, signal?: AbortSignal) {
   return request<UsageRecordsResponse>({
     url: '/api/admin/usage/records',
+    signal,
     method: 'GET',
     params: data,
   })
@@ -538,25 +539,28 @@ export function getUsageRecordDetail(data: UsageDetailQuery) {
   })
 }
 
-export function getUsageRecordSummary(data: UsageRangeQuery) {
+export function getUsageRecordSummary(data: UsageRangeQuery, signal?: AbortSignal) {
   return request<UsageSummaryResponse>({
     url: '/api/admin/usage/records/summary',
+    signal,
     method: 'GET',
     params: data,
   })
 }
 
-export function getUsageRecordInsightsOverview(data: UsageRangeQuery) {
+export function getUsageRecordInsightsOverview(data: UsageRangeQuery, signal?: AbortSignal) {
   return request<UsageInsightsOverviewResponse>({
     url: '/api/admin/usage/insights/overview',
+    signal,
     method: 'GET',
     params: data,
   })
 }
 
-export function getUsageRecordInsightsDiagnostics(data: UsageDiagnosticsQuery) {
+export function getUsageRecordInsightsDiagnostics(data: UsageDiagnosticsQuery, signal?: AbortSignal) {
   return request<UsageDiagnosticsResponse>({
     url: '/api/admin/usage/insights/diagnostics',
+    signal,
     method: 'GET',
     params: data,
   })

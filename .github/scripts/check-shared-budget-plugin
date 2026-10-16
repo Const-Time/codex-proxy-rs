@@ -14,5 +14,5 @@ archive_name="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); pri
 CPR_SHARED_BUDGET_ARCHIVE="$output/$archive_name"
 test -f "$CPR_SHARED_BUDGET_ARCHIVE"
 export CPR_SHARED_BUDGET_ARCHIVE
-cargo test --locked -p gateway-plugin-runtime --all-features --test main \
+cargo test --locked --workspace --all-features --test main \
   quota::packaged_shared_budget_plugin_uses_native_permissions_cas_reset_and_restored_state -- --exact --ignored

@@ -28,7 +28,7 @@ export function useApiKeysQuery() {
     refreshingConcurrency = true
     const sequence = requestSequence
     try {
-      const result = await fetchPage(cursors.get(page.value), pageSize.value, undefined)
+      const result = await fetchPage(cursors.get(page.value), pageSize.value, searchQuery.value.trim() || undefined)
       if (sequence !== requestSequence)
         return
       const counts = new Map(result.items.map(item => [item.id, item.activeConcurrency]))

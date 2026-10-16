@@ -1,6 +1,7 @@
 //! 将已验证插件包解压到独立私有目录，并持有可执行资源
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,7 +13,9 @@ use super::{PackageError, ValidatedPackage};
 pub struct PreparedPackage {
     directory: tempfile::TempDir,
     executable: PathBuf,
-    package: Arc<ValidatedPackage>,
+    manifest: gateway_plugin_sdk::Manifest,
+    digest: String,
+    resources: BTreeMap<String, Vec<u8>>,
 }
 
 impl ValidatedPackage {
@@ -45,7 +48,14 @@ impl ValidatedPackage {
         Ok(PreparedPackage {
             directory,
             executable,
-            package: Arc::clone(self),
+            manifest: self.manifest.clone(),
+            digest: self.digest.clone(),
+            resources: self
+                .files
+                .iter()
+                .filter(|(path, _)| self.manifest.resources.contains_key(*path))
+                .map(|(path, bytes)| (path.clone(), bytes.clone()))
+                .collect(),
         })
     }
 }
@@ -62,7 +72,16 @@ impl PreparedPackage {
     }
 
     #[must_use]
-    pub fn package(&self) -> &ValidatedPackage {
-        &self.package
+    pub fn manifest(&self) -> &gateway_plugin_sdk::Manifest {
+        &self.manifest
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(crate) fn resource(&self, path: &str) -> Option<&[u8]> {
+        self.resources.get(path).map(Vec::as_slice)
     }
 }

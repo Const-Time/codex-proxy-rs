@@ -664,7 +664,7 @@ async fn unchanged_schema_configuration_accepts_native_writes_after_preparation_
         store.clone(),
     );
     let state = engine
-        .prepare_state(&record, &artifact, None)
+        .prepare_state(&record, &artifact.info, None)
         .await
         .unwrap();
     assert!(state.is_none());

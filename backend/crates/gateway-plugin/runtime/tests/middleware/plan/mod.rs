@@ -486,7 +486,10 @@ async fn binding_validation_rejects_empty_ambiguous_and_undeclared_scopes_withou
         PluginMiddlewareMount::Attempt,
     ] {
         record.middleware.as_mut().unwrap().mounts = vec![mount];
-        production.validate(&record, &declared, None).await.unwrap();
+        production
+            .validate(&record, &declared.info, None)
+            .await
+            .unwrap();
     }
     assert!(
         manager

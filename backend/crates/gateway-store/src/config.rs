@@ -26,6 +26,8 @@ pub struct StoreConfig {
     pub(crate) pool: StorePoolConfig,
     #[serde(skip)]
     backup_staging_dir: PathBuf,
+    #[serde(skip)]
+    pub(crate) budget_journal_dir: PathBuf,
 }
 
 /// PostgreSQL 连接池预算；acquire 超时决定池耗尽时快速失败而非排队积压。
@@ -78,6 +80,7 @@ impl StoreConfig {
             });
         }
         self.backup_staging_dir = runtime_data_dir.join("backup-staging");
+        self.budget_journal_dir = runtime_data_dir.join("budget-settlements");
         self.validate_resolved()
     }
 

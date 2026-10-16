@@ -3,6 +3,51 @@ use gateway_core::health::HealthState;
 use std::time::Duration;
 
 #[test]
+fn application_overload_reports_loss_without_writing_partial_json() {
+    if env::var_os(CHILD_PROCESS_ENV).is_some() {
+        let directory = PathBuf::from(env::var_os(LOG_DIRECTORY_ENV).unwrap());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let bundle = runtime
+            .block_on(gateway_host::initialize(logging_config(directory, false)))
+            .unwrap();
+        let health = bundle.logging_health_probe();
+        let payload = "x".repeat(128 * 1024);
+        tracing::info!(target: APPLICATION_LOG_TARGET, payload, "oversized record");
+        tracing::info!(target: APPLICATION_LOG_TARGET, "following complete record");
+        assert!(
+            matches!(runtime.block_on(health.check()), HealthState::Degraded(message) if message.contains("1 records dropped"))
+        );
+        drop(bundle);
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "logging::sink::application_overload_reports_loss_without_writing_partial_json",
+        ])
+        .env(CHILD_PROCESS_ENV, "1")
+        .env(LOG_DIRECTORY_ENV, directory.path())
+        .env("RUST_LOG", "info")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = read_log_file_set(directory.path(), APPLICATION_LOG_FILE_PREFIX);
+    for line in body.lines() {
+        serde_json::from_str::<serde_json::Value>(line).expect("complete JSON event");
+    }
+    assert!(body.contains("following complete record"));
+    assert!(!body.contains("oversized record"));
+}
+
+#[test]
 fn file_queue_drains_every_record_before_normal_shutdown() {
     if env::var_os(CHILD_PROCESS_ENV).is_some() {
         with_file_logging(

@@ -86,7 +86,8 @@ services:
       redis:
         condition: service_healthy
     pids_limit: 256
-    cpus: '2.0'
+    # CPU 上限不能超过宿主机可用核数；默认兼容 1 核机器。
+    cpus: '1.0'
     mem_limit: 1g
     ports:
       - '127.0.0.1:8080:8080'

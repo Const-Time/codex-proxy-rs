@@ -19,6 +19,8 @@ use std::{
 #[derive(Default)]
 pub struct MemoryStore {
     pub save_fault: AtomicU8,
+    pub delete_fault: AtomicU8,
+    pub archive_unavailable: AtomicBool,
     state_gate: Mutex<Option<Arc<StateGate>>>,
     unreadable: AtomicBool,
     pub records: Mutex<BTreeMap<String, PluginRecord>>,
@@ -100,6 +102,9 @@ impl PluginStore for MemoryStore {
             .ok_or_else(|| AdminError::not_found("artifact"))
     }
     async fn artifact(&self, id: &str) -> Result<PluginArtifact, AdminError> {
+        if self.archive_unavailable.load(Ordering::SeqCst) {
+            return Err(AdminError::unavailable("archive unavailable"));
+        }
         self.artifacts
             .lock()
             .unwrap()
@@ -177,14 +182,26 @@ impl PluginStore for MemoryStore {
         Ok(())
     }
     async fn delete(&self, id: &str, expected: u64, _: &MutationContext) -> Result<(), AdminError> {
+        let fault = self.delete_fault.swap(0, Ordering::SeqCst);
+        if fault == 1 {
+            return Err(AdminError::unavailable("before commit"));
+        }
         let mut records = self.records.lock().unwrap();
-        if records
-            .get(id)
-            .is_none_or(|r| r.revision != expected || r.enabled)
-        {
+        if records.get(id).is_none_or(|r| r.revision != expected) {
             return Err(conflict());
         }
         records.remove(id);
+        self.state
+            .lock()
+            .unwrap()
+            .retain(|(instance, _, _), _| instance != id);
+        self.state_schemas.lock().unwrap().remove(id);
+        if fault == 3 {
+            self.unreadable.store(true, Ordering::SeqCst);
+        }
+        if fault >= 2 {
+            return Err(AdminError::unavailable("commit acknowledgement lost"));
+        }
         Ok(())
     }
     async fn state_snapshot(

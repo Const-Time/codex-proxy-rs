@@ -222,6 +222,8 @@ Responses 编码时仅为缺失的顶层 `store` 补齐 `false`；显式提供�
 
 登录返回的 Cookie 名仍为 `cpr_admin_session`，适用于管理员和普通用户。`GET /api/admin/auth/status` 返回 `{ authenticated, user }`，未登录时 user 为 null；用户包含 id、username、role、enabled、groupIds、createdAt、updatedAt。用户名不区分大小写。停用用户或修改密码后，旧会话失效；更改分组授权也会使旧会话失效。
 
+密码计算在专用的固定后台线程中执行，按可用 CPU 最多同时运行两次，单核实例为一次；排队及执行合计最多十八项，取消请求不会提前释放仍在执行的计算名额。登录按单进程一分钟窗口限制：每个邮箱最多十次、全部邮箱合计最多六十次，超过时返回 429；邮箱大小写不能绕过限制。已经被单邮箱限流的请求不会继续消耗全局次数。
+
 | 方法 | 路由 | body | 权限 |
 | --- | --- | --- | --- |
 | GET | /api/admin/users | — | 管理员；用户列表，无密码或密钥 |
@@ -963,7 +965,7 @@ OpenAI Responses 的 `serviceTier` 与本地费用估算统一采用 Provider �
 | --- | --- | --- |
 | GET / POST | `/api/admin/plugins` | 列表 / 创建实例 |
 | POST | `/api/admin/plugins/update` | `id` 加实例配置 |
-| POST | `/api/admin/plugins/uninstall` | `id, revision`，仅允许停用实例 |
+| POST | `/api/admin/plugins/uninstall` | `id, revision`，可直接卸载启用或失败实例；撤销调用并删除私有状态 |
 | GET / POST | `/api/admin/plugins/artifacts` | 制品列表 / 原始 gzip 正文，最多 32 MiB |
 | POST | `/api/admin/plugins/artifacts/remove` | `sha256`，只能删除没有实例引用的制品 |
 | GET | `/api/admin/plugins/resource` | query `id, revision, path` |

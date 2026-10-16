@@ -1,5 +1,51 @@
 //! 验证真实子进程的启动、停止、回收与容量释放
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stop_and_parent_exit_reclaim_helpers_that_detach_their_pipes() {
+    use tokio::io::AsyncReadExt as _;
+    for mode in ["tree", "tree-exit"] {
+        let directory = tempfile::tempdir().unwrap();
+        let supervisor = ProcessSupervisor::default();
+        let mut process = supervisor.spawn(worker(directory.path(), mode)).unwrap();
+        assert_eq!(process.output.read_u8().await.unwrap(), b'R');
+        let pid = std::fs::read_to_string(directory.path().join("helper-pid")).unwrap();
+        if mode == "tree" {
+            process.control.stop();
+        }
+        let exit =
+            tokio::time::timeout(std::time::Duration::from_secs(3), process.control.exited())
+                .await
+                .unwrap();
+        assert_eq!(
+            exit,
+            if mode == "tree" {
+                ProcessExit::Stopped
+            } else {
+                ProcessExit::Exited(Some(23))
+            }
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let status = std::fs::read_to_string(format!("/proc/{pid}/status"));
+                if status
+                    .as_ref()
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    || status.as_ref().is_ok_and(|s| {
+                        s.lines()
+                            .any(|l| l.starts_with("State:") && l.contains("Z (zombie)"))
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("helper must not continue running");
+    }
+}
+
 #[cfg(unix)]
 use gateway_host::process::{ProcessExit, ProcessSpec, ProcessStartError, ProcessSupervisor};
 

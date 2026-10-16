@@ -158,6 +158,15 @@ async fn websocket_model(api: &ApiServer, authorization: &str, mut body: Value) 
 
 async fn settled(env: &Environment, count: i64, key: &str, account: &str, provider: &str) {
     let ports = env.store.provider_ports();
+    let request_interval = Duration::from_millis(
+        env.admin
+            .services()
+            .settings()
+            .load()
+            .await
+            .unwrap()
+            .request_interval_ms,
+    );
     let key = gateway_core::policy::ClientApiKeyId::new(key).unwrap();
     let provider = gateway_core::identity::ProviderKind::new(provider).unwrap();
     let accounts = [gateway_core::account::ProviderAccountId::new(account).unwrap()];
@@ -178,14 +187,20 @@ async fn settled(env: &Environment, count: i64, key: &str, account: &str, provid
                 .load_state(&key, &provider, &accounts)
                 .await
                 .unwrap();
-            let idle = leases
-                .signals()
-                .get(&accounts[0])
-                .is_none_or(|state| state.in_flight == 0);
+            let idle = leases.signals().get(&accounts[0]).is_none_or(|state| {
+                state.in_flight == 0
+                    && state.last_started_at.is_none_or(|started| {
+                        started
+                            .elapsed()
+                            .is_ok_and(|elapsed| elapsed >= request_interval)
+                    })
+            });
             if requests == count && charges == count && idle {
                 break;
             }
-            tokio::task::yield_now().await;
+            // Finishing a request does not expire the configured account pacing
+            // interval. Fast fixtures must wait for eligibility, not just billing.
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
@@ -394,7 +409,9 @@ async fn run(provider: &str, root: Option<&Path>) {
                 .unwrap();
             assert_eq!(denied.status(), 401);
             http_model(&api, &authorization, body.clone(), false).await;
+            settled(&env, 1, key.secret.record.id.as_str(), &allowed, provider).await;
             http_model(&api, &authorization, body.clone(), true).await;
+            settled(&env, 2, key.secret.record.id.as_str(), &allowed, provider).await;
             websocket_model(&api, &authorization, body.clone()).await;
             settled(&env, 3, key.secret.record.id.as_str(), &allowed, provider).await;
             let raw = "{ \"future\": 9007199254740993, \"text\": \"雪☃\", \"status\": \"completed\", \"id\": \"adapter-response\" }\n";

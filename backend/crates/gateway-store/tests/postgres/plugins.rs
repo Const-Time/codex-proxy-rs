@@ -580,6 +580,7 @@ async fn plugin_state_is_cas_scoped_bounded_and_revoked_on_disable_without_touch
             .contains("not-in-audit")
     );
     record.id = "plugin-b".into();
+    record.enabled = true;
     store.save(&record, 1, &actor, None).await.unwrap();
     store.delete("plugin-b", 2, &actor).await.unwrap();
     store.delete_artifact(&info.sha256, &actor).await.unwrap();

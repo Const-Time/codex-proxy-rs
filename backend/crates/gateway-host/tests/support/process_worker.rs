@@ -6,7 +6,28 @@ use std::{
 };
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("helper") {
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
     let mode = std::fs::read_to_string("mode").unwrap();
+    if mode.starts_with("tree") {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("helper")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write("helper-pid", child.id().to_string()).unwrap();
+        std::io::stdout().write_all(b"R").unwrap();
+        std::io::stdout().flush().unwrap();
+        if mode == "tree-exit" {
+            std::process::exit(23);
+        }
+        let _ = child.wait();
+        return;
+    }
     if mode == "stderr" {
         std::io::stderr().write_all(&[b'x'; 4096]).unwrap();
     }

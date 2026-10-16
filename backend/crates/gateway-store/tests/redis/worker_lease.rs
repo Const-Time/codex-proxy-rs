@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::time::Duration;
 
-use gateway_core::task::{WorkerId, WorkerKind, WorkerLeaseAcquisition, WorkerLeaseRequest};
+use gateway_core::task::{
+    WorkerContribution, WorkerId, WorkerKind, WorkerLeaseAcquisition, WorkerLeaseRequest,
+    WorkerRunnable,
+};
 use gateway_store::{StoreConfig, initialize};
 use sqlx::{
     ConnectOptions as _, PgPool,
@@ -33,8 +36,25 @@ async fn store_bundle_worker_plan_and_leader_lease_are_single_use_and_fenced() {
 
     assert!(runtime_data.path().join("backup-staging").is_dir());
 
-    let kinds = first
-        .take_worker_contributions()
+    let contributions = first.take_worker_contributions();
+    let budget_worker = contributions
+        .iter()
+        .find_map(|contribution| match contribution {
+            WorkerContribution::Registration(registration)
+                if registration.id
+                    == WorkerId::try_new(WorkerKind::OpsFlush, "postgres_client_budget")
+                        .unwrap() =>
+            {
+                Some(registration)
+            }
+            _ => None,
+        })
+        .expect("every instance must recover its own settlement journal");
+    assert!(matches!(
+        budget_worker.runnable,
+        WorkerRunnable::Scheduled { lease: None, .. }
+    ));
+    let kinds = contributions
         .into_iter()
         .map(|contribution| contribution.kind())
         .collect::<BTreeSet<_>>();

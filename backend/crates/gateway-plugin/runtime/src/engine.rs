@@ -222,10 +222,10 @@ impl PluginRuntime for PluginEngine {
     async fn prepare_state(
         &self,
         record: &PluginRecord,
-        artifact: &PluginArtifact,
+        artifact: &PluginArtifactInfo,
         process: Option<&Arc<dyn PluginProcess>>,
     ) -> Result<Option<PluginStateCommit>, AdminError> {
-        let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
+        let manifest: Manifest = serde_json::from_value(artifact.manifest.clone())
             .map_err(|_| AdminError::invalid("invalid plugin manifest"))?;
         tokio::time::timeout(
             Duration::from_secs(30),
@@ -247,8 +247,8 @@ impl PluginRuntime for PluginEngine {
     {
         crate::observation::Plan::compile(targets, services, cancellation)
     }
-    fn contributes_model_catalog(&self, artifact: &PluginArtifact) -> Result<bool, AdminError> {
-        let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
+    fn contributes_model_catalog(&self, artifact: &PluginArtifactInfo) -> Result<bool, AdminError> {
+        let manifest: Manifest = serde_json::from_value(artifact.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         Ok(manifest.contributes.contains_key(&Capability::ModelCatalog))
     }
@@ -294,10 +294,10 @@ impl PluginRuntime for PluginEngine {
     async fn validate(
         &self,
         record: &PluginRecord,
-        artifact: &PluginArtifact,
-        previous: Option<&PluginArtifact>,
+        artifact: &PluginArtifactInfo,
+        previous: Option<&PluginArtifactInfo>,
     ) -> Result<(), AdminError> {
-        let manifest: Manifest = serde_json::from_value(artifact.info.manifest.clone())
+        let manifest: Manifest = serde_json::from_value(artifact.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
         if let Some(binding) = &record.observer {
@@ -397,7 +397,7 @@ impl PluginRuntime for PluginEngine {
             return Err(AdminError::invalid("插件私有状态声明超过宿主限制"));
         }
         if let Some(previous) = previous
-            && previous.info.plugin_id != artifact.info.plugin_id
+            && previous.plugin_id != artifact.plugin_id
         {
             return Err(AdminError::invalid("实例只能切换同一插件的版本"));
         }
@@ -561,7 +561,7 @@ impl PluginRuntime for PluginEngine {
             let resource_bytes: usize = management
                 .resources
                 .iter()
-                .filter_map(|r| prepared.package().resource(&r.path))
+                .filter_map(|r| prepared.resource(&r.path))
                 .map(|b| b.len())
                 .sum();
             if resource_bytes > 8 * 1024 * 1024 {
@@ -569,7 +569,6 @@ impl PluginRuntime for PluginEngine {
             }
             for resource in &management.resources {
                 if prepared
-                    .package()
                     .resource(&resource.path)
                     .is_none_or(|bytes| bytes.len() > 1024 * 1024)
                     || manifest
@@ -681,7 +680,7 @@ impl PluginProcess for LivePlugin {
             return None;
         }
         Some(gateway_admin::ports::plugins::PluginObserverIdentity {
-            plugin_id: self.package.package().manifest().plugin_id().ok()?,
+            plugin_id: self.package.manifest().plugin_id().ok()?,
             instance_id: self.services.caller().instance_id().into(),
         })
     }
@@ -987,7 +986,7 @@ impl PluginProcess for LivePlugin {
             .iter()
             .map(|r| PluginResource {
                 path: r.path.clone(),
-                content_type: self.package.package().manifest().resources[&r.path].clone(),
+                content_type: self.package.manifest().resources[&r.path].clone(),
                 public: r.public,
             })
             .collect()
@@ -1016,13 +1015,11 @@ impl PluginProcess for LivePlugin {
         }
         let body = self
             .package
-            .package()
             .resource(path)
             .ok_or_else(|| AdminError::not_found("插件资源不存在"))?
             .to_vec();
         let content_type = self
             .package
-            .package()
             .manifest()
             .resources
             .get(path)

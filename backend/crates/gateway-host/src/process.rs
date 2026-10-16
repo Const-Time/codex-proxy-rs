@@ -4,7 +4,7 @@ use std::{num::NonZeroUsize, path::PathBuf, process::Stdio, sync::Arc};
 
 use tokio::{
     io::AsyncReadExt as _,
-    process::{ChildStdin, ChildStdout, Command},
+    process::{ChildStdin, ChildStdout},
     sync::{Semaphore, watch},
 };
 
@@ -102,22 +102,30 @@ fn spawn_process(
     spec: ProcessSpec,
     slot: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<ProcessConnection, ProcessStartError> {
-    let mut child = Command::new(&spec.executable)
-        .current_dir(&spec.directory)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
+    let mut command = process_wrap::tokio::CommandWrap::with_new(&spec.executable, |command| {
+        command
+            .current_dir(&spec.directory)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    });
+    command.wrap(process_wrap::tokio::KillOnDrop);
+    #[cfg(unix)]
+    command.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    command.wrap(process_wrap::tokio::JobObject);
+    let child = command
         .spawn()
         // 只保留错误类别与 OS 编号，不把进程路径、环境或输出带入诊断
         .map_err(|error| ProcessStartError::Spawn {
             kind: error.kind(),
             os_code: error.raw_os_error(),
         })?;
-    let input = child.stdin.take().ok_or(ProcessStartError::Pipes)?;
-    let output = child.stdout.take().ok_or(ProcessStartError::Pipes)?;
-    let mut stderr = child.stderr.take().ok_or(ProcessStartError::Pipes)?;
+    let mut child = ManagedChild(child, false);
+    let input = child.0.stdin().take().ok_or(ProcessStartError::Pipes)?;
+    let output = child.0.stdout().take().ok_or(ProcessStartError::Pipes)?;
+    let mut stderr = child.0.stderr().take().ok_or(ProcessStartError::Pipes)?;
     let (stop, mut stopped) = watch::channel(false);
     let (exit_sender, exit) = watch::channel(None);
     tokio::spawn(async move {
@@ -128,7 +136,7 @@ fn spawn_process(
             tokio::select! {
                 biased;
                 _ = stopped.changed() => break ProcessExit::Stopped,
-                result = child.wait() => break result.map_or(ProcessExit::Failed, |status| ProcessExit::Exited(status.code())),
+                result = child.0.inner_mut().wait() => break result.map_or(ProcessExit::Failed, |status| ProcessExit::Exited(status.code())),
                 result = stderr.read(&mut buffer), if stderr_open => {
                     match result {
                         Ok(0) => stderr_open = false,
@@ -142,10 +150,11 @@ fn spawn_process(
             }
         };
         // stderr 是不可信诊断，不写宿主日志；业务日志必须经过有界脱敏接口
-        if !matches!(reason, ProcessExit::Exited(_)) {
-            let _ = child.kill().await;
-        }
-        let _ = child.wait().await;
+        // Also reclaim helpers when the plugin parent exits normally or crashes.
+        let _ = child.0.start_kill();
+        let _ = child.0.wait().await;
+        child.1 = true;
+        drop(child);
         drop(slot);
         exit_sender.send_replace(Some(reason));
     });
@@ -154,4 +163,14 @@ fn spawn_process(
         output,
         control: ProcessControl { stop, exit },
     })
+}
+
+struct ManagedChild(Box<dyn process_wrap::tokio::ChildWrapper>, bool);
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        // Covers cancellation during pipe setup or supervisor shutdown as well.
+        if !self.1 {
+            let _ = self.0.start_kill();
+        }
+    }
 }

@@ -24,6 +24,145 @@ use gateway_store::postgres::{
 
 use super::TestDatabase;
 
+#[tokio::test]
+#[ignore = "manual durable settlement timing against an isolated PostgreSQL fixture"]
+async fn durable_settlement_latency_probe() {
+    let db = TestDatabase::create("budget_latency")
+        .await
+        .expect("isolated database required");
+    seed(&db, "latency", "0", "0").await;
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
+    let mut samples = Vec::new();
+    for index in 0..110 {
+        let start = std::time::Instant::now();
+        store
+            .settle(charge("latency", &format!("latency-{index}"), "0.001"))
+            .await
+            .unwrap();
+        if index >= 10 {
+            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "durable_settlement_samples=100 p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
+        samples[50], samples[95], samples[99]
+    );
+    assert_eq!(
+        status(&db, "latency").await.daily_used_usd.canonical(),
+        "0.11"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn complete_database_outage_keeps_the_charge_for_restart_recovery() {
+    let Some(database) = TestDatabase::create("budget_database_outage").await else {
+        return;
+    };
+    seed(&database, "key", "1", "50").await;
+    let disconnected = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(50))
+        .connect_lazy("postgres://fixture@127.0.0.1:1/unreachable_fixture")
+        .unwrap();
+    let store =
+        PgClientBudgetStore::open(disconnected, database.budget_directory.path().to_owned())
+            .await
+            .unwrap();
+    assert!(store.settle(charge("key", "outage", "1")).await.is_err());
+    drop(store);
+    let restarted = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
+    restarted.recover_pending().await.unwrap();
+    restarted.recover_pending().await.unwrap();
+    assert_eq!(
+        status(&database, "key").await.daily_used_usd.canonical(),
+        "1"
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn failed_settlement_survives_restart_and_replays_once_before_admission() {
+    let Some(database) = TestDatabase::create("budget_journal_restart").await else {
+        return;
+    };
+    seed(&database, "key", "1", "50").await;
+    let store = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
+    store
+        .admit(key_id("key"), Some(group_id("key")), None)
+        .await
+        .unwrap();
+    sqlx::raw_sql("create function reject_test_charge() returns trigger language plpgsql as $$ begin if new.daily_used_usd > 0 then raise exception 'test fault'; end if; return new; end $$; create trigger reject_test_charge before update on user_group_budget_windows for each row execute function reject_test_charge();")
+        .execute(&database.pool).await.unwrap();
+    let pending = charge("key", "restart", "1");
+    assert!(store.settle(pending.clone()).await.is_err());
+    drop(store);
+    let record = std::fs::read_dir(database.budget_directory.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|path| path.extension().is_some_and(|e| e == "json"))
+        .unwrap();
+    std::fs::rename(
+        record,
+        database
+            .budget_directory
+            .path()
+            .join(format!(".{}.tmp", uuid::Uuid::new_v4())),
+    )
+    .unwrap();
+    sqlx::query("drop trigger reject_test_charge on user_group_budget_windows")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let restarted = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        restarted
+            .admit(key_id("key"), Some(group_id("key")), None)
+            .await
+            .is_err()
+    );
+    restarted.recover_pending().await.unwrap();
+    restarted.settle(pending).await.unwrap();
+    let events: i64 = sqlx::query_scalar(
+        "select count(*) from user_group_charge_events where request_id='req_restart'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+    assert_eq!(
+        status(&database, "key").await.daily_used_usd.canonical(),
+        "1"
+    );
+    assert!(
+        !std::fs::read_dir(database.budget_directory.path())
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|e| e == "json"))
+    );
+    database.close().await;
+}
+
 fn key_id(key: &str) -> ClientApiKeyId {
     ClientApiKeyId::new(key).unwrap()
 }
@@ -132,7 +271,9 @@ async fn subscription_cycle_upgrade_keeps_historical_windows_counters_and_ledger
         before, after,
         "migration is not an unapproved historical repair"
     );
-    PgClientBudgetStore::new(db.pool.clone())
+    PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap()
         .admit(key_id("legacy"), Some(group_id("legacy")), None)
         .await
         .unwrap();
@@ -161,7 +302,9 @@ async fn single_account_expiry_keeps_usage_until_confirmed_upstream_reset() {
     };
     seed(&db, "single", "0", "10").await;
     let account = member(&db, "single", "single").await;
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     store.settle(charge("single", "first", "9")).await.unwrap();
     sqlx::query("update user_group_budget_windows set weekly_end=now()-interval '1 second'")
         .execute(&db.pool)
@@ -226,7 +369,9 @@ async fn multi_account_groups_ignore_individual_resets_and_roll_all_subscribers_
         .execute(&db.pool)
         .await
         .unwrap();
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     store.settle(charge("multi", "one", "9")).await.unwrap();
     second_subscriber(&db, "multi").await;
     store
@@ -294,7 +439,9 @@ async fn group_membership_and_manual_reset_preserve_shared_cycle_and_other_usage
     };
     seed(&db, "topology", "0", "100").await;
     member(&db, "topology", "only").await;
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     store
         .settle(charge("topology", "before", "7"))
         .await
@@ -355,7 +502,9 @@ async fn user_quota_multiplier_changes_limits_without_repricing_consumption() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     store
         .settle(charge("factor", "factor", "15"))
         .await
@@ -405,7 +554,9 @@ async fn subscription_resets_preserve_history_and_retry_does_not_clear_new_usage
         return;
     };
     seed(&db, "reset", "10", "100").await;
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     store
         .settle(charge("reset", "before-reset", "7"))
         .await
@@ -473,7 +624,9 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
         .await
         .unwrap();
     member(&db, "pooled", "pool-other").await;
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     store
         .settle(charge("pooled", "pool-before", "5"))
         .await
@@ -727,7 +880,10 @@ async fn admission_billing_does_not_depend_on_observation_rows_or_live_repricing
             .execute(&db.pool)
             .await
             .unwrap();
-        let store = PgClientBudgetStore::new(db.pool.clone());
+        let store =
+            PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+                .await
+                .unwrap();
         let frozen = store
             .admit(
                 key_id(key),
@@ -794,7 +950,9 @@ async fn component_billing_keeps_unknown_retry_fees_raw_without_observation_rows
     seed(&db, "components", "100", "1000").await;
     sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
         .bind(group_id("components").as_str()).bind(serde_json::json!({"test-model":{"multiplier":"3","scope":{"components":["cacheRead","output"]}}})).execute(&db.pool).await.unwrap();
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     let frozen = store
         .admit(
             key_id("components"),
@@ -849,7 +1007,9 @@ async fn delayed_observation_writer_retains_the_admission_rule_for_both_insert_p
     };
     seed(&db, "delayed", "100", "1000").await;
     let account = member(&db, "delayed", "billing").await;
-    let budget = PgClientBudgetStore::new(db.pool.clone());
+    let budget = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     for first_attempt in [false, true] {
         sqlx::query("update account_groups set model_multipliers=$2 where id=$1")
             .bind(group_id("delayed").as_str())
@@ -1012,7 +1172,9 @@ async fn model_billing_for_endpoint(endpoint: &str) {
             .await
             .unwrap();
     }
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     let frozen = store
         .admit(
             key_id("priced"),
@@ -1130,8 +1292,18 @@ async fn budgets_settle_exactly_once_and_enforce_each_threshold_across_store_ins
     };
     seed(&database, "day", "0.3", "2").await;
     seed(&database, "week", "2", "0.2").await;
-    let first = PgClientBudgetStore::new(database.pool.clone());
-    let second = PgClientBudgetStore::new(database.pool.clone());
+    let first = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
+    let second = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
     for (key, prefix, amount) in [("day", "d", "0.1"), ("week", "w", "0.1")] {
         for _ in 0..3 {
             // 已准入请求可完成并超过限额，不预占估算费用。
@@ -1185,7 +1357,12 @@ async fn window_rollover_is_shanghai_midnight_and_seven_days_with_late_settlemen
         return;
     };
     seed(&database, "key", "1", "2").await;
-    let store = PgClientBudgetStore::new(database.pool.clone());
+    let store = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
     store
         .admit(key_id("key"), Some(group_id("key")), None)
         .await
@@ -1244,7 +1421,12 @@ async fn zero_cost_and_interrupted_requests_never_block_limited_keys() {
         return;
     };
     seed(&database, "key", "1", "5").await;
-    let store = PgClientBudgetStore::new(database.pool.clone());
+    let store = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
     store
         .admit(key_id("key"), Some(group_id("key")), None)
         .await
@@ -1255,7 +1437,12 @@ async fn zero_cost_and_interrupted_requests_never_block_limited_keys() {
         .admit(key_id("key"), Some(group_id("key")), None)
         .await
         .unwrap();
-    let restarted = PgClientBudgetStore::new(database.pool.clone());
+    let restarted = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
     restarted
         .admit(key_id("key"), Some(group_id("key")), None)
         .await
@@ -1288,7 +1475,12 @@ async fn transient_settlement_failure_rolls_back_and_retries_exact_cost_before_a
     seed(&database, "key", "1", "50").await;
     sqlx::query("update account_groups set model_multipliers=$1")
         .bind(serde_json::json!({"model":{"multiplier":"3","scope":{"components":["output","cacheRead"]}}})).execute(&database.pool).await.unwrap();
-    let store = PgClientBudgetStore::new(database.pool.clone());
+    let store = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
     let scope = store
         .admit(
             key_id("key"),
@@ -1357,7 +1549,12 @@ async fn group_budget_updates_preserve_usage_and_disable_live_access() {
         return;
     };
     seed(&database, "key", "0", "0").await;
-    let store = PgClientBudgetStore::new(database.pool.clone());
+    let store = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
     let admin = PgAccountGroupRepository::new(database.pool.clone());
     store
         .admit(key_id("key"), Some(group_id("key")), None)
@@ -1422,7 +1619,12 @@ async fn budget_database_outage_fails_closed() {
     let Some(database) = TestDatabase::create("budgets_outage").await else {
         return;
     };
-    let store = PgClientBudgetStore::new(database.pool.clone());
+    let store = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().to_owned(),
+    )
+    .await
+    .unwrap();
     database.pool.close().await;
     assert_eq!(
         store
@@ -1459,7 +1661,9 @@ async fn multiple_keys_share_the_user_group_budget_but_other_users_do_not() {
             .await
             .unwrap();
     }
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     let scope = store
         .admit(key_id("second"), Some(group_id("first")), None)
         .await
@@ -1501,7 +1705,9 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
     };
     seed(&db, "first", "1", "5").await;
     seed(&db, "other", "10", "50").await;
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     let scope = store
         .admit(key_id("first"), Some(group_id("first")), None)
         .await
@@ -1542,7 +1748,9 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
         .await
         .expect("group with no keys can be removed while a request is in flight");
     store.settle(charge.clone()).await.unwrap();
-    PgClientBudgetStore::new(db.pool.clone())
+    PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap()
         .settle(charge)
         .await
         .unwrap();
@@ -1565,7 +1773,9 @@ async fn revoked_grants_and_disabled_groups_are_checked_without_snapshot_refresh
         return;
     };
     seed(&db, "key", "1", "5").await;
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     store
         .admit(key_id("key"), Some(group_id("key")), None)
         .await
@@ -1608,7 +1818,9 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
     sqlx::query("update account_groups set model_multipliers = $2 where id=$1")
         .bind(group_id("scoped").as_str()).bind(serde_json::json!({"test-model":{"multiplier":"3","scope":{"components":["cacheRead","output"]}}}))
         .execute(&db.pool).await.unwrap();
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     let frozen_scope = store
         .admit(
             key_id("scoped"),
@@ -1648,7 +1860,9 @@ async fn component_billing_freezes_scope_and_uses_the_same_amount_in_budget_ledg
         .execute(&db.pool)
         .await
         .unwrap();
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     for _ in 0..2 {
         store.settle(settled.clone()).await.unwrap();
     }
@@ -1725,7 +1939,9 @@ async fn execution_owned_costs_bill_each_attempt_without_observations() {
         return;
     };
     seed(&db, "facts", "0", "0").await;
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     for (index, scope, rate, expected) in [
         (
             0,
@@ -1811,7 +2027,9 @@ async fn cached_request_charges_scoped_markup_before_async_finalization() {
     seed(&db, "cached", "0", "0").await;
     sqlx::query("update account_groups set model_multipliers=$1")
         .bind(serde_json::json!({"model":{"multiplier":"2","scope":{"components":["cacheRead","cacheWrite"]}}})).execute(&db.pool).await.unwrap();
-    let store = PgClientBudgetStore::new(db.pool.clone());
+    let store = PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
+        .await
+        .unwrap();
     let scope = store
         .admit(
             key_id("cached"),

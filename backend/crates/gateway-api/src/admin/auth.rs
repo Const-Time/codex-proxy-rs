@@ -387,6 +387,10 @@ fn admin_session_cookie(headers: &HeaderMap) -> Option<String> {
 
 fn map_login_error(error: LoginError) -> AdminError {
     match error {
+        LoginError::RateLimited => AdminError::invalid_request(
+            StatusCode::TOO_MANY_REQUESTS,
+            "登录过于频繁，请一分钟后重试",
+        ),
         LoginError::InvalidCredentials => AdminError::invalid_admin_credentials(),
         LoginError::Unavailable => AdminError::internal(),
     }

@@ -51,15 +51,6 @@ pub struct ValidatedPackage {
 }
 
 impl ValidatedPackage {
-    /// 仅供已冻结资源声明读取校验后的字节，不暴露缓存路径或任意文件读取
-    pub(crate) fn resource(&self, path: &str) -> Option<&[u8]> {
-        self.manifest
-            .resources
-            .contains_key(path)
-            .then(|| self.files.get(path).map(Vec::as_slice))
-            .flatten()
-    }
-
     pub fn read(
         archive: Arc<[u8]>,
         expected_sha256: Option<&str>,
@@ -76,15 +67,9 @@ impl ValidatedPackage {
         // 先限制整个解压字节流，连 PAX 元数据、目录、padding 和尾部数据也纳入预算
         let expanded_limit =
             u64::try_from(limits.expanded_bytes).map_err(|_| PackageError::Limit)?;
-        let mut expanded = Vec::new();
-        MultiGzDecoder::new(archive.as_ref())
-            .take(expanded_limit.saturating_add(1))
-            .read_to_end(&mut expanded)
-            .map_err(|_| PackageError::Archive)?;
-        if expanded.len() > limits.expanded_bytes {
-            return Err(PackageError::Limit);
-        }
-        let mut tar = tar::Archive::new(expanded.as_slice());
+        let mut expanded =
+            MultiGzDecoder::new(archive.as_ref()).take(expanded_limit.saturating_add(1));
+        let mut tar = tar::Archive::new(&mut expanded);
         let mut files = BTreeMap::new();
         let mut folded_paths = std::collections::BTreeSet::new();
         let mut total = 0usize;
@@ -109,7 +94,7 @@ impl ValidatedPackage {
             {
                 return Err(PackageError::Limit);
             }
-            let mut data = Vec::new();
+            let mut data = Vec::with_capacity(size);
             entry
                 .read_to_end(&mut data)
                 .map_err(|_| PackageError::Archive)?;
@@ -117,6 +102,11 @@ impl ValidatedPackage {
                 return Err(PackageError::Archive);
             }
             files.insert(path, data);
+        }
+        // Count padding, trailing data and concatenated gzip members as before.
+        std::io::copy(&mut expanded, &mut std::io::sink()).map_err(|_| PackageError::Archive)?;
+        if expanded.limit() == 0 {
+            return Err(PackageError::Limit);
         }
         let manifest_bytes = files.remove("plugin.json").ok_or(PackageError::Archive)?;
         let manifest: Manifest =

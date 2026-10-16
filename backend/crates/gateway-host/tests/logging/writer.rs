@@ -11,7 +11,7 @@ fn retention_preserves_complete_dates_across_compression_rotation_and_restart() 
                 let payload = "x".repeat(1024 * 1024);
                 for sequence in 0..25 {
                     tracing::info!(target: REQUEST_DUMP_LOG_TARGET, sequence, payload, "retention record");
-                    tracing::info!(target: APPLICATION_LOG_TARGET, sequence, payload, "retention record");
+                    tracing::info!(target: APPLICATION_LOG_TARGET, sequence, payload = &payload[..32 * 1024], "retention record");
                     tracing::info!(target: OAUTH_RECOVERY_LOG_TARGET, sequence, payload, "retention record");
                 }
             },

@@ -255,7 +255,7 @@ async fn prepared_observer_is_inactive_and_declared_capability_is_validated() {
             .is_err()
     );
     f.engine
-        .validate(&f.record, &f.artifact, None)
+        .validate(&f.record, &f.artifact.info, None)
         .await
         .unwrap();
     f.process.activate();
@@ -1078,6 +1078,7 @@ async fn original_api_core_sdk_observer_persists_one_native_terminal_in_postgres
     let lifecycle = Arc::new(ApiLifecycle);
     let api = gateway_api::initialize(
         gateway_api::ApiConfig {
+            ingress: Default::default(),
             asset_directory: environment.cache.path().into(),
             cors_allowed_origins: vec![],
             request_timeout_seconds: None,

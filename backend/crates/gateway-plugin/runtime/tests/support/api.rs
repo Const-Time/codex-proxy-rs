@@ -27,6 +27,7 @@ impl ApiServer {
         let workers = gateway_host::workers::WorkerSupervisor::new(cancellation.clone());
         let app = gateway_api::initialize(
             gateway_api::ApiConfig {
+                ingress: Default::default(),
                 asset_directory: env.cache.path().into(),
                 cors_allowed_origins: vec![],
                 request_timeout_seconds,

@@ -15,18 +15,45 @@ use gateway_core::{
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
+mod journal;
 
 pub struct PgClientBudgetStore {
     pool: PgPool,
     retry: Mutex<BTreeMap<String, ClientBudgetCharge>>,
+    journal: journal::Journal,
+    journal_failed: AtomicBool,
 }
 
 impl PgClientBudgetStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self {
+    pub async fn open(pool: PgPool, directory: PathBuf) -> Result<Self, ClientBudgetError> {
+        let journal = journal::Journal::new(directory);
+        let pending = journal.pending().await?;
+        Ok(Self {
             pool,
-            retry: Mutex::new(BTreeMap::new()),
+            retry: Mutex::new(
+                pending
+                    .into_iter()
+                    .map(|charge| (charge.request_id.as_str().to_owned(), charge))
+                    .collect(),
+            ),
+            journal,
+            journal_failed: AtomicBool::new(false),
+        })
+    }
+
+    pub async fn recover_pending(&self) -> Result<(), ClientBudgetError> {
+        // Includes writes completed after the original settlement future was cancelled.
+        let pending = self.journal.pending().await.inspect_err(|_| {
+            self.journal_failed.store(true, Ordering::Release);
+        })?;
+        for charge in pending {
+            self.settle(charge).await?;
         }
+        Ok(())
     }
 
     async fn admit_inner(
@@ -35,6 +62,11 @@ impl PgClientBudgetStore {
         expected_group: Option<AccountGroupId>,
         requested_model: Option<PublicModelId>,
     ) -> Result<ClientBudgetScope, GatewayError> {
+        if self.journal_failed.load(Ordering::Acquire)
+            || self.retry.lock().map_err(|_| unavailable())?.len() >= 4096
+        {
+            return Err(unavailable());
+        }
         let group = expected_group.ok_or_else(|| {
             GatewayError::new(
                 GatewayErrorKind::PolicyDenied,
@@ -184,7 +216,24 @@ impl ClientBudgetPort for PgClientBudgetStore {
     }
     fn settle(&self, charge: ClientBudgetCharge) -> BoxFuture<'_, Result<(), ClientBudgetError>> {
         Box::pin(async move {
+            // Persist before touching the ledger, including during a complete PostgreSQL outage.
+            let charge = match self.journal.persist(charge).await {
+                Ok(charge) => charge,
+                Err(error) => {
+                    self.journal_failed.store(true, Ordering::Release);
+                    return Err(error);
+                }
+            };
+            self.retry
+                .lock()
+                .map_err(|_| ClientBudgetError)?
+                .insert(charge.request_id.as_str().to_owned(), charge.clone());
             let result = self.settle_inner(&charge).await;
+            if result.is_ok() {
+                self.journal
+                    .remove(charge.request_id.as_str().to_owned())
+                    .await?;
+            }
             let mut retry = self.retry.lock().map_err(|_| ClientBudgetError)?;
             if result.is_err() {
                 retry.insert(charge.request_id.as_str().to_owned(), charge);
@@ -192,6 +241,30 @@ impl ClientBudgetPort for PgClientBudgetStore {
                 retry.remove(charge.request_id.as_str());
             }
             result
+        })
+    }
+}
+
+impl gateway_core::health::HealthProbe for PgClientBudgetStore {
+    fn name(&self) -> &'static str {
+        "client_budget_settlement"
+    }
+    fn check(&self) -> BoxFuture<'_, gateway_core::health::HealthState> {
+        Box::pin(async {
+            use gateway_core::health::HealthState;
+            if self.journal_failed.load(Ordering::Acquire) {
+                return HealthState::Unhealthy(
+                    "budget journal write failed; admission stopped".into(),
+                );
+            }
+            match self.retry.lock() {
+                Ok(pending) if pending.is_empty() => HealthState::Healthy,
+                Ok(pending) => HealthState::Degraded(format!(
+                    "{} budget settlements await durable retry",
+                    pending.len()
+                )),
+                Err(_) => HealthState::Unhealthy("budget settlement state unavailable".into()),
+            }
         })
     }
 }

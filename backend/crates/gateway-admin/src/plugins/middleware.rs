@@ -235,6 +235,14 @@ impl Publication {
             self.revoke_observation();
         }
     }
+    pub(super) fn block_removal(&mut self, id: &str) {
+        if self.entries.get(id).is_some_and(Entry::controls_execution) || self.blocked.contains(id)
+        {
+            self.block(id);
+        } else {
+            self.remove(id);
+        }
+    }
     pub(super) fn shutdown(&self) {
         self.epoch.revoke();
         self.observation_epoch.revoke();

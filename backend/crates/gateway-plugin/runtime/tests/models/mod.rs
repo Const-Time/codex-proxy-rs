@@ -1,4 +1,5 @@
 mod affinity;
+mod compatibility;
 pub(crate) mod fixture;
 pub(crate) mod http;
 mod workbench;

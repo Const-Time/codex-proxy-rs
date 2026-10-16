@@ -340,6 +340,15 @@ pub fn decode_request_with_headers(
     decode_request_inner(&body, &OpenAiRequestHeaders::from_headers(headers))
 }
 
+pub(super) fn decode_request_with_headers_accounted(
+    body: &[u8],
+    headers: &HeaderMap,
+    mut reserve: impl FnMut(usize) -> Result<(), RequestDecodeError>,
+) -> Result<DecodedResponsesRequest, RequestDecodeError> {
+    let body = decompress_request_body_accounted(body, headers, &mut reserve)?;
+    decode_request_inner(&body, &OpenAiRequestHeaders::from_headers(headers))
+}
+
 /// 下游请求体解压后的最大字节数；防御解压炸弹。
 const MAX_DECOMPRESSED_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
@@ -350,6 +359,14 @@ const MAX_DECOMPRESSED_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub(in crate::openai) fn decompress_request_body<'a>(
     body: &'a [u8],
     headers: &HeaderMap,
+) -> Result<Cow<'a, [u8]>, RequestDecodeError> {
+    decompress_request_body_accounted(body, headers, &mut |_| Ok(()))
+}
+
+fn decompress_request_body_accounted<'a>(
+    body: &'a [u8],
+    headers: &HeaderMap,
+    reserve: &mut impl FnMut(usize) -> Result<(), RequestDecodeError>,
 ) -> Result<Cow<'a, [u8]>, RequestDecodeError> {
     let encoding = headers
         .get_all(axum::http::header::CONTENT_ENCODING)
@@ -365,11 +382,11 @@ pub(in crate::openai) fn decompress_request_body<'a>(
         "" | "identity" => Ok(Cow::Borrowed(body)),
         "gzip" => {
             let decoder = flate2::read::MultiGzDecoder::new(body);
-            read_bounded(decoder).map(Cow::Owned)
+            read_bounded(decoder, reserve).map(Cow::Owned)
         }
         "deflate" => {
             let decoder = flate2::read::ZlibDecoder::new(body);
-            read_bounded(decoder).map(Cow::Owned)
+            read_bounded(decoder, reserve).map(Cow::Owned)
         }
         "zstd" => {
             let mut decoder = zstd::stream::read::Decoder::with_buffer(body)
@@ -378,7 +395,7 @@ pub(in crate::openai) fn decompress_request_body<'a>(
             decoder
                 .window_log_max(MAX_DECOMPRESSED_REQUEST_BYTES.ilog2())
                 .map_err(|_| RequestDecodeError::MalformedJson)?;
-            read_bounded(decoder).map(Cow::Owned)
+            read_bounded(decoder, reserve).map(Cow::Owned)
         }
         other => Err(RequestDecodeError::UnsupportedContentEncoding {
             encoding: other.to_owned(),
@@ -386,7 +403,10 @@ pub(in crate::openai) fn decompress_request_body<'a>(
     }
 }
 
-fn read_bounded<R: std::io::Read>(mut reader: R) -> Result<Vec<u8>, RequestDecodeError> {
+fn read_bounded<R: std::io::Read>(
+    mut reader: R,
+    reserve: &mut impl FnMut(usize) -> Result<(), RequestDecodeError>,
+) -> Result<Vec<u8>, RequestDecodeError> {
     let mut decoded = Vec::new();
     let mut chunk = [0; 8192];
     loop {
@@ -408,6 +428,10 @@ fn read_bounded<R: std::io::Read>(mut reader: R) -> Result<Vec<u8>, RequestDecod
             let capacity = (decoded.capacity() * 2)
                 .max(required)
                 .min(MAX_DECOMPRESSED_REQUEST_BYTES);
+            // Doubling can briefly retain the old half-sized allocation too.
+            // Charge growth before realloc, without reserving the whole 64 MiB ceiling.
+            let growth = capacity - decoded.capacity();
+            reserve(growth + growth / 2)?;
             decoded.reserve_exact(capacity - decoded.len());
         }
         decoded.extend_from_slice(&chunk[..read]);

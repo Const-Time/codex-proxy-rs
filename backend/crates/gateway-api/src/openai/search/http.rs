@@ -13,9 +13,9 @@ use gateway_core::operation::{Operation, RawJsonPayload, StandaloneSearchRequest
 
 use crate::ApiState;
 use crate::openai::{
-    auth::{authenticate_client, client_access_error_response},
     endpoint::collect_raw_json_response,
     error::gateway_error_response,
+    ingress::AuthenticatedBody,
     responses::{OpenAiRequestHeaders, request_client_context},
 };
 
@@ -26,13 +26,14 @@ pub(crate) async fn standalone_search(
     State(state): State<ApiState>,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: AuthenticatedBody,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers).await {
-        Ok(client) => client,
-        Err(error) => return client_access_error_response(error),
-    };
+    let AuthenticatedBody {
+        client,
+        body,
+        memory: _memory,
+    } = body;
     let (client_ip, user_agent) = request_client_context(
         &headers,
         connect_info.map(|Extension(ConnectInfo(address))| address),

@@ -78,12 +78,12 @@ impl Fixture {
         };
         assert!(self.artifact.info.unsupported_capabilities.is_empty());
         self.engine
-            .validate(&record, &self.artifact, None)
+            .validate(&record, &self.artifact.info, None)
             .await
             .unwrap();
         record.enabled = false;
         self.engine
-            .validate(&record, &self.artifact, None)
+            .validate(&record, &self.artifact.info, None)
             .await
             .unwrap();
         record.enabled = true;

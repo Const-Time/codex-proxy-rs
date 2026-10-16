@@ -8,6 +8,7 @@ pub(crate) fn store_worker_contributions(
     client_key_usage_writer: postgres::PgClientApiKeyUsageWriter,
     admission_release_writer: redis::ClientAdmissionReleaseWriter,
     retention: Arc<postgres::PgRetentionRepository>,
+    budgets: Arc<postgres::PgClientBudgetStore>,
 ) -> StoreResult<Vec<WorkerContribution>> {
     let stale_id = WorkerId::try_new(WorkerKind::StaleModelRequestRecovery, "postgres")
         .map_err(worker_definition_error)?;
@@ -25,13 +26,22 @@ pub(crate) fn store_worker_contributions(
             .map_err(worker_definition_error)?;
     Ok(vec![
         WorkerContribution::Registration(scheduled_worker(
+            WorkerId::try_new(WorkerKind::OpsFlush, "postgres_client_budget")
+                .map_err(worker_definition_error)?,
+            Duration::from_secs(5),
+            false, // Each replica owns a local journal; a cluster lease would skip other journals.
+            Box::new(BudgetSettlementTask { budgets }),
+        )?),
+        WorkerContribution::Registration(scheduled_worker(
             stale_id,
             Duration::from_secs(30),
+            true,
             Box::new(StaleModelRequestRecoveryTask { execution }),
         )?),
         WorkerContribution::Registration(scheduled_worker(
             retention_id,
             Duration::from_secs(60 * 60),
+            true,
             Box::new(RetentionTask { retention }),
         )?),
         WorkerContribution::Registration(
@@ -70,6 +80,7 @@ pub(crate) fn store_worker_contributions(
 pub(crate) fn scheduled_worker(
     id: WorkerId,
     interval: Duration,
+    cluster_wide: bool,
     task: Box<dyn ScheduledTask>,
 ) -> StoreResult<WorkerRegistration> {
     let schedule = WorkerSchedule::try_new(
@@ -80,13 +91,15 @@ pub(crate) fn scheduled_worker(
         Duration::from_secs(5 * 60),
     )
     .map_err(worker_definition_error)?;
-    let lease = WorkerLeaseRequest::try_new(id.clone(), schedule.leader_lease_ttl())
+    let lease = cluster_wide
+        .then(|| WorkerLeaseRequest::try_new(id.clone(), schedule.leader_lease_ttl()))
+        .transpose()
         .map_err(worker_definition_error)?;
     WorkerRegistration::try_new(
         id,
         WorkerRunnable::Scheduled {
             schedule,
-            lease: Some(lease),
+            lease,
             task,
         },
     )
@@ -104,6 +117,23 @@ pub(crate) fn worker_definition_error(
 
 pub(crate) struct StaleModelRequestRecoveryTask {
     execution: Arc<postgres::PgExecutionStore>,
+}
+
+struct BudgetSettlementTask {
+    budgets: Arc<postgres::PgClientBudgetStore>,
+}
+impl ScheduledTask for BudgetSettlementTask {
+    fn run_cycle(
+        &self,
+        context: WorkerCycleContext,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
+            tokio::select! {
+                () = context.cancellation().cancelled() => Ok(()),
+                result = self.budgets.recover_pending() => result.map_err(|_| WorkerTaskError::safe("budget settlement recovery failed")),
+            }
+        })
+    }
 }
 
 impl ScheduledTask for StaleModelRequestRecoveryTask {
