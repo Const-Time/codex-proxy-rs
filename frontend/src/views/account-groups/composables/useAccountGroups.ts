@@ -89,6 +89,7 @@ export function useAccountGroups() {
   }
 
   async function loadReferenceKeys() {
+    clientKeys.value = []
     try {
       const items: ApiKey[] = []
       let cursor: string | undefined
@@ -299,7 +300,11 @@ export function useAccountGroups() {
   })
 
   onMounted(() => {
-    void Promise.all([query.execute(), loadReferenceKeys()])
+    void query.execute()
+  })
+  watch([showDeleteModal, showDisableModal], ([deleting, disabling]) => {
+    if (deleting || disabling)
+      void loadReferenceKeys()
   })
 
   return {

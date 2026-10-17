@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
-import type { AccountGroup, AccountModelAccess } from '@/api'
+import type { AccountGroupRef, AccountModelAccess } from '@/api'
 
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
@@ -11,7 +11,7 @@ import AccountSettingsFields from './AccountSettingsFields.vue'
 
 defineProps<{
   account: AccountRow | null
-  groups: AccountGroup[]
+  groups: AccountGroupRef[]
   groupsLoading: boolean
   saving: boolean
 }>()

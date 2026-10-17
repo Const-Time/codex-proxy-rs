@@ -1,22 +1,23 @@
-import type { AccountGroup } from '@/api'
+import type { AccountGroupRef } from '@/api'
 
 import { onMounted, shallowRef } from 'vue'
-import { getAccountGroups } from '@/api'
+import { getAccountGroupCatalog } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 import { errorMessage } from '@/utils/async'
 
 export function useAccountGroupCatalog(options: { immediate?: boolean } = {}) {
-  const groups = shallowRef<AccountGroup[]>([])
+  const groups = shallowRef<AccountGroupRef[]>([])
   const loading = shallowRef(false)
 
   async function loadGroups() {
     loading.value = true
     try {
-      const first = await getAccountGroups({ page: 1, pageSize: 200 })
-      const items = [...first.items]
-      for (let page = 2; page <= first.page.totalPages; page += 1) {
-        const result = await getAccountGroups({ page, pageSize: first.page.pageSize })
-        items.push(...result.items)
+      const items: AccountGroupRef[] = []
+      for (let page = 1; ; page += 1) {
+        const batch = await getAccountGroupCatalog({ page, pageSize: 200 })
+        items.push(...batch)
+        if (batch.length < 200)
+          break
       }
       groups.value = items
       return items

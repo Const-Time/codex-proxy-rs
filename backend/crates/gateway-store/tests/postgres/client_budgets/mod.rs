@@ -1352,6 +1352,160 @@ async fn budgets_settle_exactly_once_and_enforce_each_threshold_across_store_ins
 }
 
 #[tokio::test]
+async fn unlimited_daily_accounting_does_not_replace_weekly_reset_metadata() {
+    let Some(database) = TestDatabase::create("no_daily_reset").await else {
+        return;
+    };
+    seed(&database, "key", "0", "50").await;
+    let store = PgClientBudgetStore::open(
+        database.pool.clone(),
+        database.budget_directory.path().into(),
+    )
+    .await
+    .unwrap();
+    store
+        .admit(key_id("key"), Some(group_id("key")), None)
+        .await
+        .unwrap();
+    store.settle(charge("key", "day-one", "3")).await.unwrap();
+    sqlx::query("update user_group_budget_windows set last_reset_at=daily_start,last_reset_reason='upstream_window' where user_id='budget-user'")
+        .execute(&database.pool).await.unwrap();
+    let before: (DateTime<Utc>,DateTime<Utc>,String) = sqlx::query_as("select daily_end,last_reset_at,weekly_used_usd::text from user_group_budget_windows where user_id='budget-user'")
+        .fetch_one(&database.pool).await.unwrap();
+    for at in [before.0, before.0 + chrono::Duration::seconds(10)] {
+        sqlx::query("select advance_subscription_windows('budget-user',$1,$2)")
+            .bind(group_id("key").as_str())
+            .bind(at)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+    let after: (DateTime<Utc>,String,String,String) = sqlx::query_as("select last_reset_at,last_reset_reason,daily_used_usd::text,weekly_used_usd::text from user_group_budget_windows where user_id='budget-user'")
+        .fetch_one(&database.pool).await.unwrap();
+    assert_eq!(after.0, before.1);
+    assert_eq!(after.1, "upstream_window");
+    assert_eq!(
+        after
+            .2
+            .parse::<gateway_core::metering::Decimal>()
+            .unwrap()
+            .canonical(),
+        "0"
+    );
+    assert_eq!(after.3, before.2);
+    let events: i64 = sqlx::query_scalar(
+        "select count(*) from subscription_reset_events where reason='daily_period'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 0);
+    // Re-enabling the daily limit restores real daily reset events, once per day.
+    sqlx::query("update account_groups set daily_limit_usd=5 where id=$1")
+        .bind(group_id("key").as_str())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let next = before.0 + chrono::Duration::days(1);
+    for _ in 0..2 {
+        sqlx::query("select advance_subscription_windows('budget-user',$1,$2)")
+            .bind(group_id("key").as_str())
+            .bind(next)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+    let events: i64 = sqlx::query_scalar(
+        "select count(*) from subscription_reset_events where reason='daily_period'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+    assert_eq!(
+        status(&database, "key").await.weekly_used_usd.canonical(),
+        "3"
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn unlimited_daily_upgrade_repairs_only_metadata_and_retains_audit_and_money() {
+    let Some(db) = TestDatabase::create_at_version("daily_metadata_upgrade", 43).await else {
+        return;
+    };
+    for (key, daily) in [("prior", "0"), ("unknown", "0"), ("limited", "5")] {
+        seed(&db, key, daily, "50").await;
+        sqlx::query("select advance_subscription_windows('budget-user',$1,now())")
+            .bind(group_id(key).as_str())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("update user_group_budget_windows set daily_used_usd=2,weekly_used_usd=7,last_reset_at=daily_start,last_reset_reason='daily_period'")
+        .execute(&db.pool).await.unwrap();
+    sqlx::query(
+        "insert into subscription_reset_events(id,reason,occurred_at,affected_count,targets)
+        select 'prior-real-reset','upstream_window',daily_start-interval '1 day',1,
+          jsonb_build_array(jsonb_build_object('userId',user_id,'groupId',account_group_id))
+        from user_group_budget_windows where account_group_id=$1",
+    )
+    .bind(group_id("prior").as_str())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into subscription_reset_events(id,reason,occurred_at,affected_count,targets)
+        select 'old-daily-'||account_group_id,'daily_period',daily_start,1,
+          jsonb_build_array(jsonb_build_object('userId',user_id,'groupId',account_group_id))
+        from user_group_budget_windows",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let facts = async || {
+        sqlx::query_scalar::<_,serde_json::Value>(
+        "select to_jsonb(w)-'last_reset_at'-'last_reset_reason' from user_group_budget_windows w order by account_group_id")
+        .fetch_all(&db.pool).await.unwrap()
+    };
+    let events = async || {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "select to_jsonb(e) from subscription_reset_events e order by id",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap()
+    };
+    let before = facts().await;
+    let audit = events().await;
+    super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
+    assert_eq!(facts().await, before);
+    assert_eq!(events().await, audit);
+    for (key, reason) in [
+        ("prior", Some("upstream_window")),
+        ("unknown", None),
+        ("limited", Some("daily_period")),
+    ] {
+        let actual: (Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "select last_reset_reason,last_reset_at from user_group_budget_windows where account_group_id=$1")
+            .bind(group_id(key).as_str()).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(actual.0.as_deref(), reason);
+        assert_eq!(actual.1.is_some(), reason.is_some());
+    }
+    let matched: bool = sqlx::query_scalar(
+        "select w.last_reset_at=e.occurred_at
+        from user_group_budget_windows w join subscription_reset_events e on e.id='prior-real-reset'
+        where w.account_group_id=$1",
+    )
+    .bind(group_id("prior").as_str())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(matched);
+    db.close().await;
+}
+
+#[tokio::test]
 async fn window_rollover_is_shanghai_midnight_and_seven_days_with_late_settlement() {
     let Some(database) = TestDatabase::create("budgets_windows").await else {
         return;

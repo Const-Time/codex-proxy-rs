@@ -245,7 +245,7 @@ Responses 编码时仅为缺失的顶层 `store` 补齐 `false`；显式提供�
 
 订阅管理仅重置明确选择的用户分组对，保留历史请求和计费账本。日窗口至下一个北京时间零点，手动重置不移动分组统一的周结束时间；同一 requestId 重试不会清除后续消费。重置与在途结算按数据库事务串行化，重置之后完成的请求仍计入配额。
 
-自动联动开启时，账号主动重置成功只会重置该账号所在单账号分组下用户的日/周额度。多账号分组（包含停用成员）采用独立、统一的七天周期，不随某个成员重置；新订阅沿用分组周期。上游自行重置和自然恢复通过已持久化的配额快照识别：仅 `window_seconds = 604800` 的账号级周窗口，其刷新边界向后推进超过 60 秒才触发。5 小时等短周期、比例下降和周边界未变化均不触发。首次观察只建立基线，重复、过期快照及重复兑换不重复重置；后台每 60 秒检查一次已取得的上游配额，账号页面读取新配额时也会检查。自然窗口有明确边界时，保留边界之后已经产生的消费。单账号组在未确认上游换窗时保留并累计用量，不按本地七天周期清零。独立周换窗和日换窗分别记录 group_period、daily_period，包含时间和受影响订阅；只读列表不会虚拟清零。识别时效取决于上游配额刷新；未被快照观察到的外部重置无法可靠识别。
+自动联动开启时，账号主动重置成功只会重置该账号所在单账号分组下用户的日/周额度。多账号分组（包含停用成员）采用独立、统一的七天周期，不随某个成员重置；新订阅沿用分组周期。上游自行重置和自然恢复通过已持久化的配额快照识别：仅 `window_seconds = 604800` 的账号级周窗口，其刷新边界向后推进超过 60 秒才触发。5 小时等短周期、比例下降和周边界未变化均不触发。首次观察只建立基线，重复、过期快照及重复兑换不重复重置；后台每 60 秒检查一次已取得的上游配额，账号页面读取新配额时也会检查。自然窗口有明确边界时，保留边界之后已经产生的消费。单账号组在未确认上游换窗时保留并累计用量，不按本地七天周期清零。独立周换窗记录 group_period；仅日限大于零时，日换窗记录 daily_period 并更新最近重置。无日限仍滚动内部日统计，但不覆盖最近重置，也不清零周用量。重置事件包含时间和受影响订阅；只读列表不会虚拟清零。识别时效取决于上游配额刷新；未被快照观察到的外部重置无法可靠识别。
 
 请求费用展示额外提供 `billing.originalAmountDisplay`、`billing.groupMultiplierDisplay`。模型原始费用先按 Provider 价格规则校验和分解，再单独展示请求发生时冻结的分组模型倍率、作用范围与最终总费用。`multiplierDisplay` 展示服务档位及系统模型定价倍率，两者不混用。列表和详情金额不再添加 `≈`；无法恢复单价的历史请求仍保留原始总额、分组倍率和实际总额。
 
@@ -638,6 +638,7 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 | 方法 | 路由 | 主要 query/body | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/account-groups` | `page`、`pageSize`、`search`、`enabled` | 分页查询分组；返回账号可用性、并发槽位（Redis 不可用时 `usedSlots=null`）及成功请求 USD 用量 |
+| `GET` | `/api/admin/account-groups/catalog` | `page`、`pageSize`、`search`、`enabled` | 管理员选择器专用轻量目录；`data` 为 `{ id, name, color, enabled }[]`，不读取成员、Key 或用量；默认 50 条，最多 200 条，返回不足一页时结束 |
 | `POST` | `/api/admin/account-groups/create` | `{ name, description, color, dailyLimitUsd?, weeklyLimitUsd?, modelMultipliers? }` | 创建空分组；`color` 严格为 `#RRGGBBAA`，返回时统一大写 |
 | `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, dailyLimitUsd, weeklyLimitUsd, modelMultipliers? }` | 更新名称、描述、颜色、日/周额度和模型倍率 |
 | `POST` | `/api/admin/account-groups/enable` | `{ id }` | 启用 |
@@ -647,6 +648,8 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 列表数据为 `{ items, page, configRevision }`，其中 item 返回 `memberCount`、按 Provider 聚合的
 `providerCounts` 和 `clientKeyCount`。查询分组成员使用账号列表的 `groupId` 筛选，
 不提供独立的分组成员路由；账号的 Provider 不代表整个分组的 Provider。
+
+分组成功请求 USD 用量复用小时投影，保留原有成功状态、费用完整性与历史分组归属口径；最近数据、非整小时边界、待回填/待修正小时仍读取原始记录。分组下拉不再调用带费用统计的完整列表。分组页面的 Key 引用名称只在禁用/删除确认时加载，删除限制仍由后端事务校验。
 
 ## 7. Client Key
 

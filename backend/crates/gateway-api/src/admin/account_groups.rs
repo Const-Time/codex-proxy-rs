@@ -241,11 +241,47 @@ where
 {
     Router::new()
         .route("/api/admin/account-groups", get(list::<S>))
+        .route("/api/admin/account-groups/catalog", get(catalog::<S>))
         .route("/api/admin/account-groups/create", post(create::<S>))
         .route("/api/admin/account-groups/update", post(update::<S>))
         .route("/api/admin/account-groups/enable", post(enable::<S>))
         .route("/api/admin/account-groups/disable", post(disable::<S>))
         .route("/api/admin/account-groups/delete", post(delete::<S>))
+}
+
+#[derive(Serialize)]
+struct CatalogEntry {
+    id: String,
+    name: String,
+    color: String,
+    enabled: bool,
+}
+
+async fn catalog<S: AdminSessionState + Send + Sync>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<ListAccountGroupsQuery>,
+) -> Result<impl IntoResponse, AdminError> {
+    let items = state
+        .admin_services()
+        .account_groups()
+        .catalog(query.into_command().map_err(map_wire_error)?)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(
+            items
+                .into_iter()
+                .map(|g| CatalogEntry {
+                    id: g.id.as_str().into(),
+                    name: g.name,
+                    color: g.color.as_str().into(),
+                    enabled: g.enabled,
+                })
+                .collect::<Vec<_>>(),
+        ),
+    ))
 }
 
 async fn list<S>(

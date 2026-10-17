@@ -296,7 +296,7 @@ impl DefaultAccountsService {
             .into_iter()
             .map(|result| ((result.account_id, result.key), result.usage))
             .collect::<BTreeMap<_, _>>();
-        for (item, quota) in accounts.iter().zip(quotas) {
+        for (item, quota) in accounts.iter().zip(quotas.iter_mut()) {
             for window in &mut quota.windows {
                 if window.local_usage.is_none()
                     && window.local_usage_attribution == QuotaLocalUsageAttribution::AccountWide
@@ -307,6 +307,10 @@ impl DefaultAccountsService {
                     }
                 }
             }
+        }
+        // Independent read-only forecasts must not serialize the entire page.
+        // Keep admission bounded; the Store still owns the global query budget.
+        futures::stream::iter(accounts.iter().zip(quotas.iter_mut())).for_each_concurrent(4, |(item, quota)| async move {
             // Estimation must never make the account directory unavailable.
             if let Err(error) = self.attach_quota_estimates(item, quota).await {
                 tracing::warn!(account_id = %item.account.id, %error, "quota estimate unavailable");
@@ -317,7 +321,7 @@ impl DefaultAccountsService {
                     }
                 }
             }
-        }
+        }).await;
         Ok(())
     }
 

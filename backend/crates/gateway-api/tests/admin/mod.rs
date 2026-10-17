@@ -699,6 +699,23 @@ impl MemoryAccountGroupStore {
 
 #[async_trait]
 impl AccountGroupStore for MemoryAccountGroupStore {
+    async fn account_group_catalog(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::account_groups::AccountGroupRef>> {
+        Ok(self
+            .list_account_groups(query)
+            .await?
+            .items
+            .into_iter()
+            .map(|g| gateway_admin::model::account_groups::AccountGroupRef {
+                id: g.id,
+                name: g.name,
+                color: g.color,
+                enabled: g.enabled,
+            })
+            .collect())
+    }
     async fn list_account_groups(
         &self,
         query: AccountGroupListQuery,

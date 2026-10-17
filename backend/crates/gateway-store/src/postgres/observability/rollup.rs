@@ -71,7 +71,7 @@ impl PgUsageRollupRepository {
                 .join(", ");
             let mut query = QueryBuilder::<Postgres>::new(format!("insert into usage_hourly_stats
                 (bucket_start, {DIMENSIONS}, request_count, success_count, input_tokens, output_tokens,
-                 cached_tokens, cache_write_tokens, total_tokens, latency_sum, latency_count, billing_usd, usage_billing_usd)
+                 cached_tokens, cache_write_tokens, total_tokens, latency_sum, latency_count, billing_usd, usage_billing_usd, group_billing_usd)
                 select "));
             query.push_bind(hour).push(format!(", {dimensions}, {} from model_requests mr
                 left join user_group_charge_events charge on charge.request_id = mr.id where mr.started_at >= ", aggregates()));
@@ -102,6 +102,7 @@ impl PgUsageRollupRepository {
 }
 
 fn aggregates() -> String {
+    let group_fact = completed_usage_fact_predicate("mr");
     let fact = format!(
         "({}) and mr.recovered_at is null",
         completed_usage_fact_predicate("mr")
@@ -116,7 +117,8 @@ fn aggregates() -> String {
         coalesce(sum(mr.latency_ms) filter (where {fact}),0)::bigint as latency_sum,
         count(mr.latency_ms) filter (where {fact})::bigint as latency_count,
         coalesce(sum(coalesce(charge.amount_usd, case when mr.cost_currency='USD' then mr.billed_cost_amount end)),0) as billing_usd,
-        sum(mr.billed_cost_amount) filter (where {fact} and mr.cost_currency='USD') as usage_billing_usd")
+        sum(mr.billed_cost_amount) filter (where {fact} and mr.cost_currency='USD') as usage_billing_usd,
+        coalesce(sum(mr.billed_cost_amount) filter (where {group_fact} and mr.cost_currency='USD' and mr.cost_amount is not null),0) as group_billing_usd")
 }
 
 pub(crate) async fn card_summary(
@@ -159,7 +161,7 @@ pub(crate) async fn card_summary(
         from bounds b cross join lateral generate_series(date_bin(interval '1 hour',b.first,{EPOCH}), b.last, interval '1 hour') h
         where h < b.last and not exists(select 1 from covered c where c.bucket_start=h)),
         rows as (select mr.request_count, mr.success_count, mr.input_tokens, mr.output_tokens, mr.cached_tokens,
-            mr.cache_write_tokens, mr.total_tokens, mr.latency_sum, mr.latency_count, mr.billing_usd, mr.usage_billing_usd
+            mr.cache_write_tokens, mr.total_tokens, mr.latency_sum, mr.latency_count, mr.billing_usd, mr.usage_billing_usd, mr.group_billing_usd
         from usage_hourly_stats mr join covered c using(bucket_start) where true"));
     push_usage_filter(&mut query, filter, "mr");
     query.push(format!(" union all select facts.* from raw_hours r cross join lateral (

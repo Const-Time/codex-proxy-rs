@@ -109,6 +109,39 @@ impl PgAccountGroupRepository {
 
 #[async_trait]
 impl AccountGroupStore for PgAccountGroupRepository {
+    async fn account_group_catalog(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::account_groups::AccountGroupRef>> {
+        validate_page_query(&query)?;
+        let mut statement = QueryBuilder::<Postgres>::new(
+            "select g.id,g.name,g.color,g.enabled from account_groups g where true",
+        );
+        push_group_filter(&mut statement, &query);
+        statement
+            .push(" order by g.created_at desc,g.id desc limit ")
+            .push_bind(i64::from(query.page_size.get()));
+        statement
+            .push(" offset ")
+            .push_bind(i64::from(query.page - 1) * i64::from(query.page_size.get()));
+        let rows = statement
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| admin_store_error(ENTITY, unavailable("load group catalog")))?;
+        rows.iter()
+            .map(|row| {
+                Ok(gateway_admin::model::account_groups::AccountGroupRef {
+                    id: AccountGroupId::new(row.get::<String, _>("id"))
+                        .map_err(|_| invalid_admin("invalid group id"))?,
+                    name: row.get("name"),
+                    color: AccountGroupColor::parse(&row.get::<String, _>("color"))
+                        .ok_or_else(|| invalid_admin("invalid group color"))?,
+                    enabled: row.get("enabled"),
+                })
+            })
+            .collect()
+    }
     async fn update_plugin_group_budget(
         &self,
         scope: PluginMutationScope,
@@ -800,32 +833,58 @@ async fn group_costs(
     }
     let completed_usage = completed_usage_fact_predicate("mr");
     let statement = format!(
-        "with requested_groups(group_id) as (
-           select unnest($1::text[])
+        "with bounds as (
+           select now() - make_interval(days => usage_retention_days::int) as first,
+             date_bin(interval '1 hour',now(),timestamptz '1970-01-01')-interval '1 hour' as last,
+             date_trunc('day',now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai' as today
+           from runtime_settings where id=1
+         ), covered as materialized (
+           select h.bucket_start from usage_hourly_covered h cross join bounds b
+           where h.bucket_start>=b.first and h.bucket_start+interval '1 hour'<=b.last
+             and not exists(select 1 from usage_hourly_dirty d where d.bucket_start=h.bucket_start)
+         ), raw_ranges as (
+           select greatest(h,b.first) as first,least(h+interval '1 hour',b.last) as last
+           from bounds b cross join lateral generate_series(
+             date_bin(interval '1 hour',b.first,timestamptz '1970-01-01'),b.last,interval '1 hour') h
+           where h<b.last and not exists(select 1 from covered c where c.bucket_start=h)
+           union all select greatest(first,last),'infinity'::timestamptz from bounds
+         ), facts as (
+           select s.routing_group_refs,s.bucket_start as started_at,s.group_billing_usd as amount
+           from usage_hourly_stats s join covered c using(bucket_start)
+           where s.routing_group_refs && $1::text[]
+           union all
+           select mr.routing_group_refs,mr.started_at,mr.billed_cost_amount as amount
+           from raw_ranges r cross join lateral (
+             select routing_group_refs,started_at,billed_cost_amount from model_requests mr
+             where mr.started_at>=r.first and mr.started_at<r.last
+               and mr.routing_group_refs && $1::text[] and {completed_usage}
+               and mr.cost_currency='USD' and mr.cost_amount is not null
+           ) mr
          )
-         select requested_groups.group_id,
-                coalesce(sum(mr.billed_cost_amount) filter (
-                  where mr.started_at >= date_trunc('day', now() at time zone 'Asia/Shanghai')
-                    at time zone 'Asia/Shanghai'
-                ), 0)::text as today_usd,
-                coalesce(sum(mr.billed_cost_amount), 0)::text as retained_total_usd
-         from requested_groups
-         cross join runtime_settings settings
-         left join model_requests mr
-           on mr.routing_group_refs @> array[requested_groups.group_id]::text[]
-          and mr.started_at >= now() - make_interval(days => settings.usage_retention_days::int)
-          and {completed_usage}
-          and mr.cost_currency = 'USD'
-          and mr.cost_amount is not null
-         where settings.id = 1
-         group by requested_groups.group_id"
+         select refs.group_id,
+           coalesce(sum(f.amount) filter(where f.started_at>=b.today),0)::text as today_usd,
+           coalesce(sum(f.amount),0)::text as retained_total_usd
+         from facts f cross join bounds b cross join lateral (
+           select distinct unnest(f.routing_group_refs) as group_id
+         ) refs where refs.group_id=any($1::text[]) group by refs.group_id"
     );
     // 动态片段仅为共享的固定 usage-fact predicate；group IDs 仍使用 bind。
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| unavailable("begin account group costs"))?;
+    sqlx::query("set local jit=off")
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| unavailable("plan account group costs"))?;
     let rows = sqlx::query(sqlx::AssertSqlSafe(statement))
         .bind(group_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|_| unavailable("load account group costs"))?;
+    tx.commit()
+        .await
+        .map_err(|_| unavailable("complete account group costs"))?;
     rows.into_iter()
         .map(|row| {
             let group_id: String = row

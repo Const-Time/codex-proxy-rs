@@ -387,6 +387,12 @@ struct UnavailableAccountGroupStore;
 
 #[async_trait]
 impl AccountGroupStore for UnavailableAccountGroupStore {
+    async fn account_group_catalog(
+        &self,
+        _: AccountGroupListQuery,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::account_groups::AccountGroupRef>> {
+        Err(unavailable("account group catalog"))
+    }
     async fn list_account_groups(
         &self,
         _: AccountGroupListQuery,

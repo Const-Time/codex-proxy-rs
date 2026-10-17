@@ -477,6 +477,7 @@ pub(super) struct FakeAccountStore {
     quota_window_usage: Mutex<Vec<AccountUsageWindowResult>>,
     quota_window_queries: Mutex<Vec<AccountUsageWindowQuery>>,
     forecast_history: Mutex<gateway_admin::model::quota_forecast_sampling::QuotaForecastHistory>,
+    forecast_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 impl FakeAccountStore {
@@ -500,6 +501,7 @@ impl FakeAccountStore {
             quota_window_usage: Mutex::new(Vec::new()),
             quota_window_queries: Mutex::new(Vec::new()),
             forecast_history: Mutex::new(Default::default()),
+            forecast_gate: Mutex::new(None),
         })
     }
 
@@ -591,6 +593,10 @@ impl AccountStore for FakeAccountStore {
             .unwrap()
             .push(account_id.to_owned());
         self.quota_notify.notify_one();
+        let gate = self.forecast_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         if self.fail_estimate_for.lock().unwrap().as_deref() == Some(account_id) {
             return Err(store_unavailable());
         }
@@ -2934,6 +2940,64 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
         .await
         .unwrap();
     assert!(page.items[0].quota.windows[0].estimated_quota.is_none());
+}
+
+#[tokio::test]
+async fn account_list_forecasts_run_concurrently_but_are_bounded_and_fail_independently() {
+    let observed = Utc::now() - TimeDelta::minutes(1);
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_quota(forecast_quota(observed, 46.0));
+    let store = FakeAccountStore::new("openai", events());
+    store.set_accounts(
+        (0..9)
+            .map(|i| {
+                let mut account = account_record("openai");
+                account.id = format!("acct_parallel_{i}");
+                account.created_at = observed - TimeDelta::days(1);
+                account
+            })
+            .collect(),
+    );
+    *store.fail_estimate_for.lock().unwrap() = Some("acct_parallel_2".into());
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.forecast_gate.lock().unwrap() = Some(gate.clone());
+    let services = accounts_service(provider, store.clone()).await;
+    let listing = tokio::spawn(async move {
+        services
+            .accounts()
+            .list(AccountListQuery {
+                page: 1,
+                page_size: gateway_admin::model::PageSize::new(20).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: None,
+                sort: None,
+            })
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if store.estimate_observations.lock().unwrap().len() >= 4 {
+                break;
+            }
+            store.quota_notify.notified().await;
+        }
+    })
+    .await
+    .expect("four independent estimates should start without serial waiting");
+    tokio::task::yield_now().await;
+    assert_eq!(store.estimate_observations.lock().unwrap().len(), 4);
+    assert!(!listing.is_finished());
+    gate.add_permits(9);
+    let page = tokio::time::timeout(std::time::Duration::from_secs(2), listing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.items.len(), 9);
+    assert_eq!(store.estimate_observations.lock().unwrap().len(), 9);
+    assert!(page.items.iter().all(|item| item.quota.windows.len() == 1));
 }
 
 #[tokio::test]

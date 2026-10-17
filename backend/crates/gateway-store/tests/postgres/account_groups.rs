@@ -22,6 +22,236 @@ use super::TestDatabase;
 const MIXED_GROUP: &str = "grp_00000000000000000000000000000001";
 const EMPTY_GROUP: &str = "grp_00000000000000000000000000000002";
 
+fn page_query() -> AccountGroupListQuery {
+    AccountGroupListQuery {
+        page: 1,
+        page_size: PageSize::new(20).unwrap(),
+        search: None,
+        enabled: None,
+    }
+}
+
+#[tokio::test]
+async fn catalog_needs_neither_request_history_nor_members_and_honors_filters() {
+    let Some(db) = TestDatabase::create("group_catalog").await else {
+        return;
+    };
+    sqlx::query(
+        "insert into account_groups(id,name,color,enabled,created_at,updated_at) values
+        ($1,'Alpha','#2563EBFF',true,now(),now()),($2,'Beta','#2563EBFF',false,now(),now())",
+    )
+    .bind(MIXED_GROUP)
+    .bind(EMPTY_GROUP)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    // These tables are intentionally inaccessible under their production names.
+    // A selector must not accidentally regress to the full statistics/member path.
+    sqlx::raw_sql(
+        "alter table model_requests rename to hidden_requests;
+        alter table account_group_accounts rename to hidden_members;
+        alter table client_api_key_groups rename to hidden_keys;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let store = PgAccountGroupRepository::new(db.pool.clone());
+    let all = store.account_group_catalog(page_query()).await.unwrap();
+    assert_eq!(all.len(), 2);
+    let filtered = store
+        .account_group_catalog(AccountGroupListQuery {
+            search: Some("bet".into()),
+            enabled: Some(false),
+            ..page_query()
+        })
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id.as_str(), EMPTY_GROUP);
+    assert!(!filtered[0].enabled);
+    for page in 1..=3 {
+        let items = store
+            .account_group_catalog(AccountGroupListQuery {
+                page,
+                page_size: PageSize::new(1).unwrap(),
+                ..page_query()
+            })
+            .await
+            .unwrap();
+        if page <= 2 {
+            assert_eq!(items[0].id, all[(page - 1) as usize].id);
+        } else {
+            assert!(items.is_empty());
+        }
+    }
+    db.close().await;
+}
+
+async fn assert_costs_equal_raw(pool: &sqlx::PgPool) {
+    let page = PgAccountGroupRepository::new(pool.clone())
+        .list_account_groups(page_query())
+        .await
+        .unwrap();
+    for group in page.items {
+        let raw: (String,String) = sqlx::query_as("select
+            coalesce(sum(billed_cost_amount) filter(where started_at>=date_trunc('day',now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai'),0)::text,
+            coalesce(sum(billed_cost_amount),0)::text
+            from model_requests where routing_group_refs @> array[$1]::text[]
+              and started_at>=now()-make_interval(days=>(select usage_retention_days::int from runtime_settings where id=1))
+              and outcome='succeeded' and downstream_committed_at is not null
+              and (client_status_code between 200 and 399 or (client_transport='websocket' and client_status_code is null))
+              and cost_currency='USD' and cost_amount is not null and total_tokens>0")
+            .bind(group.id.as_str()).fetch_one(pool).await.unwrap();
+        let canonical = |s: &str| {
+            s.parse::<gateway_core::metering::Decimal>()
+                .unwrap()
+                .canonical()
+        };
+        assert_eq!(group.usage.today_usd.as_str(), canonical(&raw.0));
+        assert_eq!(group.usage.retained_total_usd.as_str(), canonical(&raw.1));
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual local PostgreSQL benchmark; synthetic data only"]
+async fn group_cost_rollups_measure_large_history() {
+    use gateway_store::postgres::PgUsageRollupRepository;
+    let Some(db) = TestDatabase::create("group_cost_perf").await else {
+        return;
+    };
+    sqlx::query(
+        "insert into account_groups(id,name,color,created_at,updated_at) values
+        ($1,'One','#2563EBFF',now(),now()),($2,'Two','#2563EBFF',now(),now())",
+    )
+    .bind(MIXED_GROUP)
+    .bind(EMPTY_GROUP)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    seed_account(&db.pool, "acct_perf", "openai", "Performance").await;
+    sqlx::query("insert into model_requests(id,client_api_key_ref,config_revision,protocol,operation,endpoint,
+        client_transport,requested_model_id,provider_kind,provider_account_id,provider_account_ref,
+        attempt_count,upstream_transport,upstream_send_state,downstream_committed_at,outcome,client_status_code,total_tokens,
+        cost_source,cost_amount,cost_currency,started_at,deadline_at,completed_at,
+        routing_scope,routing_group_refs,routing_group_names_snapshot)
+        select 'perf-'||n,'perf-key',1,'openai','responses','/v1/responses','http_sse','perf-model',
+          'openai','acct_perf','acct_perf',1,'http_sse','sent',now(),'succeeded',200,1000,'calculated',0.123,'USD',
+          date_trunc('hour',now())-(2+n%168)*interval '1 hour',now()+interval '1 minute',now(),
+          'groups',array[$1,$2]::text[],jsonb_build_array($1::text,$2::text) from generate_series(1,100000) n")
+        .bind(MIXED_GROUP).bind(EMPTY_GROUP).execute(&db.pool).await.unwrap();
+    sqlx::query("analyze model_requests")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let store = PgAccountGroupRepository::new(db.pool.clone());
+    let start = std::time::Instant::now();
+    let raw = store.list_account_groups(page_query()).await.unwrap();
+    let raw_ms = start.elapsed().as_millis();
+    let worker = PgUsageRollupRepository::new(db.pool.clone());
+    while worker.refresh_batch(chrono::Utc::now()).await.unwrap() > 0 {}
+    sqlx::raw_sql("analyze usage_hourly_stats; analyze usage_hourly_covered;")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    let rolled = store.list_account_groups(page_query()).await.unwrap();
+    let rolled_ms = start.elapsed().as_millis();
+    assert_eq!(raw, rolled);
+    assert_costs_equal_raw(&db.pool).await;
+    let start = std::time::Instant::now();
+    let catalog = store.account_group_catalog(page_query()).await.unwrap();
+    let catalog_ms = start.elapsed().as_millis();
+    assert_eq!(catalog.len(), 2);
+    eprintln!(
+        "GROUP_COST_BENCH: 100000 requests; raw_ms={raw_ms}; hybrid_ms={rolled_ms}; catalog_ms={catalog_ms}; exact_values=PASS"
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn group_cost_rollups_preserve_raw_semantics_and_repair_late_changes_after_upgrade() {
+    use gateway_store::postgres::PgUsageRollupRepository;
+    let Some(db) = TestDatabase::create_at_version("group_rollup_upgrade", 43).await else {
+        return;
+    };
+    sqlx::query(
+        "insert into account_groups(id,name,color,created_at,updated_at) values
+        ($1,'One','#2563EBFF',now(),now()),($2,'Two','#2563EBFF',now(),now())",
+    )
+    .bind(MIXED_GROUP)
+    .bind(EMPTY_GROUP)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    seed_account(&db.pool, "acct_rollup", "openai", "Rollup").await;
+    for (id, amount) in [
+        ("old", "1"),
+        ("recent", "2"),
+        ("late", "3"),
+        ("websocket", "4"),
+        ("http", "8"),
+        ("recovered", "16"),
+        ("partial", "32"),
+        ("expired", "64"),
+        ("future", "128"),
+    ] {
+        seed_group_cost_snapshot(&db.pool, id, "acct_rollup", MIXED_GROUP, amount).await;
+    }
+    sqlx::query("update runtime_settings set usage_retention_days=31 where id=1")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update model_requests set started_at=case id
+        when 'recent' then now()-interval '1 minute' when 'future' then now()+interval '1 hour'
+        when 'partial' then now()-interval '31 days'+interval '1 minute'
+        when 'expired' then now()-interval '31 days'-interval '1 minute'
+        else date_trunc('hour',now())-interval '3 hours' end,
+        deadline_at=now()+interval '2 hours',completed_at=now()+interval '1 hour 1 minute',
+        routing_group_refs=array[$1,$1,$2]::text[], routing_group_names_snapshot=jsonb_build_array($1::text,$1::text,$2::text)")
+        .bind(MIXED_GROUP).bind(EMPTY_GROUP).execute(&db.pool).await.unwrap();
+    sqlx::raw_sql("update model_requests set client_status_code=null where id in ('websocket','http');
+        update model_requests set client_transport='websocket' where id='websocket';
+        update model_requests set recovered_at=completed_at,recovery_request_id='recent',recovery_attempt_count=1,recovery_retry_delay_ms=0,recovery_total_latency_ms=1 where id='recovered';
+        update model_requests set cost_amount=null,cost_currency=null,cost_source='unavailable' where id='late';
+        insert into usage_hourly_covered select distinct date_bin(interval '1 hour',started_at,timestamptz '1970-01-01') from model_requests;
+        delete from usage_hourly_dirty;")
+        .execute(&db.pool).await.unwrap();
+    let before: Vec<serde_json::Value> =
+        sqlx::query_scalar("select to_jsonb(mr) from model_requests mr order by id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    super::TEST_MIGRATOR.run(&db.pool).await.unwrap();
+    assert!(sqlx::query_scalar::<_,bool>("select not exists(select 1 from usage_hourly_covered c where not exists(select 1 from usage_hourly_dirty d where d.bucket_start=c.bucket_start))")
+        .fetch_one(&db.pool).await.unwrap());
+    assert_costs_equal_raw(&db.pool).await;
+    let worker = PgUsageRollupRepository::new(db.pool.clone());
+    while worker.refresh_batch(chrono::Utc::now()).await.unwrap() > 0 {}
+    assert_costs_equal_raw(&db.pool).await;
+    let after: Vec<serde_json::Value> =
+        sqlx::query_scalar("select to_jsonb(mr) from model_requests mr order by id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after);
+    // Missing pricing arrives after the stable hour was already projected.
+    sqlx::query("update model_requests set cost_amount=7,cost_currency='USD',cost_source='provider_reported' where id='late'").execute(&db.pool).await.unwrap();
+    assert_costs_equal_raw(&db.pool).await;
+    while worker.refresh_batch(chrono::Utc::now()).await.unwrap() > 0 {}
+    assert_costs_equal_raw(&db.pool).await;
+    // A later deletion and routing change must also invalidate the old projection.
+    sqlx::query("delete from model_requests where id='old'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update model_requests set routing_group_refs=array[$1]::text[],routing_group_names_snapshot=jsonb_build_array($1::text) where id='websocket'")
+        .bind(EMPTY_GROUP).execute(&db.pool).await.unwrap();
+    assert_costs_equal_raw(&db.pool).await;
+    while worker.refresh_batch(chrono::Utc::now()).await.unwrap() > 0 {}
+    assert_costs_equal_raw(&db.pool).await;
+    db.close().await;
+}
+
 #[tokio::test]
 async fn user_counts_follow_grants_without_counting_keys_or_deleted_users() {
     let Some(database) = TestDatabase::create("group_user_counts").await else {

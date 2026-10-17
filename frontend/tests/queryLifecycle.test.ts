@@ -51,6 +51,32 @@ test('API Key concurrency refresh retains the active search', async () => {
   fixture.dispose()
 })
 
+test('group selectors page through the lightweight catalog and retain data on failed reload', async () => {
+  const pages: number[] = []
+  let fail = false
+  const fixture = load<{ useAccountGroupCatalog: typeof import('../src/composables/useAccountGroupCatalog.ts').useAccountGroupCatalog }>('../src/composables/useAccountGroupCatalog.ts', {
+    '@/api': {
+      getAccountGroupCatalog: async ({ page, pageSize }: { page: number, pageSize: number }) => {
+        pages.push(page)
+        assert.equal(pageSize, 200)
+        if (fail)
+          throw new Error('unavailable')
+        return Array.from({ length: page === 1 ? 200 : 1 }, (_, i) => ({ id: `${page}-${i}`, name: 'Group', color: '#64748BFF', enabled: true }))
+      },
+    },
+  })
+  const view = fixture.module.useAccountGroupCatalog({ immediate: false })
+  await view.loadGroups()
+  assert.deepEqual(pages, [1, 2])
+  assert.equal(view.groups.value.length, 201)
+  assert.equal(view.loading.value, false)
+  fail = true
+  await view.loadGroups()
+  assert.equal(view.groups.value.length, 201)
+  assert.equal(view.loading.value, false)
+  assert.equal(fixture.errors.length, 1)
+})
+
 test('superseded usage requests and component disposal abort network work without error toasts', async () => {
   const signals: AbortSignal[] = []
   const pending = (_query: unknown, signal: AbortSignal) => {

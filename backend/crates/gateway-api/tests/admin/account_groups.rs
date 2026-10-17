@@ -12,6 +12,33 @@ use super::{AdminTestFixture, AdminTestState, PRIMARY_GROUP_ID};
 const SESSION_COOKIE: &str = "cpr_admin_session=valid-session";
 
 #[tokio::test]
+async fn catalog_is_authenticated_paginated_and_contains_only_selector_fields() {
+    let fixture = authenticated_fixture().await;
+    let uri = "/api/admin/account-groups/catalog?page=1&pageSize=1&search=alpha&enabled=true";
+    let denied = request(router(&fixture), Method::GET, uri, None, false).await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let response = request(router(&fixture), Method::GET, uri, None, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let value = response_json(response).await;
+    let entries = value["data"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], PRIMARY_GROUP_ID);
+    assert_eq!(entries[0]["enabled"], true);
+    assert!(entries[0]["name"].is_string());
+    assert!(entries[0]["color"].is_string());
+    assert_eq!(entries[0].as_object().unwrap().len(), 4);
+    let response = request(
+        router(&fixture),
+        Method::GET,
+        "/api/admin/account-groups/catalog?pageSize=201",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn list_route_should_keep_camel_case_group_and_page_wire() {
     let fixture = authenticated_fixture().await;
     let response = request(

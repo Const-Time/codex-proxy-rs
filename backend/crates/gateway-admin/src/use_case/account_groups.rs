@@ -32,6 +32,10 @@ use super::{map_store_error, publish_committed};
 /// API-facing account group management service.
 #[async_trait]
 pub trait AccountGroupService: Send + Sync {
+    async fn catalog(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> Result<Vec<crate::model::account_groups::AccountGroupRef>, AdminError>;
     async fn list(&self, query: AccountGroupListQuery) -> Result<AccountGroupPage, AdminError>;
     async fn create(
         &self,
@@ -120,6 +124,15 @@ impl DefaultAccountGroupService {
 
 #[async_trait]
 impl AccountGroupService for DefaultAccountGroupService {
+    async fn catalog(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> Result<Vec<crate::model::account_groups::AccountGroupRef>, AdminError> {
+        self.store
+            .account_group_catalog(query)
+            .await
+            .map_err(|error| map_store_error(error, "account group catalog"))
+    }
     async fn list(&self, query: AccountGroupListQuery) -> Result<AccountGroupPage, AdminError> {
         let mut page = self
             .store

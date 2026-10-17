@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AccountGroup } from '@/api'
+import type { AccountGroupRef } from '@/api'
 import { Search } from '@lucide/vue'
 import { computed } from 'vue'
 
@@ -9,7 +9,7 @@ import ProviderFilterSegmented from '@/components/ProviderFilterSegmented.vue'
 import { accountStatusFilterOptions } from '../constants'
 
 const props = defineProps<{
-  groups: AccountGroup[]
+  groups: AccountGroupRef[]
   groupsLoading: boolean
 }>()
 

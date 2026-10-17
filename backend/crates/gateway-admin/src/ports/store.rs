@@ -494,6 +494,10 @@ pub trait ClientKeyStore: Send + Sync {
 /// Provider-neutral account group management transactions.
 #[async_trait]
 pub trait AccountGroupStore: Send + Sync {
+    async fn account_group_catalog(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> AdminStoreResult<Vec<crate::model::account_groups::AccountGroupRef>>;
     async fn update_plugin_group_budget(
         &self,
         _scope: crate::model::plugins::PluginMutationScope,

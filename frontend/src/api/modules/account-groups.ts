@@ -97,6 +97,10 @@ export function getAccountGroups(data: AccountGroupListParams) {
   })
 }
 
+export function getAccountGroupCatalog(data: AccountGroupListParams) {
+  return request<AccountGroupRef[]>({ url: '/api/admin/account-groups/catalog', method: 'GET', params: data })
+}
+
 export function createAccountGroup(data: AccountGroupCreateParam) {
   return request<AccountGroupMutationResponse>({
     url: '/api/admin/account-groups/create',

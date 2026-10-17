@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AccountGroup, AccountModelAccess } from '@/api'
+import type { AccountGroupRef, AccountModelAccess } from '@/api'
 
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
@@ -9,7 +9,7 @@ import AccountSettingsFields from './AccountSettingsFields.vue'
 defineProps<{
   selectedCount: number
   catalogAccountId?: string
-  groups: AccountGroup[]
+  groups: AccountGroupRef[]
   groupsLoading: boolean
   saving: boolean
 }>()

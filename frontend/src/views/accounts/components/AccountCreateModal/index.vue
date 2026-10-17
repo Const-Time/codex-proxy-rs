@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { AccountRow } from '../../constants'
 import type { AccountCreateForm, AccountImportMode } from './model'
-import type { AccountGroup } from '@/api'
+import type { AccountGroupRef } from '@/api'
 import { Openai, Xai } from '@boxicons/vue'
 import { LayoutGrid, Settings2 } from '@lucide/vue'
 import { computed } from 'vue'
@@ -17,7 +17,7 @@ import { accountProxyError } from './model'
 import { resolveAccountCreatePresentation } from './presenter'
 
 const props = withDefaults(defineProps<{
-  groups: AccountGroup[]
+  groups: AccountGroupRef[]
   groupsLoading: boolean
   saving?: boolean
   oauthLoading?: boolean
