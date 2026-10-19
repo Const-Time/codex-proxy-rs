@@ -7,10 +7,10 @@ import BaseCard from '@/components/base/BaseCard.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import ProviderFilterSegmented from '@/components/ProviderFilterSegmented.vue'
 import OpsErrorPanel from './components/OpsErrorPanel.vue'
+import UsageDateRangePicker from './components/UsageDateRangePicker.vue'
 import UsageFilters from './components/UsageFilters.vue'
 import UsageInsightsGrid from './components/UsageInsightsGrid.vue'
 import UsageRecordDetailModal from './components/UsageRecordDetailModal.vue'
@@ -21,7 +21,7 @@ import UserRankingPanel from './components/UserRankingPanel.vue'
 import { useUsageRecordDetail } from './composables/useUsageRecordDetail'
 import { useUsageRecordsTable } from './composables/useUsageRecordsTable'
 import { useUsageTimeRange } from './composables/useUsageTimeRange'
-import { usageRecordColumns, usageTimeRangeOptions } from './constants'
+import { usageRecordColumns } from './constants'
 
 const props = defineProps<{ personal?: boolean }>()
 provide('personalUsage', computed(() => Boolean(props.personal)))
@@ -34,7 +34,7 @@ const recordViewOptions = [
   { label: '成功记录', value: 'success' },
   { label: '错误排查', value: 'errors' },
 ]
-const { timeRange, timeRangeParams, refreshTimeRangeEnd }
+const { timeRange, timeRangeParams, refreshTimeRangeEnd, customDates, setCustomRange }
   = useUsageTimeRange()
 
 const {
@@ -62,7 +62,7 @@ const {
 
 const { showDetailModal, selectedUsageRecord, handleViewDetail } = useUsageRecordDetail(Boolean(props.personal))
 
-watch(timeRange, () => {
+watch([timeRange, customDates], () => {
   refreshTimeRangeEnd()
   currentPage.value = 1
   void loadUsageRecords()
@@ -73,7 +73,7 @@ watch(timeRange, () => {
   <div class="w-full">
     <BasePageHeader :title="personal ? '使用记录' : '使用统计'" description="查看请求用量、性能趋势与调用错误记录">
       <template #actions>
-        <BaseSelect v-model="timeRange" :options="usageTimeRangeOptions" class="w-34" />
+        <UsageDateRangePicker v-model="timeRange" @apply="setCustomRange" />
         <ProviderFilterSegmented
           v-model="providerQuery"
           :disabled="refreshingList"

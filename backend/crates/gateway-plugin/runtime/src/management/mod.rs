@@ -53,6 +53,10 @@ pub(super) async fn invoke(
         session.maximum_call_timeout().min(Duration::from_secs(30)),
     );
     context.request_id = Some(request.actor.request_id.clone());
+    context.request = request
+        .invocation
+        .as_ref()
+        .and_then(|v| crate::request_context::wire(&v.context.call_scope));
     let _caller = calls
         .enter(
             context.clone(),

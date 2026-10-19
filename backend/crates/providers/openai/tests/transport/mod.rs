@@ -529,3 +529,5 @@ fn assert_substrings_appear_in_order(haystack: &str, needles: &[&str]) {
         offset += relative + needle.len();
     }
 }
+
+mod proxy_capacity;

@@ -2460,7 +2460,7 @@ async fn selector_capacity_failure_occurs_before_visible_upstream_send() {
         Ok(_) => panic!("capacity must fail"),
         Err(error) => error,
     };
-    assert_eq!(error.kind(), ProviderErrorKind::Unavailable);
+    assert_eq!(error.kind(), ProviderErrorKind::AccountCapacityUnavailable);
     assert_eq!(error.send_state(), UpstreamSendState::NotSent);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
 }
@@ -2505,7 +2505,16 @@ async fn selection_failures_carry_a_distinguishable_client_error_code() {
         let detail = error
             .client_visible_upstream_error()
             .expect("client visible detail");
-        assert_eq!(error.kind(), ProviderErrorKind::Unavailable);
+        assert_eq!(
+            error.kind(),
+            if expected_code == "account_selector_unavailable" {
+                ProviderErrorKind::ProviderInfrastructureUnavailable
+            } else if expected_code == "account_capacity_busy" {
+                ProviderErrorKind::AccountCapacityUnavailable
+            } else {
+                ProviderErrorKind::NoEligibleAccount
+            }
+        );
         assert_eq!(detail.code(), Some(expected_code));
         assert_eq!(detail.error_type(), Some("account_unavailable_error"));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
@@ -3638,7 +3647,7 @@ mod upstream_adapter {
             .await
             .err()
             .expect("rejected");
-        assert_eq!(error.kind(), ProviderErrorKind::Unavailable);
+        assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
         assert_eq!(error.send_state(), UpstreamSendState::NotSent);
         assert_eq!(
             selector.required_accounts.lock().unwrap()[0],

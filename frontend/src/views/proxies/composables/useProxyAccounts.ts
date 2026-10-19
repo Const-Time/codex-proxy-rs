@@ -35,7 +35,6 @@ export function useProxyAccounts(options: {
 
   function setPage(page: number) {
     query.page.value = page
-    query.items.value = []
     load()
   }
 
@@ -71,9 +70,13 @@ export function useProxyAccounts(options: {
     query.error.value = ''
     query.page.value = 1
     search.value = ''
-    load()
+    if (options.isOpen() && options.proxyId())
+      void query.reloadFromStart()
   }, { immediate: true })
-  watchDebounced(search, () => setPage(1), { debounce: 300 })
+  watchDebounced(search, () => {
+    if (options.isOpen() && options.proxyId())
+      void query.reloadFromStart()
+  }, { debounce: 300 })
 
   return {
     accounts: query.items,

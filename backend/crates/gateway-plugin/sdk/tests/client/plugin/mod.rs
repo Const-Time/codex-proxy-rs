@@ -490,6 +490,7 @@ async fn send_call(
                 id,
                 method: method.into(),
                 context: CallContext {
+                    request: None,
                     call_id: id,
                     instance_id: "test-instance".into(),
                     generation: 1,

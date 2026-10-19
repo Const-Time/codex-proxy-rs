@@ -329,7 +329,11 @@ async fn sdk_adapter_tail_error_keeps_metering_but_never_delivers_completed_wire
         );
         assert_eq!(account.failures.load(Ordering::SeqCst), 1);
         if mode == "tail" {
-            assert!(f.access.is_revoked());
+            assert!(!f.access.is_revoked());
+            let mut next = f.stream("http", Account::new(), None, CancellationToken::new());
+            while let Some(event) = next.next().await {
+                event.unwrap();
+            }
         }
         assert!(!format!("{error:?}").contains("private fixture tail fault"));
         f.stop().await;

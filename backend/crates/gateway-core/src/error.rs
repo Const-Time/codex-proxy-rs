@@ -40,6 +40,7 @@ pub enum ProviderErrorKind {
     AccountCapacityUnavailable,
     /// Provider 已确认当前请求无法选出可用账号。
     NoEligibleAccount,
+    SessionPolicyRestricted,
     /// Provider 的账号存储、租约协调或本地凭据数据不可用。
     ProviderInfrastructureUnavailable,
     /// 请求超时。
@@ -77,6 +78,7 @@ impl ProviderErrorKind {
             Self::QuotaExhausted => "quota_exhausted",
             Self::AccountCapacityUnavailable => "account_capacity_unavailable",
             Self::NoEligibleAccount => "no_eligible_account",
+            Self::SessionPolicyRestricted => "session_policy_restricted",
             Self::ProviderInfrastructureUnavailable => "provider_infrastructure_unavailable",
             Self::Timeout => "timeout",
             Self::Transport => "transport",
@@ -1142,6 +1144,10 @@ impl GatewayError {
             ProviderErrorKind::InvalidRequest => {
                 Self::new(GatewayErrorKind::InvalidRequest, "invalid upstream request")
             }
+            ProviderErrorKind::SessionPolicyRestricted => Self::new(
+                GatewayErrorKind::InvalidRequest,
+                "session policy excludes all eligible accounts",
+            ),
             ProviderErrorKind::ContinuationRecoveryRequired => Self::new(
                 GatewayErrorKind::InvalidRequest,
                 "conversation continuation must be rebuilt",

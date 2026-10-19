@@ -59,6 +59,7 @@ pub struct PluginEngine {
     store: Arc<dyn PluginStore>,
     processes: ProcessSupervisor,
     validators: Arc<tokio::sync::Semaphore>,
+    preparations: tokio::sync::Semaphore,
     logs: crate::callbacks::LogRegistry,
     data: Option<Arc<dyn gateway_admin::ports::plugins::PluginDataService>>,
 }
@@ -77,6 +78,7 @@ impl PluginEngine {
             store,
             processes: ProcessSupervisor::default(),
             validators: Arc::new(tokio::sync::Semaphore::new(2)),
+            preparations: tokio::sync::Semaphore::new(2),
             logs: crate::callbacks::LogRegistry::default(),
             data: None,
         }
@@ -190,22 +192,17 @@ fn configuration(record: &PluginRecord, manifest: &Manifest) -> Result<Value, Ad
     }
     Ok(value)
 }
-pub(crate) fn schema(value: &Value) -> Result<jsonschema::Validator, AdminError> {
-    jsonschema::options()
-        .offline()
-        .with_pattern_options(jsonschema::PatternOptions::fancy_regex().backtrack_limit(20_000))
-        .build(value)
-        .map_err(|_| AdminError::invalid("插件 schema 无效或引用外部资源"))
-}
+pub(crate) use crate::schema::schema;
+
 fn unsupported(manifest: &Manifest) -> Vec<String> {
     manifest
         .contributes
         .iter()
         .filter(|(cap, decl)| match cap {
-            Capability::Middleware => decl.version != 4,
+            Capability::Middleware => !matches!(decl.version, 4 | 5),
             Capability::UpstreamAdapter => !matches!(decl.version, 1 | 2),
-            Capability::Management
-            | Capability::FrontendAuthentication
+            Capability::Management => !matches!(decl.version, 1 | 2),
+            Capability::FrontendAuthentication
             | Capability::ModelCatalog
             | Capability::ModelRouter
             | Capability::Scheduler
@@ -256,13 +253,22 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(info.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         info.unsupported_capabilities = unsupported(&manifest);
-        info.version_warning =
+        info.version_warning = if let Some(package) = &manifest.package
+            && package.protocol_version != gateway_plugin_sdk::PROTOCOL_VERSION
+        {
+            Some(format!(
+                "插件使用 RPC v{}，当前宿主需要 v{}；请上传适配新版 SDK 的插件包，原实例数据会保留",
+                package.protocol_version,
+                gateway_plugin_sdk::PROTOCOL_VERSION
+            ))
+        } else {
             (!manifest.engines.codex_proxy_rs.matches(&self.version)).then(|| {
                 format!(
                     "插件声明宿主版本 {}，当前为 {}，兼容性未经保证",
                     manifest.engines.codex_proxy_rs, self.version
                 )
-            });
+            })
+        };
         Ok(info)
     }
     async fn inspect(&self, archive: Arc<[u8]>) -> Result<PluginArtifact, AdminError> {
@@ -300,6 +306,16 @@ impl PluginRuntime for PluginEngine {
         let manifest: Manifest = serde_json::from_value(artifact.manifest.clone())
             .map_err(|_| AdminError::invalid("插件清单无效"))?;
         configuration(record, &manifest)?;
+        if record.enabled
+            && manifest
+                .package
+                .as_ref()
+                .is_some_and(|p| p.protocol_version != gateway_plugin_sdk::PROTOCOL_VERSION)
+        {
+            return Err(AdminError::invalid(
+                "插件 RPC 协议不兼容，请先上传并切换到 v4 插件包；无需删除原实例",
+            ));
+        }
         if let Some(binding) = &record.observer {
             binding.validate()?;
             if manifest
@@ -356,7 +372,7 @@ impl PluginRuntime for PluginEngine {
                 .contributes
                 .get(&Capability::Middleware)
                 .ok_or_else(|| AdminError::invalid("此制品未提供中间件能力"))?;
-            if declaration.version != 4
+            if !matches!(declaration.version, 4 | 5)
                 || binding.mounts.iter().any(|mount| {
                     !declaration.stages.contains(&match mount {
                         PluginMiddlewareMount::Http => Stage::Http,
@@ -408,6 +424,11 @@ impl PluginRuntime for PluginEngine {
         record: &PluginRecord,
         artifact: PluginArtifact,
     ) -> Result<Arc<dyn PluginProcess>, AdminError> {
+        let _slot = self
+            .preparations
+            .acquire()
+            .await
+            .map_err(|_| AdminError::unavailable("插件准备已关闭"))?;
         let package = self
             .package(artifact.archive, Some(record.artifact_sha256.clone()))
             .await?;

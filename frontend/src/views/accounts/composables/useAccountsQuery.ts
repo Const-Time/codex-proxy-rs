@@ -121,15 +121,13 @@ export function useAccountsQuery() {
   watchDebounced(
     searchQuery,
     () => {
-      query.page.value = 1
-      void query.execute()
+      void query.reloadFromStart()
     },
     { debounce: 250 },
   )
 
   watch([providerQuery, statusQuery, groupQuery], () => {
-    query.page.value = 1
-    void query.execute()
+    void query.reloadFromStart()
   })
 
   onMounted(() => {

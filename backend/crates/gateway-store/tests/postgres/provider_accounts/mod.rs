@@ -1895,6 +1895,7 @@ async fn authorization_import_rejects_a_saved_proxy_changed_during_oauth() {
     let edited = proxies
         .update(
             UpdateProxy {
+                max_websocket_connections: None,
                 location_policy: None,
                 id: saved.id.clone(),
                 revision: saved.revision,

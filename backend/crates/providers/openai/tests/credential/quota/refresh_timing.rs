@@ -13,8 +13,8 @@ async fn mount_usage(server: &MockServer, value: serde_json::Value) {
         .await;
 }
 
-async fn wait_for_reset_grace(reset: i64) {
-    let due = SystemTime::UNIX_EPOCH + Duration::from_secs((reset + 120) as u64);
+async fn wait_for_reset_grace(reset: i64, grace_seconds: i64) {
+    let due = SystemTime::UNIX_EPOCH + Duration::from_secs((reset + grace_seconds) as u64);
     if let Ok(remaining) = due.duration_since(SystemTime::now()) {
         tokio::time::sleep(remaining + Duration::from_millis(50)).await;
     }
@@ -28,7 +28,7 @@ async fn reset_grace_bypasses_periodic_throttle_once_then_allows_the_next_window
     let server = MockServer::start().await;
     let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
     // 使用接近宽限期终点的真实窗口，在数秒内走完两个窗口的调度与落库路径。
-    let short_reset = Utc::now().timestamp() - 115;
+    let short_reset = Utc::now().timestamp() - 5;
     let week_reset = short_reset + 3;
     let usage = |short_used, short_reset, week_used, week_reset| {
         json!({"rate_limit": {
@@ -50,7 +50,7 @@ async fn reset_grace_bypasses_periodic_throttle_once_then_allows_the_next_window
     let requests = server.received_requests().await.expect("requests").len();
 
     assert!(
-        Utc::now().timestamp() < short_reset + 120,
+        Utc::now().timestamp() < short_reset + 10,
         "fixture must precede grace deadline"
     );
     service.synchronize().await.expect("before grace deadline");
@@ -60,7 +60,7 @@ async fn reset_grace_bypasses_periodic_throttle_once_then_allows_the_next_window
     );
 
     mount_usage(&server, usage(0, short_reset + 18_000, 100, week_reset)).await;
-    wait_for_reset_grace(short_reset).await;
+    wait_for_reset_grace(short_reset, 10).await;
     let partial = service.synchronize().await.expect("short reset check");
     assert_eq!(partial.exhausted, 1);
     assert_eq!(
@@ -78,7 +78,7 @@ async fn reset_grace_bypasses_periodic_throttle_once_then_allows_the_next_window
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
 
     // 周窗口的到期复核仍未恢复时，也不能每轮扫描重复请求。
-    wait_for_reset_grace(week_reset).await;
+    wait_for_reset_grace(week_reset, 10).await;
     assert_eq!(
         service
             .synchronize()
@@ -164,8 +164,8 @@ async fn overdue_reset_retries_and_recovers_without_waiting_thirty_minutes() {
         .await
         .expect("throttled immediate retry");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    // 调度使用 std::time::Instant；真实等待验证公共服务路径，不添加生产测试钩子。
-    tokio::time::sleep(Duration::from_secs(61)).await;
+    // 真实等待验证公共服务路径的 30 秒快速复核间隔。
+    tokio::time::sleep(Duration::from_secs(31)).await;
     assert_eq!(
         service
             .synchronize()
@@ -236,7 +236,7 @@ async fn allowed_account_with_expired_window_synchronizes_at_reset_grace() {
 
     // 当到达 reset + 120s 宽限期后，账号虽然处于 allowed 状态，但包含已到期的非零用量窗口，被调度主动同步。
     mount_usage(&server, usage(0, short_reset + 18_000)).await;
-    wait_for_reset_grace(short_reset).await;
+    wait_for_reset_grace(short_reset, 120).await;
 
     let summary = service
         .synchronize()

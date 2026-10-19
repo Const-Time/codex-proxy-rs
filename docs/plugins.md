@@ -4,18 +4,24 @@
 
 宿主在 Unix 使用独立进程组、Windows 使用 Job Object 管理插件及其助手进程。停用、卸载、父进程崩溃或退出时清理整个受管组，助手进程关闭标准输入输出也不会绕过清理。可信原生插件仍具有当前系统用户权限；进程组不是安全沙箱，也不是独立 CPU/内存配额，部署层资源限额仍须保留。
 
-当前已接入插件协议、安装管理、管理页面、私有状态及下表列出的运行能力。SDK、CLI、包校验、RPC 和页面桥来自上游 v3.21.2 固定快照 `fb15f3e3`；本地 Admin、Store、API 和运行时接入保持现有职责划分。SDK 包含完整上游类型并不代表本地宿主已实现所有能力。
+当前已接入插件协议、安装管理、管理页面、私有状态及下表列出的运行能力。SDK 基础类型与页面桥源自上游 v3.21.2；RPC v4 编解码与会话队列对齐上游 `a0e70807`；本地 Admin、Store、API 和运行时接入保持现有职责划分。SDK 包含完整上游类型并不代表本地宿主已实现所有能力。
 
 模型事件的 HME1/GPE2 费用快照保持上游字段集合，不附加本地 `custom_multiplier_scope`。上游 SDK 严格拒绝未知字段，直接添加字段会导致模型体检等插件报“模型事件批次格式错误”。核心仍按倍率适用范围计算并记录费用，管理 API 保留完整明细；插件事件返回已经计算好的金额和有效单价，不能根据倍率字段重新推算账单。共享额度继续使用独立的版本化扩展接口。新增合同字段须显式版本化，不能直接扩展既有事件。运行时回归测试使用固定版本的原始上游 SDK 解码带有本地计费结果的事件，并核对实际结算金额。
+
+## RPC v4 升级
+
+宿主 3.13.0 起不运行 RPC v2/v3 二进制。请使用匹配的 SDK / CLI 重建，在原实例切换制品；停用与删除不依赖旧进程启动。共享额度管理使用 0.2.0，模型体检使用 0.4.0，私有状态 schema 不变。管理 v2、中间件 v5 支持入口快照；调度等其他能力仍以本地下表为准，不因帧协议升级自动获得新业务语义。
+
+v4 帧仍为 4 字节元数据长度、8 字节总载荷长度；载荷顺序为请求快照 JSON、业务 JSON、二进制正文。元数据中的 `request_context_bytes` / `data_bytes` 声明前两段长度。JSON 不再重复放入控制元数据，控制元数据上限仍为 64 KiB。普通 serde 序列化 Message 不能代替 SDK 帧编解码器。
 
 ## 支持范围
 
 | 合同 | 当前支持 |
 | --- | --- |
-| SDK / 清单 / 进程协议 | SDK 0.1.0、manifest v2、protocol v2 |
+| SDK / 清单 / 进程协议 | SDK 0.1.0、manifest v2、protocol v4 |
 | 安装与运行 | 本地上传、摘要与路径校验、配置 schema 校验、独立可信进程、启停与重启恢复 |
-| 管理能力 | management v1 的私有资源、页面、已注册路由；仅管理员可访问 |
-| 管理请求 | method/path/query/contentType 与二进制正文；不转发浏览器 Cookie 或请求头；响应必须没有自定义头 |
+| 管理能力 | management v1/v2 的私有资源、页面、已注册路由；仅管理员可访问 |
+| 管理请求 | method/path/query/contentType 与二进制正文；业务头不转发浏览器 Cookie；v4 的 CallContext.request 是可信插件可读的入口快照（含原始头），不能记录或透传敏感字段；响应仍经原管理校验 |
 | 页面桥 | 上游 v2 桥的管理请求、一次性登录回调地址、Responses JSON/SSE 模型调用与高度调整；本地父页面代为鉴权，iframe 使用独立的 opaque origin |
 | 登录回调 | 已注册的 `management.callback` / public_management；复用 OAuth pending-flow 一次性消费，绑定管理员、实例 revision、实际进程 incarnation 和路径 |
 | 通用外部 HTTP | `host.http.do/do_stream/stream_read/stream_close`，宿主签发的调用范围内使用；沿原取消与资源清理链，不需要配置模型服务 |
@@ -44,7 +50,7 @@
 | 本地预算差异 | 用户＋分组共享额度使用 `host.cpr.shared_budgets.v1.*`；上游独立 Key 预算接口保持 unsupported，不能将单 Key 操作隐式扩大为共享额度操作 |
 | 未开放的能力 | 未绑定宿主模型调用权限的阶段回调 |
 
-第三方原包验收分别记录包内协议和实际执行。官方 workbench `0.3.1` Linux x86_64 发布包（SHA-256 `5f173067aa892de3f34532d63fd5d163e4123c495b7176d7cca5518fb33620b0`）已在真实 Runtime 子进程验证协议 v2/middleware v4 的原包解析、握手、注册、公开 CSS 与私有 HTML 声明、资源读取、命令帮助和撤销；未改写包体、版本范围或贡献项。middleware v4 已开放正常启用；该原包及仅替换 SDK 的重建包通过生产校验器、七项声明能力的基本联合调用和原生模型验收。原包与重建包还已通过管理业务、原生文本 JSON/SSE/WebSocket、Images 上传转换，以及真实页面图片生成和续聊的联合验收。该证据限定 Linux x86_64 和受控上游，不能推广为任意第三方插件、后续版本或其他平台原包均已兼容。可显式运行外置集成用例：设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为已核对摘要的原包路径，再执行 `cargo test -p gateway-plugin-runtime --test main installation::official_workbench_archive -- --ignored`。普通检查会将这个需要官方制品的用例标记为 ignored，不能把普通检查通过当作原包验收。官方发行包位于 [插件 Releases](https://github.com/zyycn/codex-proxy-plugins/releases/tag/v0.3.1)。
+历史验收：宿主 3.12.x 曾通过官方 workbench `0.3.1` 的 RPC v2 原包验收。该二进制不适用于 3.13.0 的 RPC v4，必须使用新版 SDK 重建并重新验收；此前的验收不能作为当前兼容性证据。外置 `installation::official_workbench_archive` 测试现验证旧包被明确拒绝启用、仍允许停用；需要设置 `CPR_PLUGIN_WORKBENCH_ORIGINAL` 为摘要核对过的旧包路径并使用 `--ignored`。普通检查中的 ignored 不代表第三方原包已通过验收。
 
 管理资源声明的 `public` 随实际插件代次保留。匿名读取使用 `GET /api/plugins/resource?id=…&revision=…&path=…`，只返回当前启用实例在 `management.register` 中明确登记为公开、且归档清单声明的静态资源；私有或未登记路径返回 404，失效代次返回 409。返回格式沿用 `{status, contentType, body}` 的 JSON envelope 和 base64 正文，公开 HTML 不作为宿主同源页面执行。管理资源读取及插件业务调用继续使用现有管理员入口。改变公开声明、停用或升级均通过原实例代次生效。
 

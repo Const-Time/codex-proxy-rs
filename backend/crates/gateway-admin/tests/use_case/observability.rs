@@ -93,6 +93,45 @@ fn external_observability_range_rejects_over_366_days_and_reversed_range() {
 }
 
 #[tokio::test]
+async fn today_dashboard_loads_yesterday_independently_of_chart_range() {
+    let now = Utc::now();
+    let start = china_day_start(now);
+    let range = TimeRange::new(start, now).unwrap();
+    let store = Arc::new(FixtureObservabilityStore::new(range));
+    store.replace_trend(vec![health_metric_point(
+        start,
+        RequestMetrics {
+            request_count: 3,
+            input_tokens: 100,
+            cached_tokens: 20,
+            ..Default::default()
+        },
+    )]);
+    store.overview.lock().unwrap().requests = RequestMetrics {
+        request_count: 7,
+        input_tokens: 200,
+        cached_tokens: 100,
+        ..Default::default()
+    };
+    let services = observability_services(store.clone()).await;
+    let summary = services
+        .observability()
+        .dashboard_summary(range, TrendKind::Usage)
+        .await
+        .unwrap();
+    assert_eq!(summary.today.request_count, 3);
+    assert_eq!(summary.yesterday.request_count, 7);
+    assert_eq!(summary.yesterday.cached_token_rate, 0.5);
+    assert_eq!(
+        *store.summary_ranges.lock().unwrap(),
+        vec![TimeRange {
+            start: start - Duration::days(1),
+            end: start,
+        }]
+    );
+}
+
+#[tokio::test]
 async fn health_timeline_should_keep_exactly_china_day_quarter_hour_slots() {
     let now = Utc::now();
     let day_start = china_day_start(now);
@@ -723,6 +762,7 @@ async fn usage_insights_should_reject_partial_costs_when_billing_stream_fails() 
 }
 
 struct FixtureObservabilityStore {
+    summary_ranges: Mutex<Vec<TimeRange>>,
     usage_summary_calls: AtomicUsize,
     trend: Mutex<Vec<RequestMetricPoint>>,
     overview: Mutex<UsageOverview>,
@@ -740,6 +780,7 @@ struct FixtureObservabilityStore {
 impl FixtureObservabilityStore {
     fn new(range: TimeRange) -> Self {
         Self {
+            summary_ranges: Mutex::new(Vec::new()),
             usage_summary_calls: AtomicUsize::new(0),
             trend: Mutex::new(Vec::new()),
             overview: Mutex::new(UsageOverview {
@@ -910,7 +951,12 @@ impl ObservabilityStore for FixtureObservabilityStore {
         })
     }
 
-    async fn usage_summary(&self, _: TimeRange, _: UsageFilter) -> AdminStoreResult<UsageOverview> {
+    async fn usage_summary(
+        &self,
+        range: TimeRange,
+        _: UsageFilter,
+    ) -> AdminStoreResult<UsageOverview> {
+        self.summary_ranges.lock().unwrap().push(range);
         self.usage_summary_calls.fetch_add(1, Ordering::Relaxed);
         tokio::task::yield_now().await;
         Ok(self.overview.lock().expect("overview").clone())

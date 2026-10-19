@@ -19,8 +19,10 @@ pub(super) async fn invoke(
     context.cancellation = origin.context.cancellation.clone();
     context.deadline_at = origin.context.deadline_at;
     context.origin = Some(origin);
-    if session.capability_version(Capability::Middleware) != Some(4)
-        || !session.capability_supports_stage(Capability::Middleware, Stage::WebSocket)
+    if !matches!(
+        session.capability_version(Capability::Middleware),
+        Some(4 | 5)
+    ) || !session.capability_supports_stage(Capability::Middleware, Stage::WebSocket)
     {
         return Err(MiddlewareError::InvalidState);
     }
@@ -48,6 +50,10 @@ pub(super) async fn invoke(
             .map_err(|_| MiddlewareError::Fault)?,
     };
     let mut call = session.context(Stage::WebSocket, remaining);
+    call.request = context
+        .origin
+        .as_ref()
+        .and_then(|v| crate::request_context::wire(&v.context.call_scope));
     call.request_id = Some(context.connection_id.clone());
     let _binding =
         callbacks.bind_websocket(&call, invocation.clone(), context.service_origin(None))?;

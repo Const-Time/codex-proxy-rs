@@ -49,6 +49,7 @@ pub(crate) async fn invoke(
     };
     let mut context = session.context(Stage::Retry, timeout);
     context.request_id = Some(request.request_id.clone());
+    context.request = crate::request_context::wire(input.call_scope());
     context.attempt_id = Some(format!("{}:{}", request.request_id, request.attempt_index));
     outbound
         .bind(

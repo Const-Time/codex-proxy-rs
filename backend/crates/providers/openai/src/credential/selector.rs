@@ -94,6 +94,7 @@ pub struct SelectCodexCredential<'a> {
 }
 
 pub(crate) struct SelectCodexProviderEndpointCredential<'a> {
+    pub model: Option<&'a str>,
     pub request_url: &'a Url,
     pub attempt: &'a AttemptContext,
     pub session_affinity: Option<&'a CodexSessionAffinity>,
@@ -262,7 +263,7 @@ struct AffinityTelemetry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelCatalogEligibility<'a> {
     Required(&'a str),
-    NotApplicable,
+    Endpoint(Option<&'a str>),
 }
 
 impl CodexCredentialSelector {
@@ -346,8 +347,12 @@ impl CodexCredentialSelector {
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
             session_affinity_observation: request.session_affinity,
         };
-        self.select_inner(&input, None, ModelCatalogEligibility::NotApplicable)
-            .await
+        self.select_inner(
+            &input,
+            None,
+            ModelCatalogEligibility::Endpoint(request.model),
+        )
+        .await
     }
 
     async fn select_inner(
@@ -405,7 +410,9 @@ impl CodexCredentialSelector {
                             .is_some_and(|scope| scope.allows(account.id())))
                     && (diagnostic
                         || match model_catalog_eligibility {
-                            ModelCatalogEligibility::NotApplicable => true,
+                            ModelCatalogEligibility::Endpoint(model) => request.attempt.account_scope().is_some_and(|scope| {
+                                model.map_or_else(|| scope.directory().account(account.id()).is_some_and(|a| a.model_access().mode() == gateway_core::account::AccountModelAccessMode::All), |model| scope.allows_model(account.id(), model))
+                            }),
                             ModelCatalogEligibility::Required(upstream_model) => {
                                 if !request.attempt.account_scope().is_some_and(|scope| {
                                     scope.allows_model(account.id(), upstream_model)
@@ -565,7 +572,7 @@ impl CodexCredentialSelector {
                     &self.provider_kind,
                     match model_catalog_eligibility {
                         ModelCatalogEligibility::Required(model) => Some(model),
-                        ModelCatalogEligibility::NotApplicable => None,
+                        ModelCatalogEligibility::Endpoint(model) => model,
                     },
                     &candidates,
                     &context,
@@ -612,6 +619,25 @@ impl CodexCredentialSelector {
                     })
                 } else if quota_exhausted {
                     Err(CredentialSelectionError::QuotaExhausted)
+                } else if cyber_policy_scope
+                    .as_ref()
+                    .and_then(|scope| scope.state.as_ref())
+                    .is_some_and(|state| {
+                        let mut effective = candidates.iter().filter(|candidate| {
+                            pinned_account
+                                .as_ref()
+                                .is_none_or(|id| candidate.account.id() == id)
+                        });
+                        effective.next().is_some_and(|first| {
+                            state.excluded_accounts().contains(first.account.id())
+                                && effective.all(|candidate| {
+                                    state.excluded_accounts().contains(candidate.account.id())
+                                })
+                        })
+                    })
+                {
+                    // 仅明确的会话策略排除使用此分类，空池、传输和容量失败保持原分类
+                    Err(CredentialSelectionError::SessionPolicyRestricted)
                 } else {
                     Err(CredentialSelectionError::NoEligibleCredential)
                 };
@@ -1526,6 +1552,8 @@ pub enum CredentialSelectionError {
     Policy(gateway_core::engine::account_scheduling::AccountPolicyError),
     #[error("no eligible Codex account")]
     NoEligibleCredential,
+    #[error("upstream safety policy temporarily excludes accounts for this session")]
+    SessionPolicyRestricted,
     #[error("account snapshot changed during selection")]
     AccountSnapshotChanged,
     #[error("all eligible accounts have exhausted quota")]

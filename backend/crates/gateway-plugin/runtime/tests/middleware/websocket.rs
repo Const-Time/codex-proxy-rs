@@ -223,7 +223,7 @@ async fn sdk_websocket_partial_read_transfers_only_unread_payload_and_errors_sta
     f.manager.shutdown().await;
 }
 #[tokio::test]
-async fn forged_websocket_handles_fault_the_generation_and_explicit_restart_recovers() {
+async fn forged_websocket_handles_reject_the_call_without_breaking_following_calls() {
     let f = Fixture::new().await;
     assert!(
         f.plan(Default::default())
@@ -240,9 +240,8 @@ async fn forged_websocket_handles_fault_the_generation_and_explicit_restart_reco
             .middleware_registry()
             .unwrap()
             .freeze_websocket(&Default::default(), Default::default())
-            .is_err()
+            .is_ok()
     );
-    f.change(true).await;
     assert!(
         f.plan(Default::default())
             .run(

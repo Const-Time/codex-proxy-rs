@@ -24,7 +24,18 @@ export function usePagedQuery<Result extends PageResult>(options: {
   const total = shallowRef(0)
   const items = shallowRef<Result['items'][number][]>([])
   const request = useRequestState(options.onError)
-  const { loading, error, invalidate } = request
+  const { loading, error } = request
+  let confirmed = { page: page.value, pageSize: pageSize.value }
+
+  function restorePagination() {
+    page.value = confirmed.page
+    pageSize.value = confirmed.pageSize
+  }
+
+  function invalidate() {
+    request.invalidate()
+    restorePagination()
+  }
 
   async function execute(execution: { silent?: boolean } = {}) {
     const requestId = request.start(execution.silent)
@@ -46,16 +57,27 @@ export function usePagedQuery<Result extends PageResult>(options: {
       page.value = result.page.page
       pageSize.value = result.page.pageSize
       total.value = result.page.total
+      confirmed = { page: page.value, pageSize: pageSize.value }
       options.onSuccess?.(result)
       return true
     }
     catch (cause: unknown) {
+      if (request.isCurrent(requestId))
+        restorePagination()
       request.fail(requestId, cause, execution.silent)
       return false
     }
     finally {
       request.finish(requestId)
     }
+  }
+
+  function reloadFromStart() {
+    items.value = []
+    total.value = 0
+    confirmed = { page: 1, pageSize: confirmed.pageSize }
+    restorePagination()
+    return execute()
   }
 
   return {
@@ -66,6 +88,7 @@ export function usePagedQuery<Result extends PageResult>(options: {
     loading,
     error,
     execute,
+    reloadFromStart,
     invalidate,
   }
 }

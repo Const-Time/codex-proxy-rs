@@ -310,14 +310,16 @@ async fn rejected_maintenance_retries_without_blocking_other_instances() {
 }
 
 #[tokio::test]
-async fn malformed_maintenance_responses_fault_the_generation() {
+async fn malformed_maintenance_responses_reject_only_the_call() {
     for mode in ["maintenance-envelope", "maintenance-payload"] {
         let f = MaintenanceFixture::new(mode).await;
         let process = f.process().await;
         process.activate();
         assert!(process.reconcile(Default::default()).await.is_err());
-        assert!(process.access().is_revoked());
-        assert_ne!(process.status(), "ready");
+        assert!(!process.access().is_revoked());
+        assert_eq!(process.status(), "ready");
+        process.reconcile(Default::default()).await.unwrap();
+        assert_eq!(f.count().await, 2);
         process.stop().await;
         f.manager.shutdown().await;
     }

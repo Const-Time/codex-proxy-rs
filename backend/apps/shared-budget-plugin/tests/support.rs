@@ -70,6 +70,7 @@ impl Host {
             .unwrap_or_default();
         write_frame(&mut self.input,&Frame {message:Message::Call {
             id:self.id,method:"management.handle".into(),context:CallContext {
+                request: None,
                 call_id:self.id,instance_id:"budget-test".into(),generation:1,incarnation:"budget-process".into(),stage:Stage::Management,
                 timeout_ms:5000,resource_stream:false,resource_scope_id:format!("scope-{}",self.id),request_id:None,attempt_id:None,account_id:None,credential_revision:None,
             },params:json!({"method":if body.is_some(){"POST"}else{"GET"},"path":path,"query":"","content_type":body.as_ref().map(|_|"application/json"),"headers":[]}),

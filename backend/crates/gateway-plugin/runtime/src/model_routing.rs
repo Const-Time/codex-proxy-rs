@@ -50,6 +50,7 @@ pub(crate) async fn invoke(
     }
     let mut context = session.context(Stage::Routing, timeout);
     context.request_id = Some(input.request_id().as_str().into());
+    context.request = crate::request_context::wire(input.nested_context().scope());
     outbound
         .bind(
             &context,

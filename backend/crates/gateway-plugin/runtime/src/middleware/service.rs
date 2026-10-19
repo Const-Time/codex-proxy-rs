@@ -75,8 +75,10 @@ pub(super) async fn invoke(
     input: core::Value,
     next: core::Next,
 ) -> Result<core::Value, core::Error> {
-    if session.capability_version(Capability::Middleware) != Some(4)
-        || !session.capability_supports_stage(Capability::Middleware, Stage::Service)
+    if !matches!(
+        session.capability_version(Capability::Middleware),
+        Some(4 | 5)
+    ) || !session.capability_supports_stage(Capability::Middleware, Stage::Service)
     {
         return Err(core::Error::unavailable("服务中间件未声明"));
     }
@@ -104,6 +106,7 @@ pub(super) async fn invoke(
         closed,
     });
     call.request_id = Some(context.request_id.clone());
+    call.request = crate::request_context::wire(&context.call_scope);
     let _binding = callbacks
         .bind_service(&call, invocation, context.call_scope.clone())
         .map_err(|_| core::Error::unavailable("服务调用上下文不可用"))?;

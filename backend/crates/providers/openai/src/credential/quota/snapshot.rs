@@ -114,6 +114,7 @@ pub struct CodexAccountQuotaSnapshot {
     credential_revision: CredentialRevision,
     observed_at: SystemTime,
     plan_type: Option<String>,
+    credits_usable: bool,
     fact: CodexQuotaFact,
     quota: QuotaState,
     windows: Vec<CodexQuotaWindow>,
@@ -140,6 +141,11 @@ impl CodexAccountQuotaSnapshot {
     #[must_use]
     pub fn plan_type(&self) -> Option<&str> {
         self.plan_type.as_deref()
+    }
+
+    #[must_use]
+    pub(super) const fn credits_usable(&self) -> bool {
+        self.credits_usable
     }
 
     #[must_use]
@@ -201,7 +207,7 @@ fn parse_codex_quota_object(
     for limit in canonical_rate_limits(object)? {
         aggregate.observe_rate_limit(limit.rate_limit)?;
     }
-    // credits / spend_control 只证明文档结构已识别，不参与账号级访问结论。
+    // 点数与支出控制不换算为套餐百分比；账号可用性由快照统一判断。
     if let Some(spend_control) = object.get("spend_control") {
         aggregate.observe_metadata_object(spend_control, "reached")?;
     }
@@ -337,6 +343,12 @@ pub(crate) fn parse_account_quota_snapshot(
             .then_with(|| left.key.cmp(&right.key))
     });
     let quota = authoritative_quota_state(&object, &windows, observed_at)?;
+    let credits_usable = has_usable_credits(&object);
+    let quota = if credits_usable {
+        QuotaState::allowed(observed_at)
+    } else {
+        quota
+    };
     let recovery = object
         .get(RECOVERY_FIELD)
         .map(|value| serde_json::from_value(value.clone()))
@@ -350,6 +362,7 @@ pub(crate) fn parse_account_quota_snapshot(
             .get("plan_type")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        credits_usable,
         fact,
         quota,
         windows,
@@ -366,6 +379,27 @@ fn quota_source_order(source: &str) -> u8 {
 }
 
 /// 默认 `codex` 桶是唯一可改变账号额度访问结论的 quota 响应字段。
+fn has_usable_credits(usage: &Map<String, Value>) -> bool {
+    let Some(credits) = usage.get("credits") else {
+        return false;
+    };
+    let available = credits.get("has_credits").and_then(Value::as_bool) == Some(true)
+        || credits.get("unlimited").and_then(Value::as_bool) == Some(true);
+    // 套餐耗尽不阻止点数支出，但不能绕过显式支出上限或工作区限制
+    let spend_reached = usage
+        .get("spend_control")
+        .and_then(|spend| spend.get("reached"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let other_limit_reached = usage
+        .get("rate_limit_reached_type")
+        .and_then(|reason| reason.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|reason| reason != "rate_limit_reached");
+    available && !spend_reached && !other_limit_reached
+}
+
+/// 只有默认 `codex` 桶能提供账号级套餐访问结论，具名桶只保留展示事实
 fn authoritative_quota_state(
     usage: &Map<String, Value>,
     windows: &[CodexQuotaWindow],

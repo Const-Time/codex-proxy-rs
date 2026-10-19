@@ -62,7 +62,7 @@ pub(crate) async fn image_edits(
 async fn handle_image_request(
     state: ApiState,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: AuthenticatedBody,
     kind: ImageRequestKind,
     endpoint: &'static str,
@@ -71,8 +71,19 @@ async fn handle_image_request(
     let AuthenticatedBody {
         client,
         body,
-        memory: _memory,
+        mut memory,
     } = body;
+    let body = if kind == ImageRequestKind::Edit {
+        if super::request::is_multipart(&headers) && !memory.reserve(body.len().saturating_mul(8)) {
+            return crate::openai::ingress::exhausted();
+        }
+        match super::request::normalize_edit_body(body, &mut headers).await {
+            Ok(body) => body,
+            Err(error) => return gateway_error_response(&error),
+        }
+    } else {
+        body
+    };
     let (client_ip, user_agent) = request_client_context(
         &headers,
         connect_info.map(|Extension(ConnectInfo(address))| address),

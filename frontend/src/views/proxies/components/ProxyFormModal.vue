@@ -8,6 +8,7 @@ import BaseForm from '@/components/base/BaseForm/index.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
+import BaseNumberInput from '@/components/base/BaseNumberInput.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import { proxyConnectionFields, proxyConnectionUpdate, proxyProtocols } from './connection'
 
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 const open = defineModel<boolean>({ required: true })
 const name = defineModel<string>('name', { required: true })
 const proxyUrl = defineModel<string>('proxyUrl', { required: true })
+const maxWebsocketConnections = defineModel<number>('maxWebsocketConnections', { required: true })
 const locationPolicy = defineModel<ProxyLocationPolicy>('locationPolicy', { required: true })
 const locationModes = [
   { label: '自动识别出口地区', value: 'auto' },
@@ -146,6 +148,12 @@ function toggleConnection() {
       <p v-if="proxy?.lastTest?.location" class="m-0 text-cp-xs text-cp-text-tertiary">
         最近识别：{{ proxy.lastTest.location.country }} / {{ proxy.lastTest.location.region }} / {{ proxy.lastTest.location.city }} · {{ proxy.lastTest.location.timezone }}
       </p>
+      <BaseFormItem label="WebSocket 连接上限">
+        <BaseNumberInput v-model="maxWebsocketConnections" label="WebSocket 连接上限" :min="0" :max="4294967295" :disabled="saving" />
+        <p class="mt-1 text-cp-xs text-cp-text-secondary">
+          0 表示不限。同一代理的账号共享连接名额，包含空闲连接。
+        </p>
+      </BaseFormItem>
     </BaseForm>
     <template #footer>
       <BaseButton variant="secondary" :disabled="saving" @click="open = false">

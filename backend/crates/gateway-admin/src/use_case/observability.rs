@@ -207,10 +207,17 @@ impl DefaultObservabilityService {
         range: TimeRange,
     ) -> Result<DashboardResult, AdminError> {
         let observed_at = Utc::now();
-        let (mut observation, settings, runtime_slots) = futures::try_join!(
+        let today_start = china_day_start(range.end);
+        let yesterday_range = TimeRange {
+            start: today_start - Duration::days(1),
+            end: today_start,
+        };
+        let (mut observation, settings, runtime_slots, yesterday_overview) = futures::try_join!(
             self.store.dashboard_summary(range, observed_at),
             self.settings.load_runtime_settings(),
             self.store.dashboard_runtime_slots(observed_at),
+            self.store
+                .usage_summary(yesterday_range, UsageFilter::default()),
         )
         .map_err(|error| map_store_error(error, "dashboard"))?;
         self.enrich_list_billing(&mut observation.recent_requests);
@@ -222,10 +229,25 @@ impl DefaultObservabilityService {
                 .plan_type_display(&account.provider_kind, account.plan_type.as_deref());
         }
         let today_start = china_day_start(observation.range.end);
-        let yesterday_start = today_start - Duration::days(1);
         let today =
             dashboard_period_metrics(&observation.trend, today_start, observation.range.end);
-        let yesterday = dashboard_period_metrics(&observation.trend, yesterday_start, today_start);
+        // The selected chart can start today; yesterday must be queried independently.
+        let yesterday_requests = yesterday_overview.requests;
+        let yesterday = DashboardPeriodMetrics {
+            request_count: yesterday_requests.request_count,
+            input_tokens: yesterday_requests.input_tokens,
+            output_tokens: yesterday_requests.output_tokens,
+            cached_tokens: yesterday_requests.cached_tokens,
+            total_tokens: yesterday_requests.total_tokens,
+            cached_token_rate: rate_or_zero(
+                yesterday_requests.cached_tokens,
+                yesterday_requests.input_tokens,
+            ),
+            observed_cached_token_rate: ratio(
+                yesterday_requests.cached_tokens,
+                yesterday_requests.input_tokens,
+            ),
+        };
         let total_billing_usd = observation.totals.billing_usd.clone();
         let total_cached_token_rate = rate_or_zero(
             observation.totals.cached_tokens,

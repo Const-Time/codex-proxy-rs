@@ -61,9 +61,9 @@ fn archive() -> Arc<[u8]> {
     let manifest = json!({
         "manifestVersion":2,"name":"upstream-service-fixture","displayName":"Upstream service fixture","publisher":"local","version":"1.0.0","description":"Unmodified upstream SDK contract","license":"Apache-2.0",
         "engines":{"codex-proxy-rs":">=3.11.0,<4.0.0"},"main":"bin/plugin","runtime":"trustedProcess",
-        "contributes":{"maintenance":{"id":"local.upstream-service-fixture.maintenance","version":1,"stages":["maintenance"]},"middleware":{"id":"local.upstream-service-fixture.middleware","version":4,"stages":["service"]}},
+        "contributes":{"maintenance":{"id":"local.upstream-service-fixture.maintenance","version":1,"stages":["maintenance"]},"middleware":{"id":"local.upstream-service-fixture.middleware","version":5,"stages":["service"]}},
         "configurationSchema":{"type":"object","properties":{"maintenance":{"type":"boolean"},"mutate":{"type":"boolean"},"observation":{"type":"string"},"rewrite":{"type":"string","enum":["actor","request"]}},"additionalProperties":false},"state":[],"resources":{},
-        "package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},"files":{"bin/plugin":hex::encode(Sha256::digest(&executable))}}
+        "package":{"protocolVersion":gateway_plugin_sdk::PROTOCOL_VERSION,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},"files":{"bin/plugin":hex::encode(Sha256::digest(&executable))}}
     });
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),

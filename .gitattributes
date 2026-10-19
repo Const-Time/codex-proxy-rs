@@ -1,0 +1,2 @@
+# SQLx migration checksums must match on Windows and Linux checkouts.
+backend/migrations/*.sql text eol=lf

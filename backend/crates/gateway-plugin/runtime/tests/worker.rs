@@ -1215,8 +1215,8 @@ impl PluginHandler for Worker {
                 }
                 match self.adapter_mode.as_str() {
                     "observer-null" => Ok(CallReply::unary(serde_json::Value::Null, vec![])),
-                    "observer-envelope" => Ok(CallReply::unary(json!({"extra":true}),vec![])),
-                    "observer-payload" => Ok(CallReply::unary(json!({}),vec![1])),
+                    "observer-envelope" if event_id != "req_recovered:terminal" => Ok(CallReply::unary(json!({"extra":true}),vec![])),
+                    "observer-payload" if event_id != "req_recovered:terminal" => Ok(CallReply::unary(json!({}),vec![1])),
                     "observer-fault" => Err(PluginFault::new(ErrorCode::Rejected,"private observer error detail")),
                     _ => Ok(CallReply::unary(json!({}),vec![])),
                 }
@@ -1280,11 +1280,11 @@ impl PluginHandler for Worker {
                 if self.adapter_mode == "maintenance-service" || self.adapter_mode == "maintenance-wait" {
                     assert!(call.host.service::<gateway_plugin_sdk::call::services::settings::ApiKeyExists>(()).await.map_err(|e|PluginFault::new(ErrorCode::Fault,e.message))?);
                 }
-                if self.adapter_mode == "maintenance-envelope" {return Ok(CallReply::unary(json!({"extra":true}), vec![]));}
-                if self.adapter_mode == "maintenance-payload" {return Ok(CallReply::unary(json!({}), vec![1]));}
                 let record=call.host.call("host.state.get",json!({"namespace":"counter","key":"reconcile"}),vec![]).await.map_err(|e|e.into_plugin_fault())?.result["record"].clone();
                 let count=record["value"].as_u64().unwrap_or(0)+1;
                 call.host.call("host.state.put",json!({"namespace":"counter","key":"reconcile","value":count,"expected_version":record["version"]}),vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                if count == 1 && self.adapter_mode == "maintenance-envelope" {return Ok(CallReply::unary(json!({"extra":true}), vec![]));}
+                if count == 1 && self.adapter_mode == "maintenance-payload" {return Ok(CallReply::unary(json!({}), vec![1]));}
                 if self.adapter_mode == "maintenance-fault" {return Err(PluginFault::new(ErrorCode::Rejected,"private maintenance failure detail"));}
                 Ok(CallReply::unary(json!({}),vec![]))
             },

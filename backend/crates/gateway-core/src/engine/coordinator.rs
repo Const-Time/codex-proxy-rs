@@ -2108,6 +2108,7 @@ where
                     error.kind(),
                     ProviderErrorKind::AccountCapacityUnavailable
                         | ProviderErrorKind::NoEligibleAccount
+                        | ProviderErrorKind::SessionPolicyRestricted
                         | ProviderErrorKind::QuotaExhausted
                 ) && self.last_retryable_failure.is_some()
                 {
@@ -2132,6 +2133,7 @@ where
                     error.kind(),
                     ProviderErrorKind::AccountCapacityUnavailable
                         | ProviderErrorKind::NoEligibleAccount
+                        | ProviderErrorKind::SessionPolicyRestricted
                         | ProviderErrorKind::QuotaExhausted
                         | ProviderErrorKind::ProviderInfrastructureUnavailable
                 ) && error.send_state() == UpstreamSendState::NotSent)

@@ -138,6 +138,7 @@ pub struct NewProxy {
 
 #[derive(Debug, Clone)]
 pub struct UpdateProxy {
+    pub max_websocket_connections: Option<u32>,
     pub location_policy: Option<ProxyLocationPolicy>,
     pub id: String,
     pub revision: Revision,

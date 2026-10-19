@@ -13,8 +13,10 @@ pub(crate) async fn invoke(
     request: core::Request,
     next: core::Next,
 ) -> Result<core::Response, MiddlewareError> {
-    if session.capability_version(Capability::Middleware) != Some(4)
-        || !session.capability_supports_stage(Capability::Middleware, Stage::Http)
+    if !matches!(
+        session.capability_version(Capability::Middleware),
+        Some(4 | 5)
+    ) || !session.capability_supports_stage(Capability::Middleware, Stage::Http)
     {
         return Err(MiddlewareError::InvalidState);
     }
@@ -29,6 +31,7 @@ pub(crate) async fn invoke(
         .map_or(serde_json::Value::Null, |s| s.inspect());
     let mut call = session.context(Stage::Http, remaining);
     call.request_id = Some(context.request_id.clone());
+    call.request = crate::request_context::wire(&context.call_scope);
     call.resource_stream = true;
     let (invocation, request) =
         Invocation::new(request, next, call.instance_id.clone(), context.clone())?;

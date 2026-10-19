@@ -91,10 +91,12 @@ impl CodexProvider {
         context: AttemptContext,
         request: RawJsonEndpointRequest,
     ) -> Result<ProviderStream, ProviderError> {
+        let requested_model = endpoint_model(&request.body);
         let selection_started_at = Instant::now();
         let lease = self
             .selector
             .select_for_provider_endpoint(&SelectCodexProviderEndpointCredential {
+                model: requested_model.as_deref(),
                 request_url: &request.response_origin,
                 attempt: &context,
                 session_affinity: request.session_affinity.as_ref(),
@@ -1162,4 +1164,15 @@ async fn merge_response_metadata_updates(
         changed |= observation_state.observe_upstream_response_model(decoder.response_model());
     }
     Some(changed)
+}
+
+fn endpoint_model(body: &[u8]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Model {
+        model: Option<String>,
+    }
+    serde_json::from_slice::<Model>(body)
+        .ok()?
+        .model
+        .filter(|m| !m.trim().is_empty())
 }

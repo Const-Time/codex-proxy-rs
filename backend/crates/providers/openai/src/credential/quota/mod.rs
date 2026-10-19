@@ -58,8 +58,11 @@ const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 pub(crate) const QUOTA_SCHEDULING_TTL: Duration = Duration::from_secs(10 * 60);
 const QUOTA_HYDRATION_FAILURE_TTL: Duration = Duration::from_secs(5);
 const PERIODIC_QUOTA_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const QUOTA_RESET_FAST_REFRESH_WINDOW: Duration = Duration::from_secs(5 * 60);
+const QUOTA_RESET_FAST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const QUOTA_RESET_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const EXHAUSTED_QUOTA_RESET_GRACE: Duration = Duration::from_secs(10);
 const QUOTA_RESET_GRACE: Duration = Duration::from_secs(2 * 60);
-const EXHAUSTED_QUOTA_RESET_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// 首次 OAuth 异步观察失败时，由既有 quota worker 兜底重试的单轮上限。
 const INITIAL_QUOTA_SYNC_BATCH: usize = 100;
 // 5xx 上游拒绝的短退避重试预算；指数退避 1s/2s，吞掉瞬时抖动。
@@ -247,7 +250,7 @@ struct CodexQuotaProjectionState {
 }
 
 struct CodexQuotaRefreshAttempt {
-    monotonic_at: Instant,
+    monotonic_at: tokio::time::Instant,
     wall_at: SystemTime,
 }
 
@@ -437,7 +440,7 @@ impl CodexQuotaSchedulingProjection {
             .iter()
             .map(|(account, _)| account.id().clone())
             .collect::<BTreeSet<_>>();
-        let refreshed_at = Instant::now();
+        let refreshed_at = tokio::time::Instant::now();
         let mut state = self
             .state
             .write()
@@ -451,14 +454,7 @@ impl CodexQuotaSchedulingProjection {
         // 正常账号仅在非零用量窗口经过宽限期后参与，未更新时复用周期节流。
         let mut reserved = Vec::new();
         for (account, target_reset) in candidates {
-            if !periodic_quota_refresh_due(
-                &state,
-                account.id(),
-                target_reset,
-                now,
-                refreshed_at,
-                account.quota().is_exhausted(),
-            ) {
+            if !periodic_quota_refresh_due(&state, &account, target_reset, now, refreshed_at) {
                 continue;
             }
             state.last_periodic_refresh_at.insert(
@@ -507,27 +503,34 @@ fn quota_refresh_candidate(
 
 fn periodic_quota_refresh_due(
     state: &CodexQuotaProjectionState,
-    account_id: &ProviderAccountId,
+    account: &ProviderAccount,
     reset_at: Option<SystemTime>,
     now: SystemTime,
-    monotonic_now: Instant,
-    exhausted: bool,
+    monotonic_now: tokio::time::Instant,
 ) -> bool {
-    state
-        .last_periodic_refresh_at
-        .get(account_id)
-        .is_none_or(|last| {
-            let reset_due = reset_at.and_then(|reset| reset.checked_add(QUOTA_RESET_GRACE));
-            monotonic_now.saturating_duration_since(last.monotonic_at)
-                >= PERIODIC_QUOTA_REFRESH_RETRY_INTERVAL
-                || reset_due.is_some_and(|due_at| {
-                    due_at <= now
-                        && (last.wall_at < due_at
-                            || (exhausted
-                                && monotonic_now.saturating_duration_since(last.monotonic_at)
-                                    >= EXHAUSTED_QUOTA_RESET_RETRY_INTERVAL))
-                })
-        })
+    let mut interval = PERIODIC_QUOTA_REFRESH_RETRY_INTERVAL;
+    let due_at = if account.quota().is_exhausted() {
+        if let Some(since_reset) = reset_at.and_then(|reset| now.duration_since(reset).ok()) {
+            // 上游边界附近可能仍返回旧额度，首次复核也保留传播余量
+            if since_reset < EXHAUSTED_QUOTA_RESET_GRACE {
+                return false;
+            }
+            interval = if since_reset < QUOTA_RESET_FAST_REFRESH_WINDOW {
+                QUOTA_RESET_FAST_REFRESH_INTERVAL
+            } else {
+                QUOTA_RESET_REFRESH_RETRY_INTERVAL
+            };
+        }
+        reset_at.and_then(|reset| reset.checked_add(EXHAUSTED_QUOTA_RESET_GRACE))
+    } else {
+        reset_at.and_then(|reset| reset.checked_add(QUOTA_RESET_GRACE))
+    };
+    let Some(last) = state.last_periodic_refresh_at.get(account.id()) else {
+        return true;
+    };
+    monotonic_now.saturating_duration_since(last.monotonic_at) >= interval
+        // 跨越 reset 宽限期的首轮复核不受旧间隔阻挡，之后按对应间隔节流
+        || due_at.is_some_and(|due_at| last.wall_at < due_at && due_at <= now)
 }
 
 fn insert_projection_entry(
@@ -1207,9 +1210,9 @@ impl CodexCredentialQuotaService {
         } else {
             None
         };
-        if account.quota().is_exhausted()
-            && matches!(authority, QuotaRefreshAuthority::PreserveAccess)
-        {
+        let observe_access =
+            matches!(authority, QuotaRefreshAuthority::ObserveAccess) || snapshot.credits_usable();
+        if account.quota().is_exhausted() && !observe_access {
             if self
                 .store
                 .touch_quota_observation(QuotaObservationTouch {
@@ -1233,14 +1236,15 @@ impl CodexCredentialQuotaService {
                     .with_observed_at(observed_at),
             });
         }
-        let state = match authority {
-            QuotaRefreshAuthority::ObserveAccess => reconcile_refresh(
+        let state = if observe_access {
+            reconcile_refresh(
                 account.quota(),
                 &mut snapshot,
                 previous.as_ref(),
                 &mut object,
-            )?,
-            QuotaRefreshAuthority::PreserveAccess => account.quota(),
+            )?
+        } else {
+            account.quota()
         };
         let snapshot = snapshot.with_quota_state(state);
         if self

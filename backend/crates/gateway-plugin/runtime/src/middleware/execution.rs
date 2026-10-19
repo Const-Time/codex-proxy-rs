@@ -28,7 +28,10 @@ pub(super) async fn invoke(
     request: MiddlewareRequest,
     next: MiddlewareNext,
 ) -> Result<MiddlewareResponse, MiddlewareError> {
-    if session.capability_version(Capability::Middleware) != Some(4) {
+    if !matches!(
+        session.capability_version(Capability::Middleware),
+        Some(4 | 5)
+    ) {
         return Err(MiddlewareError::InvalidState);
     }
     let (stage, mount) = match context.mount {
@@ -44,6 +47,10 @@ pub(super) async fn invoke(
         return Err(MiddlewareError::Fault);
     }
     let mut call = session.context(stage, remaining);
+    call.request = request
+        .nested_context()
+        .map_err(|_| MiddlewareError::InvalidState)?
+        .and_then(|v| crate::request_context::wire(v.scope()));
     let settings_sources = request
         .settings()
         .map_or(serde_json::Value::Null, |s| s.inspect());

@@ -8,11 +8,12 @@ pub struct OutboundProxy(
     Url,
     Option<Arc<RequestLocation>>,
     Option<Arc<ProxyRequestContext>>,
+    u32,
 );
 
 impl PartialEq for OutboundProxy {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0 && self.1 == other.1
+        self.0 == other.0 && self.1 == other.1 && self.3 == other.3
     }
 }
 impl Eq for OutboundProxy {}
@@ -20,6 +21,7 @@ impl std::hash::Hash for OutboundProxy {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::hash::Hash::hash(&self.0, state);
         std::hash::Hash::hash(&self.1, state);
+        std::hash::Hash::hash(&self.3, state);
     }
 }
 
@@ -49,6 +51,16 @@ pub struct RequestLocation {
 pub struct InvalidOutboundProxy;
 
 impl OutboundProxy {
+    #[must_use]
+    pub const fn max_websocket_connections(&self) -> u32 {
+        self.3
+    }
+    #[must_use]
+    pub const fn with_max_websocket_connections(mut self, limit: u32) -> Self {
+        self.3 = limit;
+        self
+    }
+
     pub fn parse(value: &str) -> Result<Self, InvalidOutboundProxy> {
         if value.len() > 4096 || value.chars().any(char::is_control) {
             return Err(InvalidOutboundProxy);
@@ -63,7 +75,7 @@ impl OutboundProxy {
         {
             return Err(InvalidOutboundProxy);
         }
-        Ok(Self(url, None, None))
+        Ok(Self(url, None, None, 0))
     }
 
     #[must_use]

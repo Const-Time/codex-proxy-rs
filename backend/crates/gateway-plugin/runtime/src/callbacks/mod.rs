@@ -28,7 +28,7 @@ pub(crate) fn is_state_method(method: &str) -> bool {
 
 struct Namespace {
     declaration: StateNamespace,
-    schema: jsonschema::Validator,
+    schema: Arc<jsonschema::Validator>,
 }
 pub(crate) struct Callbacks {
     logs: Arc<PluginLog>,

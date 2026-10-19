@@ -116,7 +116,7 @@ pub(crate) async fn load_admin_account_page(
              from runtime_settings
             where id = 1
          )
-         select outbound_proxy_request_context(a.outbound_proxy_id) as request_context, a.outbound_proxy_url, a.id, a.provider_kind, a.name, a.email, a.upstream_user_id,
+         select outbound_proxy_request_context(a.outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = a.outbound_proxy_id), 0) as proxy_ws_capacity, a.outbound_proxy_url, a.id, a.provider_kind, a.name, a.email, a.upstream_user_id,
                 a.upstream_account_id, a.plan_type, a.authentication_kind,
                 a.credential_revision, a.has_refresh_token, a.access_token_expires_at,
                 a.next_refresh_at, a.enabled, a.concurrency_limit, a.weight, a.model_access_json,

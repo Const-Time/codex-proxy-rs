@@ -50,7 +50,9 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
         .create(
             NewProxy {
                 name: "Location".to_owned(),
-                proxy: OutboundProxy::parse("http://127.0.0.1:8888").unwrap(),
+                proxy: OutboundProxy::parse("http://127.0.0.1:8888")
+                    .unwrap()
+                    .with_max_websocket_connections(7),
                 location_policy: ProxyLocationPolicy::Auto,
             },
             &context,
@@ -96,6 +98,15 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
         loaded.summary.outbound_proxy.as_ref().unwrap().location(),
         Some(&location)
     );
+    assert_eq!(
+        loaded
+            .summary
+            .outbound_proxy
+            .as_ref()
+            .unwrap()
+            .max_websocket_connections(),
+        7
+    );
     let mut manual = location.clone();
     let provenance = loaded
         .summary
@@ -112,6 +123,7 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
     let changed = store
         .update(
             UpdateProxy {
+                max_websocket_connections: None,
                 id: initial.id.clone(),
                 revision: observed.revision,
                 name: "Manual".to_owned(),
@@ -148,6 +160,7 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
     let changed = store
         .update(
             UpdateProxy {
+                max_websocket_connections: None,
                 id: changed.id,
                 revision: changed.revision,
                 name: "Keep client".to_owned(),
@@ -176,6 +189,7 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
     let changed = store
         .update(
             UpdateProxy {
+                max_websocket_connections: None,
                 id: changed.id,
                 revision: changed.revision,
                 name: "New egress".to_owned(),
@@ -613,6 +627,7 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
         .unwrap();
     let reservation = store.reserve_import(&saved.id).await.unwrap();
     let replacement = UpdateProxy {
+        max_websocket_connections: None,
         location_policy: None,
         id: saved.id.clone(),
         revision: saved.revision,
@@ -784,6 +799,7 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let renamed = store
         .update(
             UpdateProxy {
+                max_websocket_connections: None,
                 location_policy: None,
                 id: created.id.clone(),
                 revision: created.revision,
@@ -802,6 +818,7 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let edited = store
         .update(
             UpdateProxy {
+                max_websocket_connections: None,
                 location_policy: None,
                 id: created.id.clone(),
                 revision: renamed.revision,

@@ -12,6 +12,72 @@ use std::{
 };
 
 #[tokio::test]
+async fn legacy_protocol_restore_keeps_instance_manageable_and_upgradeable() {
+    use gateway_admin::ports::plugins::PluginStore;
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Arc::new(PluginEngine::new(
+        cache.path().into(),
+        "3.13.0".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store.clone(), runtime.clone());
+    let artifact = manager
+        .upload(archive("1.0.0", false), &actor())
+        .await
+        .unwrap();
+    let installed = manager
+        .update(None, update(&artifact.sha256, 0, true), &actor())
+        .await
+        .unwrap();
+    manager.shutdown().await;
+    // Simulate the stored manifest left by the previous host. Restoration must
+    // reject it before launching, without deleting its record/configuration.
+    let mut legacy = store.artifact(&artifact.sha256).await.unwrap();
+    legacy.info.manifest["package"]["protocolVersion"] = json!(2);
+    store.put_artifact(legacy, &actor()).await.unwrap();
+    let runtime = Arc::new(PluginEngine::new(
+        cache.path().into(),
+        "3.13.0".parse().unwrap(),
+        store.clone(),
+    ));
+    let manager = PluginManager::new(store.clone(), runtime.clone());
+    manager.restore().await.unwrap();
+    let records = manager.list().await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, installed.id);
+    assert_eq!(records[0].status, "failed");
+    let info = runtime
+        .describe(store.artifact_info(&artifact.sha256).await.unwrap())
+        .unwrap();
+    assert!(info.version_warning.unwrap().contains("RPC v2"));
+    let disabled = manager
+        .update(
+            Some(&installed.id),
+            update(&artifact.sha256, installed.revision, false),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled.status, "disabled");
+    let new_artifact = manager
+        .upload(archive("2.0.0", false), &actor())
+        .await
+        .unwrap();
+    let upgraded = manager
+        .update(
+            Some(&installed.id),
+            update(&new_artifact.sha256, disabled.revision, true),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upgraded.id, installed.id);
+    assert_eq!(upgraded.status, "ready");
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn public_resources_follow_registered_visibility_and_actual_instance_revision() {
     let cache = tempfile::tempdir().unwrap();
     let store = Arc::new(MemoryStore::default());
@@ -114,7 +180,7 @@ async fn public_resources_follow_registered_visibility_and_actual_instance_revis
 
 #[tokio::test]
 #[ignore = "requires the checksum-verified official workbench 0.3.1 Linux x86_64 archive"]
-async fn official_workbench_archive_registers_public_resources_without_rewriting_the_package() {
+async fn official_workbench_archive_requires_protocol_upgrade_without_rewriting_the_package() {
     use gateway_admin::model::plugins::PluginRecord;
     use gateway_admin::ports::plugins::PluginStore;
     use sha2::{Digest as _, Sha256};
@@ -167,45 +233,26 @@ async fn official_workbench_archive_registers_public_resources_without_rewriting
         observer: None,
     };
     store.save(&record, 0, &actor(), None).await.unwrap();
+    assert!(
+        artifact
+            .info
+            .version_warning
+            .as_ref()
+            .unwrap()
+            .contains("RPC v2")
+    );
+    assert!(
+        runtime
+            .validate(&record, &artifact.info, None)
+            .await
+            .is_err()
+    );
+    let mut disabled = record;
+    disabled.enabled = false;
     runtime
-        .validate(&record, &artifact.info, None)
+        .validate(&disabled, &artifact.info, None)
         .await
         .unwrap();
-    let process = runtime.prepare(&record, artifact).await.unwrap();
-    process.activate();
-    assert!(
-        process
-            .resources()
-            .iter()
-            .any(|r| r.path == "web/app.css" && r.public)
-    );
-    assert!(
-        process
-            .resources()
-            .iter()
-            .any(|r| r.path == "web/index.html" && !r.public)
-    );
-    assert!(
-        !process
-            .resource("web/app.css")
-            .await
-            .unwrap()
-            .body
-            .is_empty()
-    );
-    assert!(
-        process
-            .command_help(Some("ping"))
-            .unwrap()
-            .unwrap()
-            .contains("ping")
-    );
-    process.revoke();
-    assert_eq!(
-        process.resource("web/app.css").await.err().unwrap().kind(),
-        AdminErrorKind::Conflict
-    );
-    process.stop().await;
 }
 
 #[tokio::test]

@@ -189,7 +189,8 @@ async fn handle(
                 .map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_owned),
             call_id: uuid::Uuid::now_v7().to_string(),
             parent_call_id: None,
-            call_scope: Default::default(),
+            call_scope: gateway_core::engine::nested::ExtensionCallScope::default()
+                .with_request(crate::request_context::capture(&request)),
             model_parent: None,
             cancellation: CancellationToken::linked([lifecycle.cancellation()]),
             deadline_at: Deadline::from_timeout(SystemTime::now(), None)

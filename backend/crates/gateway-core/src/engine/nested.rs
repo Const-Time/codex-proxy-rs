@@ -92,6 +92,7 @@ enum PermitLifetime {
 
 #[derive(Debug, Clone)]
 pub struct ExtensionCallScope {
+    request: Option<Arc<RequestContext>>,
     graph: Arc<Graph>,
     ancestors: Arc<BTreeSet<String>>,
     parent_request_id: Option<ModelRequestId>,
@@ -104,6 +105,7 @@ pub struct ExtensionCallScope {
 impl Default for ExtensionCallScope {
     fn default() -> Self {
         Self {
+            request: None,
             graph: Arc::default(),
             ancestors: Arc::default(),
             parent_request_id: None,
@@ -116,6 +118,14 @@ impl Default for ExtensionCallScope {
     }
 }
 impl ExtensionCallScope {
+    pub fn with_request(mut self, request: Arc<RequestContext>) -> Self {
+        self.request = Some(request);
+        self
+    }
+    pub fn request(&self) -> Option<&RequestContext> {
+        self.request.as_deref()
+    }
+
     /// Observe this child's native settlement without holding its permit alive.
     /// Roots have no individual permit and therefore no completion handle.
     pub fn completion(&self) -> Option<ExtensionCallCompletion> {
@@ -156,7 +166,10 @@ impl ExtensionCallScope {
     }
     pub(crate) fn transport_event(&self) -> Self {
         if self.is_root() {
-            Self::default()
+            Self {
+                request: self.request.clone(),
+                ..Self::default()
+            }
         } else {
             self.clone()
         }
@@ -264,6 +277,7 @@ impl ExtensionCallScope {
         let mut effects = self.ancestor_effects.to_vec();
         effects.push(self.effects.clone());
         Ok(Self {
+            request: self.request.clone(),
             graph: self.graph.clone(),
             ancestors: Arc::new(ancestors),
             initiating_plugin_instance_id: parent.as_ref().map(|_| instance),
@@ -555,5 +569,27 @@ impl NestedExecutionContext {
             ));
         }
         Ok(())
+    }
+}
+
+/// 不可变入口快照；正文由所属中间件资源持有，不随每次扩展调用复制
+#[derive(Clone, PartialEq, Eq)]
+pub struct RequestContext {
+    pub method: String,
+    pub uri: String,
+    pub http_version: String,
+    pub headers: Vec<super::middleware::MiddlewareHeader>,
+    pub peer_addr: Option<std::net::SocketAddr>,
+    pub client_ip: Option<std::net::IpAddr>,
+}
+
+impl std::fmt::Debug for RequestContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // URI 查询与请求头可能包含凭据，不进入诊断日志
+        formatter
+            .debug_struct("RequestContext")
+            .field("method", &self.method)
+            .field("http_version", &self.http_version)
+            .finish_non_exhaustive()
     }
 }

@@ -28,3 +28,5 @@ mod observation;
 #[cfg(unix)]
 mod engine;
 mod state;
+
+mod schema;

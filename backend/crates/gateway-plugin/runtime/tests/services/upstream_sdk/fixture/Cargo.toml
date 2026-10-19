@@ -12,6 +12,6 @@ name = "upstream-service-fixture"
 path = "src/main.rs"
 
 [dependencies]
-gateway-plugin-sdk = { git = "https://github.com/zyycn/codex-proxy-rs.git", rev = "b37d7901441e123cb9126a6f9af4ff3321548d24", features = ["io"] }
+gateway-plugin-sdk = { git = "https://github.com/zyycn/codex-proxy-rs.git", rev = "a0e708071a5c032075be81bb42a0cd5292f386a7", features = ["io"] }
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", default-features = false, features = ["io-std", "macros", "rt"] }

@@ -30,12 +30,8 @@ async fn raw_body_tail_failure_preserves_native_cost_and_invalid_streams_never_r
             let rows = f.core.finalizations.lock().unwrap();
             assert_eq!(
                 rows[0].outcome,
-                if mode == "tail-fault" {
-                    ExecutionOutcome::Failed
-                } else {
-                    // A malformed plugin stream revokes its generation and cancels the root.
-                    ExecutionOutcome::Cancelled
-                },
+                // Invalid business streams fail this execution, without revoking the generation.
+                ExecutionOutcome::Failed,
                 "{mode}"
             );
             assert_eq!(rows[0].attempt_count, 1);

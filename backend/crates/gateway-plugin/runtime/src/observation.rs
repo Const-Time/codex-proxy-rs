@@ -427,6 +427,7 @@ pub(crate) async fn invoke(
         session.maximum_call_timeout().min(TIMEOUT),
     );
     context.request_id = Some(observation.request_id.clone());
+    context.request = crate::request_context::wire(&observation.call_scope);
     let caller = registry.caller();
     let cancellation = CancellationToken::linked([cancellation, caller.cancellation()]);
     let origin = core::Origin {

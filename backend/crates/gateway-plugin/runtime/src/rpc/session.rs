@@ -13,7 +13,7 @@ use futures::future::BoxFuture;
 use gateway_host::process::{ProcessControl, ProcessSpec, ProcessStartError, ProcessSupervisor};
 use gateway_plugin_sdk::{
     CallContext, Frame, Handshake, Message, PROTOCOL_VERSION, PluginFault, Stage,
-    client::{CallDeadline, CallDeadlinePause, read_frame, validate_frame, write_frame},
+    client::{CallDeadline, CallDeadlinePause, EncodedFrame, read_frame, write_frame},
 };
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
@@ -190,7 +190,7 @@ pub trait CallbackHandler: Send + Sync {
 pub struct RpcSession {
     shared: Arc<Shared>,
     handshake: Handshake,
-    data: mpsc::Sender<Frame>,
+    data: mpsc::Sender<EncodedFrame>,
     slots: Arc<Semaphore>,
     next_call: AsyncMutex<u64>,
     limits: RpcLimits,
@@ -201,9 +201,7 @@ pub struct RpcSession {
 impl RpcSession {
     /// 只用于已确认来自插件的合同错误，不接收业务错误或原始响应内容
     pub(crate) fn invalid_response(&self, stage: Stage) -> RpcError {
-        let error = RpcError::InvalidResponse(stage, None);
-        self.shared.fail(error.clone());
-        error
+        RpcError::InvalidResponse(stage, None)
     }
 
     pub(crate) fn decode_response<T: serde::de::DeserializeOwned>(
@@ -212,9 +210,7 @@ impl RpcSession {
         value: serde_json::Value,
     ) -> Result<T, RpcError> {
         serde_json::from_value(value).map_err(|source| {
-            let error = RpcError::InvalidResponse(stage, Some(super::ErrorSource::new(source)));
-            self.shared.fail(error.clone());
-            error
+            RpcError::InvalidResponse(stage, Some(super::ErrorSource::new(source)))
         })
     }
 
@@ -245,7 +241,7 @@ pub(crate) struct Shared {
     started_at: Instant,
     expected_stop: AtomicBool,
     failure_observer: Option<Arc<dyn Fn(Duration) + Send + Sync>>,
-    pub control: mpsc::Sender<Frame>,
+    pub control: mpsc::Sender<EncodedFrame>,
     pub process: ProcessControl,
     pub stopped: watch::Sender<bool>,
     callback_slots: Arc<Semaphore>,
@@ -276,10 +272,14 @@ impl PendingCall {
         for callback in self.callbacks.drain(..) {
             callback.abort();
         }
-        if let Some(stream) = self.stream.take() {
+        let stream = self.stream.take();
+        let sender = self.result.take();
+        // Seal callback-owned resources before publishing the terminal result.
+        drop(self);
+        if let Some(stream) = stream {
             stream.finish(result.as_ref().map(|_| ()).map_err(Clone::clone));
         }
-        if let Some(sender) = self.result.take() {
+        if let Some(sender) = sender {
             let _ = sender.send(result);
         }
     }
@@ -541,6 +541,14 @@ impl Shared {
     }
 
     pub fn send_control(&self, frame: Frame) {
+        let Ok(frame) = EncodedFrame::new(frame) else {
+            self.fail(RpcError::Protocol(None));
+            return;
+        };
+        self.send_encoded_control(frame);
+    }
+
+    pub(super) fn send_encoded_control(&self, frame: EncodedFrame) {
         if self.control.try_send(frame).is_err() {
             self.fail(RpcError::Capacity);
         }
@@ -800,6 +808,7 @@ impl RpcSession {
         // 宿主生成的上下文受本会话预算约束；固定注册期限不能使较小的总预算无法启动
         let timeout = timeout.min(self.limits.maximum_call_timeout);
         CallContext {
+            request: None,
             call_id: 0,
             instance_id: self.handshake.instance_id.clone(),
             generation: self.handshake.generation,
@@ -908,7 +917,7 @@ impl RpcSession {
             payload,
         };
         // 本地元数据错误不能进入写队列并关闭整个会话
-        validate_frame(&frame)
+        let frame = EncodedFrame::new(frame)
             .map_err(|source| RpcError::Context(Some(super::ErrorSource::new(source))))?;
         let started = self.begin_call(context, deadline, stream, slot.clone(), execution)?;
         let mut guard = CallGuard {
@@ -924,11 +933,16 @@ impl RpcSession {
             if let Some((bytes, frames)) = credit {
                 // 初始信用跟在 Call 后走同一有序队列，不能被控制队列提前发送
                 self.data
-                    .send(Frame::control(Message::Credit {
-                        id: started.id,
-                        bytes,
-                        frames,
-                    }))
+                    .send(
+                        EncodedFrame::new(Frame::control(Message::Credit {
+                            id: started.id,
+                            bytes,
+                            frames,
+                        }))
+                        .map_err(|source| {
+                            RpcError::Context(Some(super::ErrorSource::new(source)))
+                        })?,
+                    )
                     .await
                     .map_err(|_| RpcError::Closed(None))?;
             }

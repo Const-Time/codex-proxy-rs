@@ -500,7 +500,7 @@ fn pack_archive(
         "engines":{"codex-proxy-rs":">=3.11.0, <4.0.0"},"main":"bin/plugin","runtime":"trustedProcess","contributes":contributes,
         "configurationSchema":{"type":"object","properties":{"registration_signal":{"type":"string"},"state_migration":{"type":"string"},"state_migration_signal":{"type":"string"},"callback_oauth_url":{"type":"string"},"public_callbacks":{"type":"boolean"},"public_resource":{"type":"boolean"},"command_registration":{"type":"object"},"command_result":{"type":"object"},"adapter_models":{"type":"array","items":{"type":"string"}},"adapter_provider":{"type":"string"},"adapter_mode":{"type":"string"},"adapter_url":{"type":"string"},"adapter_transport":{"type":"string"},"catalog_mode":{"type":"string"},"retry":{"type":"string"},"schedule":{"type":"string"},"fail":{"type":"boolean"},"token":{"type":"string"}},"additionalProperties":false},"secretFields":["token"],
         "state":[{"namespace":"counter","schemaVersion":1,"schema":{"type":"integer"},"maximumRecords":10,"maximumBytes":1024,"maximumValueBytes":128}],
-        "resources":{"index.html":"text/html"},"package":{"protocolVersion":2,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},
+        "resources":{"index.html":"text/html"},"package":{"protocolVersion":gateway_plugin_sdk::PROTOCOL_VERSION,"target":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH},
         "files":{"bin/plugin":hex::encode(Sha256::digest(&executable)),"index.html":hex::encode(Sha256::digest(page))}}});
     if observer {
         manifest["state"].as_array_mut().unwrap().push(json!({

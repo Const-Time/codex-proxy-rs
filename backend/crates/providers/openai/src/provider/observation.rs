@@ -821,6 +821,16 @@ pub(super) fn map_selection_error(error: CredentialSelectionError) -> ProviderEr
                 None => error,
             }
         }
+        CredentialSelectionError::SessionPolicyRestricted => provider_error(
+            ProviderErrorKind::SessionPolicyRestricted,
+            UpstreamSendState::NotSent,
+        )
+        .with_retry_prohibited()
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            "No account is available for this session because of an earlier upstream cyber_policy rejection. Do not repeatedly retry this session. This does not indicate an account ban or a service-wide outage.",
+            Some("cyber_policy".to_owned()),
+            Some("invalid_request_error".to_owned()),
+        )),
         CredentialSelectionError::NoEligibleCredential => provider_error(
             ProviderErrorKind::NoEligibleAccount,
             UpstreamSendState::NotSent,

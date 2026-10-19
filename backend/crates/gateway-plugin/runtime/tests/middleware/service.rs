@@ -548,9 +548,8 @@ async fn service_next_is_single_use_binary_input_does_not_consume_it_and_no_prin
 }
 
 #[tokio::test]
-async fn malformed_service_reply_faults_generation_and_explicit_restart_recovers() {
+async fn malformed_service_reply_rejects_only_the_call() {
     let f = Fixture::new().await;
-    let id = f.manager.list().await.unwrap()[0].id.clone();
     for mode in ["bad-reply", "binary-reply"] {
         let context = ctx(mode);
         assert!(
@@ -564,9 +563,8 @@ async fn malformed_service_reply_faults_generation_and_explicit_restart_recovers
                 .middleware_registry()
                 .unwrap()
                 .freeze_service(&ctx("typed"))
-                .is_err()
+                .is_ok()
         );
-        f.change(&id, true).await;
         let context = ctx("typed");
         assert!(
             f.plan(&context)

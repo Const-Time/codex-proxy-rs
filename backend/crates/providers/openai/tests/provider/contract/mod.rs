@@ -9005,3 +9005,5 @@ async fn request_rejections_should_not_retry_or_cool_down_accounts() {
         assert!(cooldowns.read(account.id()).await.unwrap().is_none());
     }
 }
+
+mod search_model_access;

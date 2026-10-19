@@ -19,6 +19,7 @@ export interface OutboundProxyTest {
 }
 
 export interface OutboundProxyRecord {
+  maxWebsocketConnections: number
   locationPolicy: ProxyLocationPolicy
   id: string
   name: string
@@ -83,7 +84,7 @@ export function getProxies(params: { page: number, pageSize: number, search?: st
   })
 }
 
-export function createProxy(data: { name: string, proxyUrl: string, locationPolicy?: ProxyLocationPolicy }) {
+export function createProxy(data: { name: string, proxyUrl: string, locationPolicy?: ProxyLocationPolicy, maxWebsocketConnections?: number }) {
   return request<ProxyMutation>({
     url: '/api/admin/proxies/create',
     method: 'POST',
@@ -91,7 +92,7 @@ export function createProxy(data: { name: string, proxyUrl: string, locationPoli
   })
 }
 
-export function updateProxy(data: { id: string, revision: number, name: string, proxyUrl?: string, locationPolicy?: ProxyLocationPolicy }) {
+export function updateProxy(data: { id: string, revision: number, name: string, proxyUrl?: string, locationPolicy?: ProxyLocationPolicy, maxWebsocketConnections?: number }) {
   return request<ProxyMutation>({
     url: '/api/admin/proxies/update',
     method: 'POST',

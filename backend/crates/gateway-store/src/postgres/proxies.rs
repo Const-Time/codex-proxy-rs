@@ -124,7 +124,14 @@ fn record(row: PgRow) -> StoreResult<ProxyRecord> {
             &row.try_get::<String, _>("proxy_url")
                 .map_err(|_| invalid())?,
         )
-        .map_err(|_| invalid())?,
+        .map_err(|_| invalid())?
+        .with_max_websocket_connections(
+            u32::try_from(
+                row.try_get::<i64, _>("max_websocket_connections")
+                    .map_err(|_| invalid())?,
+            )
+            .map_err(|_| invalid())?,
+        ),
         revision: AdminRevision::new(
             u64::try_from(row.try_get::<i64, _>("revision").map_err(|_| invalid())?)
                 .map_err(|_| invalid())?,
@@ -202,8 +209,8 @@ pub(crate) async fn resolve_proxy_selection(
             Ok((Some(id), Some(proxy.clone())))
         }
         AccountProxySelection::Saved(id) => {
-            let (value, tested) = sqlx::query_as::<_, (String, Option<bool>)>(
-                "select proxy_url, last_test_success from outbound_proxies where id = $1 for share",
+            let (value, tested, capacity) = sqlx::query_as::<_, (String, Option<bool>, i64)>(
+                "select proxy_url, last_test_success, max_websocket_connections from outbound_proxies where id = $1 for share",
             )
             .bind(id)
             .fetch_optional(&mut **transaction)
@@ -218,7 +225,13 @@ pub(crate) async fn resolve_proxy_selection(
             }
             Ok((
                 Some(id.clone()),
-                Some(OutboundProxy::parse(&value).map_err(|_| invalid())?),
+                Some(
+                    OutboundProxy::parse(&value)
+                        .map_err(|_| invalid())?
+                        .with_max_websocket_connections(
+                            u32::try_from(capacity).map_err(|_| invalid())?,
+                        ),
+                ),
             ))
         }
     }
@@ -518,9 +531,10 @@ impl ProxyStore for PgProxyRepository {
         if !created {
             return Err(store_error(conflict(&id)));
         }
-        sqlx::query("update outbound_proxies set location_policy=$2 where id=$1")
+        sqlx::query("update outbound_proxies set location_policy=$2, max_websocket_connections=$3 where id=$1")
             .bind(&id)
             .bind(sqlx::types::Json(&command.location_policy))
+            .bind(i64::from(command.proxy.max_websocket_connections()))
             .execute(&mut *transaction)
             .await
             .map_err(|_| store_error(unavailable()))?;
@@ -529,7 +543,12 @@ impl ProxyStore for PgProxyRepository {
             context,
             "create",
             &id,
-            &["name", "proxy_url", "location_policy"],
+            &[
+                "name",
+                "proxy_url",
+                "location_policy",
+                "max_websocket_connections",
+            ],
             revision,
         )
         .await
@@ -584,11 +603,12 @@ impl ProxyStore for PgProxyRepository {
              last_test_ip = case when $4 is not null and $4 <> proxy_url then null else last_test_ip end,
              last_test_message = case when $4 is not null and $4 <> proxy_url then null else last_test_message end,
              last_test_location = case when $4 is not null and $4 <> proxy_url then null else last_test_location end,
-             location_policy = coalesce($5, location_policy)
+             location_policy = coalesce($5, location_policy), max_websocket_connections = coalesce($6, max_websocket_connections)
              where id = $1 and revision = $2")
             .bind(&command.id).bind(i64::try_from(command.revision.get()).map_err(|_| store_error(invalid()))?)
             .bind(&command.name).bind(command.proxy.as_ref().map(OutboundProxy::expose_url))
             .bind(command.location_policy.as_ref().map(sqlx::types::Json))
+            .bind(command.max_websocket_connections.map(i64::from))
             .execute(&mut *transaction).await.map_err(|_| store_error(unavailable()))?;
         if changed.rows_affected() != 1 {
             return Err(store_error(conflict(&command.id)));
@@ -600,7 +620,12 @@ impl ProxyStore for PgProxyRepository {
             context,
             "update",
             &command.id,
-            &["name", "proxy_url", "location_policy"],
+            &[
+                "name",
+                "proxy_url",
+                "location_policy",
+                "max_websocket_connections",
+            ],
             revision,
         )
         .await

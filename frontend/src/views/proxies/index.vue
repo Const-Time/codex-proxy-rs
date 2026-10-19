@@ -41,7 +41,7 @@ const columns = defineTableColumns<OutboundProxyRecord>([
 ])
 const showForm = shallowRef(false)
 const editing = shallowRef<OutboundProxyRecord | null>(null)
-const form = reactive({ name: '', proxyUrl: '', locationPolicy: { mode: 'auto' } as ProxyLocationPolicy })
+const form = reactive({ maxWebsocketConnections: 0, name: '', proxyUrl: '', locationPolicy: { mode: 'auto' } as ProxyLocationPolicy })
 const saveAction = useAsyncAction()
 const { loading: saving } = saveAction
 const deleteAction = useAsyncAction()
@@ -58,6 +58,7 @@ function openForm(proxy: OutboundProxyRecord | null = null) {
   editing.value = proxy
   form.name = proxy?.name ?? ''
   form.proxyUrl = ''
+  form.maxWebsocketConnections = proxy?.maxWebsocketConnections ?? 0
   const policy = proxy?.locationPolicy ?? { mode: 'auto' as const }
   form.locationPolicy = policy.mode === 'manual'
     ? { mode: 'manual', location: { ...policy.location } }
@@ -97,8 +98,8 @@ async function save(testAfter: boolean) {
   await saveAction.run(async () => {
     // 编辑时留空保留已保存的地址和认证，不能用脱敏地址覆盖原连接。
     const result = editing.value
-      ? await updateProxy({ id: editing.value.id, revision: editing.value.revision, name, proxyUrl: proxyUrl || undefined, locationPolicy: form.locationPolicy })
-      : await createProxy({ name, proxyUrl, locationPolicy: form.locationPolicy })
+      ? await updateProxy({ id: editing.value.id, revision: editing.value.revision, name, proxyUrl: proxyUrl || undefined, locationPolicy: form.locationPolicy, maxWebsocketConnections: form.maxWebsocketConnections })
+      : await createProxy({ name, proxyUrl, locationPolicy: form.locationPolicy, maxWebsocketConnections: form.maxWebsocketConnections })
     showForm.value = false
     form.proxyUrl = ''
     toast.success('代理已保存')
@@ -243,6 +244,7 @@ onMounted(() => void query.execute())
       v-model:name="form.name"
       v-model:proxy-url="form.proxyUrl"
       v-model:location-policy="form.locationPolicy"
+      v-model:max-websocket-connections="form.maxWebsocketConnections"
       :proxy="editing"
       :saving="saving"
       @save="save"

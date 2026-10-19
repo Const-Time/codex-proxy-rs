@@ -193,6 +193,10 @@ impl Executor {
             .session
             .context(Stage::Management, self.session.maximum_call_timeout());
         context.request_id = Some(request.actor.request_id.clone());
+        context.request = request
+            .invocation
+            .as_ref()
+            .and_then(|v| crate::request_context::wire(&v.context.call_scope));
         let cancellation = self.access.cancellation();
         let _caller = self
             .calls

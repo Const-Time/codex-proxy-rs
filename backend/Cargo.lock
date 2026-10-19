@@ -582,6 +582,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -1014,7 +1015,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cpr-shared-budget-plugin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gateway-plugin-sdk",
  "serde",
@@ -1866,6 +1867,7 @@ dependencies = [
 name = "gateway-plugin-sdk"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "semver",
  "serde",
  "serde_json",
@@ -2725,6 +2727,23 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.0",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.9",
+ "version_check",
 ]
 
 [[package]]

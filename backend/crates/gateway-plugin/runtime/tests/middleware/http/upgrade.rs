@@ -137,9 +137,8 @@ async fn sdk_http_modified_or_discarded_handshake_never_starts_session_work() {
             .middleware_registry()
             .unwrap()
             .freeze_http(context())
-            .is_err()
+            .is_ok()
     );
-    f.change(true).await;
     let (response, socket, _) = run(&f, "discard-upgrade").await;
     let response = response.unwrap();
     assert_eq!(response.status(), 403);

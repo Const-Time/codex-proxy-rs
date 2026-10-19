@@ -1142,6 +1142,13 @@ async fn http_method_and_uri_are_rewritten_before_route_matching_with_original_a
     let f = new(Mode::Rewrite).await;
     let mut input = request("/missing-route");
     *input.method_mut() = http::Method::PUT;
+    input
+        .headers_mut()
+        .append("x-entry", http::HeaderValue::from_static("one"));
+    input.headers_mut().append(
+        "x-entry",
+        http::HeaderValue::from_bytes(&[0x80, 0xff]).unwrap(),
+    );
     let response = f.app.clone().oneshot(input).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-http-layer"], "fixture");
@@ -1158,6 +1165,19 @@ async fn http_method_and_uri_are_rewritten_before_route_matching_with_original_a
         "key_api_test"
     );
     assert_eq!(f.plugin.http_seen.lock().unwrap()[0].0, "/missing-route");
+    {
+        let seen = f.plugin.http_seen.lock().unwrap();
+        let entry = seen[0].1.call_scope.request().expect("entry snapshot");
+        assert_eq!(entry.method, "PUT");
+        assert_eq!(entry.uri, "/missing-route");
+        let headers: Vec<_> = entry
+            .headers
+            .iter()
+            .filter(|h| h.name() == "x-entry")
+            .map(|h| h.value())
+            .collect();
+        assert_eq!(headers, [b"one".as_slice(), &[0x80, 0xff]]);
+    }
     assert_eq!(
         f.plugin.http_seen.lock().unwrap()[0].1.request_id,
         "http-ingress-fixture"

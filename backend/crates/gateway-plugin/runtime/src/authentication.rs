@@ -51,6 +51,7 @@ pub(crate) async fn authenticate(
             .map_err(|_| AdminError::unavailable("认证服务端口不可用"))?,
     };
     context.request_id = Some(origin.context.request_id.clone());
+    context.request = crate::request_context::wire(&origin.context.call_scope);
     let cancellation = origin.context.cancellation.clone();
     let deadline = origin.context.deadline_at;
     let _services = services

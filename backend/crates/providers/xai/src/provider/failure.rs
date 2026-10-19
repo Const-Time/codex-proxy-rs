@@ -386,29 +386,34 @@ pub(super) fn map_request_error(error: GrokRequestEncodeError) -> ProviderError 
 
 /// 将选择阶段失败映射为带结构化 code 与 retry_after 的 Provider 错误。
 pub(super) fn map_selection_error(error: GrokSessionSelectorError) -> ProviderError {
-    let (retry_after, message, code) = match error {
+    let (kind, retry_after, message, code) = match error {
         GrokSessionSelectorError::Policy(error) => return error.into_provider_error(),
         GrokSessionSelectorError::AccountCoolingDown { retry_after } => (
+            ProviderErrorKind::NoEligibleAccount,
             retry_after,
             cooling_down_message(retry_after),
             "account_cooling_down",
         ),
         GrokSessionSelectorError::ModelCoolingDown { retry_after } => (
+            ProviderErrorKind::NoEligibleAccount,
             retry_after,
             model_cooling_down_message(retry_after),
             "model_cooling_down",
         ),
         GrokSessionSelectorError::CapacityUnavailable { retry_after } => (
+            ProviderErrorKind::AccountCapacityUnavailable,
             retry_after,
             "account is at its concurrency or request-interval limit".to_owned(),
             "account_capacity_busy",
         ),
         GrokSessionSelectorError::NoEligibleSession => (
+            ProviderErrorKind::NoEligibleAccount,
             None,
             "no account is eligible for the requested model".to_owned(),
             "no_eligible_account",
         ),
         GrokSessionSelectorError::Unavailable => (
+            ProviderErrorKind::ProviderInfrastructureUnavailable,
             None,
             "account scheduling state is temporarily unreadable".to_owned(),
             "account_selector_unavailable",
@@ -417,7 +422,7 @@ pub(super) fn map_selection_error(error: GrokSessionSelectorError) -> ProviderEr
             return provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent);
         }
     };
-    let error = provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent);
+    let error = provider_error(kind, UpstreamSendState::NotSent);
     let error = match retry_after {
         Some(retry_after) => error.with_retry_after(retry_after),
         None => error,

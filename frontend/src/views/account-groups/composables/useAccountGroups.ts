@@ -285,12 +285,10 @@ export function useAccountGroups() {
   }
 
   watchDebounced(searchQuery, () => {
-    query.page.value = 1
-    void query.execute()
+    void query.reloadFromStart()
   }, { debounce: 250 })
   watch(statusQuery, () => {
-    query.page.value = 1
-    void query.execute()
+    void query.reloadFromStart()
   })
   watch(showFormModal, (open) => {
     if (!open && !saving.value) {

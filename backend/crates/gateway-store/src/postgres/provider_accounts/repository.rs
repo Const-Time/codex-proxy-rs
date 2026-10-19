@@ -109,7 +109,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         include_disabled: bool,
     ) -> StoreResult<Vec<ProviderAccountSummary>> {
         let rows = sqlx::query(
-            "select outbound_proxy_request_context(outbound_proxy_id) as request_context, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
+            "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,

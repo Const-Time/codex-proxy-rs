@@ -365,6 +365,7 @@ fn handshake() -> Handshake {
 
 pub(super) fn context(id: u64, timeout: Duration) -> CallContext {
     CallContext {
+        request: None,
         call_id: id,
         instance_id: "test-instance".into(),
         generation: 7,

@@ -47,6 +47,8 @@ struct RemoveAccountRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateRequest {
     #[serde(default)]
+    max_websocket_connections: u32,
+    #[serde(default)]
     location_policy: gateway_admin::model::proxies::ProxyLocationPolicy,
     name: String,
     proxy_url: AccountProxyUpdate,
@@ -55,6 +57,7 @@ struct CreateRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateRequest {
+    max_websocket_connections: Option<u32>,
     location_policy: Option<gateway_admin::model::proxies::ProxyLocationPolicy>,
     id: String,
     revision: u64,
@@ -96,6 +99,7 @@ struct ProxyAccountView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyView {
+    max_websocket_connections: u32,
     location_policy: gateway_admin::model::proxies::ProxyLocationPolicy,
     id: String,
     name: String,
@@ -113,6 +117,7 @@ impl From<ProxyRecord> for ProxyView {
     fn from(record: ProxyRecord) -> Self {
         let endpoint = record.proxy.endpoint();
         Self {
+            max_websocket_connections: record.proxy.max_websocket_connections(),
             location_policy: record.location_policy,
             id: record.id,
             name: record.name,
@@ -302,7 +307,7 @@ where
             NewProxy {
                 location_policy: request.location_policy,
                 name: request.name,
-                proxy,
+                proxy: proxy.with_max_websocket_connections(request.max_websocket_connections),
             },
             &auth.context().mutation_context(),
         )
@@ -359,6 +364,7 @@ where
         .proxies()
         .update(
             UpdateProxy {
+                max_websocket_connections: request.max_websocket_connections,
                 location_policy: request.location_policy,
                 id: request.id,
                 revision: revision(request.revision)?,

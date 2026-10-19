@@ -338,7 +338,7 @@ async fn explicit_missing_frozen_service_never_reads_the_new_global_publication(
 }
 
 #[tokio::test]
-async fn rpc_accepts_empty_or_null_and_faults_invalid_envelope_or_payload() {
+async fn rpc_accepts_empty_or_null_and_isolates_invalid_envelope_or_payload() {
     for mode in [
         "observer",
         "observer-null",
@@ -360,8 +360,20 @@ async fn rpc_accepts_empty_or_null_and_faults_invalid_envelope_or_payload() {
             assert_eq!(f.process.status(), "ready");
         } else {
             assert_eq!(result.unwrap_err().kind(), AdminErrorKind::BadGateway);
-            assert!(f.process.access().is_revoked());
-            assert!(f.process.observer_identity().is_none());
+            assert!(!f.process.access().is_revoked());
+            assert!(f.process.observer_identity().is_some());
+            f.process
+                .observe(
+                    wire("req_recovered", Default::default()),
+                    None,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                f.record("req_recovered:terminal").await.unwrap()["count"],
+                1
+            );
         }
         f.stop().await;
     }

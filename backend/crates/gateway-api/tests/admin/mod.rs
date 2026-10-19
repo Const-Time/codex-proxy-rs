@@ -1208,8 +1208,21 @@ impl ObservabilityStore for UnusedStore {
         Err(unavailable("usage cards"))
     }
 
-    async fn usage_summary(&self, _: TimeRange, _: UsageFilter) -> AdminStoreResult<UsageOverview> {
-        Err(unavailable("usage summary"))
+    async fn usage_summary(
+        &self,
+        range: TimeRange,
+        _: UsageFilter,
+    ) -> AdminStoreResult<UsageOverview> {
+        if self.dashboard_observation.lock().unwrap().is_none() {
+            return Err(unavailable("usage summary"));
+        }
+        Ok(UsageOverview {
+            range,
+            total_cost_usd: "0".parse().unwrap(),
+            requests: Default::default(),
+            attempts: Default::default(),
+            providers: Vec::new(),
+        })
     }
 
     async fn usage_diagnostics(

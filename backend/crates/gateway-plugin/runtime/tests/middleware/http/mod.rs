@@ -343,7 +343,7 @@ async fn sdk_http_body_resources_are_bounded_even_after_each_writer_finishes() {
     f.stop().await;
 }
 #[tokio::test]
-async fn sdk_http_forged_response_and_frame_tag_close_the_generation_until_explicit_restart() {
+async fn sdk_http_invalid_response_and_frames_fail_only_the_call() {
     let f = Fixture::new().await;
     let calls = Arc::new(AtomicUsize::new(0));
     assert!(
@@ -361,9 +361,8 @@ async fn sdk_http_forged_response_and_frame_tag_close_the_generation_until_expli
             .middleware_registry()
             .unwrap()
             .freeze_http(context())
-            .is_err()
+            .is_ok()
     );
-    f.change(true).await;
     let response = f
         .run(
             "invalid-chunks",
@@ -379,10 +378,9 @@ async fn sdk_http_forged_response_and_frame_tag_close_the_generation_until_expli
             .middleware_registry()
             .unwrap()
             .freeze_http(context())
-            .is_err()
+            .is_ok()
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    f.change(true).await;
     let response = f
         .run(
             "pass",
