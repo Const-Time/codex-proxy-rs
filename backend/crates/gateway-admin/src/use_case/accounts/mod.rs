@@ -1,4 +1,5 @@
 //! 统一账号目录与跨 Provider 动态分派。
+use crate::model::provider_credentials::ProviderQuotaReadRequest;
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -19,8 +20,8 @@ use crate::{
         AdminError, MutationContext,
         accounts::{
             AccountConnectionTestEvent, AccountConnectionTestEventStream, AccountListQuery,
-            AccountPageItem, AccountUpdateResult, AccountUsageWindowQuery, AccountsUpdateResult,
-            BatchUpdateAccounts, UpdateAccount,
+            AccountPageItem, AccountUpdateResult, AccountUsage, AccountUsageWindowQuery,
+            AccountsUpdateResult, BatchUpdateAccounts, UpdateAccount,
         },
         observability::TimeRange,
         provider_credentials::{
@@ -78,6 +79,13 @@ pub trait AccountsService: Send + Sync {
         context: &MutationContext,
         command: BatchUpdateAccounts,
     ) -> Result<AccountsUpdateResult, AdminError>;
+
+    async fn account_configuration(
+        &self,
+        _account_id: &ProviderAccountId,
+    ) -> Result<Option<crate::model::provider_credentials::ProviderDocument>, AdminError> {
+        Ok(None)
+    }
 
     async fn quota(
         &self,
@@ -140,6 +148,78 @@ pub(crate) struct DefaultAccountsService {
 }
 
 impl DefaultAccountsService {
+    async fn read_quotas(
+        providers: &ProviderAdminRegistry,
+        items: &[AccountPageItem],
+        rolling_usage: &BTreeMap<String, AccountUsage>,
+    ) -> Vec<ProviderQuota> {
+        let mut groups = BTreeMap::<_, Vec<usize>>::new();
+        for (index, item) in items.iter().enumerate() {
+            groups
+                .entry(&item.account.provider_kind)
+                .or_default()
+                .push(index);
+        }
+        let batches = groups.into_iter().map(|(kind, indices)| async move {
+            let provider = match providers.require(kind) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    tracing::warn!(
+                        provider = %kind,
+                        error = %error,
+                        "account directory provider is not registered; showing empty quota"
+                    );
+                    return Vec::new();
+                }
+            };
+            let requests = indices
+                .iter()
+                .map(|&index| {
+                    let account = &items[index].account;
+                    ProviderQuotaReadRequest {
+                        account,
+                        rolling_usage: rolling_usage.get(&account.id),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let results = provider.read_quotas(&requests).await;
+            if results.len() != indices.len() {
+                tracing::warn!(
+                    provider = %kind,
+                    expected = indices.len(),
+                    actual = results.len(),
+                    "account directory quota batch has invalid length; showing empty quota"
+                );
+                return Vec::new();
+            }
+            indices
+                .into_iter()
+                .zip(results)
+                .map(|(index, result)| {
+                    let quota = result.unwrap_or_else(|error| {
+                        tracing::warn!(
+                            account_id = %items[index].account.id,
+                            error = %error,
+                            "account directory quota projection failed; showing empty quota"
+                        );
+                        empty_quota()
+                    });
+                    (index, quota)
+                })
+                .collect::<Vec<_>>()
+        });
+        // Provider 可独立完成，回填原页顺序并保留未注册或失败账号的位置
+        let mut quotas = vec![empty_quota(); items.len()];
+        for (index, quota) in futures::future::join_all(batches)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            quotas[index] = quota;
+        }
+        quotas
+    }
+
     #[must_use]
     pub(crate) fn new(
         accounts: Arc<dyn AccountStore>,
@@ -325,6 +405,37 @@ impl DefaultAccountsService {
         Ok(())
     }
 
+    async fn load_api_key_usage(
+        &self,
+        accounts: &[AccountPageItem],
+    ) -> Result<BTreeMap<String, AccountUsage>, AdminError> {
+        let now = Utc::now();
+        // API Key 没有套餐周期；本地累计直接查询账号创建后仍保留的请求记录。
+        let windows = accounts
+            .iter()
+            .filter(|item| item.account.authentication_kind == "api_key")
+            .map(|item| AccountUsageWindowQuery {
+                account_id: item.account.id.clone(),
+                key: "account-lifetime".to_owned(),
+                range: TimeRange {
+                    start: item.account.created_at,
+                    end: now,
+                },
+            })
+            .collect::<Vec<_>>();
+        if windows.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        Ok(self
+            .accounts
+            .load_account_usage_by_windows(&windows)
+            .await
+            .map_err(|error| map_store_error(error, "API Key account usage"))?
+            .into_iter()
+            .map(|result| (result.account_id, result.usage))
+            .collect())
+    }
+
     async fn load_directory_item(
         &self,
         account_id: &ProviderAccountId,
@@ -383,9 +494,15 @@ impl DefaultAccountsService {
             std::slice::from_mut(&mut quota),
         )
         .await?;
-        let usage = quota
-            .usage_window()
-            .and_then(|(window, _)| window.local_usage.clone());
+        let usage = self
+            .load_api_key_usage(std::slice::from_ref(&stored))
+            .await?
+            .remove(&stored.account.id)
+            .or_else(|| {
+                quota
+                    .usage_window()
+                    .and_then(|(window, _)| window.local_usage.clone())
+            });
         Ok(AccountDirectoryItem {
             used_slots,
             total_slots,
@@ -434,51 +551,17 @@ impl AccountsService for DefaultAccountsService {
             .into_iter()
             .map(|usage| (usage.account_id.clone(), usage))
             .collect::<BTreeMap<_, _>>();
-        let mut quotas = futures::future::join_all(page.items.iter().map(|item| async {
-            let account = &item.account;
-            let account_id = ProviderAccountId::new(account.id.clone())
-                .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
-            // 单个账号的 quota 投影失败（Provider 未注册或 quota 读取失败）不拖垮整页：
-            // 该账号降级为空额度投影，其余账号与页面状态照常返回。
-            let provider = match self.providers.require(&account.provider_kind) {
-                Ok(provider) => provider,
-                Err(error) => {
-                    tracing::warn!(
-                        account_id = %account.id,
-                        error = %error,
-                        "account directory provider is not registered; showing empty quota"
-                    );
-                    return Ok(empty_quota());
-                }
-            };
-            match provider
-                .quota(ProviderQuotaRequest {
-                    account_id,
-                    refresh: false,
-                    rolling_usage: rolling_usage.get(&account.id).cloned(),
-                })
-                .await
-            {
-                Ok(quota) => {
-                    self.accounts
-                        .observe_subscription_quota(&account.id, &quota)
-                        .await
-                        .map_err(|e| map_store_error(e, "subscription quota"))?;
-                    Ok(quota)
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        account_id = %account.id,
-                        error = %error,
-                        "account directory quota projection failed; showing empty quota"
-                    );
-                    Ok(empty_quota())
-                }
-            }
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, AdminError>>()?;
+        let mut quotas = Self::read_quotas(&self.providers, &page.items, &rolling_usage).await;
+        // Keep the local subscription observation path and account order intact.
+        for result in
+            futures::future::join_all(page.items.iter().zip(&quotas).map(|(item, quota)| {
+                self.accounts
+                    .observe_subscription_quota(&item.account.id, quota)
+            }))
+            .await
+        {
+            result.map_err(|e| map_store_error(e, "subscription quota"))?;
+        }
         self.attach_quota_local_usage(&page.items, &mut quotas)
             .await?;
         let runtime = self
@@ -491,14 +574,17 @@ impl AccountsService for DefaultAccountsService {
             .load_runtime_settings()
             .await
             .map_err(|error| map_store_error(error, "account capacity settings"))?;
+        let mut api_key_usage = self.load_api_key_usage(&page.items).await?;
         let items = page
             .items
             .into_iter()
             .zip(quotas)
             .map(|(mut item, quota)| {
-                let usage = quota
-                    .usage_window()
-                    .and_then(|(window, _)| window.local_usage.clone());
+                let usage = api_key_usage.remove(&item.account.id).or_else(|| {
+                    quota
+                        .usage_window()
+                        .and_then(|(window, _)| window.local_usage.clone())
+                });
                 AccountDirectoryItem {
                     used_slots: runtime
                         .in_flight
@@ -723,6 +809,17 @@ impl AccountsService for DefaultAccountsService {
         Ok(result)
     }
 
+    async fn account_configuration(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<Option<crate::model::provider_credentials::ProviderDocument>, AdminError> {
+        let (_, provider) = self.provider_for_account(account_id).await?;
+        provider
+            .account_configuration(account_id)
+            .await
+            .map_err(|error| map_provider_error(error, "provider account configuration"))
+    }
+
     async fn quota(
         &self,
         account_id: &ProviderAccountId,
@@ -911,6 +1008,7 @@ fn map_reset_credits_error_after_refresh(
 /// 账号目录中单个账号 quota 读取失败时使用的空额度投影。
 fn empty_quota() -> ProviderQuota {
     ProviderQuota {
+        credits: None,
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,

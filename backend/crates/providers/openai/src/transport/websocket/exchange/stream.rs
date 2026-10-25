@@ -532,7 +532,16 @@ async fn discard_stream_websocket(
             .discard_with_observation(tombstone_observation)
             .await;
     }
-    websocket.close().await;
+    if matches!(
+        reason,
+        StreamWebSocketDiscardReason::ClientCancelled
+            | StreamWebSocketDiscardReason::DownstreamSendFailed
+            | StreamWebSocketDiscardReason::PoolShutdown
+    ) {
+        websocket.close_and_wait().await;
+    } else {
+        websocket.abort_and_wait().await;
+    }
 }
 
 fn connection_observation(

@@ -101,6 +101,8 @@ pub(crate) struct SelectCodexProviderEndpointCredential<'a> {
 }
 
 struct CredentialSelectionInput<'a> {
+    requires_websocket: bool,
+    oauth_only: bool,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
@@ -300,6 +302,8 @@ impl CodexCredentialSelector {
         request: &SelectCodexCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            requires_websocket: false,
+            oauth_only: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -318,8 +322,12 @@ impl CodexCredentialSelector {
         request: &SelectCodexCredential<'_>,
         cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         session_affinity_observation: Option<&CodexSessionAffinity>,
+        requires_websocket: bool,
+        oauth_only: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            requires_websocket,
+            oauth_only,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -342,6 +350,8 @@ impl CodexCredentialSelector {
         request: &SelectCodexProviderEndpointCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            requires_websocket: false,
+            oauth_only: true,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
@@ -403,6 +413,7 @@ impl CodexCredentialSelector {
             .into_iter()
             .filter(|account| {
                 account.provider() == &self.provider_kind
+                        && (!request.oauth_only || account.authentication_kind() == CODEX_AUTHENTICATION_KIND_OAUTH)
                     && (diagnostic
                         || request
                             .attempt
@@ -421,11 +432,26 @@ impl CodexCredentialSelector {
                                 }
                                 let observed_support =
                                     self.catalog.observed_model_support(account, upstream_model);
-                                matches!(observed_support, Ok(None | Some(true)))
+                                if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY { matches!(observed_support, Ok(Some(true))) } else { matches!(observed_support, Ok(None | Some(true))) }
                             }
                         })
             })
             .collect::<Vec<_>>();
+        let mut eligible = Vec::with_capacity(accounts.len());
+        for account in accounts {
+            if request.requires_websocket
+                && account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY
+            {
+                let runtime = self.repository.load_runtime_credential(&account).await?;
+                if !matches!(runtime.authentication, CodexRuntimeAuthentication::ApiKey(ref auth)
+                    if auth.configuration.transport == super::ApiKeyTransport::PreferWebsocket)
+                {
+                    continue;
+                }
+            }
+            eligible.push(account);
+        }
+        let accounts = eligible;
         if !diagnostic {
             self.quota.prepare_scheduling(&accounts).await;
         }
@@ -1275,6 +1301,12 @@ impl CodexCredentialSelector {
         response_origin: &Url,
         headers: &[String],
     ) -> Result<CodexCookieCaptureOutcome, CredentialSelectionError> {
+        if account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH {
+            return Ok(CodexCookieCaptureOutcome {
+                credential_revision: None,
+                rejected: headers.len(),
+            });
+        }
         let parsed = self.cookie_policy.parse_response_headers(
             account.id().as_str(),
             account.revision().get(),
@@ -1289,7 +1321,12 @@ impl CodexCredentialSelector {
             });
         }
         let mut data = self.repository.load_complete_data(account).await?;
-        let cookies = data.cookies_mut();
+        let Some(cookies) = data.cookies_mut() else {
+            return Ok(CodexCookieCaptureOutcome {
+                credential_revision: None,
+                rejected: headers.len(),
+            });
+        };
         for input in parsed.inputs {
             let scope = self.cookie_policy.validate_capture(
                 &input.response_origin,
@@ -1362,10 +1399,13 @@ impl CodexCredentialSelector {
         if data.cookies().is_empty() {
             return Ok(());
         }
+        let Some(cookies) = data.cookies_mut() else {
+            return Ok(());
+        };
         match recovery {
             CookieRecovery::ExpireAt(expires_at) => {
                 let expires_at = chrono::DateTime::<chrono::Utc>::from(expires_at);
-                for cookie in data.cookies_mut() {
+                for cookie in cookies {
                     cookie.expires_at = Some(
                         cookie
                             .expires_at
@@ -1373,7 +1413,7 @@ impl CodexCredentialSelector {
                     );
                 }
             }
-            CookieRecovery::Clear => data.cookies_mut().clear(),
+            CookieRecovery::Clear => cookies.clear(),
         }
         self.repository.compare_and_swap_data(account, data).await?;
         Ok(())

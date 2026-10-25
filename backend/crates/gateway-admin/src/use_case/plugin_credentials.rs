@@ -174,6 +174,7 @@ impl PluginCredentialService for DefaultPluginCredentialService {
                     let result = commit_credential_rotation(
                         accounts.as_ref(),
                         prepared,
+                        None,
                         &scope.actor,
                         "plugin credential rotation",
                     )

@@ -57,12 +57,20 @@ pub trait ProviderCatalogPort: Send + Sync {
     ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>>;
 }
 
+/// Provider 客户端目录条目；缺少原生协议正文时使用已编译的通用画像。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModelDescriptor {
     pub model: UpstreamModelId,
-    pub payload: RawJsonPayload,
+    pub content: ProviderModelContent,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderModelContent {
+    Native(RawJsonPayload),
+    Adapted(ModelPresentation),
+}
+
+/// 对外目录按条目保留原生正文或使用通用画像适配。
 #[derive(Debug, Clone)]
 pub enum PublicModelDescriptor {
     Native {
@@ -75,6 +83,20 @@ pub enum PublicModelDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("provider model catalog is unavailable")]
 pub struct ProviderCatalogUnavailable;
+
+impl ProviderModelContent {
+    pub(crate) fn for_public_model(&self, model: PublicModelId) -> PublicModelDescriptor {
+        match self {
+            Self::Native(payload) => PublicModelDescriptor::Native {
+                model,
+                payload: payload.clone(),
+            },
+            Self::Adapted(presentation) => {
+                PublicModelDescriptor::Adapted(PublicModelProfile::new(model, presentation.clone()))
+            }
+        }
+    }
+}
 
 /// Provider 实时目录编译后的单模型能力。
 #[derive(Debug, Clone, PartialEq, Eq)]

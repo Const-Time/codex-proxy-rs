@@ -18,7 +18,7 @@ use gateway_plugin_sdk::{
             FinishReason as WireFinishReason, Usage as WireUsage, WireEvent, WirePayload,
             facts::{self, ExecutionCost, ExecutionFacts},
         },
-        observation::{RequestMoney, RequestTimings},
+        observation::RequestMoney,
     },
 };
 
@@ -142,7 +142,7 @@ fn observation(value: &ProviderResponseObservation) -> facts::ResponseObservatio
         request_id: value.request_id().map(|value| value.as_str().to_owned()),
         service_tier: value.service_tier().map(str::to_owned),
         upstream_response_model: value.upstream_response_model().map(str::to_owned),
-        timings: RequestTimings {
+        timings: facts::ResponseTimings {
             transport_decision_wait_ms: timings.transport_decision_wait_ms,
             connect_ms: timings.connect_ms,
             headers_ms: timings.headers_ms,
@@ -151,7 +151,9 @@ fn observation(value: &ProviderResponseObservation) -> facts::ResponseObservatio
             first_text_ms: timings.first_text_ms,
             first_token_ms: timings.first_token_ms,
             provider_processing_ms: timings.provider_processing_ms,
-            latency_ms: None,
+            upstream_response_ms: timings.upstream_response_ms,
+            upstream_api_overhead_ms: timings.upstream_api_overhead_ms,
+            upstream_engine_ms: timings.upstream_engine_ms,
         },
         client_headers: value
             .client_headers()
@@ -269,7 +271,13 @@ fn project_fact(event: GatewayEvent) -> Option<Result<CanonicalEvent, PluginFaul
 
 fn project_wire(wire: &ProtocolWireEvent) -> Result<WireEvent, PluginFault> {
     let protocol = wire.protocol().to_owned();
-    let payload = if let Some(body) = wire.raw_body_chunk() {
+    let payload = if let Some(message) = wire.raw_websocket_message() {
+        WirePayload::WebSocket {
+            event: wire.event_type().map(str::to_owned),
+            data: wire.has_json_data().then(|| wire.data().clone()),
+            message: message.as_bytes().to_vec(),
+        }
+    } else if let Some(body) = wire.raw_body_chunk() {
         WirePayload::RawBody {
             body: body.to_vec(),
         }

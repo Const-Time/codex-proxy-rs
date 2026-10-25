@@ -141,22 +141,27 @@ impl CallbackHandler for Callbacks {
                 Some(caller.graph.clone()),
             );
         }
-        if matches!(context.stage, Stage::Management | Stage::PublicManagement)
-            && let Some(models) = &self.models
+        if matches!(
+            context.stage,
+            Stage::Management | Stage::PublicManagement | Stage::Maintenance
+        ) && let Some(models) = &self.models
+            && let Some(caller) = self.calls.caller(&context.resource_scope_id)
         {
-            // LivePlugin registers the authenticated actor before the RPC begins.
-            let _ = models.bind(
-                context,
-                None,
-                self.calls.actor(&context.resource_scope_id),
-                gateway_core::lifecycle::CancellationToken::new(),
-                self.calls
-                    .caller(&context.resource_scope_id)
-                    .and_then(|caller| caller.invocation.clone()),
-                self.calls
-                    .caller(&context.resource_scope_id)
-                    .map(|caller| caller.graph.clone()),
-            );
+            // Authority was captured before the host appended the callback's parent identity.
+            if models
+                .bind(
+                    context,
+                    None,
+                    self.calls.actor(&context.resource_scope_id),
+                    caller.cancellation.clone(),
+                    caller.invocation.clone(),
+                    Some(caller.graph.clone()),
+                )
+                .is_ok()
+                && caller.account_probe_authorized
+            {
+                models.authorize_account_probe(context);
+            }
         }
     }
     fn finish(&self, context: &CallContext) {

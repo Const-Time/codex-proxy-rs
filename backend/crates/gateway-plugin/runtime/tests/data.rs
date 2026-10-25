@@ -66,6 +66,7 @@ impl PluginDataService for Facts {
         self.reads.fetch_add(1, Ordering::SeqCst);
         assert_eq!(id, "acct_test");
         Ok(ProviderQuota {
+            credits: None,
             plan_type: Some("not-in-facts".into()),
             observed_at: None,
             refresh_token_expires_at: Some("2026-01-01T00:00:00Z".parse().unwrap()),

@@ -444,6 +444,12 @@ impl Provider for CodexProvider {
         let cyber_policy_session_key =
             derive_codex_cyber_policy_session_key(&upstream_request, context.client_api_key_ref());
 
+        let requires_websocket = transport_requirement(&upstream_request).requires_websocket()
+            || (context.continuation_attempt() == ContinuationAttempt::Native
+                && (previous_session.as_ref().is_some_and(|state| {
+                    state.continuation_scope == OpenAiContinuationScope::ConnectionLocal
+                }) || matches!(context.continuation(), Some(ContinuationBinding::Pinned(binding))
+                        if binding.scope() == NativeContinuationScope::ConnectionLocal)));
         let selection_started_at = Instant::now();
         let selection = async {
             self.selector
@@ -458,6 +464,9 @@ impl Provider for CodexProvider {
                     },
                     cyber_policy_session_key.as_ref(),
                     session_affinity.as_ref(),
+                    requires_websocket,
+                    upstream_request.responses_lite.is_some()
+                        || upstream_request.memgen_request.is_some(),
                 )
                 .await
                 .map_err(map_selection_error)
@@ -475,6 +484,13 @@ impl Provider for CodexProvider {
             u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let lease = Arc::new(lease);
         // 首字计时的起点：账号选择完成之后、上游建立之前。
+        if previous_session.as_ref().is_some_and(|state| {
+            state
+                .credential_revision
+                .is_some_and(|revision| revision != lease.account().revision().get())
+        }) {
+            return Err(continuation_replay_required_error("scope_unavailable"));
+        }
         let output_started_at = Instant::now();
         let provider_kind = ProviderKind::new(PROVIDER_NAME)
             .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
@@ -619,7 +635,19 @@ impl Provider for CodexProvider {
             );
         }
         let requirement = transport_requirement(&upstream_request);
-        let requested_transport = selected_transport(&upstream_request);
+        let api_http = matches!(lease.authentication(), crate::credential::CodexRuntimeAuthentication::ApiKey(auth)
+            if auth.configuration.transport == crate::credential::ApiKeyTransport::Http);
+        if api_http && requirement.requires_websocket() {
+            return Err(provider_error(
+                ProviderErrorKind::Unsupported,
+                UpstreamSendState::NotSent,
+            ));
+        }
+        let requested_transport = if api_http {
+            CodexProviderTransport::HttpOnly
+        } else {
+            selected_transport(&upstream_request)
+        };
         let session_http_fallback = requirement.allows_pre_send_http_fallback()
             && session_affinity
                 .as_ref()
@@ -740,6 +768,11 @@ impl Provider for CodexProvider {
         let session_capture =
             (!continuation_requested || previous_session.is_some()).then(|| OpenAiSessionCapture {
                 account_id: lease.account_id().as_str().to_owned(),
+                credential_revision: matches!(
+                    lease.authentication(),
+                    crate::credential::CodexRuntimeAuthentication::ApiKey(_)
+                )
+                .then_some(lease.account().revision().get()),
                 conversation_id: upstream_request.local_conversation_id.clone(),
                 turn_state: upstream_request.turn_state.clone(),
                 client_turn_id: original_client_turn_id,
@@ -763,6 +796,7 @@ impl Provider for CodexProvider {
                 .map_err(|_| {
                     provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
                 })?
+                .with_authentication(lease.authentication())
                 .with_connection_budget(context.connection_budget().clone())
                 .with_response_control(context.response_control().cloned()),
             response_origin: self.responses_url.clone(),

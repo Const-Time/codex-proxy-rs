@@ -1,6 +1,6 @@
 # Gateway Plugin SDK
 
-> 此 SDK 来源于上游 v3.21.2（`fb15f3e3`），RPC v4 编解码及会话队列对齐 `a0e70807`；能力接入见支持矩阵。当前本地运行时只支持其中部分能力，实际以[本地支持矩阵](../../../../docs/plugins.md)为准。
+> 此 SDK 基础来源于上游 v3.21.2（`fb15f3e3`），RPC v5 原始 HTTP 与观测合同对齐 `b8479b59`；能力接入见支持矩阵。当前本地运行时只支持其中部分能力，实际以[本地支持矩阵](../../../../docs/plugins.md)为准。
 
 用于编写 Codex Proxy 插件的 Rust 合同与可选会话辅助。插件只依赖本包，不依赖宿主 Core、Admin、Store 或 Host。
 SDK 仍处于实验阶段；能力是否可用取决于宿主支持、清单声明与实际注册，
@@ -10,7 +10,7 @@ SDK 仍处于实验阶段；能力是否可用取决于宿主支持、清单声�
 | --- | --- | --- |
 | SDK 包 | `0.1.0` | Rust 开发依赖，独立于网关版本 |
 | `manifestVersion` | `2` | 安装清单格式 |
-| `package.protocolVersion` | `4` | 宿主与插件的进程通信 |
+| `package.protocolVersion` | `5` | 宿主与插件的进程通信 |
 | `contributes.*.version` | 默认 `1`，`management` 支持 `1/2`、`middleware` 支持 `4/5`，`upstream_adapter` 为 `2` | 单项能力合同，见[扩展项声明](docs/manifest.md#扩展项简写) |
 
 开发顺序：编写[清单](docs/manifest.md) → 实现[能力处理器](docs/capabilities.md) → 用 [CLI](../../../apps/plugin-cli/README.md)

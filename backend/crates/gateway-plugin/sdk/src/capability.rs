@@ -36,7 +36,7 @@ impl Capability {
             | Self::Observer
             | Self::CommandLine
             | Self::Maintenance => &[1],
-            Self::UpstreamAdapter => &[1, 2],
+            Self::UpstreamAdapter => &[4],
         }
     }
 

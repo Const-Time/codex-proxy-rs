@@ -736,6 +736,7 @@ pub struct CredentialDeletionResult {
 pub struct RotateCredential {
     pub mutation: CredentialMutation,
     pub provider_material: ProviderDocument,
+    pub settings: Option<super::accounts::UpdateAccount>,
 }
 
 /// Provider 校验手工轮换材料时所需的非事务输入。
@@ -817,6 +818,7 @@ impl fmt::Debug for PreparedCredentialRotation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CredentialRotationCommit {
     pub prepared: PreparedCredentialRotationFacts,
+    pub settings: Option<super::accounts::UpdateAccount>,
 }
 
 impl fmt::Debug for RotateCredential {
@@ -825,6 +827,7 @@ impl fmt::Debug for RotateCredential {
             .debug_struct("RotateCredential")
             .field("mutation", &self.mutation)
             .field("provider_material", &self.provider_material)
+            .field("settings", &self.settings)
             .finish()
     }
 }
@@ -918,6 +921,12 @@ pub enum AccountUsagePeriod {
     Monthly,
 }
 
+/// 已加载的账号事实，批量查询无需逐账号重复读取凭据。
+pub struct ProviderQuotaReadRequest<'a> {
+    pub account: &'a crate::model::accounts::AccountRecord,
+    pub rolling_usage: Option<&'a crate::model::accounts::AccountUsage>,
+}
+
 /// Provider 解释 quota 所需的公共请求事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderQuotaRequest {
@@ -934,9 +943,18 @@ pub struct ProviderQuota {
     pub observed_at: Option<DateTime<Utc>>,
     pub refresh_token_expires_at: Option<DateTime<Utc>>,
     pub windows: Vec<ProviderQuotaWindow>,
+    pub credits: Option<ProviderQuotaCredits>,
     /// 展示用快照级触顶事实（顶层或任一窗口触顶）；不参与账号五态派生。
     pub limit_reached: bool,
     pub provider_data: Option<ProviderDocument>,
+}
+
+/// 上游点数余额的展示事实，保留原始十进制文本以避免精度损失。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderQuotaCredits {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
 }
 
 /// 空值和 `unknown` 代表未提供套餐；新的套餐标识仍按明确值保留。

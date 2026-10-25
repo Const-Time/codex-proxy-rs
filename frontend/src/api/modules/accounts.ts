@@ -1,3 +1,4 @@
+import type { AxiosRequestConfig as RequestOptions } from 'axios'
 import type { AccountGroupRef } from './account-groups'
 import request from '../request'
 
@@ -29,7 +30,14 @@ export interface AccountQuotaWindow {
   resetAtDisplay: string
 }
 
+export interface AccountQuotaCredits {
+  hasCredits: boolean
+  unlimited: boolean
+  balance: string | null
+}
+
 export interface AccountQuota {
+  credits: AccountQuotaCredits | null
   refreshedAtDisplay: string
   limitReached: boolean
   // 429 临时限流（Redis 冷却）到期时间；非限流中为 null。
@@ -507,5 +515,27 @@ export function completeAccountOAuth(data: AccountOAuthCompleteParam) {
     url: '/api/admin/accounts/oauth/complete',
     method: 'POST',
     data,
+  })
+}
+
+export interface ApiKeyConfiguration {
+  base_url: string
+  transport: 'http' | 'prefer_websocket'
+}
+
+export function getAccountDetail(data: AccountIdParam, options: RequestOptions = {}) {
+  return request<{ account: Account, credentialConfiguration?: ApiKeyConfiguration }>({
+    url: '/api/admin/accounts/detail',
+    method: 'GET',
+    params: data,
+    ...options,
+  })
+}
+
+export function updateAccountApiKey(data: { accountId: string, baseUrl: string, transport: ApiKeyConfiguration['transport'], apiKey?: string, settings?: AccountUpdateParam }) {
+  return request<{ accountId: string }>({
+    url: '/api/admin/accounts/rotate',
+    method: 'POST',
+    data: { provider: 'openai', ...data },
   })
 }

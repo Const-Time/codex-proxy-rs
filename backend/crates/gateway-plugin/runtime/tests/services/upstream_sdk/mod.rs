@@ -29,20 +29,20 @@ pub(crate) fn binary() -> &'static PathBuf {
                 PathBuf::from,
             )
             .join("upstream-service-fixture");
-        let output = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--locked", "--manifest-path"])
+        let output = std::process::Command::new("rustup")
+            .args([
+                "run",
+                "1.99.1",
+                "cargo",
+                "build",
+                "--locked",
+                "--manifest-path",
+            ])
             .arg(fixture.join("Cargo.toml"))
             .arg("--target-dir")
             .arg(&target)
-            .env(
-                "RUSTUP_TOOLCHAIN",
-                option_env!("RUSTUP_TOOLCHAIN").unwrap_or("1.97.0"),
-            )
-            .env(
-                "RUSTC",
-                PathBuf::from(env!("CARGO"))
-                    .with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX)),
-            )
+            .env_remove("RUSTC")
+            .env_remove("RUSTUP_TOOLCHAIN")
             .output()
             .unwrap();
         assert!(

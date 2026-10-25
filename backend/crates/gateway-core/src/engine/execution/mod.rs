@@ -1467,10 +1467,15 @@ impl DefaultExecutionService {
                 .observe_probe_failure(&observed, started_at, &error)
                 .await);
         }
+        let facts: Vec<_> = events
+            .into_iter()
+            .flat_map(|event| event.into_parts().0)
+            .collect();
+        let complete = facts.iter().any(|event| matches!(event, GatewayEvent::Completed(meta) if matches!(meta.finish_reason(), Some(crate::event::FinishReason::Stop))));
         Ok(AccountProbeResult {
-            text: events
+            complete,
+            text: facts
                 .into_iter()
-                .flat_map(|event| event.into_parts().0)
                 .filter_map(|fact| match fact {
                     GatewayEvent::TextDelta(delta) => Some(delta.text),
                     _ => None,
@@ -1755,10 +1760,7 @@ impl ExecutionService for DefaultExecutionService {
                     if scope.allows_provider_model(kind, target.as_str())
                         && seen.insert(model.clone())
                     {
-                        result.push(PublicModelDescriptor::Native {
-                            model,
-                            payload: source.payload.clone(),
-                        });
+                        result.push(source.content.for_public_model(model));
                     }
                 }
                 for model in client.snapshot.public_models_for_provider(kind) {
@@ -1777,10 +1779,7 @@ impl ExecutionService for DefaultExecutionService {
                     }
                     if let Some(source) = by_id.get(target.as_str()) {
                         seen.insert(model.clone());
-                        result.push(PublicModelDescriptor::Native {
-                            model,
-                            payload: source.payload.clone(),
-                        });
+                        result.push(source.content.for_public_model(model));
                     }
                 }
             }

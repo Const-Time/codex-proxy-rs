@@ -357,7 +357,7 @@ async fn sdk_adapter_validates_sequence_and_preserves_host_send_state_on_failure
         let f = Fixture::new(&server.url, "http_sse").await;
         let account = Account::new();
         let mut stream = f.stream(mode, account.clone(), None, CancellationToken::new());
-        let error = loop {
+        let mut error = loop {
             match stream.next().await.unwrap() {
                 Ok(_) => {}
                 Err(error) => break error,
@@ -368,10 +368,47 @@ async fn sdk_adapter_validates_sequence_and_preserves_host_send_state_on_failure
         assert_eq!(account.failures.load(Ordering::SeqCst), 1);
         if mode == "failure" {
             assert_eq!(error.retry_after(), Some(Duration::from_millis(1200)));
+            let events = error.take_atomic_client_events();
+            let observation = events
+                .iter()
+                .find_map(|event| event.response_observation())
+                .unwrap();
+            assert_eq!(observation.status_code(), Some(429));
+            assert_eq!(
+                observation.request_id().map(|id| id.as_str()),
+                Some("fixture-failure-request")
+            );
             assert_eq!(f.manager.list().await.unwrap()[0].status, "ready");
         }
         f.stop().await;
     }
+}
+
+#[tokio::test]
+async fn sdk_adapter_preserves_observation_only_frames_and_merges_later_updates() {
+    let server = Server::new().await;
+    let fixture = Fixture::new(&server.url, "http_sse").await;
+    let mut stream = fixture.stream(
+        "observation",
+        Account::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.unwrap());
+    }
+    assert_eq!(events.len(), 3);
+    assert!(events[1].canonical_facts().is_empty());
+    assert!(events[1].wire_event().is_none());
+    let observation = events[2].response_observation().unwrap();
+    assert_eq!(
+        observation.request_id().map(|id| id.as_str()),
+        Some("fixture-raw-request")
+    );
+    assert_eq!(observation.timings().upstream_engine_ms, Some(12.5));
+    assert_eq!(observation.service_tier(), Some("priority"));
+    fixture.stop().await;
 }
 #[tokio::test]
 async fn sdk_adapter_continuation_is_owned_by_instance_key_account_and_credential_revision() {

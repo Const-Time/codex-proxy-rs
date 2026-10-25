@@ -14,7 +14,7 @@ use std::sync::Arc;
 fn contribution() -> ContributionDeclaration {
     ContributionDeclaration {
         id: "local.fixture.upstream".into(),
-        version: 2,
+        version: 4,
         stages: vec![Stage::Upstream],
         input_formats: vec!["openai".into()],
         output_formats: vec!["openai".into()],
@@ -107,7 +107,7 @@ fn upstream_adapter_registration_rejects_ambiguous_base_paths_and_model_ranges()
 }
 #[tokio::test]
 async fn sdk_upstream_adapter_registration_is_validated_before_the_instance_can_be_published() {
-    for contract in [1, 2] {
+    for contract in [4] {
         let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(MemoryStore::default());
         let runtime = Arc::new(PluginEngine::new(

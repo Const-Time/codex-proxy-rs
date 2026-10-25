@@ -7,7 +7,8 @@ pub mod snapshot;
 pub use catalog::{
     ContributedModelAlias, ContributedModelCatalog, ModelCatalogValidator,
     ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
-    ProviderModelCapabilities, ProviderModelDescriptor, PublicModelDescriptor,
+    ProviderModelCapabilities, ProviderModelContent, ProviderModelDescriptor,
+    PublicModelDescriptor,
 };
 
 pub use crate::account::scope::{

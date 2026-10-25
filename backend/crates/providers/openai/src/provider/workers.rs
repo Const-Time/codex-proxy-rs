@@ -261,7 +261,15 @@ impl DaemonTask for OpenAiCatalogEtagTask {
     fn run(
         &self,
         cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        self.run_with_context(gateway_core::task::WorkerDaemonContext::new(cancellation))
+    }
+
+    fn run_with_context(
+        &self,
+        context: gateway_core::task::WorkerDaemonContext,
     ) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        let cancellation = context.cancellation().clone();
         Box::pin(async move {
             loop {
                 tokio::select! {
@@ -273,6 +281,8 @@ impl DaemonTask for OpenAiCatalogEtagTask {
                         error = %error,
                         "OpenAI model catalog ETag refresh failed"
                     );
+                } else {
+                    context.succeeded();
                 }
             }
         })

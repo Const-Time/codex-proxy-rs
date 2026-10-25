@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -201,6 +202,7 @@ pub struct ProtocolWireEvent {
     data: Value,
     has_json_data: bool,
     raw_sse_frame: Option<Bytes>,
+    raw_websocket_message: Option<Arc<str>>,
     raw_json_body: Option<Bytes>,
     raw_body_chunk: Option<Bytes>,
     sse_id: Option<String>,
@@ -208,6 +210,26 @@ pub struct ProtocolWireEvent {
 }
 
 impl ProtocolWireEvent {
+    pub fn raw_websocket(
+        protocol: impl Into<String>,
+        message: impl Into<Arc<str>>,
+    ) -> Result<Self, IdentifierError> {
+        let mut wire = Self::json(protocol, None, Value::Null)?;
+        wire.has_json_data = false;
+        Ok(wire.with_raw_websocket_message(message))
+    }
+
+    #[must_use]
+    pub fn with_raw_websocket_message(mut self, message: impl Into<Arc<str>>) -> Self {
+        self.raw_websocket_message = Some(message.into());
+        self
+    }
+
+    #[must_use]
+    pub fn raw_websocket_message(&self) -> Option<&str> {
+        self.raw_websocket_message.as_deref()
+    }
+
     /// 创建协议原生 JSON event。
     ///
     /// # Errors
@@ -241,6 +263,7 @@ impl ProtocolWireEvent {
             data,
             has_json_data: true,
             raw_sse_frame: None,
+            raw_websocket_message: None,
             raw_json_body: None,
             raw_body_chunk: None,
             sse_id,
@@ -289,6 +312,7 @@ impl ProtocolWireEvent {
             data: Value::Null,
             has_json_data: false,
             raw_sse_frame: Some(raw_sse_frame),
+            raw_websocket_message: None,
             raw_json_body: None,
             raw_body_chunk: None,
             sse_id: None,
@@ -315,6 +339,7 @@ impl ProtocolWireEvent {
             data: Value::Null,
             has_json_data: false,
             raw_sse_frame: None,
+            raw_websocket_message: None,
             raw_json_body: Some(raw_json_body),
             raw_body_chunk: None,
             sse_id: None,
@@ -457,7 +482,7 @@ impl UpstreamHttpVersion {
 }
 
 /// Provider transport 边界测得的阶段耗时。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ProviderResponseTimings {
     pub transport_decision_wait_ms: Option<u64>,
     pub connect_ms: Option<u64>,
@@ -467,6 +492,9 @@ pub struct ProviderResponseTimings {
     pub first_text_ms: Option<u64>,
     pub first_token_ms: Option<u64>,
     pub provider_processing_ms: Option<u64>,
+    pub upstream_response_ms: Option<u64>,
+    pub upstream_api_overhead_ms: Option<f64>,
+    pub upstream_engine_ms: Option<f64>,
 }
 
 /// Provider 已筛选的响应观测 JSON。
@@ -475,7 +503,7 @@ pub struct ProviderResponseTimings {
 /// 脱敏和版本演进均由所属 Provider 负责。这样 Provider 专有协议不会渗入路由
 /// 或管理领域。
 #[derive(Clone, PartialEq, Eq)]
-pub struct ProviderResponseMetadata(String);
+pub struct ProviderResponseMetadata(Arc<str>);
 
 impl ProviderResponseMetadata {
     const MAX_BYTES: usize = 32 * 1024;
@@ -489,7 +517,7 @@ impl ProviderResponseMetadata {
         serde_json::from_str::<Value>(&json)
             .ok()
             .filter(Value::is_object)
-            .map(|_| Self(json))
+            .map(|_| Self(json.into()))
     }
 
     /// 返回不透明的 JSON 文本，供持久化 adapter 原样验证和写入。
@@ -544,7 +572,7 @@ impl fmt::Debug for ProviderResponseHeader {
 }
 
 /// Core 消费的 Provider 执行观测，不会原样进入客户端响应。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderResponseObservation {
     transport: UpstreamTransport,
     http_version: Option<UpstreamHttpVersion>,
@@ -554,7 +582,7 @@ pub struct ProviderResponseObservation {
     service_tier: Option<String>,
     upstream_response_model: Option<String>,
     timings: ProviderResponseTimings,
-    client_headers: Vec<ProviderResponseHeader>,
+    client_headers: Arc<[ProviderResponseHeader]>,
     provider_metadata: Option<ProviderResponseMetadata>,
 }
 
@@ -570,7 +598,7 @@ impl ProviderResponseObservation {
             service_tier: None,
             upstream_response_model: None,
             timings: ProviderResponseTimings::default(),
-            client_headers: Vec::new(),
+            client_headers: Arc::default(),
             provider_metadata: None,
         }
     }
@@ -647,7 +675,7 @@ impl ProviderResponseObservation {
 
     #[must_use]
     pub fn with_client_headers(mut self, client_headers: Vec<ProviderResponseHeader>) -> Self {
-        self.client_headers = client_headers;
+        self.client_headers = client_headers.into();
         self
     }
 

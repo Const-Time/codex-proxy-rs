@@ -21,6 +21,7 @@ pub mod reset_credits;
 mod response_meta;
 pub(crate) mod session;
 mod time;
+pub(crate) use endpoints::parse_upstream_base_url;
 pub mod tls;
 pub mod usage;
 pub mod websocket;

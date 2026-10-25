@@ -31,7 +31,6 @@ use gateway_admin::{
 use gateway_core::{
     engine::budget::ClientBudgetStatus,
     engine::execution::ClientApiKeyUsageSink,
-    lifecycle::CancellationToken,
     policy::{ClientApiKeyId, PlaintextClientApiKey, RateLimits},
     routing::{AccountGroupId, ProviderKind},
     task::{DaemonTask, WorkerTaskError},
@@ -606,7 +605,18 @@ impl ClientApiKeyUsageSink for PgClientApiKeyUsageSink {
 }
 
 impl DaemonTask for PgClientApiKeyUsageWriter {
-    fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+    fn run(
+        &self,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        self.run_with_context(gateway_core::task::WorkerDaemonContext::new(cancellation))
+    }
+
+    fn run_with_context(
+        &self,
+        context: gateway_core::task::WorkerDaemonContext,
+    ) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        let cancellation = context.cancellation().clone();
         Box::pin(async move {
             loop {
                 tokio::select! {
@@ -629,6 +639,7 @@ impl DaemonTask for PgClientApiKeyUsageWriter {
                         "client API key last-used flush failed",
                     ));
                 }
+                context.succeeded();
             }
         })
     }

@@ -4,6 +4,7 @@ use provider_openai::transport::{
     websocket::write_websocket_audit_artifact_for_dir,
 };
 
+mod cleanup;
 mod diagnostics;
 mod fingerprint;
 mod metadata;
@@ -2332,3 +2333,5 @@ async fn diagnostics_capture_metadata_and_unknown_events_before_normal_close() {
     assert!(!snapshot.to_string().contains("opaque-turn-secret"));
     assert!(!snapshot.to_string().contains("private-data"));
 }
+
+mod breaker;

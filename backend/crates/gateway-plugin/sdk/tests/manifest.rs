@@ -396,7 +396,7 @@ fn contributes_rejects_duplicate_capability_keys_in_direct_json_parsing() {
 
     let handshake = format!(
         r#"{{
-            "protocol_version":4,"artifact_sha256":"digest","plugin_id":"test.example",
+            "protocol_version":5,"artifact_sha256":"digest","plugin_id":"test.example",
             "instance_id":"instance","generation":1,"incarnation":"incarnation",
             "configuration":{{}},
             "contributes":{{"middleware":{declaration},"middleware":{declaration}}}

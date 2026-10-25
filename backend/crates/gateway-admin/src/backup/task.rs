@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use gateway_core::{
     lifecycle::CancellationToken,
-    task::{DaemonTask, WorkerTaskError},
+    task::{DaemonTask, WorkerDaemonContext, WorkerTaskError},
 };
 use tracing::{info, warn};
 
@@ -66,18 +66,30 @@ impl BackupTask {
 }
 
 impl DaemonTask for BackupTask {
-    fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
-        Box::pin(async move { self.run_daemon(cancellation).await })
+    fn run(
+        &self,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        self.run_with_context(gateway_core::task::WorkerDaemonContext::new(cancellation))
+    }
+
+    fn run_with_context(
+        &self,
+        context: WorkerDaemonContext,
+    ) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move { self.run_daemon(context).await })
     }
 }
 
 impl BackupTask {
-    async fn run_daemon(&self, cancellation: CancellationToken) -> Result<(), WorkerTaskError> {
+    async fn run_daemon(&self, context: WorkerDaemonContext) -> Result<(), WorkerTaskError> {
+        let cancellation = context.cancellation();
         loop {
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            self.run_cycle(&cancellation).await?;
+            self.run_cycle(cancellation).await?;
+            context.succeeded();
 
             tokio::select! {
                 _ = cancellation.cancelled() => return Ok(()),

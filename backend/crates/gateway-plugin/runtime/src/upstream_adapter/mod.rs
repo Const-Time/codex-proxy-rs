@@ -5,6 +5,7 @@ mod event;
 mod execution;
 mod failure;
 mod network;
+mod observation;
 mod save;
 mod sessions;
 mod target;
@@ -88,7 +89,7 @@ pub(crate) async fn register(
     let Some(contribution) = manifest.contributes.get(&Capability::UpstreamAdapter) else {
         return Ok(vec![]);
     };
-    if !matches!(contribution.version, 1 | 2) || !contribution.stages.contains(&Stage::Upstream) {
+    if contribution.version != 4 || !contribution.stages.contains(&Stage::Upstream) {
         return Err(AdminError::invalid("上游适配器版本或阶段不支持"));
     }
     let reply = session

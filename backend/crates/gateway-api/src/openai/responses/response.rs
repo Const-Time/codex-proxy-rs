@@ -80,9 +80,15 @@ impl OpenAiResponsesEncoder {
     /// 消费一个 Provider event，并返回 WebSocket JSON messages。
     pub fn push_websocket(&mut self, event: &ProviderEvent) -> Vec<String> {
         self.observe_canonical_identity(event);
-        let Some(wire) = openai_wire(event).filter(|wire| wire.has_json_data()) else {
+        let Some(wire) = openai_wire(event) else {
             return Vec::new();
         };
+        if !wire.has_json_data() {
+            return wire
+                .raw_websocket_message()
+                .map(|message| vec![message.to_owned()])
+                .unwrap_or_default();
+        }
         self.observe_wire(wire);
         let projected = client_failure_payload(wire);
         let data = projected.as_ref().unwrap_or_else(|| wire.data());
@@ -100,6 +106,11 @@ impl OpenAiResponsesEncoder {
             )
         {
             return vec![data.to_string()];
+        }
+        if projected.is_none()
+            && let Some(message) = wire.raw_websocket_message()
+        {
+            return vec![message.to_owned()];
         }
         vec![data.to_string()]
     }

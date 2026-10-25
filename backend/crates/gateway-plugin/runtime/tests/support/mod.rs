@@ -354,7 +354,7 @@ pub fn catalog_archive(version: &str) -> Arc<[u8]> {
     )
 }
 pub fn upstream_archive(version: &str) -> Arc<[u8]> {
-    upstream_archive_contract(version, 2)
+    upstream_archive_contract(version, 4)
 }
 pub fn upstream_archive_contract(version: &str, contract: u32) -> Arc<[u8]> {
     build_archive(

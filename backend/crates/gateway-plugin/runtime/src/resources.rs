@@ -74,6 +74,7 @@ impl InvocationDeadline {
     }
 }
 pub(crate) struct InvocationCaller {
+    pub(crate) account_probe_authorized: bool,
     calls: std::sync::Weak<InvocationCalls>,
     actor: MutationContext,
     context: gateway_plugin_sdk::CallContext,
@@ -108,6 +109,23 @@ impl InvocationCalls {
             std::iter::once(revocation)
                 .chain(invocation.iter().map(|i| i.context.cancellation.clone())),
         );
+        let account_probe_authorized = graph.is_root()
+            && invocation.as_ref().is_none_or(|origin| {
+                origin.context.parent_call_id.is_none()
+                    && origin.context.model_parent.is_none()
+                    && origin.context.validate().is_ok()
+            })
+            && match (&actor.actor, context.stage) {
+                (
+                    gateway_admin::model::MutationActor::AdminSession { .. },
+                    gateway_plugin_sdk::Stage::Management,
+                ) => true,
+                (
+                    gateway_admin::model::MutationActor::Plugin { instance_id, .. },
+                    gateway_plugin_sdk::Stage::Maintenance,
+                ) => instance_id == &context.instance_id,
+                _ => false,
+            };
         if let Some(invocation) = &mut invocation {
             invocation.context.parent_call_id = Some(std::mem::replace(
                 &mut invocation.context.call_id,
@@ -149,6 +167,7 @@ impl InvocationCalls {
             scope.clone(),
             InvocationEntry {
                 caller: Some(Arc::new(InvocationCaller {
+                    account_probe_authorized,
                     calls: Arc::downgrade(self),
                     actor,
                     context,

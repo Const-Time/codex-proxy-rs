@@ -245,7 +245,7 @@ async fn run(provider: &str, root: Option<&Path>) {
     } else {
         "gpt-5.4"
     };
-    for contract in [1, 2] {
+    for contract in [4] {
         for websocket in [false, true] {
             eprintln!("adapter v{contract}, upstream websocket={websocket}: enable/API");
             let http = Server::new().await;
@@ -466,7 +466,7 @@ async fn run(provider: &str, root: Option<&Path>) {
             settled(&env, 6, key.secret.record.id.as_str(), &allowed, provider).await;
 
             let replacement = plugins
-                .upload(upstream_archive_contract("1.0.1", 3 - contract), &actor())
+                .upload(upstream_archive_contract("1.0.1", contract), &actor())
                 .await
                 .unwrap();
             let mut command = update(&replacement.sha256, installed.revision, true);

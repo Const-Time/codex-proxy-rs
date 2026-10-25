@@ -46,7 +46,7 @@ session.run(plugin).await?;
 
 ## 能力与方法
 
-Provider 固定为宿主内置的 OpenAI 与 xAI。当前宿主开放以下 11 类扩展能力；新插件的 `middleware` 使用 v4，`upstream_adapter` 使用 v2，其余使用 v1；旧合同见[弃用窗口](manifest.md#接口弃用)：
+Provider 固定为宿主内置的 OpenAI 与 xAI。当前宿主开放以下 11 类扩展能力；`middleware` 使用 v4/v5，`upstream_adapter` 使用 v4，`management` 使用 v1/v2，其余使用 v1；旧合同见[接口弃用](manifest.md#接口弃用)：
 
 | 能力 | 类型化方法 |
 | --- | --- |

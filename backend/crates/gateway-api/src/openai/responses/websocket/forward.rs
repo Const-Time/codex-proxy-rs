@@ -577,7 +577,7 @@ pub(in crate::openai) async fn send_metadata(
 
 pub(in crate::openai) async fn send_messages(
     connection: &mut ResponsesWebSocketConnection,
-    messages: Vec<String>,
+    messages: Vec<impl Into<axum::extract::ws::Utf8Bytes>>,
     request_id: &Arc<str>,
     first_frame_written: &mut bool,
     terminal_batch: bool,

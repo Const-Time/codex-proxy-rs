@@ -401,8 +401,13 @@ impl PumpedWebSocket {
     }
 
     /// 主动关闭连接（best-effort 发送 Close 帧）。
-    pub(crate) async fn close_and_wait(mut self) {
+    pub(crate) async fn close_and_wait(self) {
         self.close().await;
+        self.abort_and_wait().await;
+    }
+
+    /// 异常退出不等待可能阻塞的 Close 发送；释放 socket 后再归还容量。
+    pub(crate) async fn abort_and_wait(mut self) {
         if let Some(pump) = self.pump.as_mut() {
             // 沿用 Drop 的停止语义，并等待 socket 析构完成后再让容量等待者继续
             pump.abort();
@@ -412,7 +417,10 @@ impl PumpedWebSocket {
 
     pub(crate) async fn close(&self) {
         if !self.is_closed() {
-            let _ = self.send(Message::Close(None)).await;
+            // 正常取消尽量发送关闭帧，但不能被阻塞的发送或心跳拖住资源回收。
+            let _ =
+                tokio::time::timeout(Duration::from_millis(250), self.send(Message::Close(None)))
+                    .await;
         }
     }
 }

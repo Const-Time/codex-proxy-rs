@@ -236,9 +236,14 @@ async fn reauthorize_account_file(
     // 文件只能替换凭据；提交期间的并发资料编辑也不能被旧快照覆盖。
     facts.preserve_profile = true;
     let prepared = PreparedCredentialRotation::new(facts, guard);
-    let result =
-        commit_credential_rotation(accounts, prepared, &command.context, "file reauthorization")
-            .await?;
+    let result = commit_credential_rotation(
+        accounts,
+        prepared,
+        None,
+        &command.context,
+        "file reauthorization",
+    )
+    .await?;
     Ok(crate::model::provider_credentials::CredentialImportResult {
         config_revision: result.config_revision,
         credentials: vec![
@@ -365,12 +370,19 @@ async fn commit_authorization(
 async fn commit_credential_rotation(
     accounts: &dyn AccountStore,
     prepared: PreparedCredentialRotation,
+    settings: Option<crate::model::accounts::UpdateAccount>,
     context: &MutationContext,
     resource: &'static str,
 ) -> Result<CredentialMutationResult, AdminError> {
     let (facts, guard) = prepared.into_parts();
     match accounts
-        .commit_credential_rotation(CredentialRotationCommit { prepared: facts }, context)
+        .commit_credential_rotation(
+            CredentialRotationCommit {
+                prepared: facts,
+                settings,
+            },
+            context,
+        )
         .await
     {
         Ok(result) => {
@@ -392,7 +404,13 @@ async fn commit_credential_refresh(
 ) -> Result<CredentialMutationResult, AdminError> {
     let (facts, guard) = prepared.into_parts();
     match accounts
-        .commit_credential_refresh(CredentialRotationCommit { prepared: facts }, context)
+        .commit_credential_refresh(
+            CredentialRotationCommit {
+                prepared: facts,
+                settings: None,
+            },
+            context,
+        )
         .await
     {
         Ok(result) => {

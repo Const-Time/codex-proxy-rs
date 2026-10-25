@@ -253,11 +253,13 @@ impl Provider for Core {
         assert_eq!(protocol, "openai");
         Ok(Some(vec![ProviderModelDescriptor {
             model: UpstreamModelId::new("gpt-native").unwrap(),
-            payload: RawJsonPayload::new(
-                "openai",
-                bytes::Bytes::from_static(br#"{"id":"gpt-native"}"#),
-            )
-            .unwrap(),
+            content: gateway_core::routing::ProviderModelContent::Native(
+                RawJsonPayload::new(
+                    "openai",
+                    bytes::Bytes::from_static(br#"{"id":"gpt-native"}"#),
+                )
+                .unwrap(),
+            ),
         }]))
     }
     async fn execute(
@@ -274,7 +276,7 @@ impl Provider for Core {
         }
         assert!(matches!(
             context.client_api_key_ref().as_str(),
-            "key_alice" | "key_system"
+            "key_alice" | "key_system" | "admin_connection_test"
         ));
         let adapter = match request.candidate().upstream_model() {
             Some(model) => context.upstream_adapter(request.candidate().provider(), model)?,
@@ -389,7 +391,11 @@ impl Provider for Core {
             let _wait = SelectionWait(self.selection_waiters.clone());
             gate.await.unwrap();
         }
-        assert!(context.account_scope().unwrap().allows(&account));
+        assert!(
+            context
+                .account_scope()
+                .is_none_or(|scope| scope.allows(&account))
+        );
         assert!(!context.excluded_accounts().contains(&account));
         self.selected.lock().unwrap().push(account.clone());
         let lease_account = account.clone();
@@ -936,6 +942,7 @@ impl Fixture {
             )
             .with_http(http.clone())
             .with_data(key_data.clone())
+            .with_account_probe(execution.clone())
             .with_models(
                 Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
                     execution.clone(),

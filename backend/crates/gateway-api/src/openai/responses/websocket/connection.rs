@@ -361,7 +361,7 @@ impl ResponsesWebSocketConnection {
     /// pump 已关闭、写入超时或 transport 失败时返回稳定错误。
     pub async fn send_text(
         &mut self,
-        payload: String,
+        payload: impl Into<axum::extract::ws::Utf8Bytes>,
         context: WriteContext,
     ) -> Result<(), ConnectionWriteError> {
         self.send(Message::Text(payload.into()), context).await

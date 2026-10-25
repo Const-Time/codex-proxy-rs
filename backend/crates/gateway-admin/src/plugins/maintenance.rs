@@ -43,10 +43,22 @@ struct Maintenance {
     publications: SnapshotPublications,
 }
 impl DaemonTask for Maintenance {
-    fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+    fn run(
+        &self,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        self.run_with_context(gateway_core::task::WorkerDaemonContext::new(cancellation))
+    }
+
+    fn run_with_context(
+        &self,
+        context: gateway_core::task::WorkerDaemonContext,
+    ) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        let cancellation = context.cancellation().clone();
         Box::pin(async move {
             let mut publications = self.publications.subscribe();
             let mut publication = publications.next().await.expect("initial Core publication");
+            context.succeeded();
             let mut active = ActivePlugins::new();
             let mut jobs = JoinSet::new();
             let mut notifications = Vec::<Arc<Notify>>::new();

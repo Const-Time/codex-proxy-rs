@@ -149,6 +149,9 @@ const {
 })
 
 const {
+  apiKey: editingApiKey,
+  configurationLoading,
+  configurationReady,
   showEditModal,
   editingAccount,
   schedulingEnabled,
@@ -277,7 +280,7 @@ const {
             </template>
 
             <template #planType="{ row }">
-              <AccountPlanBadge :plan-type="row.planType" :plan-type-display="row.planTypeDisplay" />
+              <AccountPlanBadge :authentication-kind="row.authenticationKind" :plan-type="row.planType" :plan-type-display="row.planTypeDisplay" />
             </template>
 
             <template #usage="{ row }">
@@ -381,6 +384,7 @@ const {
 
     <AccountEditModal
       v-model="showEditModal"
+      v-model:api-key="editingApiKey"
       v-model:enabled="schedulingEnabled"
       v-model:concurrency-limit="editingConcurrencyLimit"
       v-model:weight="editingWeight"
@@ -388,6 +392,8 @@ const {
       v-model:proxy-mode="editingProxyMode"
       v-model:proxy-id="editingProxyId"
       v-model:selected-group-ids="editingGroupIds"
+      :configuration-loading="configurationLoading"
+      :configuration-ready="configurationReady"
       :account="editingAccount"
       :groups="groups"
       :groups-loading="groupsLoading"

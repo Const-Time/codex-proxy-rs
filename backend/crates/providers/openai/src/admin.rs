@@ -1,5 +1,7 @@
 //! OpenAI 管理边界：Provider preparation 与 Redis OAuth pending 适配。
 
+use gateway_admin::model::provider_credentials::ProviderQuotaReadRequest;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -404,6 +406,10 @@ impl ProviderAdmin for OpenAiAdminProvider {
         if pending.provider_kind() != &self.provider_kind {
             return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
         }
+        if let gateway_admin::model::provider_credentials::AuthorizationMutationTarget::Reauthorize { account_id } = pending.target()
+            && self.account(account_id).await?.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+        }
         let started = self
             .oauth
             .start_authorization(StartCodexOAuthAuthorization { mutation: pending })
@@ -488,6 +494,17 @@ impl ProviderAdmin for OpenAiAdminProvider {
             return Err(provider_admin_error(ProviderAdminErrorKind::Conflict)
                 .with_public_message("账号凭据已被更新，请刷新账号列表后重试"));
         }
+        if current.account.authentication_kind()
+            == crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY
+        {
+            let prepared = CodexCredentialAdmin
+                .prepare_api_key_rotation(
+                    current,
+                    Value::Object(command.provider_material.into_provider_data().into_inner()),
+                )
+                .map_err(map_credential_admin_error)?;
+            return prepared_rotation(prepared, command.account.provider_kind);
+        }
         let mut secret = rotation_secret(command.provider_material)?;
         if secret.id_token.is_none() {
             let runtime = CodexCredentialCodec::decode(&current.credential)
@@ -535,6 +552,10 @@ impl ProviderAdmin for OpenAiAdminProvider {
         &self,
         command: PrepareCredentialRefresh,
     ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
+        if command.account.authentication_kind != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+        {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+        }
         validate_account_record(&command.account, &self.provider_kind)?;
         let account_id = ProviderAccountId::new(command.account.id.clone())
             .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
@@ -553,6 +574,36 @@ impl ProviderAdmin for OpenAiAdminProvider {
             .await
             .map_err(map_credential_admin_error)?;
         prepared_rotation(prepared, command.account.provider_kind)
+    }
+
+    async fn account_configuration(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<Option<ProviderDocument>, ProviderAdminError> {
+        let account = self.account(account_id).await?;
+        if account.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY {
+            return Ok(None);
+        }
+        let current = self
+            .accounts
+            .load_current_credential(account_id)
+            .await
+            .map_err(map_store_error)?;
+        let crate::credential::CodexCredentialData::ApiKey(data) =
+            CodexCredentialCodec::decode_complete(&current.credential)
+                .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?
+        else {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
+        };
+        let value = serde_json::to_value(data.configuration())
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Internal))?;
+        let object = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| provider_admin_error(ProviderAdminErrorKind::Internal))?;
+        Ok(Some(ProviderDocument::new(
+            gateway_core::account::OpaqueProviderData::new(object),
+        )))
     }
 
     fn quota_forecast_observation(
@@ -599,6 +650,12 @@ impl ProviderAdmin for OpenAiAdminProvider {
             rolling_usage: _,
         } = request;
         let mut account = self.account(&account_id).await?;
+        if account.authentication_kind() == crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY {
+            if refresh {
+                return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+            }
+            return Ok(project_quota(None, account.quota().is_exhausted()));
+        }
         let snapshot = if refresh {
             let snapshot = Some(
                 self.quota
@@ -610,18 +667,84 @@ impl ProviderAdmin for OpenAiAdminProvider {
             snapshot
         } else {
             self.quota
-                .read_account(&account_id)
+                .read_snapshot_for(&account)
                 .await
                 .map_err(map_quota_error)?
         };
-        Ok(project_quota(snapshot, &account))
+        Ok(project_quota(snapshot, account.quota().is_exhausted()))
+    }
+
+    async fn read_quotas(
+        &self,
+        requests: &[ProviderQuotaReadRequest<'_>],
+    ) -> Vec<Result<ProviderQuota, ProviderAdminError>> {
+        let identities = requests
+            .iter()
+            .map(|request| {
+                if request.account.provider_kind != self.provider_kind {
+                    return Err(provider_admin_error(ProviderAdminErrorKind::NotFound));
+                }
+                let id = ProviderAccountId::new(request.account.id.clone())
+                    .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+                let revision =
+                    CredentialRevision::new(request.account.credential_revision.get())
+                        .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+                Ok((id, revision))
+            })
+            .collect::<Vec<_>>();
+        let ids = requests
+            .iter()
+            .zip(&identities)
+            .filter_map(|(_, identity)| identity.as_ref().ok().map(|(id, _)| id.clone()))
+            .collect::<Vec<_>>();
+        let observations = if ids.is_empty() {
+            Ok(BTreeMap::new())
+        } else {
+            self.accounts
+                .get_quotas(&ids)
+                .await
+                .map_err(|error| map_quota_error(error.into()))
+                .map(|values| {
+                    values
+                        .into_iter()
+                        .map(|observation| (observation.account_id.clone(), observation))
+                        .collect::<BTreeMap<_, _>>()
+                })
+        };
+        requests
+            .iter()
+            .zip(identities)
+            .map(|(request, identity)| {
+                let (id, revision) = identity?;
+                let snapshot = {
+                    observations
+                        .as_ref()
+                        .map_err(Clone::clone)?
+                        .get(&id)
+                        .map(|observation| {
+                            self.quota.project_observation(&id, revision, observation)
+                        })
+                        .transpose()
+                        .map_err(map_quota_error)?
+                        .flatten()
+                };
+                Ok(project_quota(
+                    snapshot,
+                    request.account.quota.is_exhausted(),
+                ))
+            })
+            .collect()
     }
 
     async fn profile_statistics(
         &self,
         account_id: &ProviderAccountId,
     ) -> Result<ProviderProfileStatistics, ProviderAdminError> {
-        self.account(account_id).await?;
+        if self.account(account_id).await?.authentication_kind()
+            != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+        {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+        }
         let statistics = self
             .profile_statistics
             .profile_statistics(account_id)
@@ -634,7 +757,11 @@ impl ProviderAdmin for OpenAiAdminProvider {
         &self,
         account_id: &ProviderAccountId,
     ) -> Result<ProviderProfileAvatar, ProviderAdminError> {
-        self.account(account_id).await?;
+        if self.account(account_id).await?.authentication_kind()
+            != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+        {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+        }
         self.profile_statistics
             .profile_avatar(account_id)
             .await
@@ -646,7 +773,11 @@ impl ProviderAdmin for OpenAiAdminProvider {
         &self,
         account_id: &ProviderAccountId,
     ) -> Result<ProviderResetCredits, ProviderAdminError> {
-        self.account(account_id).await?;
+        if self.account(account_id).await?.authentication_kind()
+            != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+        {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+        }
         self.quota
             .list_reset_credits(account_id)
             .await
@@ -658,7 +789,14 @@ impl ProviderAdmin for OpenAiAdminProvider {
         &self,
         command: ConsumeProviderResetCredit,
     ) -> Result<ProviderResetCreditResult, ProviderAdminError> {
-        self.account(&command.account_id).await?;
+        if self
+            .account(&command.account_id)
+            .await?
+            .authentication_kind()
+            != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+        {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+        }
         self.quota
             .consume_reset_credit(
                 &command.account_id,
@@ -972,6 +1110,7 @@ fn account_matches_record(account: &ProviderAccount, record: &AccountRecord) -> 
 
 fn empty_quota() -> ProviderQuota {
     ProviderQuota {
+        credits: None,
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
@@ -983,12 +1122,12 @@ fn empty_quota() -> ProviderQuota {
 
 fn project_quota(
     snapshot: Option<CodexAccountQuotaSnapshot>,
-    account: &ProviderAccount,
+    limit_reached: bool,
 ) -> ProviderQuota {
     let mut quota = snapshot
         .map(project_quota_snapshot)
         .unwrap_or_else(empty_quota);
-    quota.limit_reached = account.quota().is_exhausted();
+    quota.limit_reached = limit_reached;
     quota
 }
 
@@ -1035,6 +1174,13 @@ fn project_quota_snapshot(snapshot: CodexAccountQuotaSnapshot) -> ProviderQuota 
     // 在窗口全部过期后继续维持限流。
     let limit_reached = quota_windows_limit_reached(&windows);
     ProviderQuota {
+        credits: snapshot.credits().map(|credits| {
+            gateway_admin::model::provider_credentials::ProviderQuotaCredits {
+                has_credits: credits.has_credits,
+                unlimited: credits.unlimited,
+                balance: credits.balance.clone(),
+            }
+        }),
         plan_type: snapshot.plan_type().map(str::to_owned),
         observed_at: Some(DateTime::<Utc>::from(snapshot.observed_at())),
         refresh_token_expires_at: None,

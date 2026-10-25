@@ -4383,13 +4383,15 @@ impl Provider for CatalogChargedProvider {
     > {
         Ok(Some(vec![gateway_core::routing::ProviderModelDescriptor {
             model: UpstreamModelId::new("gpt-start").unwrap(),
-            payload: gateway_core::operation::RawJsonPayload::new(
-                "codex",
-                bytes::Bytes::from_static(
-                    br#"{"slug":"gpt-start","native_field":{"effort":"high"}}"#,
-                ),
-            )
-            .unwrap(),
+            content: gateway_core::routing::ProviderModelContent::Native(
+                gateway_core::operation::RawJsonPayload::new(
+                    "codex",
+                    bytes::Bytes::from_static(
+                        br#"{"slug":"gpt-start","native_field":{"effort":"high"}}"#,
+                    ),
+                )
+                .unwrap(),
+            ),
         }]))
     }
     async fn execute(

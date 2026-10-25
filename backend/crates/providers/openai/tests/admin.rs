@@ -14,8 +14,8 @@ use gateway_admin::model::provider_credentials::{
     AuthorizationMutationTarget, AuthorizationOwnerBinding, CompleteAuthorization,
     ConsumeProviderResetCredit, PendingAuthorizationMutation, PrepareCredentialImport,
     PrepareCredentialRefresh, PrepareCredentialRotation, ProviderDocument,
-    ProviderExportCredentialInput, ProviderQuotaRequest, ProviderQuotaWindowRole,
-    QuotaLocalUsageAttribution,
+    ProviderExportCredentialInput, ProviderQuotaReadRequest, ProviderQuotaRequest,
+    ProviderQuotaWindowRole, QuotaLocalUsageAttribution,
 };
 use gateway_admin::model::{MutationActor, MutationContext, Revision};
 use gateway_admin::ports::provider::ProviderAdminErrorKind;
@@ -2085,4 +2085,307 @@ async fn quota_refresh_exposes_safe_failure_reasons_and_recovers_without_account
     let current = store.account(account_id).expect("account after recovery");
     assert_eq!(current.credential_state(), CredentialState::Ready);
     assert!(current.last_error_message().is_none());
+}
+
+#[tokio::test]
+async fn openai_admin_quota_projects_credit_balance_from_refresh_and_cached_observation() {
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: "acct_credit_balance".to_owned(),
+            name: "credit balance".to_owned(),
+            secret: secret("credit-balance-test-token"),
+            verified_account: profile("chatgpt-credit-balance"),
+            next_refresh_at: None,
+            enabled: true,
+        })
+        .await;
+    let account = store.account("acct_credit_balance").unwrap();
+    let server = MockServer::start().await;
+    let mut config = valid_config();
+    config.config.api.base_url = server.uri();
+    let bundle = provider_openai::initialize(
+        config.config,
+        provider_ports_with(store.clone(), Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .unwrap();
+    for (wire, expected) in [
+        (
+            json!({"has_credits": true, "unlimited": false, "balance": "62500"}),
+            Some((true, false, Some("62500"))),
+        ),
+        (
+            json!({"has_credits": false, "unlimited": false, "balance": 0}),
+            Some((false, false, Some("0"))),
+        ),
+        (
+            json!({"has_credits": true, "unlimited": false, "balance": "9007199254740993.1234567890"}),
+            Some((true, false, Some("9007199254740993.1234567890"))),
+        ),
+        (
+            json!({"has_credits": true, "unlimited": false, "balance": null}),
+            Some((true, false, None)),
+        ),
+        (
+            json!({"has_credits": false, "unlimited": true}),
+            Some((false, true, None)),
+        ),
+        (Value::Null, None),
+    ] {
+        let _mock = Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "rate_limit": {"allowed": true, "primary_window": {"used_percent": 28}},
+                "credits": wire,
+            })))
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+        for refresh in [true, false] {
+            let quota = bundle
+                .admin_provider()
+                .quota(ProviderQuotaRequest {
+                    account_id: account.id().clone(),
+                    refresh,
+                    rolling_usage: None,
+                })
+                .await
+                .expect("quota with credits");
+            assert_eq!(
+                quota.credits.as_ref().map(|credits| (
+                    credits.has_credits,
+                    credits.unlimited,
+                    credits.balance.as_deref(),
+                )),
+                expected
+            );
+            assert_eq!(quota.windows[0].used_percent, Some(28.0));
+            assert!(!quota.limit_reached);
+        }
+    }
+}
+
+#[tokio::test]
+async fn openai_admin_reads_a_full_quota_page_in_one_store_call() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let mut records = Vec::new();
+    for index in 0..200 {
+        let id = format!("acct_admin_quota_page_{index}");
+        store
+            .seed_oauth_credential(ImportCodexOAuthCredential {
+                account_id: id.clone(),
+                name: id.clone(),
+                secret: secret("synthetic-quota-page-access"),
+                verified_account: profile(&format!("chatgpt-quota-page-{index}")),
+                next_refresh_at: None,
+                enabled: false,
+            })
+            .await;
+        records.push(account_record(&store.account(&id).expect("stored account")));
+    }
+    let config = valid_config();
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with(Arc::clone(&store), Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .expect("OpenAI bundle");
+    let requests = records
+        .iter()
+        .map(|account| ProviderQuotaReadRequest {
+            account,
+            rolling_usage: None,
+        })
+        .collect::<Vec<_>>();
+    let account_reads = store.account_reads();
+    let credential_loads = store.credential_loads();
+    let quota_reads = store.quota_reads();
+
+    let results = bundle.admin_provider().read_quotas(&requests).await;
+
+    assert_eq!(results.len(), records.len());
+    assert!(
+        results
+            .into_iter()
+            .all(|result| result.expect("cached quota").windows.is_empty())
+    );
+    assert_eq!(store.quota_reads() - quota_reads, 1);
+    assert_eq!(store.account_reads(), account_reads);
+    assert_eq!(store.credential_loads(), credential_loads);
+}
+
+#[tokio::test]
+async fn openai_admin_batch_quota_isolates_stale_and_invalid_observations() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let mut records = Vec::new();
+    for suffix in ["healthy", "stale", "invalid", "missing"] {
+        let id = format!("acct_admin_quota_batch_{suffix}");
+        store
+            .seed_oauth_credential(ImportCodexOAuthCredential {
+                account_id: id.clone(),
+                name: id.clone(),
+                secret: secret("synthetic-quota-batch-access"),
+                verified_account: profile(&format!("chatgpt-quota-batch-{suffix}")),
+                next_refresh_at: None,
+                enabled: false,
+            })
+            .await;
+        let account = store.account(&id).expect("stored account");
+        if suffix != "missing" {
+            let used = if suffix == "invalid" {
+                json!("invalid")
+            } else {
+                json!(25)
+            };
+            store
+                .compare_and_swap_quota(QuotaObservation {
+                    account_id: account.id().clone(),
+                    expected_revision: account.revision(),
+                    observed_at: SystemTime::now(),
+                    plan_type: None,
+                    state: QuotaState::allowed(SystemTime::now()),
+                    quota: OpaqueProviderData::new(
+                        json!({
+                            "rate_limit": { "primary_window": {
+                                "used_percent": used,
+                                "reset_at": Utc::now().timestamp() + 3600,
+                                "limit_window_seconds": 18000
+                            }}
+                        })
+                        .as_object()
+                        .expect("quota object")
+                        .clone(),
+                    ),
+                })
+                .await
+                .expect("store quota");
+        }
+        let mut record = account_record(&store.account(&id).expect("stored quota facts"));
+        if suffix == "stale" {
+            record.credential_revision =
+                Revision::new(record.credential_revision.get() + 1).unwrap();
+        }
+        records.push(record);
+    }
+    let mut foreign = records[0].clone();
+    foreign.provider_kind = ProviderKind::new("xai").unwrap();
+    records.push(foreign);
+    let config = valid_config();
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with(Arc::clone(&store), Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .expect("OpenAI bundle");
+    let requests = records
+        .iter()
+        .map(|account| ProviderQuotaReadRequest {
+            account,
+            rolling_usage: None,
+        })
+        .collect::<Vec<_>>();
+    let quota_reads = store.quota_reads();
+    let account_reads = store.account_reads();
+
+    let results = bundle.admin_provider().read_quotas(&requests).await;
+
+    assert_eq!(results.len(), 5);
+    assert_eq!(
+        results[0].as_ref().unwrap().windows[0].used_percent,
+        Some(25.0)
+    );
+    assert_eq!(
+        results[1].as_ref().unwrap_err().kind(),
+        ProviderAdminErrorKind::Conflict
+    );
+    assert_eq!(
+        results[2].as_ref().unwrap_err().kind(),
+        ProviderAdminErrorKind::Invalid
+    );
+    assert!(results[3].as_ref().unwrap().windows.is_empty());
+    assert_eq!(
+        results[4].as_ref().unwrap_err().kind(),
+        ProviderAdminErrorKind::NotFound
+    );
+    assert_eq!(store.quota_reads() - quota_reads, 1);
+    assert_eq!(store.account_reads(), account_reads);
+
+    assert!(bundle.admin_provider().read_quotas(&[]).await.is_empty());
+    assert_eq!(store.quota_reads() - quota_reads, 1);
+}
+
+#[tokio::test]
+async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotating_address() {
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_api_key(
+            "acct_api_admin",
+            "https://first.example/v1".to_owned(),
+            provider_openai::credential::ApiKeyTransport::Http,
+        )
+        .await;
+    let account = store.account("acct_api_admin").unwrap();
+    let config = valid_config();
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with(Arc::clone(&store), Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .unwrap();
+    let admin = bundle.admin_provider();
+    let configuration = admin
+        .account_configuration(account.id())
+        .await
+        .unwrap()
+        .unwrap();
+    let configuration = configuration.expose_to_provider().expose_to_provider();
+    assert_eq!(configuration.len(), 2);
+    assert_eq!(
+        configuration.get("base_url"),
+        Some(&json!("https://first.example/v1"))
+    );
+    assert!(!configuration.contains_key("api_key"));
+    for base_url in [
+        "https://second.example/root",
+        "http://10.0.0.7:8080/v1",
+        "http://[fd00::7]:8080/v1",
+        "http://relay:8080/v1",
+    ] {
+        let prepared = admin
+            .prepare_rotation(PrepareCredentialRotation {
+                account: account_record(&account),
+                provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                    json!({"base_url":base_url, "transport":"prefer_websocket"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )),
+            })
+            .await
+            .unwrap();
+        let material = prepared
+            .facts()
+            .provider_material
+            .expose_to_provider()
+            .expose_to_provider();
+        assert_eq!(material.get("api_key"), Some(&json!("sk-api-test-only")));
+        assert_eq!(material.get("base_url"), Some(&json!(base_url)));
+        assert!(!prepared.facts().has_refresh_token);
+        assert_eq!(prepared.facts().account_id, *account.id());
+    }
+    assert_eq!(
+        admin
+            .prepare_refresh(PrepareCredentialRefresh {
+                account: account_record(&account)
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ProviderAdminErrorKind::Unsupported
+    );
+    assert_eq!(
+        admin.reset_credits(account.id()).await.unwrap_err().kind(),
+        ProviderAdminErrorKind::Unsupported
+    );
 }

@@ -1814,6 +1814,11 @@ where
         // 均只接触已剥离的稳定错误字段。
         record_trace_error(&self.trace.attempt(self.attempts), &error);
         let atomic_client_events = error.take_atomic_client_events();
+        for event in &atomic_client_events {
+            if let Some(observation) = event.response_observation() {
+                self.observe_response(observation.clone());
+            }
+        }
         let current = self.current.take().ok_or(EngineError::NoActiveAttempt)?;
         self.record_provider_failure(current.metadata.provider().clone(), error.kind());
         // attempt_send_state 是本 attempt 自身的发送事实，驱动重试门；

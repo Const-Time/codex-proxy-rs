@@ -148,6 +148,7 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
                     .with_credentials(admin.services().plugin_credentials())
                     .with_resources(admin.services().plugin_resources())
                     .with_quota(admin.services().plugin_quota())
+                    .with_account_probe(core.account_probe())
                     .with_models(
                         Arc::new(gateway_api::openai::middleware::PluginModelExecution::new(
                             core.execution_service(),

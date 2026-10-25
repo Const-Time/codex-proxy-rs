@@ -316,14 +316,13 @@ async fn registration_generic_http_matches_upstream_without_private_state_author
 }
 
 #[tokio::test]
-async fn external_http_unrepresentable_response_header_preserves_host_sent_state() {
+async fn external_http_opaque_response_header_is_supported_by_rpc_v5() {
     let f = Fixture::new().await;
     let server = Server::new().await;
     let reply = f
         .call(json!({"mode":"unary","url":format!("{}/opaque",server.url)}))
         .await;
-    assert_eq!(reply["error"]["code"], "fault");
-    assert_eq!(reply["error"]["send_state"], "sent");
+    assert_eq!(reply, json!({"status":200,"bytes":[0,255,1,0]}));
     assert_eq!(server.requests.lock().unwrap().len(), 1);
     f.manager.shutdown().await;
 }

@@ -47,6 +47,7 @@ pub(super) async fn invoke(
         return Err(MiddlewareError::Fault);
     }
     let mut call = session.context(stage, remaining);
+    call.resource_stream = true;
     call.request = request
         .nested_context()
         .map_err(|_| MiddlewareError::InvalidState)?

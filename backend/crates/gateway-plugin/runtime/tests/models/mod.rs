@@ -10,6 +10,180 @@ use serde_json::json;
 use std::{sync::atomic::Ordering, time::Duration};
 
 #[tokio::test]
+async fn account_probe_requires_admin_and_bounds_native_diagnostics_without_key_billing() {
+    use gateway_admin::model::MutationActor;
+    let fixture = Fixture::new().await;
+    let input = json!({"mode":"raw","method":"host.account.probe","params":{"account_id":"acct_allowed","model":"gpt-native"},"body":{"model":"gpt-native","input":"diagnostic","max_output_tokens":90000}});
+    for actor in [
+        MutationActor::System,
+        MutationActor::AdminApiKey,
+        MutationActor::Plugin {
+            instance_id: fixture.id.clone(),
+            revision: std::num::NonZeroU64::new(1).unwrap(),
+        },
+    ] {
+        let output = fixture.call_as(input.clone(), actor).await;
+        assert_eq!(output["error"]["code"], "permission_denied", "{output}");
+    }
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 0);
+    for extra in [
+        json!({"tools":[]}),
+        json!({"previous_response_id":"response-parent"}),
+        json!({"model":"other-model"}),
+    ] {
+        let mut bad = input.clone();
+        bad["body"]
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = fixture.call(bad).await;
+        assert_eq!(output["error"]["code"], "invalid_input", "{output}");
+    }
+    let output = tokio::time::timeout(Duration::from_secs(5), fixture.call(input))
+        .await
+        .unwrap();
+    assert!(output.get("error").is_none(), "{output}");
+    assert_eq!(output["result"]["status"], "ok");
+    assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.key_data.reads.load(Ordering::SeqCst), 0);
+    assert!(fixture.core.charges.lock().unwrap().is_empty());
+    assert_eq!(
+        fixture.core.bodies.lock().unwrap()[0]["max_output_tokens"],
+        4096
+    );
+    assert_eq!(fixture.core.bodies.lock().unwrap()[0]["stream"], true);
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn account_probe_accepts_browser_root_rejects_descendants_and_releases_cancelled_work() {
+    let fixture = Fixture::new().await;
+    let make_request = |parent: Option<&str>,
+                        cancellation: gateway_core::lifecycle::CancellationToken,
+                        stall: bool| {
+        let mut request = crate::support::request("models");
+        request.actor.actor = gateway_admin::model::MutationActor::AdminSession {
+            admin_user_id: "alice".into(),
+        };
+        request.body = serde_json::to_vec(&json!({"operation":"models","mode":"raw","method":"host.account.probe","params":{"account_id":"acct_allowed","model":"gpt-native"},"body":{"model":"gpt-native","input":"OK","mode":if stall {"stall"} else {""}}})).unwrap();
+        request.invocation = Some(gateway_admin::model::plugins::PluginInvocationContext {
+            context: gateway_core::engine::middleware::http::Context {
+                request_id: "probe-browser".into(),
+                call_id: "root".into(),
+                parent_call_id: parent.map(str::to_owned),
+                call_scope: Default::default(),
+                model_parent: None,
+                cancellation,
+                deadline_at: Default::default(),
+            },
+            http: None,
+            services: None,
+        });
+        request
+    };
+    let response = fixture
+        .manager
+        .handle(
+            &fixture.id,
+            1,
+            make_request(Some("parent"), Default::default(), false),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"]["code"], "permission_denied");
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.manager.handle(
+            &fixture.id,
+            1,
+            make_request(None, Default::default(), false),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["result"]["status"], "ok", "{body}");
+    let cancellation = gateway_core::lifecycle::CancellationToken::new();
+    let request = make_request(None, cancellation.clone(), true);
+    let call = fixture.manager.handle(&fixture.id, 1, request);
+    let (response, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(call, async {
+            while fixture.core.starts.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+            cancellation.cancel();
+        })
+    })
+    .await
+    .unwrap();
+    if let Ok(response) = response {
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert!(
+            body.get("error").is_some(),
+            "cancelled probe returned success: {body}"
+        );
+    }
+    assert!(fixture.core.charges.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn model_callbacks_inherit_host_bound_request_origin() {
+    use gateway_core::engine::nested::{ExtensionCallScope, RequestContext};
+    use std::sync::Arc;
+    let fixture = Fixture::new().await;
+    let origin = RequestContext {
+        method: "POST".into(),
+        uri: "/plugins/model".into(),
+        http_version: "HTTP/1.1".into(),
+        headers: vec![MiddlewareHeader::new(
+            "User-Agent",
+            bytes::Bytes::from_static(b"origin-test/1"),
+        )],
+        peer_addr: None,
+        client_ip: Some("192.0.2.42".parse().unwrap()),
+    };
+    let mut request = crate::support::request("models");
+    request.actor.actor = gateway_admin::model::MutationActor::AdminSession {
+        admin_user_id: "alice".into(),
+    };
+    request.body =
+        serde_json::to_vec(&json!({"operation":"models","mode":"unary","key":"key_alice"}))
+            .unwrap();
+    request.invocation = Some(gateway_admin::model::plugins::PluginInvocationContext {
+        context: gateway_core::engine::middleware::http::Context {
+            request_id: "origin-request".into(),
+            call_id: "origin-call".into(),
+            parent_call_id: None,
+            call_scope: ExtensionCallScope::default().with_request(Arc::new(origin)),
+            model_parent: None,
+            cancellation: Default::default(),
+            deadline_at: Default::default(),
+        },
+        http: None,
+        services: None,
+    });
+    let response = fixture
+        .manager
+        .handle(&fixture.id, 1, request)
+        .await
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert!(response.get("error").is_none(), "{response}");
+    fixture.clean(1).await;
+    {
+        let requests = fixture.core.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].client_ip, Some("192.0.2.42".parse().unwrap()));
+        assert_eq!(requests[0].user_agent.as_deref(), Some("origin-test/1"));
+    }
+    fixture.manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn management_system_api_key_and_plugin_actors_do_not_obtain_system_command_key_authority() {
     use gateway_admin::model::MutationActor;
     let fixture = Fixture::new().await;

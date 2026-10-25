@@ -814,13 +814,15 @@ impl Provider for Effects {
                 .into_iter()
                 .map(|id| gateway_core::routing::ProviderModelDescriptor {
                     model: gateway_core::routing::UpstreamModelId::new(id).unwrap(),
-                    payload: gateway_core::operation::RawJsonPayload::new(
-                        "codex",
-                        Bytes::from(
-                            json!({"slug":id,"native_field":{"effort":"high"}}).to_string(),
-                        ),
-                    )
-                    .unwrap(),
+                    content: gateway_core::routing::ProviderModelContent::Native(
+                        gateway_core::operation::RawJsonPayload::new(
+                            "codex",
+                            Bytes::from(
+                                json!({"slug":id,"native_field":{"effort":"high"}}).to_string(),
+                            ),
+                        )
+                        .unwrap(),
+                    ),
                 })
                 .collect(),
         ))

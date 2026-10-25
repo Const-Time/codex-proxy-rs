@@ -109,11 +109,14 @@ impl Execution {
             .decoder
             .decode(
                 &chunk,
-                &self.adapter.registered.declaration.protocol,
-                self.adapter.registered.declaration.transport.as_str(),
-                self.invocation.context.client_transport(),
-                self.invocation.account.as_ref(),
-                active.managed.http.send_state.get(),
+                super::event::DecodeContext {
+                    protocol: &self.adapter.registered.declaration.protocol,
+                    transport: self.adapter.registered.declaration.transport.as_str(),
+                    client_transport: self.invocation.context.client_transport(),
+                    account: self.invocation.account.as_ref(),
+                    sent: active.managed.http.send_state.get(),
+                    started_at: self.invocation.context.timing_started_at(),
+                },
             )
             .map_err(|error| match error {
                 EventDecodeError::Invalid(error) => {
@@ -200,6 +203,7 @@ impl Execution {
             ));
         }
         let mut context = self.adapter.session.context(Stage::Upstream, timeout);
+        context.resource_stream = true;
         context.request_id = Some(invocation.context.request_id().as_str().to_owned());
         context.request = invocation
             .context
@@ -277,6 +281,10 @@ impl Execution {
                 .ok_or_else(invalid)?
                 .to_owned(),
             fast_mode: invocation.context.fast_mode().as_str().to_owned(),
+            request_elapsed_ms: u64::try_from(
+                invocation.context.timing_started_at().elapsed().as_millis(),
+            )
+            .unwrap_or(u64::MAX),
             headers,
             continuation: previous.map(|state| state.continuation),
         };
@@ -285,29 +293,7 @@ impl Execution {
                 source.to_string(),
             ))
         })?;
-        let payload = if self
-            .adapter
-            .session
-            .capability_version(gateway_plugin_sdk::Capability::UpstreamAdapter)
-            == Some(1)
-        {
-            let mut metadata = serde_json::to_value(&request).map_err(|source| {
-                invalid().with_raw_upstream_error(gateway_core::error::RawUpstreamError::new(
-                    source.to_string(),
-                ))
-            })?;
-            metadata
-                .as_object_mut()
-                .ok_or_else(invalid)?
-                .remove("fast_mode");
-            metadata["disable_fast"] = serde_json::json!(
-                invocation.context.fast_mode() == gateway_core::account::FastMode::Disabled
-            );
-            gateway_plugin_sdk::call::upstream_adapter::encode_request_metadata(&metadata, body)
-        } else {
-            request.encode(body)
-        }
-        .map_err(|source| {
+        let payload = request.encode(body).map_err(|source| {
             invalid().with_raw_upstream_error(gateway_core::error::RawUpstreamError::new(
                 source.to_string(),
             ))

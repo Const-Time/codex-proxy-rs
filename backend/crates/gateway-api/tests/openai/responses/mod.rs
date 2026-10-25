@@ -921,3 +921,30 @@ fn transparent_encoder_should_only_require_wire_terminal_for_buffered_conversion
         ResponseEncodeError::MissingWireTerminal
     );
 }
+
+#[test]
+fn websocket_encoder_preserves_raw_v5_messages_and_still_projects_capacity_errors() {
+    let raw = "{ \"type\": \"response.future\", \"number\": 9007199254740993 }";
+    let wire = ProtocolWireEvent::json("openai", None, serde_json::from_str(raw).unwrap())
+        .unwrap()
+        .with_raw_websocket_message(raw);
+    assert_eq!(
+        OpenAiResponsesEncoder::new().push_websocket(&ProviderEvent::wire(wire)),
+        vec![raw]
+    );
+    let opaque = ProtocolWireEvent::raw_websocket("openai", "future opaque frame").unwrap();
+    assert_eq!(
+        OpenAiResponsesEncoder::new().push_websocket(&ProviderEvent::wire(opaque)),
+        vec!["future opaque frame"]
+    );
+    let raw = r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"busy"}}}"#;
+    let wire = ProtocolWireEvent::json("openai", None, serde_json::from_str(raw).unwrap())
+        .unwrap()
+        .with_raw_websocket_message(raw);
+    let messages = OpenAiResponsesEncoder::new().push_websocket(&ProviderEvent::wire(wire));
+    assert_eq!(messages.len(), 1);
+    assert_ne!(
+        messages[0], raw,
+        "raw pass-through must not bypass the existing capacity projection"
+    );
+}

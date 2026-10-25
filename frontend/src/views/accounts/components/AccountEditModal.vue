@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
+import type { ApiKeyAccountForm } from '../utils/upstreamApiKey'
 import type { AccountGroupRef, AccountModelAccess } from '@/api'
 
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
+import AccountApiKeyFields from './AccountApiKeyFields.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
 import AccountPlanBadge from './AccountPlanBadge.vue'
 import AccountSettingsFields from './AccountSettingsFields.vue'
@@ -14,6 +16,8 @@ defineProps<{
   groups: AccountGroupRef[]
   groupsLoading: boolean
   saving: boolean
+  configurationLoading: boolean
+  configurationReady: boolean
 }>()
 
 const emit = defineEmits<{
@@ -21,6 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const open = defineModel<boolean>({ required: true })
+const apiKey = defineModel<ApiKeyAccountForm>('apiKey', { required: true })
 const enabled = defineModel<boolean>('enabled', { required: true })
 const concurrencyLimit = defineModel<string>('concurrencyLimit', { required: true })
 const modelAccess = defineModel<AccountModelAccess | undefined>('modelAccess', { required: true })
@@ -48,13 +53,26 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
           size="lg"
         />
         <div class="flex shrink-0 items-center gap-3">
-          <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
+          <AccountPlanBadge :authentication-kind="account.authenticationKind" :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
           <ProviderIconGroup
             :provider="account.provider"
             :authentication-kind="account.authenticationKind"
           />
         </div>
       </div>
+
+      <section v-if="account.authenticationKind === 'api_key'" class="grid gap-4">
+        <h3 class="m-0 text-cp font-heavy text-cp-text">
+          上游连接
+        </h3>
+        <p v-if="configurationLoading" role="status" class="m-0 text-cp-sm text-cp-text-secondary">
+          正在读取上游设置…
+        </p>
+        <p v-else-if="!configurationReady" role="alert" class="m-0 text-cp-sm text-cp-error">
+          上游设置读取失败，请关闭后重试
+        </p>
+        <AccountApiKeyFields v-else v-model="apiKey" editing :disabled="saving" />
+      </section>
 
       <AccountSettingsFields
         v-model:enabled="enabled"
@@ -79,7 +97,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
       <BaseButton
         variant="primary"
         :loading="saving"
-        :disabled="!account || groupsLoading"
+        :disabled="!account || groupsLoading || (account.authenticationKind === 'api_key' && !configurationReady)"
         @click="emit('save')"
       >
         保存更改

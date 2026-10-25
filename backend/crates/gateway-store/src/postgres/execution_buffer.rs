@@ -12,7 +12,6 @@ use gateway_core::engine::{
     ModelRequestId, NewModelRequest, ProbeFailure, RecoveryReport,
 };
 use gateway_core::error::{ProviderError, StoreError};
-use gateway_core::lifecycle::CancellationToken;
 use gateway_core::task::{DaemonTask, WorkerTaskError};
 use gateway_core::upstream::UpstreamSendState;
 use tokio::sync::{Mutex, mpsc};
@@ -353,8 +352,16 @@ where
 {
     fn run(
         &self,
-        cancellation: CancellationToken,
+        cancellation: gateway_core::lifecycle::CancellationToken,
     ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        self.run_with_context(gateway_core::task::WorkerDaemonContext::new(cancellation))
+    }
+
+    fn run_with_context(
+        &self,
+        context: gateway_core::task::WorkerDaemonContext,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        let cancellation = context.cancellation().clone();
         Box::pin(async move {
             let mut receiver = self.receiver.lock().await;
             loop {
@@ -372,13 +379,15 @@ where
                 let Some(queued) = queued else {
                     return Err(WorkerTaskError::safe("execution observation queue closed"));
                 };
-                persist_queued(queued, self.inner.as_ref()).await;
+                if persist_queued(queued, self.inner.as_ref()).await {
+                    context.succeeded();
+                }
             }
         })
     }
 }
 
-async fn persist_queued<S>(mut queued: QueuedExecutionObservation, store: &S)
+async fn persist_queued<S>(mut queued: QueuedExecutionObservation, store: &S) -> bool
 where
     S: ExecutionStore + ?Sized,
 {
@@ -392,12 +401,15 @@ where
             request_id = ?request_id,
             "执行观测队列内部状态无效，已丢弃本次写入"
         );
-        return;
+        return false;
     };
     // Store 写入没有统一幂等键；超时可能表示已提交，不能在这里盲目重试并
     // 制造重复 ops_events。失败会被计数并丢弃，数据面始终不等待补偿。
     match write.persist(store).await {
-        Ok(()) => state.record_persisted(),
+        Ok(()) => {
+            state.record_persisted();
+            true
+        }
         Err(error) => {
             state.record_write_failure();
             let stats = state.snapshot();
@@ -408,6 +420,7 @@ where
                 write_failure_total = stats.write_failure_total,
                 "执行观测写入失败，数据面不受影响"
             );
+            false
         }
     }
 }

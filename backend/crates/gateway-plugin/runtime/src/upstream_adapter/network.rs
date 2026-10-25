@@ -4,9 +4,7 @@ use super::{
     target::UpstreamTarget,
 };
 use crate::RpcReply;
-use crate::outbound::{
-    HttpScope, MAX_PAYLOAD, SendGuard, denied, empty, headers, http_error, invalid,
-};
+use crate::outbound::{HttpScope, MAX_PAYLOAD, SendGuard, denied, empty, http_error, invalid};
 use gateway_core::{
     engine::{nested::ExtensionCallScope, upstream_adapter::UpstreamAccountConnection},
     lifecycle::CancellationToken,
@@ -131,7 +129,7 @@ impl ManagedCall {
                 (n, v.to_vec())
             })
             .collect();
-        headers.extend(input.headers.into_iter().map(|(n, v)| (n, v.into_bytes())));
+        headers.extend(input.headers);
         Ok((
             HttpRequest {
                 method: input.method,
@@ -244,7 +242,7 @@ impl ManagedCall {
                     }
                     let _ = connection;
                     return Ok(RpcReply {
-                        result: serde_json::json!({"status":101,"headers":[],"stream":null}),
+                        result: serde_json::json!({"status":101,"http_version":"HTTP/1.1","headers":[],"stream":null,"trailers":[]}),
                         payload: vec![],
                     });
                 }
@@ -276,7 +274,12 @@ impl ManagedCall {
                 Ok(RpcReply {
                     result: serde_json::to_value(wire::HttpResponse {
                         status: response.status,
-                        headers: headers(response.headers)?,
+                        http_version: format!("{:?}", response.version),
+                        headers: response.headers,
+                        trailers: response
+                            .body
+                            .as_mut()
+                            .map_or_else(Vec::new, |body| body.take_trailers()),
                         stream: None,
                     })
                     .map_err(|_| invalid())?,

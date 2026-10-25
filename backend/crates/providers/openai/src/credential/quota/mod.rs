@@ -763,7 +763,10 @@ impl CodexCredentialQuotaService {
     }
 
     pub async fn synchronize(&self) -> Result<CodexQuotaSyncSummary, CodexCredentialQuotaError> {
-        let accounts = self.repository.list_for_provider().await?;
+        let mut accounts = self.repository.list_for_provider().await?;
+        accounts.retain(|account| {
+            account.authentication_kind() == crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+        });
         let mut summary = CodexQuotaSyncSummary::default();
         let now = SystemTime::now();
         let account_ids = accounts
@@ -953,7 +956,9 @@ impl CodexCredentialQuotaService {
         account: &ProviderAccount,
         rate_limits: &[ParsedRateLimits],
     ) -> Result<bool, CodexCredentialQuotaError> {
-        if rate_limits.is_empty() {
+        if account.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+            || rate_limits.is_empty()
+        {
             return Ok(false);
         }
         let has_quota_facts = rate_limits.iter().any(|observation| {
@@ -1093,7 +1098,7 @@ impl CodexCredentialQuotaService {
         self.read_snapshot_for(&account).await
     }
 
-    async fn read_snapshot_for(
+    pub(crate) async fn read_snapshot_for(
         &self,
         account: &ProviderAccount,
     ) -> Result<Option<CodexAccountQuotaSnapshot>, CodexCredentialQuotaError> {
@@ -1110,9 +1115,16 @@ impl CodexCredentialQuotaService {
         else {
             return Ok(None);
         };
-        if observation.account_id != *account_id
-            || observation.expected_revision != account.revision()
-        {
+        self.project_observation(account_id, account.revision(), &observation)
+    }
+
+    pub(crate) fn project_observation(
+        &self,
+        account_id: &ProviderAccountId,
+        revision: CredentialRevision,
+        observation: &gateway_core::account::QuotaObservation,
+    ) -> Result<Option<CodexAccountQuotaSnapshot>, CodexCredentialQuotaError> {
+        if observation.account_id != *account_id || observation.expected_revision != revision {
             return Err(CodexCredentialQuotaError::RevisionConflict);
         }
         if observation.quota.expose_to_provider().is_empty() {
@@ -1121,7 +1133,7 @@ impl CodexCredentialQuotaService {
         let observed_at = observation.observed_at;
         let snapshot = parse_account_quota_snapshot(
             account_id.clone(),
-            account.revision(),
+            revision,
             observed_at,
             &Value::Object(observation.quota.expose_to_provider().clone()),
         )?
@@ -1159,6 +1171,9 @@ impl CodexCredentialQuotaService {
             .await?
             .filter(|account| account.provider().as_str() == "openai")
             .ok_or(CodexCredentialQuotaError::NotFound)?;
+        if account.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH {
+            return Err(CodexCredentialQuotaError::NotFound);
+        }
         let observed_at = SystemTime::now();
         if !access_token_is_current(&account, observed_at) {
             return Err(CodexCredentialQuotaError::CredentialRefreshRequired);
@@ -1591,6 +1606,9 @@ fn merge_passive_metadata(quota: &mut Map<String, Value>, rate_limits: &ParsedRa
         value.insert("unlimited".to_owned(), Value::Bool(credits.unlimited));
         if let Some(balance) = credits.balance.as_ref() {
             value.insert("balance".to_owned(), Value::String(balance.clone()));
+        } else {
+            // 点数对象明确更新但未提供余额时，不能把旧余额继续作为当前余额展示。
+            value.remove("balance");
         }
         quota.insert("credits".to_owned(), Value::Object(value));
     }

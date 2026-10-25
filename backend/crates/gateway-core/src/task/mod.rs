@@ -334,7 +334,68 @@ pub trait ScheduledTask: Send + Sync {
 /// 长驻任务。
 ///
 /// 实现负责连接级重连退避；Host 负责任务退出或 panic 后的重启退避。
+/// 一次 daemon 运行的取消与成功进度，重启时必须创建新上下文
+#[derive(Clone)]
+pub struct WorkerDaemonContext {
+    cancellation: CancellationToken,
+    progress: std::sync::Arc<DaemonProgress>,
+}
+
+#[derive(Default)]
+struct DaemonProgress {
+    completed: std::sync::atomic::AtomicU64,
+    changed: event_listener::Event,
+}
+
+impl WorkerDaemonContext {
+    #[must_use]
+    pub fn new(cancellation: CancellationToken) -> Self {
+        Self {
+            cancellation,
+            progress: std::sync::Arc::default(),
+        }
+    }
+
+    #[must_use]
+    pub const fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    /// 仅在实际工作或依赖检查成功后通知 Host；进入 run 不代表恢复
+    pub fn succeeded(&self) {
+        if !self.cancellation.is_cancelled() {
+            self.progress
+                .completed
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            self.progress.changed.notify(usize::MAX);
+        }
+    }
+
+    #[must_use]
+    pub fn completed_cycles(&self) -> u64 {
+        self.progress
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 先注册再检查计数，避免报告与等待交错时丢失成功通知
+    pub async fn progress_since(&self, completed: u64) {
+        let changed = self.progress.changed.listen();
+        if self.completed_cycles() == completed {
+            changed.await;
+        }
+    }
+}
+
 pub trait DaemonTask: Send + Sync {
+    /// 保留原入口给独立调用者；Host 为每次监督运行传递隔离的成功进度。
+    fn run_with_context(
+        &self,
+        context: WorkerDaemonContext,
+    ) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        self.run(context.cancellation().clone())
+    }
+
     fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>>;
 }
 

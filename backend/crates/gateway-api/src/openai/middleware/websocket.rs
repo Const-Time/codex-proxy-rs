@@ -204,14 +204,19 @@ pub(in crate::openai) async fn respond(
                                 .map_err(|_| MiddlewareError::InvalidState)?;
                         value.insert("type".into(), "error".into());
                         value.insert("status".into(), status.into());
-                        return Ok((vec![serde_json::Value::Object(value).to_string()], true));
+                        return Ok((
+                            vec![axum::extract::ws::Utf8Bytes::from(
+                                serde_json::Value::Object(value).to_string(),
+                            )],
+                            true,
+                        ));
                     }
                     delivery.advance().await?;
                     let (frames, terminal) = delivery.take_output();
                     let messages = frames
                         .into_iter()
                         .map(|bytes| {
-                            String::from_utf8(bytes.to_vec())
+                            axum::extract::ws::Utf8Bytes::try_from(bytes)
                                 .map_err(|_| MiddlewareError::InvalidState)
                         })
                         .collect::<Result<Vec<_>, _>>()?;

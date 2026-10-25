@@ -642,6 +642,7 @@ async fn upstream_resets_are_scoped_and_deduplicated_across_observations() {
     let admin = super::admin_account_store(&db.pool);
     let now = Utc::now();
     let mut quota = ProviderQuota {
+        credits: None,
         plan_type: None,
         observed_at: Some(now),
         refresh_token_expires_at: None,

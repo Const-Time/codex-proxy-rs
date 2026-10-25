@@ -47,6 +47,7 @@ impl HttpDispatcher {
 }
 
 pub struct PluginEngine {
+    probes: Option<Arc<crate::models::AccountProbes>>,
     credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     services: Option<gateway_core::engine::middleware::service::Source>,
     outbound: crate::outbound::SharedClient,
@@ -66,6 +67,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            probes: None,
             credentials: None,
             services: None,
             outbound: Arc::default(),
@@ -100,6 +102,13 @@ impl PluginEngine {
         keys: Arc<dyn gateway_admin::ClientKeyService>,
     ) -> Self {
         self.models = Some(crate::models::ModelServices::new(execution, keys));
+        self
+    }
+    pub fn with_account_probe(
+        mut self,
+        probe: Arc<dyn gateway_core::engine::probe::AccountProbe>,
+    ) -> Self {
+        self.probes = Some(crate::models::AccountProbes::new(probe));
         self
     }
     pub fn with_quota(
@@ -200,7 +209,7 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
         .iter()
         .filter(|(cap, decl)| match cap {
             Capability::Middleware => !matches!(decl.version, 4 | 5),
-            Capability::UpstreamAdapter => !matches!(decl.version, 1 | 2),
+            Capability::UpstreamAdapter => decl.version != 4,
             Capability::Management => !matches!(decl.version, 1 | 2),
             Capability::FrontendAuthentication
             | Capability::ModelCatalog
@@ -331,7 +340,7 @@ impl PluginRuntime for PluginEngine {
             if manifest
                 .contributes
                 .get(&Capability::UpstreamAdapter)
-                .is_none_or(|d| !matches!(d.version, 1 | 2) || !d.stages.contains(&Stage::Upstream))
+                .is_none_or(|d| d.version != 4 || !d.stages.contains(&Stage::Upstream))
             {
                 return Err(AdminError::invalid("此制品未提供上游适配器能力"));
             }
@@ -460,6 +469,7 @@ impl PluginRuntime for PluginEngine {
                 access.cancellation(),
                 self.http.clone(),
                 self.data.clone(),
+                self.probes.clone(),
             )
         });
         let logs = self.logs.register(&manifest)?;

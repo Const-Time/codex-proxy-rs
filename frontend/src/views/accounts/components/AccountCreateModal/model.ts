@@ -1,13 +1,16 @@
+import type { ApiKeyAccountForm } from '../../utils/upstreamApiKey'
 import type { AccountModelAccess } from '@/api'
 import { accountModelAccessError } from '../../utils/modelAccess'
 import { parseAccountSchedulingForm } from '../../utils/schedulingForm'
+import { emptyApiKeyAccountForm } from '../../utils/upstreamApiKey'
 
 export type AccountCreateProvider = 'batch' | 'openai' | 'xai'
-export type AccountImportMode = 'oauth' | 'access_token' | 'refresh_token' | 'json'
-export type AccountImportInputMode = Exclude<AccountImportMode, 'oauth'>
+export type AccountImportMode = 'oauth' | 'api_key' | 'access_token' | 'refresh_token' | 'json'
+export type AccountImportInputMode = Exclude<AccountImportMode, 'oauth' | 'api_key'>
 
 export interface AccountCreateForm {
   provider: AccountCreateProvider | ''
+  apiKey: ApiKeyAccountForm
   enabled: boolean
   concurrencyLimit: string
   weight: string
@@ -26,6 +29,7 @@ export interface AccountCreateForm {
 export function emptyAccountCreateForm(): AccountCreateForm {
   return {
     provider: '',
+    apiKey: emptyApiKeyAccountForm(),
     enabled: true,
     concurrencyLimit: '',
     weight: '1',

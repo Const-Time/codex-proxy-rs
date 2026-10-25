@@ -53,6 +53,7 @@ type CredentialLoadHook = dyn for<'a> Fn(
 pub(crate) struct MemoryAccountStore {
     accounts: Mutex<BTreeMap<ProviderAccountId, StoredAccount>>,
     quota_reads: AtomicUsize,
+    account_reads: AtomicUsize,
     fail_provider_listing: AtomicBool,
     credential_load_hook: Mutex<Option<Arc<CredentialLoadHook>>>,
     credential_loads: AtomicUsize,
@@ -80,6 +81,49 @@ impl MemoryAccountStore {
             .expect("seed test OAuth credential");
     }
 
+    pub(crate) async fn seed_api_key(
+        &self,
+        id: &str,
+        base_url: String,
+        transport: provider_openai::credential::ApiKeyTransport,
+    ) {
+        let credential = provider_openai::credential::CodexCredentialCodec::encode_complete(
+            provider_openai::credential::CodexCredentialData::ApiKey(
+                provider_openai::credential::ApiKeyCredentialData {
+                    schema_version: 1,
+                    installation_id: uuid::Uuid::new_v4().to_string(),
+                    base_url,
+                    api_key: "sk-api-test-only".to_owned(),
+                    transport,
+                },
+            ),
+        )
+        .expect("API Key schema");
+        let account = ProviderAccount::new(
+            ProviderAccountId::new(id).expect("id"),
+            ProviderKind::new("openai").expect("kind"),
+            id.to_owned(),
+            None,
+            "api_key".to_owned(),
+            CredentialRevision::new(1).expect("revision"),
+            None,
+        )
+        .with_account_facts(
+            true,
+            CredentialState::Ready,
+            QuotaState::unknown(),
+            None,
+            None,
+        );
+        self.create_account(NewProviderAccount {
+            account,
+            credential,
+            model_access: None,
+        })
+        .await
+        .expect("seed API account");
+    }
+
     pub(crate) fn account(&self, id: &str) -> Option<ProviderAccount> {
         let id = ProviderAccountId::new(id).ok()?;
         self.accounts
@@ -104,6 +148,9 @@ impl MemoryAccountStore {
             .with_scheduling(concurrency_limit, weight);
     }
 
+    pub(crate) fn account_reads(&self) -> usize {
+        self.account_reads.load(Ordering::SeqCst)
+    }
     pub(crate) fn quota_reads(&self) -> usize {
         self.quota_reads.load(Ordering::SeqCst)
     }
@@ -170,6 +217,7 @@ impl ProviderAccountStore for MemoryAccountStore {
         &self,
         account: &ProviderAccountId,
     ) -> Result<Option<ProviderAccount>, StoreError> {
+        self.account_reads.fetch_add(1, Ordering::SeqCst);
         Ok(self
             .accounts
             .lock()

@@ -235,7 +235,9 @@ impl HttpScope {
         let mut body = response.body;
         let mut result = wire::HttpResponse {
             status: response.status,
-            headers: headers(response.headers)?,
+            http_version: format!("{:?}", response.version),
+            headers: response.headers,
+            trailers: Vec::new(),
             stream: None,
         };
         let payload = if streaming {
@@ -260,7 +262,11 @@ impl HttpScope {
             result.stream = Some(id);
             vec![]
         } else {
-            self.collect(&mut body).await?
+            {
+                let payload = self.collect(&mut body).await?;
+                result.trailers = body.take_trailers();
+                payload
+            }
         };
         Ok(RpcReply {
             result: serde_json::to_value(result).map_err(|_| invalid())?,
@@ -287,11 +293,7 @@ impl HttpScope {
                     HttpRequest {
                         method: request.method,
                         url: request.url,
-                        headers: request
-                            .headers
-                            .into_iter()
-                            .map(|(n, v)| (n, v.into_bytes()))
-                            .collect(),
+                        headers: request.headers,
                         body: payload,
                     },
                     method == "host.http.do_stream",
@@ -320,8 +322,11 @@ impl HttpScope {
                 })?;
                 let result = tokio::select! {biased;
                     ()=stream.closed.cancelled()=>Err(denied()),
-                    result=body.as_mut().ok_or_else(denied)?.read(request.maximum_bytes as usize)=>result.map_err(http_error),
+                    result=body.as_mut().ok_or_else(denied)?.read_with_timeout(request.maximum_bytes as usize, self.timeout()?)=>result.map_err(http_error),
                 };
+                let trailers = body
+                    .as_mut()
+                    .map_or_else(Vec::new, |body| body.take_trailers());
                 if !matches!(result, Ok(Some(_))) {
                     body.take();
                     stream.closed.cancel();
@@ -332,7 +337,7 @@ impl HttpScope {
                 }
                 let chunk = result?;
                 Ok(RpcReply {
-                    result: serde_json::json!({"eof":chunk.is_none()}),
+                    result: serde_json::json!({"eof":chunk.is_none(), "trailers": trailers}),
                     payload: chunk.map_or_else(Vec::new, |c| c.to_vec()),
                 })
             }
@@ -373,23 +378,6 @@ pub(crate) fn denied() -> PluginFault {
         ErrorCode::PermissionDenied,
         "managed HTTP resource unavailable",
     )
-}
-pub(crate) fn headers(
-    headers: Vec<(String, Vec<u8>)>,
-) -> Result<Vec<(String, String)>, PluginFault> {
-    headers
-        .into_iter()
-        .map(|(n, v)| {
-            String::from_utf8(v).map(|v| (n, v)).map_err(|_| {
-                let mut fault = PluginFault::new(
-                    ErrorCode::Fault,
-                    "HTTP response header cannot be represented",
-                );
-                fault.send_state = SendState::Sent;
-                fault
-            })
-        })
-        .collect()
 }
 pub(crate) fn wire_state(state: UpstreamSendState) -> SendState {
     match state {

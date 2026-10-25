@@ -27,6 +27,18 @@ pub fn endpoint_url(base_url: &str, endpoint_path: &str) -> String {
     )
 }
 
+/// Validate account endpoint syntax; OAuth startup adds its own transport restriction.
+pub(crate) fn parse_upstream_base_url(value: &str) -> Option<url::Url> {
+    let url = url::Url::parse(value).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+}
+
 /// 返回与 base path 对应的唯一 usage endpoint。
 pub fn usage_endpoint_url(base_url: &str) -> String {
     account_endpoint_url(base_url, "usage")

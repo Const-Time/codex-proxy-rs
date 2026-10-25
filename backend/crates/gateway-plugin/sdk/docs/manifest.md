@@ -33,7 +33,7 @@
 
 `capabilities` 使用扩展能力标识；Provider、模型和账号 ID 不属于这个集合
 
-当前清单、进程协议和宿主兼容声明的格式版本均为 `2`。清单不接受 `permissions` 字段；使用其他格式版本的包须用匹配的 SDK 和 CLI 重新构建
+当前清单和宿主兼容声明格式版本为 `2`，进程 RPC 版本为 `5`。清单不接受 `permissions` 字段；旧 RPC 制品须用匹配的 SDK 和 CLI 重新构建。
 
 安装包清单校验与已安装元数据读取是两个边界：清单拒绝未知字段，并检查必需字段、类型和版本；
 数据库元数据允许的字段增减见[持久化规则](../../../../../docs/architecture.md#发布与执行边界)，不改变清单或 RPC 合同。
@@ -41,20 +41,20 @@
 
 ## 接口弃用
 
-新合同与旧合同并行提供，管理端和插件加载日志会提示旧合同及迁移方式。新合同首次正式发布后，旧合同至少再兼容 7 个正式版本；主版本、次版本和补丁版本各计一次，alpha、beta、rc、exp 及同版本重试不计
+本地宿主按 `docs/plugins.md` 的兼容矩阵校验能力，不继承上游的旧合同并行窗口。本轮直接升级 RPC v5，旧进程制品须重建。
 
-剩余窗口由宿主发行物中的 [弃用清单](../../runtime/plugin-api-deprecations.json) 给出，不通过版本号差值推算。窗口内提供旧合同转换；窗口结束后移除转换和支持声明，所有旧合同插件都应升级 SDK、处理器与清单再重新打包。仍允许尝试启动，但不再保证兼容，不按实际读取过哪些字段判断
+middleware v4/v5、management v1/v2、upstream_adapter v4 可正常启用；其他能力使用 v1。旧适配器及 middleware v3 会被拒绝启用，实例仍可停用、升级或删除。
 
 | 旧合同 | 替代合同 | 迁移内容 |
 | --- | --- | --- |
 | middleware v3 | middleware v4 | 执行设置及 `settings_sources.execution` 中的 `disable_fast` 改为 `fast_mode` 三态 |
-| upstream_adapter v1 | upstream_adapter v2 | 使用新版 `UpstreamAdapterRequest.fast_mode`，同步更新 SDK 和贡献版本 |
+| upstream_adapter v1/v2/v3 | upstream_adapter v4 | 同步更新 SDK/贡献版本，使用原始字节头、`request_elapsed_ms` 与完整 `observation` |
 
 旧布尔投影仅在 `disabled` 时为 `true`，`default` 和 `enabled` 均为 `false`。旧中间件原样回传布尔值时保留实际三态，修改其他设置不会丢失 `enabled`；实际从 `true` 改为 `false` 时设为 `default`。旧接口不能表达强制开启，需升级合同使用三态
 
 ## 扩展项简写
 
-作者声明可以省略 `id` 和固定阶段；默认版本为 `1`，新中间件显式选择版本 `4`，新版上游适配器 SDK 使用版本 `2`：
+作者声明可以省略 `id` 和固定阶段；默认版本为 `1`，新中间件显式选择版本 `4` 或 `5`，新版上游适配器 SDK 使用版本 `4`：
 
 ```json
 {
@@ -71,7 +71,7 @@
 }
 ```
 
-默认扩展项 ID 为 `<publisher>.<name>.<capability-kebab>`。middleware v3 与 upstream_adapter v1 在[弃用窗口](#接口弃用)内仍可加载。除 `middleware` 外，阶段由
+默认扩展项 ID 为 `<publisher>.<name>.<capability-kebab>`。支持的合同见上表。除 `middleware` 外，阶段由
 capability 固定并由工具生成：
 
 | 阶段 | 能力 |

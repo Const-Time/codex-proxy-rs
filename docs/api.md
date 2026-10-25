@@ -151,13 +151,16 @@ Responses 不透传下游的逐跳头、反代元数据（如 `cf-*`、`x-forwar
 `cdn-loop`）以及 `Accept-Encoding` / `Content-Encoding`。链路元数据和编解码能力
 由各段传输层独立管理；其余业务扩展头继续透传，不使用固定业务头白名单。
 此规则同时适用于上游 HTTP 和 WebSocket，不影响上游响应的 `cf-ray` 等诊断信息。
+API Key 上游还会移除 Cookie、ChatGPT 账号身份、`x-codex-*`、`x-openai-internal-*`、会话/线程身份头及
+`X-OpenAI-Actor-Authorization`，避免把 OAuth 或网关托管身份传给第三方 API。
 
 Responses WebSocket 仅接受文本 `response.create`，同一连接串行执行。当前响应期间收到的后续业务帧
 留在有界接收队列中，待当前响应完成终结和写出后再逐条校验、准入与执行，不因请求提前到达而断开。
 这对齐 Codex 客户端 `stream_request` 持锁至本轮结束的串行行为，不表示支持额外控制消息类型。
 接收队列容量为 32 个事件，超载仍关闭连接；Ping/Pong、客户端关闭和服务关闭不等待队列中的请求执行。
 
-客户端使用 HTTP/SSE 时，OpenAI Provider 仍可能选择上游 WebSocket。
+OAuth 账号在客户端使用 HTTP/SSE 时仍可能选择上游 WebSocket。API Key 账号默认使用 HTTP/SSE，
+可在账号上配置 `prefer_websocket`；必须依赖 WS 的预热、非持久化新链和连接内续接不使用 HTTP-only 账号。
 客户端配置的 `supports_websockets` 只控制第一段连接，不是服务端传输策略开关。
 上游在响应终态前发送 Close 1000 仍属于失败，不能按“正常关闭”计为成功。
 
@@ -434,7 +437,7 @@ concurrent proxy mutations return 409. OAuth commits still reject a deleted, cha
 导入的 `data` 必须是 JSON object，Admin API 请求上限为 64 MiB；Provider 可以收紧限制，
 当前 xAI 导入上限为 16 MiB。内部 schema 由目标 Provider 独占解释：
 
-- OpenAI 接受单账号 OAuth 文档、`accounts` 数组（最多 200 项）、CPR 账号 bundle 和含代理引用的 sub2api 导出；
+- OpenAI 接受单账号 OAuth 或 API Key 文档、`accounts` 数组（最多 200 项）、CPR 账号 bundle 和含代理引用的 sub2api 导出；
 - OpenAI OAuth token 字段接受 `accessToken`、`refreshToken`、`idToken`，以及官方
   `auth.json` 中的 `access_token`、`refresh_token`、`id_token`，可以嵌套在 `tokens` 等账号 object 内；
   每项至少包含 AT 或 RT。仅含 `OPENAI_API_KEY` 的客户端代理配置不是 OAuth 账号导入材料；
@@ -444,7 +447,38 @@ concurrent proxy mutations return 409. OAuth commits still reject a deleted, cha
 - xAI 从单账号 object 或 `accounts` 数组中提取 OAuth token；并发、优先级等字段不参与认证；
 - xAI 批量导入逐条独立校验：失败条目跳过并记录日志，不中断其余条目，仅当没有任何条目成功时整个导入才报错；
 - xAI API Key 不是受支持的账号 credential；
-- 导入不会只凭文件外形写入账号；目标 Provider 使用认证材料完成必要的 token exchange 或已认证账号资料补全。
+- OAuth 导入由目标 Provider 完成必要的 token exchange 或身份投影。API Key 导入校验凭据格式与地址，不调用 OAuth 或 ChatGPT 身份接口；可用性由模型目录和连接测试验证。
+
+API Key 账号使用以下独立凭据形态：
+
+```json
+{
+  "provider": "openai",
+  "data": {
+    "authentication_kind": "api_key",
+    "name": "团队上游",
+    "base_url": "https://api.example.com/v1",
+    "api_key": "<upstream-api-key>",
+    "transport": "http"
+  }
+}
+```
+
+`base_url` 是 API 前缀，追加 `responses` 和 `models`，不会自动补 `/v1`；支持根路径和自定义前缀。
+地址仅允许 HTTPS，HTTP 只允许本机回环；拒绝 URL 中的认证信息、查询串和 fragment。
+`transport` 可省略（默认 `http`）或设为 `prefer_websocket`。API Key 使用 Bearer 认证与普通 JSON，
+不携带 OAuth Cookie 或 ChatGPT 身份。上游须提供标准 `/models` 列表，模型目录按账号和凭据版本隔离。
+API Key 每次导入创建独立账号；更新已有账号使用 `rotate`。导出会显式包含密钥，沿用敏感导出的确认合同。
+
+sub2api 的 `platform=openai`、`type=apikey` 使用 `credentials.base_url` / `credentials.api_key`；
+导入时按其端点规则将服务根、版本前缀或完整 `/responses` 地址转换为 API 前缀，缺省地址为官方 `/v1`。
+非空模型映射、请求头覆盖、其他协议和启用的 `extra.openai_*` 设置尚未适配，返回输入错误，需先移除并在本项目重新配置。
+
+API Key 账号支持 Responses、模型目录、连接测试和使用统计中的本地用量。OAuth 刷新/重新授权、ChatGPT 额度、个人资料、订阅、重置卡
+及 Images、standalone Search、Responses Lite / compact 专用入口不对这类账号开放。
+客户端的 `image_generation` 和 `X-OpenAI-Actor-Authorization` 声明不改变账号的实际能力。
+账号列表和详情的 API Key `usage` 汇总该账号创建后仍保留的本地请求记录，`windowLabelDisplay` 为 `通用额度`；
+日志清理会影响累计范围，不代表上游余额。OAuth 账号仍按实际周/月额度窗口统计。
 
 管理端的 OpenAI `AT` / `RT` 标签是同一导入 API 的输入便利层：每行一个 token，最多 200 行，提交前
 转换为对应的 `accounts` JSON。Admin API 本身不接收纯文本 token 列表。例如：
@@ -489,6 +523,13 @@ OpenAI rotation 请求字段为：
   "refreshToken": "..."
 }
 ```
+
+API Key rotation 使用 `{ provider: "openai", accountId, baseUrl, transport, apiKey?, settings? }`。
+省略 `apiKey` 保留当前密钥，空字符串无效；账号 ID 和认证类型不能通过轮换转换。
+rotation 可选携带 `settings`，字段与 `POST /api/admin/accounts/update` 相同，其中 `accountId` 必须与外层一致。
+凭据与设置在同一事务中保存，任一校验或持久化失败均不落库；省略 `settings` 保留现有分组、调度等设置。
+`GET /api/admin/accounts/detail` 对 API Key 账号额外返回 `credentialConfiguration: { base_url, transport }`，不回显密钥。
+更新会推进凭据 revision 并失效目录与连接；旧版本会话不可静默续接到新上游。
 
 OAuth start 使用：
 
@@ -1048,3 +1089,7 @@ Usage 列表和详情（含个人视图）返回 `requestedServiceTier` 与 `ups
 账号界面将 OpenAI 账号文档拆成独立条目提交，单条失败不会中断后续条目；保留原文档元信息和账号引用的代理配置。xAI 文档保持 Provider 内部的去重与导入规则。一次最多 200 项，单项 OpenAI 最多 4 MiB、xAI 最多 16 MiB。
 
 部分成功时保留输入和失败说明；输入保持不变的再次提交会跳过本窗口已确认成功的条目。关闭窗口、编辑输入或刷新页面会清除这些本地回执。网络中断而结果不确定的条目须先核对账号列表；这不是服务端幂等任务。已过期且没有刷新令牌的 OpenAI AT 不接受导入。
+
+## 账号 Credits（RPC v5 配套改造）
+
+账号 `quota.credits` 为 `null` 或 `{hasCredits, unlimited, balance}`。`balance` 为十进制字符串或 `null`，不转浮点数；`"0"`、无限额度和未返回余额分别展示。余额来自上游刷新或被动额度事件，缺失的新余额不会保留旧值。展示不改变本地订阅、共享额度及计费口径。

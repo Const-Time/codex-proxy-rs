@@ -54,9 +54,13 @@ impl CodexProvider {
                 attempt: &context,
                 session_affinity_key: affinity.as_ref().map(|value| value.key()),
             };
-            let selection =
-                self.selector
-                    .select_with_cyber_policy(&request, cyber.as_ref(), affinity.as_ref());
+            let selection = self.selector.select_with_cyber_policy(
+                &request,
+                cyber.as_ref(),
+                affinity.as_ref(),
+                false,
+                false,
+            );
             if let Some(remaining) = context.connection_budget().startup_remaining() {
                 tokio::time::timeout(remaining, selection)
                     .await

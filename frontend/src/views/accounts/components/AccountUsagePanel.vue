@@ -86,7 +86,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
           <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
             模型使用排行
           </h3>
-          <BaseIconButton label="额度预测" size="sm" aria-haspopup="dialog" @click="forecastOpen = true">
+          <BaseIconButton v-if="account.authenticationKind !== 'api_key'" label="额度预测" size="sm" aria-haspopup="dialog" @click="forecastOpen = true">
             <ChartNoAxesCombined class="size-3.5" />
           </BaseIconButton>
         </div>
@@ -136,5 +136,5 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
       </div>
     </div>
   </section>
-  <AccountQuotaForecastModal v-model="forecastOpen" :account="account" :refreshing="refreshing" @refresh-quota="emit('refreshQuota', $event)" />
+  <AccountQuotaForecastModal v-if="account.authenticationKind !== 'api_key'" v-model="forecastOpen" :account="account" :refreshing="refreshing" @refresh-quota="emit('refreshQuota', $event)" />
 </template>

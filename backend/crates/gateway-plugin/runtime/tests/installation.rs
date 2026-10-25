@@ -34,7 +34,7 @@ async fn legacy_protocol_restore_keeps_instance_manageable_and_upgradeable() {
     // Simulate the stored manifest left by the previous host. Restoration must
     // reject it before launching, without deleting its record/configuration.
     let mut legacy = store.artifact(&artifact.sha256).await.unwrap();
-    legacy.info.manifest["package"]["protocolVersion"] = json!(2);
+    legacy.info.manifest["package"]["protocolVersion"] = json!(4);
     store.put_artifact(legacy, &actor()).await.unwrap();
     let runtime = Arc::new(PluginEngine::new(
         cache.path().into(),
@@ -50,7 +50,7 @@ async fn legacy_protocol_restore_keeps_instance_manageable_and_upgradeable() {
     let info = runtime
         .describe(store.artifact_info(&artifact.sha256).await.unwrap())
         .unwrap();
-    assert!(info.version_warning.unwrap().contains("RPC v2"));
+    assert!(info.version_warning.unwrap().contains("RPC v4"));
     let disabled = manager
         .update(
             Some(&installed.id),

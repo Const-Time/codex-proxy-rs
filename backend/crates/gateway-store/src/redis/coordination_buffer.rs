@@ -121,7 +121,18 @@ pub struct ClientAdmissionReleaseWriter {
 }
 
 impl DaemonTask for ClientAdmissionReleaseWriter {
-    fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+    fn run(
+        &self,
+        cancellation: gateway_core::lifecycle::CancellationToken,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        self.run_with_context(gateway_core::task::WorkerDaemonContext::new(cancellation))
+    }
+
+    fn run_with_context(
+        &self,
+        context: gateway_core::task::WorkerDaemonContext,
+    ) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        let cancellation = context.cancellation().clone();
         Box::pin(async move {
             let mut receiver = self.receiver.lock().await;
             loop {
@@ -140,6 +151,8 @@ impl DaemonTask for ClientAdmissionReleaseWriter {
                     .await
                 {
                     tracing::warn!(%error, "Client admission 后台释放失败，依赖租约 TTL 收敛");
+                } else {
+                    context.succeeded();
                 }
             }
         })

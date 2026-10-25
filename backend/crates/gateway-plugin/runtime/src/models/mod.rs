@@ -1,6 +1,8 @@
 //! Native SDK callbacks reuse Core execution, not a plugin-specific ledger or scheduler.
+mod probe;
 mod request;
 mod session;
+pub(crate) use probe::AccountProbes;
 
 use crate::RpcReply;
 use futures::future::BoxFuture;
@@ -32,6 +34,7 @@ pub(crate) fn is_method(method: &str) -> bool {
     matches!(
         method,
         "host.keys.list"
+            | "host.account.probe"
             | "host.affinity.lookup"
             | "host.models.list"
             | "host.model.execute"
@@ -59,6 +62,7 @@ enum KeyAuthority {
     Unavailable,
 }
 struct Scope {
+    account_probe: std::sync::atomic::AtomicBool,
     http: Arc<crate::middleware::http::Invocation>,
     context: CallContext,
     keys: KeyAuthority,
@@ -97,6 +101,7 @@ impl Scope {
     }
 }
 pub(crate) struct Models {
+    probes: Option<Arc<AccountProbes>>,
     http: Option<Arc<crate::HttpDispatcher>>,
     services: Arc<ModelServices>,
     data: Option<Arc<dyn PluginDataService>>,
@@ -109,8 +114,10 @@ impl Models {
         cancellation: CancellationToken,
         http: Option<Arc<crate::HttpDispatcher>>,
         data: Option<Arc<dyn PluginDataService>>,
+        probes: Option<Arc<AccountProbes>>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            probes,
             http,
             services,
             data,
@@ -213,6 +220,7 @@ impl Models {
         scopes.insert(
             context.resource_scope_id.clone(),
             Arc::new(Scope {
+                account_probe: std::sync::atomic::AtomicBool::new(false),
                 http,
                 context: context.clone(),
                 keys,
@@ -224,6 +232,18 @@ impl Models {
             }),
         );
         Ok(())
+    }
+    pub(crate) fn authorize_account_probe(&self, context: &CallContext) {
+        if let Some(scope) = self
+            .scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&context.resource_scope_id)
+        {
+            scope
+                .account_probe
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
     }
     pub(crate) fn finish(&self, context: &CallContext) {
         let scope = self
@@ -258,6 +278,7 @@ impl Models {
             .cloned();
         let services = self.services.clone();
         let data = self.data.clone();
+        let probes = self.probes.clone();
         Box::pin(async move {
             let scope = scope.ok_or_else(|| {
                 PluginFault::new(
@@ -266,7 +287,14 @@ impl Models {
                 )
             })?;
             scope.validate()?;
-            let reply = if method.starts_with("host.http.") {
+            let reply = if method == "host.account.probe" {
+                probes
+                    .ok_or_else(|| {
+                        PluginFault::new(ErrorCode::Unsupported, "account probes are unavailable")
+                    })?
+                    .execute(&scope, params, payload)
+                    .await?
+            } else if method.starts_with("host.http.") {
                 tokio::select! {biased;
                     () = scope.cancellation.cancelled() => {
                         let mut fault = PluginFault::new(ErrorCode::Cancelled, "HTTP callback scope cancelled");
@@ -284,6 +312,7 @@ impl Models {
                 if matches!(
                     method.as_str(),
                     "host.model.execute"
+                        | "host.account.probe"
                         | "host.model.execute_stream"
                         | "host.model.stream_read"
                         | "host.model.stream_close"
@@ -574,7 +603,17 @@ async fn call(
         "host.model.execute" | "host.model.execute_stream" => {
             let metadata: ModelExecuteRequest = parse(params)?;
             let streaming = method == "host.model.execute_stream";
-            let request = request::decode(&scope.context, &metadata, payload, streaming)?;
+            let mut request = request::decode(&scope.context, &metadata, payload, streaming)?;
+            // The host-bound origin is authoritative; plugin-supplied context is not.
+            if let Some(origin) = scope.graph.request() {
+                request.request.metadata.client_ip = origin.client_ip;
+                request.request.metadata.user_agent = origin
+                    .headers
+                    .iter()
+                    .find(|header| header.name().eq_ignore_ascii_case("user-agent"))
+                    .and_then(|header| std::str::from_utf8(header.value()).ok())
+                    .map(str::to_owned);
+            }
             let execution = services.execution.clone();
             let selected = match metadata.client_key_id.as_deref() {
                 Some(key) => Some(client(&services, execution.as_ref(), scope, key).await?),

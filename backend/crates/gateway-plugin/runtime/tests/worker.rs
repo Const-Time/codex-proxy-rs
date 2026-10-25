@@ -1251,6 +1251,9 @@ impl PluginHandler for Worker {
                 Ok(CallReply::unary(json!({}), serde_json::to_vec(&StateMigrationResult { changes }).unwrap()))
             }
             "plugin.reconcile" => {
+                if self.adapter_mode == "maintenance-account-probe" {
+                    call.host.call("host.account.probe",json!({"account_id":"acct_allowed","model":"gpt-native"}),serde_json::to_vec(&json!({"model":"gpt-native","input":"OK"})).unwrap()).await.map_err(|e|e.into_plugin_fault())?;
+                }
                 use gateway_plugin_sdk::Stage;
                 assert_eq!(call.context.stage, Stage::Maintenance);
                 assert_eq!(call.params, json!({}));
@@ -2728,7 +2731,7 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
         } else {
             "host.upstream.http.do"
         };
-        let reply=call.host.call(method,json!({"method":"POST","path":if mode=="auxiliary" {"audit"}else{"responses"},"headers":[["x-fixture","adapter"]],"query":[]}),body).await.map_err(callback_error)?;
+        let reply=call.host.call(method,json!({"method":"POST","path":if mode=="auxiliary" {"audit"}else{"responses"},"headers":[["x-fixture",b"adapter".to_vec()]],"query":[]}),body).await.map_err(callback_error)?;
         assert_eq!(reply.result["status"], 200);
         if mode == "http-stream" {
             let stream = reply.result["stream"].as_str().unwrap();
@@ -2759,6 +2762,11 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
     }
     if mode == "failure" || mode == "auxiliary" {
         let mut event = UpstreamAdapterEvent::new(event(vec![], None));
+        let mut observation =
+            gateway_plugin_sdk::call::model::facts::ResponseObservation::new("http_sse");
+        observation.status_code = Some(429);
+        observation.request_id = Some("fixture-failure-request".into());
+        event.observation = Some(observation);
         event.failure = Some(UpstreamFailure {
             kind: UpstreamFailureKind::RateLimited,
             status: Some(429),
@@ -2839,7 +2847,15 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
             })
         },
     ));
-    completed.service_tier = Some("priority".into());
+    let mut observation = gateway_plugin_sdk::call::model::facts::ResponseObservation::new(
+        if mode.starts_with("websocket") {
+            "websocket"
+        } else {
+            "http_sse"
+        },
+    );
+    observation.service_tier = Some("priority".into());
+    completed.observation = Some(observation);
     if mode == "continuation" || mode.starts_with("websocket") {
         if let Some(previous) = metadata.continuation {
             assert_eq!(previous.state["round"], 1);
@@ -2855,6 +2871,15 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
         });
     }
     let mut chunks = vec![started];
+    if mode == "observation" {
+        let mut message = UpstreamAdapterEvent::new(event(vec![], None));
+        let mut observation =
+            gateway_plugin_sdk::call::model::facts::ResponseObservation::new("http_sse");
+        observation.request_id = Some("fixture-raw-request".into());
+        observation.timings.upstream_engine_ms = Some(12.5);
+        message.observation = Some(observation);
+        chunks.push(message.encode().unwrap());
+    }
     if let Some(raw) = raw_body {
         completed.event.wire = None;
         let body = "{ \"future\": 9007199254740993, \"text\": \"雪☃\", \"status\": \"completed\", \"id\": \"adapter-response\" }\n".as_bytes();

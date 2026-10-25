@@ -1,6 +1,6 @@
 [package]
 name = "cpr-shared-budget-plugin"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -11,11 +11,11 @@ autotests = false
 gateway-plugin-sdk = { path = "../../crates/gateway-plugin/sdk", features = ["io"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-tokio = { version = "1.52.3", default-features = false, features = ["io-std", "macros", "rt"] }
+tokio = { version = "1.53.3", default-features = false, features = ["io-std", "macros", "rt"] }
 uuid = { version = "1.23.3", features = ["v4"] }
 
 [dev-dependencies]
-tokio = { version = "1.52.3", default-features = false, features = ["process", "time"] }
+tokio = { version = "1.53.3", default-features = false, features = ["process", "time"] }
 
 [[test]]
 name = "main"
