@@ -35,6 +35,7 @@ pub(crate) fn is_method(method: &str) -> bool {
         method,
         "host.keys.list"
             | "host.account.probe"
+            | "host.account.probe.capabilities"
             | "host.affinity.lookup"
             | "host.models.list"
             | "host.model.execute"
@@ -287,7 +288,16 @@ impl Models {
                 )
             })?;
             scope.validate()?;
-            let reply = if method == "host.account.probe" {
+            let reply = if method == "host.account.probe.capabilities" {
+                if !payload.is_empty() || params != serde_json::json!({}) {
+                    return Err(invalid());
+                }
+                probes
+                    .ok_or_else(|| {
+                        PluginFault::new(ErrorCode::Unsupported, "account probes are unavailable")
+                    })?
+                    .capabilities(&scope)?
+            } else if method == "host.account.probe" {
                 probes
                     .ok_or_else(|| {
                         PluginFault::new(ErrorCode::Unsupported, "account probes are unavailable")

@@ -1251,6 +1251,12 @@ impl PluginHandler for Worker {
                 Ok(CallReply::unary(json!({}), serde_json::to_vec(&StateMigrationResult { changes }).unwrap()))
             }
             "plugin.reconcile" => {
+                if self.adapter_mode == "maintenance-model-detection" {
+                    assert_eq!(call.context.timeout_ms, 120000);
+                    let capabilities = call.host.call("host.account.probe.capabilities", json!({}), vec![]).await.map_err(|e|e.into_plugin_fault())?;
+                    assert_eq!(capabilities.result["scheduled_detection"], true);
+                    call.host.call("host.account.probe",json!({"account_id":"acct_allowed","model":"gpt-native","mode":"model_detection"}),serde_json::to_vec(&json!({"model":"gpt-native","input":"diagnostic","max_output_tokens":90000})).unwrap()).await.map_err(|e|e.into_plugin_fault())?;
+                }
                 if self.adapter_mode == "maintenance-account-probe" {
                     call.host.call("host.account.probe",json!({"account_id":"acct_allowed","model":"gpt-native"}),serde_json::to_vec(&json!({"model":"gpt-native","input":"OK"})).unwrap()).await.map_err(|e|e.into_plugin_fault())?;
                 }

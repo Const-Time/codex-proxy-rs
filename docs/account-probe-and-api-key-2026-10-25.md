@@ -22,11 +22,19 @@
 
 RPC v5 上新增本 fork 的 `host.account.probe` 回调，非上游标准 SDK 能力；插件 0.6.0 须与此次宿主改动配套安装。
 
-- 参数：`account_id`、`model`；二进制部分为 OpenAI Responses JSON，最大 64 KiB。
+- 参数：`account_id`、`model`，可选 `mode: "short" | "model_detection"`（默认 short）；二进制部分为 OpenAI Responses JSON，最大 64 KiB。
 - 仅宿主绑定的根管理员 management 调用或已发布插件 maintenance 根调用可用。子调用、System、AdminApiKey 和 management 阶段的 Plugin actor 均不能冒充权限。
 - 禁止 tools、previous_response_id 和参数与正文模型不一致；使用既有原生 AccountProbe，固定账号，不借用用户 Key。
 - 返回 text、complete 和 status；错误只返回 HTTP 状态、发送事实及白名单错误码，不泄漏原始上游错误正文。
 - 共用宿主诊断并发限制；取消、超时按结果可能未知处理。
+
+### 定时完整检测（开发版）
+
+新增只读 `host.account.probe.capabilities`，参数为空对象且不接受正文，沿用诊断根调用权限；返回 `scheduled_detection: true`、`maximum_output_tokens: 4096`、`timeout_seconds: 90`。没有发起模型请求或计费。插件在保存完整定时检测前检查此能力，旧宿主明确提示升级，旧的短探测计划保持兼容。
+
+maintenance 根调用指定 `mode: "model_detection"` 时，使用与手动检测相同的 90 秒/4096 输出 token 上限；默认短探测仍为 20 秒/128 token 上限。维护 RPC 总时限提高到 120 秒，串行、激活权限、取消、撤销、正文和结果大小限制不变。OAuth 不支持 token 参数的说明仍适用。
+
+配套插件支持 Meow 和 ModelTrace 定时完整报告。每轮只推进一道题，每道失败请求最多重试两次，三次失败后暂停账号；成功题不重跑，模型不匹配作为有效结果保留。中断的 pending 算一次失败。计划和进度持久化，关闭页面仍运行；显式恢复沿用配置一致且仍保留在历史中的任务。此次没有修改数据库迁移、业务额度或账本逻辑。
 
 本次本地验收不部署生产、不调用真实付费模型。具体测试结果在任务回复和本地 `.runtime` 日志中记录。
 

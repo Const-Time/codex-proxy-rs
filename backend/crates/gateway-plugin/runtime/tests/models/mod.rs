@@ -14,6 +14,12 @@ async fn account_probe_requires_admin_and_bounds_native_diagnostics_without_key_
     use gateway_admin::model::MutationActor;
     let fixture = Fixture::new().await;
     let input = json!({"mode":"raw","method":"host.account.probe","params":{"account_id":"acct_allowed","model":"gpt-native"},"body":{"model":"gpt-native","input":"diagnostic","max_output_tokens":90000}});
+    let capabilities = json!({"mode":"raw","method":"host.account.probe.capabilities","params":{}});
+    let supported = fixture.call(capabilities.clone()).await;
+    assert_eq!(
+        supported["result"]["scheduled_detection"], true,
+        "{supported}"
+    );
     for actor in [
         MutationActor::System,
         MutationActor::AdminApiKey,
@@ -22,6 +28,8 @@ async fn account_probe_requires_admin_and_bounds_native_diagnostics_without_key_
             revision: std::num::NonZeroU64::new(1).unwrap(),
         },
     ] {
+        let denied = fixture.call_as(capabilities.clone(), actor.clone()).await;
+        assert_eq!(denied["error"]["code"], "permission_denied", "{denied}");
         let output = fixture.call_as(input.clone(), actor).await;
         assert_eq!(output["error"]["code"], "permission_denied", "{output}");
     }

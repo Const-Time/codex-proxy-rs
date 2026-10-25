@@ -22,8 +22,31 @@ pub(crate) struct AccountProbes {
 struct Request {
     account_id: String,
     model: String,
+    #[serde(default)]
+    mode: ProbeMode,
+}
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProbeMode {
+    #[default]
+    Short,
+    ModelDetection,
 }
 impl AccountProbes {
+    pub(super) fn capabilities(&self, scope: &Scope) -> Result<RpcReply, PluginFault> {
+        if !scope
+            .account_probe
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(PluginFault::new(
+                ErrorCode::PermissionDenied,
+                "account diagnostics are not authorized",
+            ));
+        }
+        super::encode(
+            json!({"scheduled_detection":true,"maximum_output_tokens":4096,"timeout_seconds":90}),
+        )
+    }
     pub(crate) fn new(native: Arc<dyn AccountProbe>) -> Arc<Self> {
         Arc::new(Self {
             native,
@@ -63,11 +86,9 @@ impl AccountProbes {
         body.insert("store".into(), json!(false));
         // Bound requested output where supported; Codex OAuth strips this unsupported field.
         // The timeout and semaphore apply independently of provider token-limit support.
-        let limit = if scope.context.stage == Stage::Maintenance {
-            128
-        } else {
-            4096
-        };
+        let short_maintenance =
+            scope.context.stage == Stage::Maintenance && matches!(query.mode, ProbeMode::Short);
+        let limit = if short_maintenance { 128 } else { 4096 };
         let maximum = body
             .get("max_output_tokens")
             .and_then(Value::as_u64)
@@ -85,11 +106,7 @@ impl AccountProbes {
         let _permit = self.capacity.try_acquire().map_err(|_| {
             PluginFault::new(ErrorCode::Capacity, "another account diagnostic is running")
         })?;
-        let timeout = Duration::from_secs(if scope.context.stage == Stage::Maintenance {
-            20
-        } else {
-            90
-        });
+        let timeout = Duration::from_secs(if short_maintenance { 20 } else { 90 });
         let result = tokio::select! { biased;
             () = scope.cancellation.cancelled() => return Err(uncertain(ErrorCode::Cancelled, "account diagnostic cancelled")),
             result = tokio::time::timeout(timeout, self.native.probe(request)) => result,

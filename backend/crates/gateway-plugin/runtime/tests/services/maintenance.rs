@@ -61,6 +61,39 @@ async fn maintenance_account_probe_is_bound_only_while_active_and_never_charges_
     fixture.manager.shutdown().await;
     model.manager.shutdown().await;
 }
+#[tokio::test]
+async fn maintenance_model_detection_uses_full_budget_and_never_charges_a_user_key() {
+    let fixture = MaintenanceFixture::new("maintenance-model-detection").await;
+    let process = fixture.process().await;
+    assert!(process.reconcile(Default::default()).await.is_err());
+    process.activate();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        process.reconcile(Default::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let model = fixture.model_probe.as_ref().unwrap();
+    assert_eq!(
+        model.core.starts.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(model.core.charges.lock().unwrap().is_empty());
+    assert_eq!(
+        model.core.bodies.lock().unwrap()[0]["max_output_tokens"],
+        4096
+    );
+    process.revoke();
+    assert!(process.reconcile(Default::default()).await.is_err());
+    assert_eq!(
+        model.core.starts.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    process.stop().await;
+    fixture.manager.shutdown().await;
+    model.manager.shutdown().await;
+}
 struct MaintenanceFixture {
     manager: Arc<PluginManager>,
     engine: Arc<PluginEngine>,
@@ -77,7 +110,10 @@ impl MaintenanceFixture {
         let store = Arc::new(MemoryStore::default());
         let probe = Arc::new(Probe::default());
         let port = factory(&probe);
-        let model_probe = if mode == "maintenance-account-probe" {
+        let model_probe = if matches!(
+            mode,
+            "maintenance-account-probe" | "maintenance-model-detection"
+        ) {
             Some(crate::models::fixture::Fixture::new().await)
         } else {
             None

@@ -757,7 +757,7 @@ impl PluginProcess for LivePlugin {
             Stage::Maintenance,
             self.session
                 .maximum_call_timeout()
-                .min(Duration::from_secs(30)),
+                .min(Duration::from_secs(120)),
         );
         context.request_id = Some(context.resource_scope_id.clone());
         let mut origin = self
