@@ -10,12 +10,96 @@ use serde_json::json;
 use std::{sync::atomic::Ordering, time::Duration};
 
 #[tokio::test]
+async fn account_probe_allows_three_distinct_accounts_and_releases_per_account_guards() {
+    use gateway_core::lifecycle::CancellationToken;
+    let fixture = Fixture::with_accounts(&[
+        "acct_allowed",
+        "acct_alternative",
+        "acct_third",
+        "acct_forbidden",
+    ])
+    .await;
+    let make_request = |account: &str, cancellation: CancellationToken, stall: bool| {
+        let mut request = crate::support::request("models");
+        request.actor.actor = gateway_admin::model::MutationActor::AdminSession {
+            admin_user_id: "alice".into(),
+        };
+        request.body=serde_json::to_vec(&json!({"operation":"models","mode":"raw","method":"host.account.probe","params":{"account_id":account,"model":"gpt-native"},"body":{"model":"gpt-native","input":"OK","mode":if stall {"stall"} else {""}}})).unwrap();
+        request.invocation = Some(gateway_admin::model::plugins::PluginInvocationContext {
+            context: gateway_core::engine::middleware::http::Context {
+                request_id: format!("probe-{account}"),
+                call_id: format!("root-{account}"),
+                parent_call_id: None,
+                call_scope: Default::default(),
+                model_parent: None,
+                cancellation,
+                deadline_at: Default::default(),
+            },
+            http: None,
+            services: None,
+        });
+        request
+    };
+    let stop = CancellationToken::new();
+    let first = fixture.manager.handle(
+        &fixture.id,
+        1,
+        make_request("acct_allowed", stop.clone(), true),
+    );
+    let second = fixture.manager.handle(
+        &fixture.id,
+        1,
+        make_request("acct_alternative", stop.clone(), true),
+    );
+    let third = fixture.manager.handle(
+        &fixture.id,
+        1,
+        make_request("acct_third", stop.clone(), true),
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_, _, _, ()) = tokio::join!(first, second, third, async {
+            while fixture.core.starts.load(Ordering::SeqCst) < 3 {
+                tokio::task::yield_now().await;
+            }
+            for id in ["acct_allowed", "acct_forbidden"] {
+                let reply = fixture
+                    .manager
+                    .handle(&fixture.id, 1, make_request(id, Default::default(), false))
+                    .await
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(value["error"]["code"], "capacity", "{value}");
+            }
+            assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 3);
+            stop.cancel();
+        });
+    })
+    .await
+    .unwrap();
+    let reply = fixture
+        .manager
+        .handle(
+            &fixture.id,
+            1,
+            make_request("acct_allowed", Default::default(), false),
+        )
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(value["result"]["status"], "ok", "{value}");
+    assert!(fixture.core.charges.lock().unwrap().is_empty());
+    fixture.manager.shutdown().await;
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn account_probe_requires_admin_and_bounds_native_diagnostics_without_key_billing() {
     use gateway_admin::model::MutationActor;
     let fixture = Fixture::new().await;
     let input = json!({"mode":"raw","method":"host.account.probe","params":{"account_id":"acct_allowed","model":"gpt-native"},"body":{"model":"gpt-native","input":"diagnostic","max_output_tokens":90000}});
     let capabilities = json!({"mode":"raw","method":"host.account.probe.capabilities","params":{}});
     let supported = fixture.call(capabilities.clone()).await;
+    assert_eq!(supported["result"]["maximum_concurrent_accounts"], 3);
     assert_eq!(
         supported["result"]["scheduled_detection"], true,
         "{supported}"
@@ -121,6 +205,21 @@ async fn account_probe_accepts_browser_root_rejects_descendants_and_releases_can
             while fixture.core.starts.load(Ordering::SeqCst) < 2 {
                 tokio::task::yield_now().await;
             }
+            let duplicate = fixture
+                .manager
+                .handle(
+                    &fixture.id,
+                    1,
+                    make_request(None, Default::default(), false),
+                )
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&duplicate.body).unwrap();
+            assert_eq!(
+                value["error"]["code"], "capacity",
+                "same account must remain exclusive with free global slots: {value}"
+            );
+            assert_eq!(fixture.core.starts.load(Ordering::SeqCst), 2);
             cancellation.cancel();
         })
     })

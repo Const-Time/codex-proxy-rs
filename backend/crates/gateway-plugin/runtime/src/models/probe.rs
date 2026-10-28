@@ -11,11 +11,28 @@ use gateway_core::{
 use gateway_plugin_sdk::{ErrorCode, PluginFault, SendState, Stage};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 pub(crate) struct AccountProbes {
     native: Arc<dyn AccountProbe>,
     capacity: tokio::sync::Semaphore,
+    accounts: Mutex<BTreeSet<String>>,
+}
+struct AccountGuard<'a> {
+    accounts: &'a Mutex<BTreeSet<String>>,
+    id: String,
+}
+impl Drop for AccountGuard<'_> {
+    fn drop(&mut self) {
+        self.accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,13 +61,14 @@ impl AccountProbes {
             ));
         }
         super::encode(
-            json!({"scheduled_detection":true,"maximum_output_tokens":4096,"timeout_seconds":90}),
+            json!({"scheduled_detection":true,"maximum_output_tokens":4096,"timeout_seconds":90,"maximum_concurrent_accounts":3}),
         )
     }
     pub(crate) fn new(native: Arc<dyn AccountProbe>) -> Arc<Self> {
         Arc::new(Self {
             native,
-            capacity: tokio::sync::Semaphore::new(1),
+            capacity: tokio::sync::Semaphore::new(3),
+            accounts: Mutex::new(BTreeSet::new()),
         })
     }
     pub(super) async fn execute(
@@ -104,8 +122,27 @@ impl AccountProbes {
             )),
         };
         let _permit = self.capacity.try_acquire().map_err(|_| {
-            PluginFault::new(ErrorCode::Capacity, "another account diagnostic is running")
+            PluginFault::new(
+                ErrorCode::Capacity,
+                "account diagnostic capacity is exhausted",
+            )
         })?;
+        let id = request.account_id.as_str().to_owned();
+        if !self
+            .accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone())
+        {
+            return Err(PluginFault::new(
+                ErrorCode::Capacity,
+                "this account diagnostic is already running",
+            ));
+        }
+        let _account = AccountGuard {
+            accounts: &self.accounts,
+            id,
+        };
         let timeout = Duration::from_secs(if short_maintenance { 20 } else { 90 });
         let result = tokio::select! { biased;
             () = scope.cancellation.cancelled() => return Err(uncertain(ErrorCode::Cancelled, "account diagnostic cancelled")),
