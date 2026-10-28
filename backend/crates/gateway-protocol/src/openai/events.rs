@@ -246,8 +246,9 @@ pub fn retry_after_seconds_from_value(value: &Value) -> Option<u64> {
         .pointer("/response/error")
         .or_else(|| value.get("error"))
         .unwrap_or(value);
-    retry_after_seconds_header(error)
-        .or_else(|| retry_after_seconds_header(value))
+    retry_after_header(error)
+        .or_else(|| retry_after_header(value))
+        .map(|(_, seconds)| seconds)
         .or_else(|| retry_after_seconds_field(error))
         .or_else(|| {
             error
@@ -272,28 +273,26 @@ fn retry_after_seconds_field(value: &Value) -> Option<u64> {
         .filter(|seconds| *seconds > 0)
 }
 
-fn retry_after_seconds_header(value: &Value) -> Option<u64> {
-    value
-        .get("headers")
-        .and_then(Value::as_object)
-        .and_then(|headers| {
-            headers.iter().find_map(|(name, value)| {
-                if name.eq_ignore_ascii_case("retry-after") {
-                    json_value_as_retry_after_seconds(value)
-                } else {
-                    None
-                }
-            })
-        })
-}
-
-fn json_value_as_retry_after_seconds(value: &Value) -> Option<u64> {
-    match value {
-        Value::Number(value) => value.as_u64(),
-        Value::String(value) => super::headers::parse_retry_after_seconds(value),
-        Value::Array(values) => values.first().and_then(json_value_as_retry_after_seconds),
-        Value::Null | Value::Bool(_) | Value::Object(_) => None,
+pub(super) fn retry_after_header(value: &Value) -> Option<(&Value, u64)> {
+    fn parsed(value: &Value) -> Option<(&Value, u64)> {
+        match value {
+            Value::Array(values) => values.first().and_then(parsed),
+            Value::Number(number) => number.as_u64().map(|seconds| (value, seconds)),
+            Value::String(text) => {
+                super::headers::parse_retry_after_seconds(text).map(|seconds| (value, seconds))
+            }
+            _ => None,
+        }
     }
+    value
+        .get("headers")?
+        .as_object()?
+        .iter()
+        .find_map(|(name, value)| {
+            name.eq_ignore_ascii_case("retry-after")
+                .then(|| parsed(value))
+                .flatten()
+        })
 }
 
 /// 标准化的单个限流窗口。

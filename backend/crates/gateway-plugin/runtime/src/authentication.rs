@@ -3,12 +3,12 @@ use crate::RpcSession;
 use gateway_admin::model::{AdminError, plugins::*};
 use gateway_plugin_sdk::{Stage, call::frontend_authentication::*};
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 pub(crate) async fn register(session: &Arc<RpcSession>) -> Result<(), AdminError> {
     let reply = session
         .call(
             "frontend_auth.identifier",
-            session.context(Stage::Registration, Duration::from_secs(5)),
+            session.context(Stage::Registration, session.budget(Stage::Registration)),
             json!({}),
             vec![],
         )
@@ -43,7 +43,7 @@ pub(crate) async fn authenticate(
         return Err(AdminError::invalid("认证信封无效"));
     }
     let input = FrontendAuthenticationRequest { authorization };
-    let mut context = session.context(Stage::Authentication, Duration::from_secs(5));
+    let mut context = session.context(Stage::Authentication, session.budget(Stage::Authentication));
     let origin = match origin {
         Some(origin) => origin,
         None => services

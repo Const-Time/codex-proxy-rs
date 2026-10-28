@@ -4,7 +4,7 @@ pub(crate) mod tasks;
 use crate::{RpcSession, resources::InvocationCalls};
 use gateway_admin::model::{AdminError, plugins::*};
 use gateway_plugin_sdk::{Stage, call::management::*};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 pub(super) async fn invoke(
     session: &RpcSession,
@@ -50,7 +50,7 @@ pub(super) async fn invoke(
     .map_err(|_| AdminError::invalid("插件登录回调请求无效"))?;
     let mut context = session.context(
         Stage::PublicManagement,
-        session.maximum_call_timeout().min(Duration::from_secs(30)),
+        session.budget(gateway_plugin_sdk::Stage::Management),
     );
     context.request_id = Some(request.actor.request_id.clone());
     context.request = request

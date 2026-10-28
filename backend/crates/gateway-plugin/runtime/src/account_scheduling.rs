@@ -10,7 +10,7 @@ use gateway_plugin_sdk::{
 };
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 struct ModelScope {
@@ -42,7 +42,7 @@ pub(crate) async fn invoke(
     }
     let timeout = input
         .deadline()
-        .bounded(Duration::from_secs(2).min(session.maximum_call_timeout()));
+        .bounded(session.budget(gateway_plugin_sdk::Stage::Scheduling));
     if timeout.is_zero() || input.cancellation().is_cancelled() {
         return Err(AccountSchedulingFault);
     }

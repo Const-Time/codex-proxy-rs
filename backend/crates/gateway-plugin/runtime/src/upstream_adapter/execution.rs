@@ -82,12 +82,34 @@ pub(super) fn execute(
         let result = state.next().await;
         match result {
             Ok(event) => Ok(Some((event, state))),
-            Err(error) => Err(state.invocation.account.record_failure(error).await),
+            Err(error) => {
+                let error = state.finish_error(error);
+                Err(state.invocation.account.record_failure(error).await)
+            }
         }
     }))
 }
 
 impl Execution {
+    fn finish_error(&mut self, mut error: ProviderError) -> ProviderError {
+        if let Some(active) = self.active.take() {
+            let managed = Arc::clone(&active.managed);
+            // RpcStream 析构同步撤销回调并封存未完成发送，证明不能早于这一步
+            drop(active);
+            if error.kind() == ProviderErrorKind::RateLimited
+                && error.upstream_status() == Some(429)
+                && error.send_state() == UpstreamSendState::Sent
+                && managed.http.send_state.get() == UpstreamSendState::Sent
+                && managed.replay.rejected_once()
+                && !self.decoder.replay_blocked
+                && !self.invocation.context.cancellation().is_cancelled()
+            {
+                error = error.with_replay_safe();
+            }
+        }
+        error
+    }
+
     async fn next(&mut self) -> Result<gateway_core::event::ProviderEvent, ProviderError> {
         if self.active.is_none() {
             self.active = Some(self.begin().await?);
@@ -192,10 +214,11 @@ impl Execution {
         {
             return Err(invalid());
         }
-        let timeout = invocation
-            .context
-            .deadline()
-            .bounded(self.adapter.session.maximum_call_timeout());
+        let timeout = invocation.context.deadline().bounded(
+            self.adapter
+                .session
+                .budget(gateway_plugin_sdk::Stage::Upstream),
+        );
         if timeout.is_zero() || self.cancellation.is_cancelled() {
             return Err(ProviderError::new(
                 ProviderErrorKind::Cancelled,

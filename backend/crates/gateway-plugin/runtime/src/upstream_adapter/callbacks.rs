@@ -195,6 +195,12 @@ impl CallbackHandler for Callbacks {
                 )
             })?;
             if !method.starts_with("host.upstream.") {
+                if method.starts_with("host.http.")
+                    || method.starts_with("host.model.")
+                    || method == "host.services.call"
+                {
+                    call.replay.invalidate();
+                }
                 let callback = if crate::credentials::is_method(&method) {
                     let service = credentials.ok_or_else(|| {
                         PluginFault::new(

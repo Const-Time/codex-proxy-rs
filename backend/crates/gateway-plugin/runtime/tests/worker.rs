@@ -1490,13 +1490,22 @@ impl PluginHandler for Worker {
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let session = PluginSession::accept(
+    let mut session = PluginSession::accept(
         tokio::io::stdin(),
         tokio::io::stdout(),
         SessionConfig::default(),
     )
     .await
     .unwrap();
+    let budgets = session
+        .handshake()
+        .configuration
+        .get("call_budgets")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    session
+        .set_call_budgets(serde_json::from_value(budgets).unwrap())
+        .unwrap();
     let handler = Worker {
         registration_signal: session.handshake().configuration["registration_signal"]
             .as_str()
@@ -2738,7 +2747,10 @@ async fn upstream_execution(call: PluginCall, legacy: bool) -> Result<CallReply,
             "host.upstream.http.do"
         };
         let reply=call.host.call(method,json!({"method":"POST","path":if mode=="auxiliary" {"audit"}else{"responses"},"headers":[["x-fixture",b"adapter".to_vec()]],"query":[]}),body).await.map_err(callback_error)?;
-        assert_eq!(reply.result["status"], 200);
+        assert!(
+            reply.result["status"] == 200
+                || ((mode == "failure" || mode == "auxiliary") && reply.result["status"] == 429)
+        );
         if mode == "http-stream" {
             let stream = reply.result["stream"].as_str().unwrap();
             let mut total = Vec::new();

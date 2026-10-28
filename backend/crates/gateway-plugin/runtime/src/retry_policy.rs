@@ -21,7 +21,7 @@ pub(crate) async fn invoke(
     }
     let timeout = input
         .deadline()
-        .bounded(timeout.min(session.maximum_call_timeout()));
+        .bounded(timeout.min(session.budget(gateway_plugin_sdk::Stage::Retry)));
     if timeout.is_zero() || input.cancellation().is_cancelled() {
         return Err(RetryPolicyFault);
     }

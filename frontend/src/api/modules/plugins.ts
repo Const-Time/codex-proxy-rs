@@ -37,6 +37,7 @@ export interface PluginObserverBinding {
   websocketResponse: PluginMiddlewareBinding['scope'] | null
 }
 export interface PluginInstance {
+  runtimeLoad?: { activeCalls: number, executingCalls: number, queuedCalls: number, resumingCalls: number, pendingCallbacks: number, activeStreams: number } | null
   observer: PluginObserverBinding | null
   upstreamAdapter: PluginUpstreamAdapterBinding | null
   retryPolicy: PluginRetryPolicyBinding | null

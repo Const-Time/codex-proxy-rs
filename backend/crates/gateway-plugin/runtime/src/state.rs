@@ -6,7 +6,7 @@ use gateway_admin::{
 };
 use gateway_plugin_sdk::{Manifest, Stage, call::host::*};
 use serde_json::json;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 fn invalid() -> AdminError {
     AdminError::invalid("插件状态迁移结果或目标声明无效")
@@ -182,7 +182,7 @@ pub(crate) async fn invoke(
     let reply = session
         .call(
             "plugin.state.migrate",
-            session.context(Stage::Configuration, Duration::from_secs(30)),
+            session.context(Stage::Configuration, session.budget(Stage::Configuration)),
             json!({}),
             serde_json::to_vec(&request).map_err(|_| invalid())?,
         )

@@ -8,7 +8,7 @@ use gateway_plugin_sdk::{
     Capability, Stage,
     call::policy::{ModelRouteDecision as WireDecision, ModelRouteRequest, PolicyHeader},
 };
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 struct ModelScope {
     models: Option<Arc<Models>>,
@@ -44,7 +44,7 @@ pub(crate) async fn invoke(
     let headers = headers(payload.context())?;
     let timeout = input
         .deadline()
-        .bounded(Duration::from_secs(2).min(session.maximum_call_timeout()));
+        .bounded(session.budget(gateway_plugin_sdk::Stage::Routing));
     if timeout.is_zero() || input.cancellation().is_cancelled() {
         return Err(ModelRoutingFault);
     }

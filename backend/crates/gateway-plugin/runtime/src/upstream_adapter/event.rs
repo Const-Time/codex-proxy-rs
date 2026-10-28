@@ -31,6 +31,7 @@ pub(super) struct EventDecoder {
     body_chunks: usize,
     other_wire: bool,
     pub(super) completed: bool,
+    pub(super) replay_blocked: bool,
 }
 
 pub(super) struct DecodedEvent {
@@ -77,6 +78,9 @@ impl EventDecoder {
                 source.to_string(),
             ))
         })?;
+        self.replay_blocked |= !message.event.facts.is_empty()
+            || message.event.wire.is_some()
+            || message.continuation.is_some();
         if self.completed || message.event.facts.len() > 64 || message.event.host.is_some() {
             return Err(invalid(sent).into());
         }

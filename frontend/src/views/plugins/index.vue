@@ -493,6 +493,9 @@ onMounted(() => perform(async () => { }))
           </BaseButton>
         </div>
       </div>
+      <p v-if="item.runtimeLoad" class="text-xs text-cp-text-secondary" title="实时采样，各项可能重叠；刷新列表更新">
+        在途 {{ item.runtimeLoad.activeCalls }} · 执行 {{ item.runtimeLoad.executingCalls }} · 排队 {{ item.runtimeLoad.queuedCalls }} · 等待恢复 {{ item.runtimeLoad.resumingCalls }} · 回调 {{ item.runtimeLoad.pendingCallbacks }} · 流 {{ item.runtimeLoad.activeStreams }}
+      </p>
       <div v-if="item.status === 'ready'" class="flex gap-2">
         <BaseButton v-for="page in item.pages" :key="page.id" variant="secondary" @click="selected = { plugin: item, page }; editOpen = false">
           {{ page.title }}

@@ -6,6 +6,7 @@ mod execution;
 mod failure;
 mod network;
 mod observation;
+mod replay;
 mod save;
 mod sessions;
 mod target;
@@ -25,7 +26,8 @@ impl RegisteredAdapter {
         declaration: UpstreamAdapterDeclaration,
         contribution: &ContributionDeclaration,
     ) -> Result<Self, AdminError> {
-        if declaration.id.is_empty()
+        if !declaration.account_ids.is_empty()
+            || declaration.id.is_empty()
             || declaration.id.len() > 64
             || !declaration
                 .id
@@ -95,7 +97,7 @@ pub(crate) async fn register(
     let reply = session
         .call(
             REGISTER_METHOD,
-            session.context(Stage::Registration, Duration::from_secs(5)),
+            session.context(Stage::Registration, session.budget(Stage::Registration)),
             serde_json::json!({}),
             vec![],
         )

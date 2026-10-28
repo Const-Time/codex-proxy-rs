@@ -42,7 +42,7 @@ pub(super) async fn invoke(
     if !session.capability_supports_stage(Capability::Middleware, stage) {
         return Err(MiddlewareError::InvalidState);
     }
-    let remaining = context.deadline_at.bounded(session.maximum_call_timeout());
+    let remaining = context.deadline_at.bounded(session.budget(stage));
     if remaining.is_zero() || context.cancellation.is_cancelled() {
         return Err(MiddlewareError::Fault);
     }

@@ -189,9 +189,10 @@ impl Executor {
             headers,
         })
         .map_err(|_| AdminError::invalid("插件请求无效"))?;
-        let mut context = self
-            .session
-            .context(Stage::Management, self.session.maximum_call_timeout());
+        let mut context = self.session.context(
+            Stage::Management,
+            self.session.budget(gateway_plugin_sdk::Stage::Management),
+        );
         context.request_id = Some(request.actor.request_id.clone());
         context.request = request
             .invocation

@@ -42,6 +42,15 @@ pub const MODEL_CATALOG_REGISTER: Method<Empty, catalog::ModelCatalogRegistratio
     encode_payload,
 );
 
+pub const MODEL_CATALOG_REGISTER_V2: Method<Empty, catalog::ModelCatalogRegistrationV2> =
+    Method::new(
+        "model_catalog.register",
+        &[C::ModelCatalog],
+        &[S::Registration],
+        decode_metadata_without_payload,
+        encode_payload,
+    );
+
 pub const RETRY_DECISION: Method<policy::RetryDecisionRequest, policy::RetryDecision> = Method::new(
     "policy.retry_decision",
     &[C::RetryPolicy],

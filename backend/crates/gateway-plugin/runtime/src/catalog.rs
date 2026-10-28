@@ -3,7 +3,7 @@ use crate::RpcSession;
 use gateway_admin::model::AdminError;
 use gateway_core::routing::{ContributedModelAlias, ProviderKind, PublicModelId, UpstreamModelId};
 use gateway_plugin_sdk::{Capability, Stage, call::catalog::ModelCatalogRegistration};
-use std::{collections::BTreeSet, time::Duration};
+use std::collections::BTreeSet;
 pub(crate) async fn register(
     session: &RpcSession,
     owner: &str,
@@ -16,7 +16,7 @@ pub(crate) async fn register(
     let reply = session
         .call(
             "model_catalog.register",
-            session.context(Stage::Registration, Duration::from_secs(5)),
+            session.context(Stage::Registration, session.budget(Stage::Registration)),
             serde_json::json!({}),
             vec![],
         )

@@ -270,7 +270,7 @@ impl PluginManager {
         let artifact = self
             .runtime
             .describe(self.store.artifact_info(&record.artifact_sha256).await?)?;
-        let (status, pages, resources) = {
+        let (status, pages, resources, runtime_load) = {
             let active = self
                 .active
                 .read()
@@ -283,11 +283,13 @@ impl PluginManager {
                         if record.enabled { "failed" } else { "disabled" },
                         vec![],
                         vec![],
+                        None,
                     ),
-                    |(_, p)| (p.status(), p.pages(), p.resources()),
+                    |(_, p)| (p.status(), p.pages(), p.resources(), p.runtime_load()),
                 )
         };
         Ok(PluginView {
+            runtime_load,
             observer: record.observer,
             upstream_adapter: record.upstream_adapter,
             retry_policy: record.retry_policy,

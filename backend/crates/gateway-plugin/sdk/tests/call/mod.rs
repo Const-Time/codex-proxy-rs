@@ -9,3 +9,4 @@ mod middleware;
 mod observation;
 mod policy;
 mod services;
+mod upstream_adapter;

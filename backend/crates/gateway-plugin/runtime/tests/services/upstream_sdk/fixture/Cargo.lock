@@ -17,7 +17,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "gateway-plugin-sdk"
 version = "0.1.0"
-source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=b8479b59dbafbe84ffbbd2d0ff3ccea6cfa59164#b8479b59dbafbe84ffbbd2d0ff3ccea6cfa59164"
+source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=dd529d07ec8e13b3d2b504f45e51b494d3215e2a#dd529d07ec8e13b3d2b504f45e51b494d3215e2a"
 dependencies = [
  "base64",
  "semver",

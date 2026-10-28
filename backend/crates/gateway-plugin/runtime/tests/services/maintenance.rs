@@ -500,3 +500,33 @@ async fn maintenance_runs_periodically_and_host_shutdown_cancels_pending_rpc() {
     assert!(f.probe.dropped.load(Ordering::SeqCst));
     f.manager.shutdown().await;
 }
+
+#[tokio::test]
+async fn unrelated_instance_publication_does_not_cancel_running_maintenance() {
+    let f = MaintenanceFixture::new("maintenance-wait").await;
+    f.probe.wait.store(true, Ordering::SeqCst);
+    let snapshots = RuntimeSnapshotHandle::new(snapshot(1));
+    let (stop, worker) = f.worker(&snapshots);
+    tokio::time::timeout(Duration::from_secs(5), f.probe.entered.notified())
+        .await
+        .unwrap();
+    let old = f.probe.facts.lock().unwrap()[0]
+        .context
+        .cancellation
+        .clone();
+    let mut command = update(&f.digest, 0, true);
+    command.configuration = json!({"adapter_mode":"maintenance-service"});
+    f.manager.update(None, command, &actor()).await.unwrap();
+    snapshots.publish(snapshot(2));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!old.is_cancelled());
+    assert!(!f.probe.dropped.load(Ordering::SeqCst));
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(3), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(old.is_cancelled());
+    f.manager.shutdown().await;
+}

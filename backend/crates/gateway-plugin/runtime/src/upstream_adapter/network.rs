@@ -28,6 +28,7 @@ impl Drop for PendingRead {
 pub(super) struct ManagedCall {
     pub(super) account: Arc<dyn UpstreamAccountConnection>,
     pub(super) http: Arc<HttpScope>,
+    pub(super) replay: super::replay::HttpReplay,
     pub(super) cancellation: CancellationToken,
     pub(super) closed: CancellationToken,
     pub(super) credential_gate: AsyncRwLock<()>,
@@ -61,6 +62,7 @@ impl ManagedCall {
             .map(|(url, socket)| (url, Arc::new(socket)));
         Ok(Arc::new(Self {
             account: account.clone(),
+            replay: Default::default(),
             http: HttpScope::new(
                 options.cancellation.clone(),
                 options.timeout,
@@ -210,14 +212,31 @@ impl ManagedCall {
                     serde_json::from_value(params).map_err(|_| invalid())?,
                     payload,
                 )?;
-                self.http
+                self.replay
+                    .start(purpose == adapter::UpstreamPathPurpose::Inference);
+                let response = self
+                    .http
                     .send(client, request, method.ends_with("do_stream"), purpose)
-                    .await
+                    .await;
+                self.replay.finish(
+                    response
+                        .as_ref()
+                        .ok()
+                        .and_then(|reply| {
+                            reply
+                                .result
+                                .get("status")
+                                .and_then(serde_json::Value::as_u64)
+                        })
+                        .and_then(|status| u16::try_from(status).ok()),
+                );
+                response
             }
             "host.upstream.http.stream_read" | "host.upstream.http.stream_close" => {
                 self.http.dispatch(client, method, params, payload).await
             }
             "host.upstream.websocket.open" => {
+                self.replay.invalidate();
                 if !payload.is_empty() || !self.websocket_allowed {
                     return Err(denied());
                 }

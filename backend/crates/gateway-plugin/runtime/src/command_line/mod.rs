@@ -8,7 +8,7 @@ use gateway_admin::model::{AdminError, plugins::*};
 use gateway_core::{engine::middleware::service as core, lifecycle::CancellationToken};
 use gateway_plugin_sdk::{Capability, Stage, call::management::*};
 use serde_json::json;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc};
 
 pub(crate) async fn register(session: &RpcSession) -> Result<Vec<CommandDescriptor>, AdminError> {
     match session.capability_version(Capability::CommandLine) {
@@ -20,7 +20,7 @@ pub(crate) async fn register(session: &RpcSession) -> Result<Vec<CommandDescript
     let reply = session
         .call(
             "command_line.register",
-            session.context(Stage::Registration, Duration::from_secs(5)),
+            session.context(Stage::Registration, session.budget(Stage::Registration)),
             json!({}),
             vec![],
         )
@@ -117,10 +117,12 @@ impl Executor<'_> {
             &request.actor.actor,
             gateway_admin::model::MutationActor::System
         );
-        let deadline = tokio::time::Instant::now() + self.session.maximum_call_timeout();
-        let mut context = self
-            .session
-            .context(Stage::CommandLine, self.session.maximum_call_timeout());
+        let deadline = tokio::time::Instant::now()
+            + self.session.budget(gateway_plugin_sdk::Stage::CommandLine);
+        let mut context = self.session.context(
+            Stage::CommandLine,
+            self.session.budget(gateway_plugin_sdk::Stage::CommandLine),
+        );
         context.request_id = Some(request.actor.request_id.clone());
         let caller = self.services.caller();
         let cancellation = CancellationToken::linked([request.cancellation, caller.cancellation()]);

@@ -58,6 +58,10 @@ pub trait PluginStore: Send + Sync {
 }
 #[async_trait]
 pub trait PluginProcess: Send + Sync {
+    fn runtime_load(&self) -> Option<PluginRuntimeLoad> {
+        None
+    }
+    async fn settle_maintenance(&self) {}
     async fn migrate_state(
         &self,
         _batch: PluginStateMigrationBatch,

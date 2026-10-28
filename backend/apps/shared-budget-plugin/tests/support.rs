@@ -84,6 +84,13 @@ impl Host {
             .unwrap()
             .unwrap();
             match frame.message {
+                Message::Suspend { .. } | Message::CallbackConsumed { .. } => {}
+                Message::Resume { id, epoch } => write_frame(
+                    &mut self.input,
+                    &Frame::control(Message::Resumed { id, epoch }),
+                )
+                .await
+                .unwrap(),
                 Message::Result { id, result } => {
                     assert_eq!(id, self.id);
                     return (

@@ -75,6 +75,7 @@ pub struct PluginPage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
+    pub runtime_load: Option<PluginRuntimeLoad>,
     pub observer: Option<PluginObserverBinding>,
     pub upstream_adapter: Option<PluginUpstreamAdapterBinding>,
     pub retry_policy: Option<PluginRetryPolicyBinding>,
@@ -92,6 +93,17 @@ pub struct PluginView {
     pub configured_secrets: Vec<String>,
     pub pages: Vec<PluginPage>,
     pub resources: Vec<PluginResource>,
+}
+/// Counts overlap; absent means no live runtime was available to sample.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntimeLoad {
+    pub active_calls: usize,
+    pub executing_calls: usize,
+    pub queued_calls: usize,
+    pub resuming_calls: usize,
+    pub pending_callbacks: usize,
+    pub active_streams: usize,
 }
 pub struct PluginHttpRequest {
     /// Host-only parent graph and ports; absent for callers without service authority.

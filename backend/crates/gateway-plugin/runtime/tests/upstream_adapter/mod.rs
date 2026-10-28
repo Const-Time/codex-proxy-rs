@@ -22,6 +22,7 @@ fn contribution() -> ContributionDeclaration {
 }
 fn declaration() -> UpstreamAdapterDeclaration {
     UpstreamAdapterDeclaration {
+        account_ids: vec![],
         id: "adapter".into(),
         provider: BuiltinProvider::OpenAi,
         base_url: "https://example.test/base/".into(),

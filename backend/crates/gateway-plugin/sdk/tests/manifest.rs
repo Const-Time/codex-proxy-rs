@@ -132,7 +132,7 @@ fn installation_checks_protocol_engine_and_target() {
 fn capability_contract_versions_are_checked_independently_of_rpc_version() {
     let mut manifest = packaged_manifest();
     assert!(manifest.validate().is_ok());
-    for version in [0, 1, 2, 6, u32::MAX] {
+    for version in [0, 1, 2, 7, u32::MAX] {
         manifest
             .contributes
             .get_mut(&Capability::Middleware)
@@ -140,7 +140,7 @@ fn capability_contract_versions_are_checked_independently_of_rpc_version() {
             .version = version;
         assert_eq!(manifest.validate(), Err(ManifestError::Invalid));
     }
-    for version in [3, 4, 5] {
+    for version in [3, 4, 5, 6] {
         manifest
             .contributes
             .get_mut(&Capability::Middleware)

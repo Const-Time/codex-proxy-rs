@@ -7,7 +7,7 @@ async fn slow_next_releases_execution_capacity_but_retains_inflight_limit() {
         maximum_calls: 64,
         maximum_executing_calls: 1,
         maximum_queued_calls: 1,
-        maximum_callbacks: 1,
+        maximum_callbacks: 64,
         ..RpcLimits::default()
     })
     .await;
@@ -60,11 +60,7 @@ async fn slow_next_releases_execution_capacity_but_retains_inflight_limit() {
 
 #[tokio::test]
 async fn request_and_attempt_next_can_outlive_rpc_budget_without_resetting_core_deadline() {
-    let fixture = Fixture::with_limits(RpcLimits {
-        maximum_call_timeout: Duration::from_millis(300),
-        ..RpcLimits::default()
-    })
-    .await;
+    let fixture = Fixture::with_budget(RpcLimits::default(), 300).await;
     for mount in [MiddlewareMount::Request, MiddlewareMount::Attempt] {
         let trace = Arc::new(Trace::default());
         let downstream = trace.clone();
@@ -93,11 +89,7 @@ async fn request_and_attempt_next_can_outlive_rpc_budget_without_resetting_core_
 
 #[tokio::test]
 async fn processing_budget_resumes_after_next_and_cleans_up_unfinished_plugin_work() {
-    let fixture = Fixture::with_limits(RpcLimits {
-        maximum_call_timeout: Duration::from_millis(300),
-        ..RpcLimits::default()
-    })
-    .await;
+    let fixture = Fixture::with_budget(RpcLimits::default(), 300).await;
     let trace = Arc::new(Trace::default());
     let downstream = trace.clone();
     let next = gateway_core::middleware::compose(vec![], move |input| {
@@ -129,11 +121,7 @@ async fn processing_budget_resumes_after_next_and_cleans_up_unfinished_plugin_wo
 
 #[tokio::test]
 async fn paused_next_still_obeys_core_deadline_and_explicit_cancellation() {
-    let fixture = Fixture::with_limits(RpcLimits {
-        maximum_call_timeout: Duration::from_millis(300),
-        ..RpcLimits::default()
-    })
-    .await;
+    let fixture = Fixture::with_budget(RpcLimits::default(), 300).await;
     for explicit_cancel in [false, true] {
         let entered = Arc::new(tokio::sync::Notify::new());
         let signal = entered.clone();

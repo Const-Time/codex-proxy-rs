@@ -82,7 +82,9 @@ pub(super) async fn invoke(
     {
         return Err(core::Error::unavailable("服务中间件未声明"));
     }
-    let remaining = context.deadline_at.bounded(session.maximum_call_timeout());
+    let remaining = context
+        .deadline_at
+        .bounded(session.budget(gateway_plugin_sdk::Stage::Service));
     if context.cancellation.is_cancelled() || remaining.is_zero() {
         return Err(core::Error::unavailable("服务调用已结束"));
     }

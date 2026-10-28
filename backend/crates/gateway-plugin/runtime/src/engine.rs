@@ -322,7 +322,7 @@ impl PluginRuntime for PluginEngine {
                 .is_some_and(|p| p.protocol_version != gateway_plugin_sdk::PROTOCOL_VERSION)
         {
             return Err(AdminError::invalid(
-                "插件 RPC 协议不兼容，请先上传并切换到 v4 插件包；无需删除原实例",
+                "插件 RPC 协议不兼容，请先上传并切换到 RPC v7 插件包；无需删除原实例",
             ));
         }
         if let Some(binding) = &record.observer {
@@ -531,7 +531,7 @@ impl PluginRuntime for PluginEngine {
         let reply = session
             .call(
                 "plugin.register",
-                session.context(Stage::Registration, Duration::from_secs(5)),
+                session.context(Stage::Registration, session.budget(Stage::Registration)),
                 json!({}),
                 vec![],
             )
@@ -577,7 +577,7 @@ impl PluginRuntime for PluginEngine {
             let reply = session
                 .call(
                     "management.register",
-                    session.context(Stage::Registration, Duration::from_secs(5)),
+                    session.context(Stage::Registration, session.budget(Stage::Registration)),
                     json!({}),
                     vec![],
                 )
@@ -737,6 +737,20 @@ impl PluginProcess for LivePlugin {
         )
         .await
     }
+    fn runtime_load(&self) -> Option<gateway_admin::model::plugins::PluginRuntimeLoad> {
+        let load = self.session.load();
+        Some(gateway_admin::model::plugins::PluginRuntimeLoad {
+            active_calls: load.active_calls,
+            executing_calls: load.executing_calls,
+            queued_calls: load.queued_calls,
+            resuming_calls: load.resuming_calls,
+            pending_callbacks: load.pending_callbacks,
+            active_streams: load.active_streams,
+        })
+    }
+    async fn settle_maintenance(&self) {
+        self.session.settle_cancellations().await;
+    }
     fn supports_maintenance(&self) -> bool {
         self.session.capability_version(Capability::Maintenance) == Some(1)
     }
@@ -755,9 +769,7 @@ impl PluginProcess for LivePlugin {
         let cancellation = CancellationToken::linked([cancellation, self.access.cancellation()]);
         let mut context = self.session.context(
             Stage::Maintenance,
-            self.session
-                .maximum_call_timeout()
-                .min(Duration::from_secs(120)),
+            self.session.budget(gateway_plugin_sdk::Stage::Maintenance),
         );
         context.request_id = Some(context.resource_scope_id.clone());
         let mut origin = self

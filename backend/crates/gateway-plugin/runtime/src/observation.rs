@@ -424,7 +424,7 @@ pub(crate) async fn invoke(
     }
     let mut context = session.context(
         Stage::Observation,
-        session.maximum_call_timeout().min(TIMEOUT),
+        session.budget(gateway_plugin_sdk::Stage::Observation),
     );
     context.request_id = Some(observation.request_id.clone());
     context.request = crate::request_context::wire(&observation.call_scope);
@@ -500,7 +500,6 @@ fn wire_observation(observation: &RequestObservation) -> RequestCompleted {
         upstream_model: observation
             .upstream_model()
             .map(|model| model.as_str().to_owned()),
-        response_model: observation.response_model().map(str::to_owned),
         service_tier: observation.service_tier().map(str::to_owned),
         requested_model: observation
             .requested_model()

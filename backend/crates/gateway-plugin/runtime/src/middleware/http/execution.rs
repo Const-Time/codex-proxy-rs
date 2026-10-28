@@ -20,7 +20,9 @@ pub(crate) async fn invoke(
     {
         return Err(MiddlewareError::InvalidState);
     }
-    let remaining = context.deadline_at.bounded(session.maximum_call_timeout());
+    let remaining = context
+        .deadline_at
+        .bounded(session.budget(gateway_plugin_sdk::Stage::Http));
     if context.cancellation.is_cancelled() || remaining.is_zero() {
         return Err(MiddlewareError::Fault);
     }

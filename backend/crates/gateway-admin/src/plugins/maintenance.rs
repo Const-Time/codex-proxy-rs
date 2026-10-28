@@ -1,5 +1,5 @@
 //! Published instances reconcile under Host supervision and native Core availability.
-use super::{ActivePlugins, PluginManager};
+use super::PluginManager;
 use futures::{FutureExt as _, StreamExt, future::BoxFuture};
 use gateway_core::{
     lifecycle::CancellationToken,
@@ -10,7 +10,7 @@ use gateway_core::{
     },
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
-use tokio::{sync::Notify, task::JoinSet};
+use tokio::{sync::Notify, task::JoinHandle};
 
 const INTERVAL: Duration = Duration::from_secs(30);
 const RETRY: Duration = Duration::from_secs(5);
@@ -59,14 +59,11 @@ impl DaemonTask for Maintenance {
             let mut publications = self.publications.subscribe();
             let mut publication = publications.next().await.expect("initial Core publication");
             context.succeeded();
-            let mut active = ActivePlugins::new();
-            let mut jobs = JoinSet::new();
-            let mut notifications = Vec::<Arc<Notify>>::new();
-            let mut batch = CancellationToken::new();
+            let mut active = BTreeMap::<String, MaintenanceJob>::new();
             let mut dirty = true;
             loop {
                 if cancellation.is_cancelled() || self.manager.stopping.is_cancelled() {
-                    drain(&batch, &mut jobs).await;
+                    drain(&mut active).await;
                     return Ok(());
                 }
                 dirty |= self
@@ -75,7 +72,7 @@ impl DaemonTask for Maintenance {
                     .notified()
                     .now_or_never()
                     .is_some();
-                let current = if publication.revision().is_some()
+                let current: BTreeMap<_, _> = if publication.revision().is_some()
                     && !publication.cancellation().is_cancelled()
                 {
                     self.manager
@@ -93,33 +90,52 @@ impl DaemonTask for Maintenance {
                 } else {
                     BTreeMap::new()
                 };
-                if batch.is_cancelled() || !same_instances(&active, &current) {
-                    drain(&batch, &mut jobs).await;
-                    active = current;
-                    notifications.clear();
-                    batch = CancellationToken::linked([
+                let retired: Vec<_> = active
+                    .iter()
+                    .filter(|(id, job)| {
+                        current.get(*id).is_none_or(|(revision, process)| {
+                            *revision != job.revision || !Arc::ptr_eq(process, &job.process)
+                        }) || job.stop.is_cancelled()
+                            || job.task.is_finished()
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in retired {
+                    if let Some(job) = active.remove(&id) {
+                        job.stop().await;
+                    }
+                }
+                for (id, (revision, process)) in current {
+                    if let Some(job) = active.get(&id) {
+                        if dirty {
+                            job.notify.notify_one();
+                        }
+                        continue;
+                    }
+                    let stop = CancellationToken::linked([
                         cancellation.clone(),
                         self.manager.stopping.clone(),
                         publication.cancellation(),
+                        process.access().cancellation(),
                     ]);
-                    for (id, (_, process)) in &active {
-                        let notify = Arc::new(Notify::new());
-                        notify.notify_one();
-                        notifications.push(notify.clone());
-                        let process = process.clone();
-                        let id = id.clone();
-                        let stop = CancellationToken::linked([
-                            batch.clone(),
-                            process.access().cancellation(),
-                        ]);
-                        jobs.spawn(async move {
-                            reconcile(id, process, stop, notify).await;
-                        });
-                    }
-                } else if dirty {
-                    for notify in &notifications {
-                        notify.notify_one();
-                    }
+                    let notify = Arc::new(Notify::new());
+                    notify.notify_one();
+                    let task = tokio::spawn(reconcile(
+                        id.clone(),
+                        process.clone(),
+                        stop.clone(),
+                        notify.clone(),
+                    ));
+                    active.insert(
+                        id,
+                        MaintenanceJob {
+                            revision,
+                            process,
+                            stop,
+                            notify,
+                            task,
+                        },
+                    );
                 }
                 dirty = false;
                 tokio::select! { biased;
@@ -127,38 +143,43 @@ impl DaemonTask for Maintenance {
                     () = self.manager.stopping.cancelled() => {},
                     next = publications.next() => {
                         let Some(next) = next else {
-                            drain(&batch, &mut jobs).await;
+                            drain(&mut active).await;
                             return Err(WorkerTaskError::safe("Core publication stream ended"));
                         };
                         dirty = next.revision() != publication.revision();
                         publication = next;
                     },
                     () = self.manager.maintenance_changed.notified() => { dirty = true; },
-                    () = batch.cancelled(), if !active.is_empty() => {},
-                    ended = jobs.join_next(), if !jobs.is_empty() => {
-                        if ended.is_some_and(|result| result.is_err()) {
-                            drain(&batch, &mut jobs).await;
-                            return Err(WorkerTaskError::safe("plugin maintenance task failed"));
-                        }
-                        dirty = true;
-                    },
+                    () = tokio::time::sleep(INTERVAL) => {},
                 }
             }
         })
     }
 }
 
-fn same_instances(a: &ActivePlugins, b: &ActivePlugins) -> bool {
-    a.len() == b.len()
-        && a.iter().all(|(id, (revision, process))| {
-            b.get(id)
-                .is_some_and(|(other, p)| revision == other && Arc::ptr_eq(process, p))
-        })
+struct MaintenanceJob {
+    revision: u64,
+    process: Arc<dyn crate::ports::plugins::PluginProcess>,
+    stop: CancellationToken,
+    notify: Arc<Notify>,
+    task: JoinHandle<()>,
 }
-async fn drain(stop: &CancellationToken, jobs: &mut JoinSet<()>) {
-    stop.cancel();
-    while jobs.join_next().await.is_some() {}
+impl MaintenanceJob {
+    async fn stop(self) {
+        self.stop.cancel();
+        let _ = self.task.await;
+        self.process.settle_maintenance().await;
+    }
 }
+async fn drain(jobs: &mut BTreeMap<String, MaintenanceJob>) {
+    for job in jobs.values() {
+        job.stop.cancel();
+    }
+    for (_, job) in std::mem::take(jobs) {
+        job.stop().await;
+    }
+}
+
 async fn reconcile(
     id: String,
     process: Arc<dyn crate::ports::plugins::PluginProcess>,

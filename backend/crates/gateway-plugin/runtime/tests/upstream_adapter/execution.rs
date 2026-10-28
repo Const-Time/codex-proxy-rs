@@ -213,6 +213,9 @@ impl Drop for Server {
 }
 impl Server {
     pub(super) async fn new() -> Self {
+        Self::with_status(200).await
+    }
+    async fn with_status(status: u16) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(vec![]));
@@ -253,7 +256,7 @@ impl Server {
                 if credential_barrier {
                     resume.notified().await;
                 }
-                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfixture-response").await.unwrap();
+                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfixture-response").as_bytes()).await.unwrap();
             }
         });
         Self {
@@ -666,5 +669,23 @@ async fn upstream_generic_http_inherits_selected_proxy_without_account_authentic
             "must not connect directly"
         );
         f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn retry_requires_a_single_host_observed_429_not_plugin_claims_or_auxiliary_calls() {
+    for (status, mode, expected) in [
+        (200, "failure", false),
+        (429, "failure", true),
+        (429, "auxiliary", false),
+    ] {
+        let server = Server::with_status(status).await;
+        let fixture = Fixture::new(&server.url, "http_sse").await;
+        let mut stream = fixture.stream(mode, Account::new(), None, CancellationToken::new());
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+        assert_eq!(error.replay_is_safe(), expected, "{status} {mode}");
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        fixture.stop().await;
     }
 }

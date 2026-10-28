@@ -57,6 +57,9 @@ impl Fixture {
         Self::with_limits(RpcLimits::default()).await
     }
     async fn with_limits(limits: RpcLimits) -> Self {
+        Self::with_budget(limits, 120000).await
+    }
+    async fn with_budget(limits: RpcLimits, budget_ms: u64) -> Self {
         let cache = tempfile::tempdir().unwrap();
         let package = Arc::new(
             ValidatedPackage::read(
@@ -75,7 +78,7 @@ impl Fixture {
             instance_id: "middleware-fixture".into(),
             generation: 1,
             incarnation: "incarnation-one".into(),
-            configuration: json!({}),
+            configuration: json!({"call_budgets":{"request":budget_ms,"attempt":budget_ms}}),
             contributes: package.manifest().contributes.clone(),
         };
         let session = Arc::new(
