@@ -225,6 +225,19 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
 }
 #[async_trait]
 impl PluginRuntime for PluginEngine {
+    async fn online_release(
+        &self,
+        artifact: &PluginArtifactInfo,
+    ) -> Result<Option<PluginOnlineRelease>, AdminError> {
+        crate::updates::check(artifact).await
+    }
+    async fn download_release(
+        &self,
+        artifact: &PluginArtifactInfo,
+        release: &PluginOnlineRelease,
+    ) -> Result<Arc<[u8]>, AdminError> {
+        crate::updates::download(artifact, release).await
+    }
     async fn prepare_state(
         &self,
         record: &PluginRecord,

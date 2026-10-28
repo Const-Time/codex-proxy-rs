@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginObserverBinding, PluginRetryPolicyBinding, PluginUpstreamAdapterBinding } from '@/api/modules/plugins'
+import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginObserverBinding, PluginOnlineRelease, PluginRetryPolicyBinding, PluginUpstreamAdapterBinding } from '@/api/modules/plugins'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
-import { getPluginArtifacts, getPlugins, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
+import { checkPluginUpdate, getPluginArtifacts, getPlugins, installPluginUpdate, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
@@ -17,6 +17,36 @@ const instances = ref<PluginInstance[]>([])
 const artifacts = ref<PluginArtifact[]>([])
 const busy = ref(false)
 const failure = ref('')
+const notices = ref<Record<string, string>>({})
+const onlineUpdates = ref<Record<string, { revision: number, release: PluginOnlineRelease }>>({})
+const confirmUpdate = ref(false)
+const updating = ref<PluginInstance>()
+const updateDescription = computed(() => {
+  const item = updating.value
+  const release = item && onlineUpdates.value[item.id]?.release
+  return item && release ? `从已配置的发布源下载并更新至 ${release.version}，保留当前实例的配置、密钥、定时计划和检测历史。更新会中断正在运行的插件调用，请先暂停检测。` : ''
+})
+async function checkOnline(item: PluginInstance) {
+  await perform(async () => {
+    delete onlineUpdates.value[item.id]
+    const release = await checkPluginUpdate(item)
+    notices.value[item.id] = release ? `发现新版本 ${release.version}` : '当前平台没有可用的新版本'
+    if (release)
+      onlineUpdates.value[item.id] = { revision: item.revision, release }
+  })
+}
+async function applyOnline() {
+  await perform(async () => {
+    const item = updating.value
+    const pending = item && onlineUpdates.value[item.id]
+    if (!item || !pending || pending.revision !== item.revision)
+      throw new Error('请重新检查更新')
+    await installPluginUpdate(item, pending.release)
+    delete onlineUpdates.value[item.id]
+    notices.value[item.id] = '更新成功，已保留原实例配置和历史'
+    confirmUpdate.value = false
+  })
+}
 const editing = ref<PluginInstance>()
 const editOpen = ref(false)
 const name = ref('')
@@ -260,9 +290,20 @@ async function upload(event: Event) {
       throw new Error('插件包不能超过 32 MiB')
     const result = await uploadPlugin(file)
     await refresh()
-    edit()
-    digest.value = result.sha256
-    name.value = result.displayName
+    const matches = instances.value.filter(item => item.artifact.pluginId === result.pluginId)
+    if (matches.length === 1) {
+      edit(matches[0])
+      digest.value = result.sha256
+    }
+    else if (matches.length > 1) {
+      editOpen.value = false
+      throw new Error('新版已上传。存在多个同名插件实例，请在要升级的实例中点击“配置 / 切换版本”，配置和历史会保留。')
+    }
+    else {
+      edit()
+      digest.value = result.sha256
+      name.value = result.displayName
+    }
   })
   input.value = ''
 }
@@ -481,7 +522,13 @@ onMounted(() => perform(async () => { }))
             {{ item.artifact.pluginId }} · {{ item.artifact.version }} · {{ { ready: '运行中', disabled: '已停用', failed: '启动失败或进程已退出' }[item.status] ?? item.status }}
           </p>
         </div>
-        <div class="flex gap-2">
+        <div class="flex flex-wrap gap-2">
+          <BaseButton v-if="['local.model-health', 'cpr.shared-budget-manager'].includes(item.artifact.pluginId)" variant="secondary" :disabled="busy" @click="checkOnline(item)">
+            检查更新
+          </BaseButton>
+          <BaseButton v-if="onlineUpdates[item.id]?.revision === item.revision" :disabled="busy" @click="updating = item; confirmUpdate = true">
+            在线更新
+          </BaseButton>
           <BaseButton variant="secondary" :disabled="busy" @click="edit(item)">
             配置 / 切换版本
           </BaseButton>
@@ -493,6 +540,10 @@ onMounted(() => perform(async () => { }))
           </BaseButton>
         </div>
       </div>
+      <p v-if="notices[item.id]" class="text-sm text-cp-text-secondary">
+        {{ notices[item.id] }}
+        <a v-if="onlineUpdates[item.id]" :href="onlineUpdates[item.id]!.release.releaseUrl" target="_blank" rel="noopener noreferrer" class="underline">查看发布说明</a>
+      </p>
       <p v-if="item.runtimeLoad" class="text-xs text-cp-text-secondary" title="实时采样，各项可能重叠；刷新列表更新">
         在途 {{ item.runtimeLoad.activeCalls }} · 执行 {{ item.runtimeLoad.executingCalls }} · 排队 {{ item.runtimeLoad.queuedCalls }} · 等待恢复 {{ item.runtimeLoad.resumingCalls }} · 回调 {{ item.runtimeLoad.pendingCallbacks }} · 流 {{ item.runtimeLoad.activeStreams }}
       </p>
@@ -527,6 +578,7 @@ onMounted(() => perform(async () => { }))
         </BaseButton>
       </div>
     </details>
+    <BaseConfirmModal v-model="confirmUpdate" title="在线更新插件" :description="updateDescription" :loading="busy" @confirm="applyOnline" />
     <BaseConfirmModal v-model="confirmArtifactDelete" title="删除制品" description="仅能删除没有实例使用的制品。删除后需要重新上传才能安装该版本。" destructive :loading="busy" @confirm="perform(async () => { await removePluginArtifact(removingArtifact); confirmArtifactDelete = false })" />
     <BaseConfirmModal v-model="confirmDelete" title="卸载插件" description="将停止该插件并删除实例配置和私有状态，进行中的调用会被取消。已上传制品保留，重新安装不会恢复旧状态。" destructive :loading="busy" @confirm="perform(async () => { if (removing) await uninstallPlugin(removing); confirmDelete = false })" />
   </div>

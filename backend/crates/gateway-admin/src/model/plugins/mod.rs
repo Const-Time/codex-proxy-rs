@@ -7,6 +7,15 @@ pub mod policy;
 pub use management::*;
 pub use middleware::*;
 pub use policy::*;
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginOnlineRelease {
+    pub version: String,
+    pub sha256: String,
+    pub asset_name: String,
+    pub size: u64,
+    pub release_url: String,
+}
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};

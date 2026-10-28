@@ -15,6 +15,9 @@ export interface PluginArtifact {
 export interface PluginManagementPage { id: string, title: string, entry: string }
 export interface PluginManagementResource { path: string, contentType: string, public: boolean }
 export interface PluginTarget { instanceId: string, revision: number }
+export interface PluginOnlineRelease { version: string, sha256: string, assetName: string, size: number, releaseUrl: string }
+export const checkPluginUpdate = (item: PluginInstance) => request<PluginOnlineRelease | null>({ url: '/api/admin/plugins/check-update', method: 'POST', data: { id: item.id, revision: item.revision }, timeout: 35_000 })
+export const installPluginUpdate = (item: PluginInstance, release: PluginOnlineRelease) => request<PluginInstance>({ url: '/api/admin/plugins/install-update', method: 'POST', data: { id: item.id, revision: item.revision, release, trustedProcess: true }, timeout: 240_000 })
 export interface PluginManagementView {
   name: string
   target: PluginTarget

@@ -21,6 +21,7 @@ mod schema;
 mod services;
 mod state;
 mod stream;
+pub mod updates;
 pub mod upstream_adapter;
 pub use engine::{HttpDispatcher, PluginEngine};
 pub use package::{PackageError, PackageLimits, PreparedPackage, ValidatedPackage};

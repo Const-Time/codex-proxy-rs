@@ -312,6 +312,79 @@ impl PluginManager {
 }
 #[async_trait]
 impl PluginService for PluginManager {
+    async fn check_update(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> Result<Option<PluginOnlineRelease>, AdminError> {
+        let record = self
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| AdminError::not_found("插件实例不存在"))?;
+        if record.revision != revision {
+            return Err(AdminError::conflict("插件设置已变更，请刷新"));
+        }
+        self.runtime
+            .online_release(&self.store.artifact_info(&record.artifact_sha256).await?)
+            .await
+    }
+    async fn install_update(
+        &self,
+        id: &str,
+        revision: u64,
+        release: PluginOnlineRelease,
+        actor: &MutationContext,
+    ) -> Result<PluginView, AdminError> {
+        let record = self
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| AdminError::not_found("插件实例不存在"))?;
+        if record.revision != revision {
+            return Err(AdminError::conflict("插件设置已变更，请刷新"));
+        }
+        let previous = self.store.artifact_info(&record.artifact_sha256).await?;
+        let bytes = self.runtime.download_release(&previous, &release).await?;
+        let artifact = self.upload(bytes, actor).await?;
+        if artifact.plugin_id != previous.plugin_id
+            || artifact.version != release.version
+            || artifact.sha256 != release.sha256
+        {
+            return Err(AdminError::invalid("在线更新包与检查结果不一致"));
+        }
+        if !artifact.unsupported_capabilities.is_empty() || artifact.version_warning.is_some() {
+            return Err(AdminError::invalid(
+                "新版插件不兼容当前宿主，请先升级主程序",
+            ));
+        }
+        // Only the package changes. CAS below rejects concurrent edits; state migration keeps the same instance.
+        self.update(
+            Some(id),
+            PluginUpdate {
+                observer: record.observer,
+                upstream_adapter: record.upstream_adapter,
+                retry_policy: record.retry_policy,
+                account_scheduler: record.account_scheduler,
+                model_router: record.model_router,
+                middleware: record.middleware,
+                frontend_authentication: record.frontend_authentication,
+                revision,
+                name: record.name,
+                artifact_sha256: artifact.sha256,
+                enabled: record.enabled,
+                trusted_process: true,
+                configuration: record.configuration,
+                secrets: BTreeMap::new(),
+            },
+            actor,
+        )
+        .await
+    }
     fn middleware_registry(&self) -> Option<middleware::PluginMiddlewareRegistry> {
         Some(
             self.middleware

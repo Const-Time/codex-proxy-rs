@@ -211,6 +211,19 @@ pub trait PluginProcess: Send + Sync {
 }
 #[async_trait]
 pub trait PluginRuntime: Send + Sync {
+    async fn online_release(
+        &self,
+        _artifact: &PluginArtifactInfo,
+    ) -> Result<Option<PluginOnlineRelease>> {
+        Ok(None)
+    }
+    async fn download_release(
+        &self,
+        _artifact: &PluginArtifactInfo,
+        _release: &PluginOnlineRelease,
+    ) -> Result<Arc<[u8]>> {
+        Err(AdminError::invalid("此插件尚未配置在线更新源"))
+    }
     async fn prepare_state(
         &self,
         _record: &PluginRecord,
@@ -250,6 +263,18 @@ pub trait PluginRuntime: Send + Sync {
 }
 #[async_trait]
 pub trait PluginService: Send + Sync {
+    async fn check_update(&self, _id: &str, _revision: u64) -> Result<Option<PluginOnlineRelease>> {
+        Err(AdminError::unavailable("在线更新不可用"))
+    }
+    async fn install_update(
+        &self,
+        _id: &str,
+        _revision: u64,
+        _release: PluginOnlineRelease,
+        _actor: &MutationContext,
+    ) -> Result<PluginView> {
+        Err(AdminError::unavailable("在线更新不可用"))
+    }
     /// Hosts without execution middleware do not install this data-plane port.
     fn middleware_registry(&self) -> Option<crate::plugins::middleware::PluginMiddlewareRegistry> {
         None

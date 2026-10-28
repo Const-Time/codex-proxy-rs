@@ -26,6 +26,11 @@ pub fn router<S: AdminSessionState + Clone + Send + Sync + 'static>() -> Router<
             post(remove_artifact::<S>),
         )
         .route("/api/admin/plugins/update", post(update::<S>))
+        .route("/api/admin/plugins/check-update", post(check_update::<S>))
+        .route(
+            "/api/admin/plugins/install-update",
+            post(install_update::<S>),
+        )
         .route("/api/admin/plugins/uninstall", post(uninstall::<S>))
         .route("/api/admin/plugins/resource", get(resource::<S>))
         .route("/api/plugins/resource", get(public_resource::<S>))
@@ -275,6 +280,57 @@ struct Update {
 struct Target {
     id: String,
     revision: u64,
+}
+async fn check_update<S: AdminSessionState + Send + Sync>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(input): AdminJson<Target>,
+) -> Result<impl IntoResponse, AdminError> {
+    let release = state
+        .admin_services()
+        .plugins()
+        .map_err(error)?
+        .check_update(&input.id, input.revision)
+        .await
+        .map_err(error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(release),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InstallUpdate {
+    id: String,
+    revision: u64,
+    release: PluginOnlineRelease,
+    trusted_process: bool,
+}
+async fn install_update<S: AdminSessionState + Send + Sync>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(input): AdminJson<InstallUpdate>,
+) -> Result<impl IntoResponse, AdminError> {
+    if !input.trusted_process {
+        return Err(error(gateway_admin::model::AdminError::invalid(
+            "更新前必须确认可信插件来源",
+        )));
+    }
+    let services = state.admin_services().clone();
+    let actor = auth.context().mutation_context();
+    let result = tokio::spawn(async move {
+        services
+            .plugins()?
+            .install_update(&input.id, input.revision, input.release, &actor)
+            .await
+    })
+    .await
+    .map_err(|_| AdminError::internal())?
+    .map_err(error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(result),
+    ))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,6 +1,61 @@
 use super::*;
 
 #[tokio::test]
+async fn online_plugin_updates_require_admin_and_explicit_trust_and_reject_forged_fields() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("admin-session");
+    let service = Arc::new(super::plugin_models::Plugins(
+        gateway_admin::model::plugins::PluginAccess::default(),
+    ));
+    let state = AdminTestState(fixture.services.clone().with_plugins(service));
+    let app = gateway_api::admin::plugins::router::<AdminTestState>().with_state(state);
+    for path in ["check-update", "install-update"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/admin/plugins/{path}"))
+                    .header("x-request-id", "online-update-auth-test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"plugin","revision":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    for (path, body, expected) in [
+        (
+            "check-update",
+            serde_json::json!({"id":"plugin","revision":1,"url":"http://127.0.0.1/private"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "install-update",
+            serde_json::json!({"id":"plugin","revision":1,"trustedProcess":false,"release":{"version":"2.0.0","sha256":"a".repeat(64),"assetName":"fixture.tar.gz","size":1,"releaseUrl":"https://github.com/example"}}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/admin/plugins/{path}"))
+                    .header("x-request-id", "online-update-input-test")
+                    .header("content-type", "application/json")
+                    .header("cookie", "cpr_admin_session=admin-session")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
 async fn plugin_management_login_tickets_require_admin_and_callbacks_are_bounded_public_documents()
 {
     let fixture = AdminTestFixture::new().await;
