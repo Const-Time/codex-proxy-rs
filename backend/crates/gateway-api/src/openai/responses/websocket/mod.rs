@@ -10,11 +10,7 @@ use std::{
 };
 
 use axum::{
-    extract::{
-        Extension, State,
-        connect_info::ConnectInfo,
-        ws::{WebSocket, WebSocketUpgrade},
-    },
+    extract::{Extension, State, connect_info::ConnectInfo},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -34,7 +30,9 @@ use crate::{
 };
 
 use super::{http::request_client_context, request::OpenAiRequestHeaders};
-use connection::{ConnectionEvent, FramePhase, ResponsesWebSocketConnection, WriteContext};
+use connection::{
+    ConnectionEvent, FramePhase, ResponsesWebSocketConnection, Socket, Upgrade, WriteContext,
+};
 use forward::{
     ConnectionReplaySnapshot, ForwardOutcome, forward_execution, send_gateway_error,
     send_protocol_error,
@@ -50,7 +48,7 @@ pub(crate) async fn responses_websocket(
     State(state): State<ApiState>,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
-    websocket: WebSocketUpgrade,
+    websocket: Upgrade,
 ) -> Response {
     let service = state.openai().clone();
     let client = match authenticate_client(&service, &headers).await {
@@ -87,7 +85,7 @@ impl ResponsesWebSocketAdapter {
 
     fn upgrade_with_client_context(
         &self,
-        websocket: WebSocketUpgrade,
+        websocket: Upgrade,
         client: AuthenticatedClient,
         client_ip: Option<IpAddr>,
         user_agent: Option<String>,
@@ -120,12 +118,9 @@ impl ResponsesWebSocketAdapter {
         let origin = crate::middleware::current();
         if let Some(origin) = origin {
             let (send, receive) = tokio::sync::oneshot::channel();
-            let mut response = websocket
-                .max_message_size(usize::MAX)
-                .max_frame_size(usize::MAX)
-                .on_upgrade(move |socket| async move {
-                    let _ = send.send(socket);
-                });
+            let mut response = websocket.on_upgrade(move |socket| async move {
+                let _ = send.send(socket);
+            });
             let task = Box::pin(async move {
                 let socket = tokio::select! {biased;()=origin.context.cancellation.cancelled()=>return Err(gateway_core::engine::middleware::MiddlewareError::Fault),socket=receive=>socket.map_err(|_|gateway_core::engine::middleware::MiddlewareError::Fault)?};
                 crate::middleware::scope(Some(origin), serve_responses_websocket(socket, session))
@@ -143,8 +138,6 @@ impl ResponsesWebSocketAdapter {
         websocket
             // 覆盖 axum/tungstenite 的私有 64 MiB message 与 16 MiB frame 默认值。
             // Responses JSON 的协议可接受性由上游决定，代理不另设 wire 长度上限。
-            .max_message_size(usize::MAX)
-            .max_frame_size(usize::MAX)
             .on_upgrade(move |socket| async move {
                 serve_responses_websocket(socket, session).await;
             })
@@ -163,7 +156,7 @@ struct ResponsesWebSocketSession {
     connection_guard: Box<dyn ConnectionGuard>,
 }
 
-async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocketSession) {
+async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSession) {
     let ResponsesWebSocketSession {
         raw_headers,
         service,
@@ -186,7 +179,7 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
             lifecycle.cancellation(),
             access.cancellation(),
         ]),
-        None => lifecycle.cancellation(),
+        None => gateway_core::lifecycle::CancellationToken::linked([lifecycle.cancellation()]),
     };
     if let Some(origin) = crate::middleware::current() {
         cancellation = gateway_core::lifecycle::CancellationToken::linked([
@@ -293,7 +286,7 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
             ClientTransport::WebSocket,
             "/v1/responses",
         );
-        let started = match start.await {
+        let mut started = match start.await {
             Ok(started) => started,
             Err(error) => {
                 trace_rejected_request(
@@ -311,6 +304,9 @@ async fn serve_responses_websocket(socket: WebSocket, session: ResponsesWebSocke
                 continue;
             }
         };
+        started
+            .session
+            .bind_downstream_connection(connection.cancellation());
         started.session.trace().record("client.connection", serde_json::json!({
             "transport": "websocket", "connectionId": connection.id(), "correlationId": correlation_id.as_ref(),
             "requestIndex": request_count,

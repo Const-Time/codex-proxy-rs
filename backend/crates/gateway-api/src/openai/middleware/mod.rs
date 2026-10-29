@@ -1,7 +1,7 @@
 //! Request middleware keeps Core's admission, atomic delivery and cleanup owners.
 mod attempt;
 mod body;
-mod delivery;
+pub(in crate::openai) mod delivery;
 mod headers;
 mod native;
 pub(super) mod raw;

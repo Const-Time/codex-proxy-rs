@@ -549,6 +549,8 @@ fn build_usage_insights(
         points: trend
             .iter()
             .map(|point| UsageInsightsPerformancePoint {
+                concurrency_avg_milli: point.metrics.concurrency_avg_milli,
+                concurrency_peak: point.metrics.concurrency_peak,
                 bucket_start: point.bucket_start,
                 latency_percentiles: point.metrics.latency_percentiles,
                 first_token_latency_percentiles: point.metrics.first_token_latency_percentiles,

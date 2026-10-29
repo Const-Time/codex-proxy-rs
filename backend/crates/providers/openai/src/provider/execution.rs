@@ -208,6 +208,8 @@ pub(super) struct OpenAiSessionState {
     pub(super) turn_state: Option<String>,
     #[serde(default)]
     pub(super) client_turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reasoning_effort_override: Option<String>,
     pub(super) continuation_scope: OpenAiContinuationScope,
 }
 
@@ -225,6 +227,7 @@ pub(super) struct OpenAiSessionCapture {
     pub(super) conversation_id: Option<String>,
     pub(super) turn_state: Option<String>,
     pub(super) client_turn_id: Option<String>,
+    pub(super) reasoning_effort_override: Option<String>,
     pub(super) response_store: bool,
     pub(super) continuation_scope: Option<OpenAiContinuationScope>,
 }
@@ -271,6 +274,7 @@ fn encode_openai_session_capture(
         conversation_id: capture.conversation_id.clone(),
         turn_state: capture.turn_state.clone(),
         client_turn_id: capture.client_turn_id.clone(),
+        reasoning_effort_override: capture.reasoning_effort_override.clone(),
         continuation_scope,
     })
 }
@@ -620,7 +624,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &authorization,
                 cookie_header.as_ref(),
                 account_selection,
-            ).with_trace(&trace),
+            ).with_trace(&trace).with_response_control(context.response_control()),
             active_account.id().as_str(),
             context.deadline(),
             &cancellation,

@@ -1,4 +1,6 @@
-use std::path::Path;
+//! 验证 OpenAI 配置解析、路径派生与上游地址约束
+
+use std::{path::Path, time::Duration};
 
 use chrono::{TimeZone as _, Utc};
 use provider_openai::config::{
@@ -139,6 +141,43 @@ fn openai_stream_retry_budget_uses_the_official_hard_cap() {
     assert_eq!(
         config.stream_max_retries(),
         u32::try_from(MAX_STREAM_MAX_RETRIES).expect("retry cap fits u32")
+    );
+}
+
+#[test]
+fn websocket_pool_idle_timeout_accepts_existing_configs_and_explicit_overrides() {
+    for (idle_timeout_ms, expected) in [(None, 300_000), (Some(600_000), 600_000)] {
+        let mut document = serde_json::json!({
+            "ws_pool": {
+                "enabled": true,
+                "max_age_ms": 3_300_000,
+                "max_connecting": 8,
+                "stream_idle_timeout_ms": 300_000
+            }
+        });
+        if let Some(idle_timeout_ms) = idle_timeout_ms {
+            document["ws_pool"]["idle_timeout_ms"] = serde_json::json!(idle_timeout_ms);
+        }
+        let mut config = valid_config();
+        config.ws_pool = serde_json::from_value(document["ws_pool"].clone()).unwrap();
+        config
+            .resolve_and_validate(Path::new("/srv/gateway"))
+            .unwrap();
+        assert_eq!(
+            config.websocket_pool_config().idle_timeout,
+            Duration::from_millis(expected)
+        );
+    }
+}
+
+#[test]
+fn websocket_pool_idle_timeout_rejects_zero() {
+    let mut config = valid_config();
+    config.ws_pool.idle_timeout_ms = 0;
+    assert!(
+        config
+            .resolve_and_validate(Path::new("/srv/gateway"))
+            .is_err()
     );
 }
 

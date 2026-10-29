@@ -46,7 +46,7 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
 
 ## 当前关键合同
 
-- 数据面公开 Responses JSON/SSE/WS（含 Codex 子代理语义）、Images generation/edit、standalone Search 和模型目录；不提供 Chat Completions。
+- 数据面公开 Responses JSON/SSE/WS（含 Codex 子代理语义）、Images generation/edit、standalone Search、模型目录和 Chat Completions 兼容入口。Chat Completions 在 API 层转换为 Responses，复用原鉴权、插件与计费链路。
 - OpenAI Responses/Images/Search 保持业务 wire 透明；xAI 在 Provider 内完成 Grok/Responses 转换。
 - 客户端错误终态适配由 API/Protocol 负责：SSE `error` 和 WS 不可消费的裸错误投影为
   `response.failed`；已可消费的 WS 包装错误与续接错误继续原样交付。

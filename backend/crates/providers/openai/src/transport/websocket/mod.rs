@@ -2,6 +2,7 @@
 
 mod audit;
 mod breaker;
+mod control;
 mod coordinator;
 mod error;
 mod exchange;

@@ -1107,6 +1107,8 @@ pub(crate) fn usage_insights_view(insights: domain::UsageInsights) -> UsageInsig
                 .account_selection_wait_percentiles
                 .p95_ms
                 .map(|value| value.as_f64()),
+            concurrency_average: point.concurrency_avg_milli as f64 / 1000.0,
+            concurrency_peak: point.concurrency_peak,
             output_throughput_p10: point.output_throughput_p10,
             output_throughput_p50: point.output_throughput_p50,
             output_throughput_p90: point.output_throughput_p90,

@@ -9,6 +9,7 @@ use crate::lifecycle::CancellationToken;
 #[derive(Clone, Default)]
 pub struct ResponseControl {
     active: Arc<Mutex<Weak<InterruptTarget>>>,
+    connection_cancellation: Option<CancellationToken>,
 }
 
 impl fmt::Debug for ResponseControl {
@@ -33,6 +34,14 @@ pub enum ResponseInterruptError {
 }
 
 impl ResponseControl {
+    #[must_use]
+    pub fn with_connection_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.connection_cancellation = Some(cancellation);
+        self
+    }
+    pub fn connection_cancellation(&self) -> Option<&CancellationToken> {
+        self.connection_cancellation.as_ref()
+    }
     /// 在上游确认响应 ID 后注册；同一执行只允许一个存活的响应 owner。
     pub fn activate(&self, response_id: String) -> Option<ActiveResponseInterrupt> {
         let mut active = self

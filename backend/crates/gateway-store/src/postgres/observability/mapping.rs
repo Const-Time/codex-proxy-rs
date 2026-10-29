@@ -179,6 +179,8 @@ pub(crate) fn admin_request_metrics(
         account_selection_wait_percentiles: admin_latency_percentiles(
             metrics.account_selection_wait_percentiles,
         )?,
+        concurrency_avg_milli: metrics.concurrency_avg_milli,
+        concurrency_peak: metrics.concurrency_peak,
         output_throughput_p10: metrics.output_throughput_p10,
         output_throughput_p50: metrics.output_throughput_p50,
         output_throughput_p90: metrics.output_throughput_p90,

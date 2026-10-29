@@ -280,7 +280,17 @@ async fn request_metric_series_inner(
             }
         }
     }
-    fill_metric_gaps(range, granularity, points)
+    let mut points = fill_metric_gaps(range, granularity, points)?;
+    if load_costs {
+        let concurrency = request_concurrency(pool, range, filter, granularity).await?;
+        for point in &mut points {
+            if let Some((average, peak)) = concurrency.get(&point.bucket_start) {
+                point.metrics.concurrency_avg_milli = *average;
+                point.metrics.concurrency_peak = *peak;
+            }
+        }
+    }
+    Ok(points)
 }
 
 pub(crate) fn calculated_usage_billing_facts(
@@ -584,6 +594,8 @@ pub(crate) async fn provider_observations(
 
 pub(crate) fn request_metrics_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<RequestMetrics> {
     Ok(RequestMetrics {
+        concurrency_avg_milli: 0,
+        concurrency_peak: 0,
         request_count: unsigned(row, "request_count")?,
         success_count: unsigned(row, "success_count")?,
         failure_count: unsigned(row, "failure_count")?,
@@ -748,4 +760,60 @@ pub(crate) async fn usage_card_summary(
         total_tokens: unsigned(&row, "total_tokens")?,
         average_latency_ms: (latency_count > 0).then(|| latency_sum / latency_count),
     })
+}
+
+// Sweep start/end events and bucket boundaries once: O(requests + buckets), never a request/bucket join.
+async fn request_concurrency(
+    pool: &PgPool,
+    range: ObservabilityRange,
+    filter: &UsageRecordFilter,
+    granularity: ObservationGranularity,
+) -> StoreResult<BTreeMap<DateTime<Utc>, (u64, u64)>> {
+    let mut query = QueryBuilder::<Postgres>::new("with bounds as (select ");
+    query.push_bind(range.start).push("::timestamptz as lo, ");
+    query.push_bind(range.end).push("::timestamptz as hi, ");
+    query
+        .push_bind(granularity.sql_interval())
+        .push("::interval as step), spans as (");
+    for (index, predicate) in [
+        "mr.outcome <> 'running' and mr.completed_at > b.lo",
+        "mr.outcome = 'running'",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if index > 0 {
+            query.push(" union all ");
+        }
+        query.push("select greatest(mr.started_at,b.lo) as lo, least(coalesce(mr.completed_at,now()),b.hi) as hi from model_requests mr cross join bounds b where mr.started_at < b.hi and ").push(*predicate);
+        push_unrecovered_request_filter(&mut query, "mr");
+        push_usage_filter(&mut query, filter, "mr");
+    }
+    query.push(r#"
+    ), events as (
+      select lo as at, 1::bigint as delta from spans where hi > lo
+      union all select hi, -1::bigint from spans where hi > lo
+      union all select greatest(t,b.lo), 0 from bounds b cross join lateral generate_series(date_bin(b.step,b.lo,timestamptz '1970-01-01'),b.hi,b.step) t
+      union all select hi,0 from bounds
+    ), grouped as (select at,sum(delta) as delta from events group by at), timeline as (
+      select at,lead(at) over(order by at) as until,sum(delta) over(order by at) as active from grouped
+    ) select date_bin(b.step,t.at,timestamptz '1970-01-01') as bucket,
+      round(sum(t.active * extract(epoch from (t.until-t.at))) / nullif(sum(extract(epoch from (t.until-t.at))),0) * 1000)::bigint as average,
+      max(t.active)::bigint as peak
+      from timeline t cross join bounds b where t.until > t.at and t.at < b.hi
+      group by bucket order by bucket
+    "#);
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|_| postgres_unavailable("load request concurrency"))?;
+    rows.iter()
+        .map(|row| {
+            Ok((
+                get(row, "bucket")?,
+                (unsigned(row, "average")?, unsigned(row, "peak")?),
+            ))
+        })
+        .collect()
 }

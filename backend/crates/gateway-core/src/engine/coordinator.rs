@@ -499,6 +499,25 @@ where
     S: ExecutionStore + 'static,
 {
     /// 当前请求独有的活动响应控制入口。
+    pub(super) fn with_connection_cancellation(
+        mut self,
+        cancellation: Option<CancellationToken>,
+    ) -> Self {
+        if let Some(cancellation) = cancellation {
+            self.response_control = self
+                .response_control
+                .with_connection_cancellation(cancellation);
+        }
+        self
+    }
+
+    pub(super) fn bind_downstream_connection(&mut self, cancellation: CancellationToken) {
+        self.response_control = self
+            .response_control
+            .clone()
+            .with_connection_cancellation(cancellation);
+    }
+
     pub fn response_control(&self) -> super::response_control::ResponseControl {
         self.response_control.clone()
     }

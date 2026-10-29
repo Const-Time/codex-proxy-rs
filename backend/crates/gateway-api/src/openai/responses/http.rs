@@ -55,6 +55,7 @@ pub(crate) async fn responses(
         body.body,
         "/v1/responses",
         (body.client, Some(body.memory)),
+        None,
     )
     .await
 }
@@ -84,11 +85,16 @@ pub(crate) async fn responses_at_endpoint(
         body,
         endpoint,
         (client, None),
+        None,
     )
     .await
 }
 
-async fn respond_authenticated(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared authenticated HTTP ingress with an optional wire projection"
+)]
+pub(in crate::openai) async fn respond_authenticated(
     State(state): State<ApiState>,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     ingress_id: Option<Extension<tower_http::request_id::RequestId>>,
@@ -99,6 +105,7 @@ async fn respond_authenticated(
         gateway_core::engine::execution::AuthenticatedClient,
         Option<crate::openai::ingress::IngressMemory>,
     ),
+    chat: Option<crate::openai::chat_completions::ChatProjection>,
 ) -> Response {
     let (client, mut memory) = authenticated;
     let service = state.openai();
@@ -138,6 +145,7 @@ async fn respond_authenticated(
             registry,
             crate::openai::middleware::request::Ingress {
                 client,
+                chat,
                 decoded,
                 headers,
                 body,
@@ -174,7 +182,43 @@ async fn respond_authenticated(
     let StartedExecution {
         stream, session, ..
     } = started;
-    let mut response = if stream {
+    let mut response = if let Some(chat) = chat {
+        let (admitted, keepalive) = tokio::sync::oneshot::channel();
+        let _ = admitted.send(session.response_commit());
+        let response = async move {
+            match crate::openai::middleware::execution_middleware_response(
+                session,
+                if stream {
+                    ClientTransport::HttpSse
+                } else {
+                    ClientTransport::HttpJson
+                },
+            )
+            .await
+            {
+                Ok(response) => {
+                    crate::openai::middleware::delivery::deliver_with_chat(
+                        response,
+                        stream,
+                        connection_guard,
+                        Some(chat),
+                    )
+                    .await
+                }
+                Err(error) => crate::openai::middleware::delivery::error_response(&error),
+            }
+        };
+        if stream {
+            super::keepalive::response_with_encoder(
+                response,
+                keepalive,
+                Some(crate::openai::chat_completions::error_sse),
+            )
+            .await
+        } else {
+            response.await
+        }
+    } else if stream {
         stream_execution_response(session, connection_guard).await
     } else {
         drop(connection_guard);

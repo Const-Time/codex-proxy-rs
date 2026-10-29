@@ -46,6 +46,7 @@ pub(in crate::openai) async fn respond(
             return forward::send_gateway_error(connection, &error, &input.correlation_id).await;
         }
     };
+    let prepared = prepared.with_connection_cancellation(connection.cancellation());
     let context = super::root::context(
         &prepared,
         input.decoded.operation(),

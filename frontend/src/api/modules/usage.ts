@@ -360,6 +360,8 @@ export interface UsageOverviewHealth {
 }
 
 export interface UsageOverviewPerformancePoint {
+  concurrencyAverage: number
+  concurrencyPeak: number
   bucket: string
   label: string
   latencyP50Ms: number | null

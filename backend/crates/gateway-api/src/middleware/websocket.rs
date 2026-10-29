@@ -1,9 +1,12 @@
 //! The API owns validation, the original upgrade extension and the duplex socket.
+use crate::openai::responses::websocket::connection::{
+    Socket as WebSocket, Upgrade as WebSocketUpgrade,
+};
 use axum::{
     body::Body,
     extract::{
         FromRequestParts,
-        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message},
     },
 };
 use futures::{
@@ -200,8 +203,6 @@ impl core::upgrade::WebSocketUpgrade for Upgrade {
             let (sender, receiver) = tokio::sync::oneshot::channel();
             let response = upgrade
                 .protocols(protocols)
-                .max_message_size(usize::MAX)
-                .max_frame_size(usize::MAX)
                 .on_upgrade(move |socket| async move {
                     let _ = sender.send(socket);
                 });

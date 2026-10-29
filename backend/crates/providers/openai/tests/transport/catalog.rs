@@ -470,6 +470,7 @@ fn profile() -> CodexWireProfileState {
 
 fn context() -> CodexRequestContext<'static> {
     CodexRequestContext {
+        response_control: None,
         trace: None,
         authorization: "Bearer oauth-access",
         account_id: Some("acct_123"),

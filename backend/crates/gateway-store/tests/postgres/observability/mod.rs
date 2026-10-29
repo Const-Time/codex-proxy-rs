@@ -2492,3 +2492,92 @@ async fn lightweight_cards_match_full_summary_scopes_and_empty_results() {
 }
 
 mod rollup;
+
+#[tokio::test]
+async fn request_concurrency_weights_overlap_and_preserves_filters() {
+    let Some(db) = TestDatabase::create("concurrency_timeline").await else {
+        return;
+    };
+    let start = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    seed_observability_facts(&db.pool, start).await.unwrap();
+    sqlx::query("update model_requests set requested_model_id='concurrency',started_at=$1-interval '5 minutes',completed_at=$1+interval '20 minutes' where id='req_observe_success'")
+        .bind(start).execute(&db.pool).await.unwrap();
+    clone_request_facts(&db.pool,"req_observe_success",1,start,
+        "jsonb_build_object('id','concurrency-2','started_at',$3+interval '10 minutes','completed_at',$3+interval '25 minutes')").await;
+    let range = ObservabilityRange::new(start, start + TimeDelta::minutes(30)).unwrap();
+    let repo = observability_repository(&db.pool);
+    let filter = UsageRecordFilter {
+        model: Some("concurrency".into()),
+        ..Default::default()
+    };
+    let points = repo.usage_trend(range, filter).await.unwrap();
+    assert_eq!(points.len(), 2);
+    assert_eq!(
+        (
+            points[0].metrics.concurrency_avg_milli,
+            points[0].metrics.concurrency_peak
+        ),
+        (1333, 2)
+    );
+    assert_eq!(
+        (
+            points[1].metrics.concurrency_avg_milli,
+            points[1].metrics.concurrency_peak
+        ),
+        (1000, 2)
+    );
+    // Simultaneous end/start must not create a zero-duration peak of two.
+    sqlx::query("update model_requests set started_at=$1,completed_at=$1+interval '15 minutes' where id='req_observe_success'").bind(start).execute(&db.pool).await.unwrap();
+    sqlx::query("update model_requests set started_at=$1+interval '15 minutes',deadline_at=$1+interval '30 minutes',completed_at=$1+interval '30 minutes' where id='concurrency-2'").bind(start).execute(&db.pool).await.unwrap();
+    let contiguous = repo
+        .usage_trend(
+            range,
+            UsageRecordFilter {
+                model: Some("concurrency".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        contiguous
+            .iter()
+            .all(|p| p.metrics.concurrency_avg_milli == 1000 && p.metrics.concurrency_peak == 1)
+    );
+    let partial = repo
+        .usage_trend(
+            ObservabilityRange::new(
+                start + TimeDelta::minutes(12),
+                start + TimeDelta::minutes(22),
+            )
+            .unwrap(),
+            UsageRecordFilter {
+                model: Some("concurrency".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        partial
+            .iter()
+            .all(|p| p.metrics.concurrency_avg_milli == 1000 && p.metrics.concurrency_peak == 1)
+    );
+    let empty = repo
+        .usage_trend(
+            range,
+            UsageRecordFilter {
+                model: Some("missing-model".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        empty
+            .iter()
+            .all(|p| p.metrics.concurrency_peak == 0 && p.metrics.concurrency_avg_milli == 0)
+    );
+}

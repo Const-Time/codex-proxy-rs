@@ -22,6 +22,7 @@ use gateway_core::{
 
 pub(in crate::openai) struct Ingress {
     pub client: AuthenticatedClient,
+    pub chat: Option<crate::openai::chat_completions::ChatProjection>,
     pub decoded: DecodedResponsesRequest,
     pub headers: HeaderMap,
     pub body: Bytes,
@@ -67,7 +68,7 @@ pub(in crate::openai) async fn respond(
         .map(|guard| guard.with_revocation(revocation));
     let request_id = prepared.request_id().as_str().to_owned();
     // Empty plans keep the existing transparent response path and its size contract.
-    let mut response = if plan.is_empty() && !has_attempts {
+    let mut response = if plan.is_empty() && !has_attempts && input.chat.is_none() {
         match service
             .start_prepared_response(prepared, input.decoded, transport, input.endpoint)
             .await
@@ -170,16 +171,28 @@ pub(in crate::openai) async fn respond(
                 super::execution_middleware_response(started.session, transport).await
             })
         });
+        let chat_error = input.chat.is_some().then_some(
+            crate::openai::chat_completions::error_sse as fn(&serde_json::Value) -> Bytes,
+        );
         let response = async move {
             match plan.run(request, next).await {
                 Ok(response) => {
-                    super::deliver_middleware_response(response, streaming, input.connection).await
+                    super::delivery::deliver_with_chat(
+                        response,
+                        streaming,
+                        input.connection,
+                        input.chat,
+                    )
+                    .await
                 }
                 Err(error) => super::delivery::error_response(&error),
             }
         };
         if streaming {
-            crate::openai::responses::keepalive::response(response, keepalive).await
+            crate::openai::responses::keepalive::response_with_encoder(
+                response, keepalive, chat_error,
+            )
+            .await
         } else {
             response.await
         }

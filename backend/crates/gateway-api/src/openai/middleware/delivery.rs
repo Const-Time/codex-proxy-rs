@@ -28,6 +28,7 @@ struct Batch {
 }
 pub(super) struct Delivery {
     body: Option<Box<dyn MiddlewareBody>>,
+    chat: Option<crate::openai::chat_completions::ChatProjection>,
     status: u16,
     valid: bool,
     streaming: bool,
@@ -50,6 +51,7 @@ impl Delivery {
         let (protocol, status, headers, body, _) = response.into_parts();
         let delivery = Self {
             body: Some(body),
+            chat: None,
             status,
             valid: protocol == "openai" && (200..=599).contains(&status),
             streaming: format.streaming() && (200..300).contains(&status),
@@ -119,6 +121,11 @@ impl Delivery {
                 .is_object()
         {
             return Err(MiddlewareError::InvalidState);
+        }
+        if (200..300).contains(&self.status)
+            && let Some(chat) = self.chat.as_ref()
+        {
+            bytes = chat.document(&bytes)?;
         }
         for batch in &batches {
             self.acknowledge(batch).await?;
@@ -383,11 +390,16 @@ impl Delivery {
         Err(MiddlewareError::InvalidState)
     }
     fn observe_sse(&mut self, payload: &[u8]) -> Result<(), MiddlewareError> {
-        if !(payload.ends_with(b"\n\n") || payload.ends_with(b"\r\n\r\n")) {
-            return Err(MiddlewareError::InvalidState);
-        }
-        let text = std::str::from_utf8(payload).map_err(|_| MiddlewareError::InvalidState)?;
-        for event in parse_sse_events(text).map_err(|_| MiddlewareError::InvalidState)? {
+        let events = if let Some(chat) = self.chat.as_mut() {
+            chat.observe(payload)?
+        } else {
+            if !(payload.ends_with(b"\n\n") || payload.ends_with(b"\r\n\r\n")) {
+                return Err(MiddlewareError::InvalidState);
+            }
+            let text = std::str::from_utf8(payload).map_err(|_| MiddlewareError::InvalidState)?;
+            parse_sse_events(text).map_err(|_| MiddlewareError::InvalidState)?
+        };
+        for event in events {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) {
                 if let Some(id) = value.pointer("/response/id").and_then(|v| v.as_str()) {
                     self.response_id = Some(id.to_owned());
@@ -441,11 +453,16 @@ impl Delivery {
                 {
                     return Err(MiddlewareError::InvalidState);
                 }
+                let bytes = if let Some(chat) = self.chat.as_mut() {
+                    chat.stream(&batch.bytes)?
+                } else {
+                    batch.bytes.clone()
+                };
                 self.acknowledge(&batch).await?;
                 if batch.terminal {
                     self.finish_terminal().await?;
                 }
-                self.pending.extend(batch.bytes);
+                self.pending.extend(bytes);
             }
             None => {
                 if !self.is_finalized() || !self.wire_terminal {
@@ -453,6 +470,11 @@ impl Delivery {
                 }
                 self.finished = true;
             }
+        }
+        if self.finished
+            && let Some(chat) = self.chat.as_mut()
+        {
+            chat.finish()?;
         }
         if self.finished && !self.websocket {
             self.pending
@@ -469,17 +491,30 @@ pub async fn deliver_middleware_response(
     streaming: bool,
     connection: Option<Box<dyn ConnectionGuard>>,
 ) -> Response {
+    deliver_with_chat(response, streaming, connection, None).await
+}
+
+pub(in crate::openai) async fn deliver_with_chat(
+    response: MiddlewareResponse,
+    streaming: bool,
+    connection: Option<Box<dyn ConnectionGuard>>,
+    chat: Option<crate::openai::chat_completions::ChatProjection>,
+) -> Response {
     let (mut delivery, headers) = Delivery::new(
         response,
         super::WireFormat::Responses { streaming },
         connection,
     );
+    delivery.chat = chat;
     let status = delivery.status;
     let stream = delivery.streaming;
     let result = async {
         delivery.validate()?;
         if stream {
             delivery.advance().await?;
+            while delivery.chat.is_some() && delivery.pending.is_empty() && !delivery.finished {
+                delivery.advance().await?;
+            }
             if delivery.pending.is_empty() {
                 return Err(MiddlewareError::InvalidState);
             }
@@ -511,7 +546,7 @@ pub async fn deliver_middleware_response(
     }
 }
 
-pub(super) fn error_response(error: &MiddlewareError) -> Response {
+pub(in crate::openai) fn error_response(error: &MiddlewareError) -> Response {
     match error {
         MiddlewareError::Gateway(error) => gateway_error_response(error),
         MiddlewareError::Engine(error) => engine_error_response(error),
@@ -577,14 +612,18 @@ fn streaming_response(delivery: Delivery, headers: Vec<MiddlewareHeader>) -> Res
             }
             if state.advance().await.is_err() {
                 state.close().await;
-                state
-                    .pending
-                    .push_back(Bytes::from(response_failed_sse_event_with_id(
-                        state.response_id.as_deref(),
-                        "server_error",
-                        "middleware_failed",
-                        "Plugin response could not be delivered",
-                    )));
+                if state.chat.is_some() {
+                    state.pending.push_back(Bytes::from_static(b"data: {\"error\":{\"type\":\"server_error\",\"code\":\"invalid_upstream_response\",\"message\":\"Chat response could not be delivered\"}}\n\n"));
+                } else {
+                    state
+                        .pending
+                        .push_back(Bytes::from(response_failed_sse_event_with_id(
+                            state.response_id.as_deref(),
+                            "server_error",
+                            "middleware_failed",
+                            "Plugin response could not be delivered",
+                        )));
+                }
                 state
                     .pending
                     .push_back(Bytes::from_static(DONE_SSE_FRAME.as_bytes()));

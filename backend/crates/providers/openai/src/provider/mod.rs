@@ -267,7 +267,12 @@ impl Provider for CodexProvider {
         let Ok(encoded) = encode_generate_request(request, "observability") else {
             return ProviderRequestObservation::default();
         };
-        let semantics = encoded.semantics();
+        let previous_session = decode_openai_session_state(request);
+        let semantics = encoded.semantics(
+            previous_session
+                .as_ref()
+                .and_then(|state| state.reasoning_effort_override.as_deref()),
+        );
         let reasoning_effort = semantics.reasoning_effort.clone();
         let previous_response_id = encoded.previous_response_id();
         let continuation = ContinuationRequestObservation {
@@ -776,6 +781,13 @@ impl Provider for CodexProvider {
                 conversation_id: upstream_request.local_conversation_id.clone(),
                 turn_state: upstream_request.turn_state.clone(),
                 client_turn_id: original_client_turn_id,
+                reasoning_effort_override: upstream_request
+                    .semantics(
+                        previous_session
+                            .as_ref()
+                            .and_then(|state| state.reasoning_effort_override.as_deref()),
+                    )
+                    .reasoning_effort_override,
                 response_store,
                 continuation_scope: None,
             });

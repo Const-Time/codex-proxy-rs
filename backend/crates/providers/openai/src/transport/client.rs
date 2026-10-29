@@ -435,7 +435,9 @@ impl<'a> CodexAccountSelectionTelemetry<'a> {
 /// 单次 Codex 上游请求的上下文。
 #[derive(Clone, Copy)]
 pub struct CodexRequestContext<'a> {
-    /// 显式传递的请求诊断上下文，跨连接任务共享。
+    /// 本次根执行的控制与下游连接生命周期，不由共享 HTTP client 持有
+    pub response_control: Option<&'a gateway_core::engine::response_control::ResponseControl>,
+    /// 显式传递的请求诊断上下文，跨连接任务共享
     pub trace: Option<&'a gateway_core::diagnostics::TraceContext>,
     /// Provider 已构造并脱敏持有的完整 Authorization 值。
     pub authorization: &'a str,
@@ -483,6 +485,7 @@ impl<'a> CodexRequestContext<'a> {
     ) -> Self {
         Self {
             trace: None,
+            response_control: None,
             authorization,
             account_id,
             request_id,
@@ -506,6 +509,15 @@ impl<'a> CodexRequestContext<'a> {
     #[must_use]
     pub const fn with_trace(mut self, trace: &'a gateway_core::diagnostics::TraceContext) -> Self {
         self.trace = Some(trace);
+        self
+    }
+
+    #[must_use]
+    pub fn with_response_control(
+        mut self,
+        control: Option<&'a gateway_core::engine::response_control::ResponseControl>,
+    ) -> Self {
+        self.response_control = control;
         self
     }
 }

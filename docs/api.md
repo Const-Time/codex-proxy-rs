@@ -1093,3 +1093,9 @@ Usage 列表和详情（含个人视图）返回 `requestedServiceTier` 与 `ups
 ## 账号 Credits（RPC v5 配套改造）
 
 账号 `quota.credits` 为 `null` 或 `{hasCredits, unlimited, balance}`。`balance` 为十进制字符串或 `null`，不转浮点数；`"0"`、无限额度和未返回余额分别展示。余额来自上游刷新或被动额度事件，缺失的新余额不会保留旧值。展示不改变本地订阅、共享额度及计费口径。
+
+## Chat Completions 兼容入口（2026-10）
+
+`POST /v1/chat/completions` 使用现有 API Key 鉴权，转换为 Responses 后经过原权限、路由、请求插件和账本链路；支持 JSON 和 SSE、文本/图像输入、函数工具、结构化输出及可表示的拒答。`stream_options.include_usage=true` 在成功终态后附加 usage；不支持的多候选、音频等字段在发出上游请求前返回 400。该入口不增加独立的账号或扣费配置。
+
+使用统计 `performance.points` 增加 `concurrencyAverage`、`concurrencyPeak`，其余字段保持兼容；统计口径为请求从开始到终结的重叠量，均值按持续时间加权，包含跨桶和跨查询起点的活动请求。

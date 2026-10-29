@@ -224,6 +224,8 @@ pub struct CostCoverage {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestMetrics {
+    pub concurrency_avg_milli: u64,
+    pub concurrency_peak: u64,
     pub request_count: u64,
     pub success_count: u64,
     pub failure_count: u64,

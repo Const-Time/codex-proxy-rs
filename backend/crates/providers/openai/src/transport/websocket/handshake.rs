@@ -30,7 +30,7 @@ use super::{
     error::CodexWebSocketExchangeError,
     model::{CodexWebSocketConnection, CodexWebSocketRequest, WebSocketContinuationRequirement},
     pool::CodexWebSocketConnectionMetadata,
-    pump::{PumpKeepalive, PumpLogContext, PumpedWebSocket, RawWsStream},
+    pump::{PumpLogContext, PumpedWebSocket, RawWsStream},
 };
 
 const WEBSOCKET_EXTENSIONS: &str = "permessage-deflate; client_max_window_bits";
@@ -118,16 +118,12 @@ pub fn responses_websocket_endpoint(base_url: &str) -> String {
 
 pub(super) async fn connect_pumped_websocket(
     connection: &CodexWebSocketConnection,
-    keepalive: PumpKeepalive,
     context: PumpLogContext,
     fast_path: bool,
     proxy_permit: Option<super::pool::ProxyConnectionPermit>,
 ) -> Result<(PumpedWebSocket, WsResponse<Option<Vec<u8>>>), CodexWebSocketExchangeError> {
     let (raw, response) = connect_websocket(connection, fast_path).await?;
-    Ok((
-        PumpedWebSocket::new(raw, keepalive, context, proxy_permit),
-        response,
-    ))
+    Ok((PumpedWebSocket::new(raw, context, proxy_permit), response))
 }
 
 pub(super) async fn send_websocket_request(

@@ -80,6 +80,26 @@ fn astra_billing_should_preserve_components_across_tiers_and_context_boundary() 
 fn gpt_6_sol_and_luna_should_use_published_tier_and_context_prices() {
     // 每百万 token 价格依次为输入、缓存读、缓存写、输出。
     for (model, tier, input, expected) in [
+        ("gpt-6.1-terra", None, 272_000, ["1", "0.05", "1.25", "5"]),
+        ("gpt-6.1-terra", None, 272_001, ["2", "0.1", "2.5", "7.5"]),
+        (
+            "gpt-6.1-terra",
+            Some("flex"),
+            272_001,
+            ["1", "0.05", "1.25", "3.75"],
+        ),
+        (
+            "gpt-6.1-terra",
+            Some("fast"),
+            272_000,
+            ["2", "0.1", "2.5", "10"],
+        ),
+        (
+            "gpt-6.1-terra",
+            Some("priority"),
+            272_001,
+            ["4", "0.2", "5", "15"],
+        ),
         ("gpt-6-sol", None, 272_000, ["2", "0.2", "2.5", "10"]),
         ("gpt-6-sol", None, 272_001, ["4", "0.4", "5", "15"]),
         (
@@ -385,6 +405,7 @@ async fn fetch_should_use_wham_usage_headers_only() {
 
     let usage = client(&server.uri())
         .fetch_usage(CodexRequestContext {
+            response_control: None,
             trace: None,
             authorization: "Bearer oauth-access",
             account_id: Some("acct_123"),
@@ -719,6 +740,7 @@ fn profile() -> CodexWireProfileState {
 
 fn context() -> CodexRequestContext<'static> {
     CodexRequestContext {
+        response_control: None,
         trace: None,
         authorization: "Bearer oauth-access",
         account_id: Some("acct_123"),

@@ -363,7 +363,7 @@ pub(in crate::openai) fn decompress_request_body<'a>(
     decompress_request_body_accounted(body, headers, &mut |_| Ok(()))
 }
 
-fn decompress_request_body_accounted<'a>(
+pub(in crate::openai) fn decompress_request_body_accounted<'a>(
     body: &'a [u8],
     headers: &HeaderMap,
     reserve: &mut impl FnMut(usize) -> Result<(), RequestDecodeError>,

@@ -718,12 +718,25 @@ impl ProviderLeasePort for TestLeaseCoordinator {
 
 #[derive(Default)]
 pub(crate) struct MemorySessionAffinity {
+    operation_delay: Duration,
     bindings: Mutex<BTreeMap<(String, String), ProviderAccountId>>,
     lookups: Mutex<Vec<String>>,
     renewal_ttls: Mutex<Vec<Duration>>,
 }
 
 impl MemorySessionAffinity {
+    pub(crate) fn with_operation_delay(operation_delay: Duration) -> Self {
+        Self {
+            operation_delay,
+            ..Self::default()
+        }
+    }
+    async fn delay_operation(&self) {
+        if !self.operation_delay.is_zero() {
+            tokio::time::sleep(self.operation_delay).await;
+        }
+    }
+
     pub(crate) fn renewal_ttls(&self) -> Vec<Duration> {
         self.renewal_ttls.lock().expect("affinity TTL lock").clone()
     }
@@ -756,6 +769,7 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         key: &'a ProviderSessionAffinityKey,
     ) -> BoxFuture<'a, Result<Option<ProviderAccountId>, ProviderStoreError>> {
         Box::pin(async move {
+            self.delay_operation().await;
             self.lookups
                 .lock()
                 .expect("session affinity lookup lock")
@@ -780,6 +794,7 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         _ttl: Duration,
     ) -> BoxFuture<'a, Result<(), ProviderStoreError>> {
         Box::pin(async move {
+            self.delay_operation().await;
             self.bindings.lock().expect("session affinity lock").insert(
                 (
                     provider_kind.as_str().to_owned(),
@@ -799,6 +814,7 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         _ttl: Duration,
     ) -> BoxFuture<'a, Result<ProviderAccountId, ProviderStoreError>> {
         Box::pin(async move {
+            self.delay_operation().await;
             let mut bindings = self.bindings.lock().expect("session affinity lock");
             Ok(bindings
                 .entry((
@@ -819,6 +835,7 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         ttl: Duration,
     ) -> BoxFuture<'a, Result<ProviderAccountId, ProviderStoreError>> {
         Box::pin(async move {
+            self.delay_operation().await;
             let binding_key = (
                 provider_kind.as_str().to_owned(),
                 key.expose_to_store().to_owned(),
@@ -850,6 +867,7 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         key: &'a ProviderSessionAffinityKey,
     ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
         Box::pin(async move {
+            self.delay_operation().await;
             Ok(self
                 .bindings
                 .lock()

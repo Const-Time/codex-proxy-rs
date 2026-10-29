@@ -180,9 +180,15 @@ pub struct PreparedRootExecution {
     started_at: SystemTime,
     deadline_at: crate::lifecycle::Deadline,
     cancellation: CancellationToken,
+    connection_cancellation: Option<CancellationToken>,
 }
 
 impl PreparedRootExecution {
+    #[must_use]
+    pub fn with_connection_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.connection_cancellation = Some(cancellation);
+        self
+    }
     /// Attach the plan from this request's frozen publication. Observer revocation
     /// belongs to the observer; it must never cancel the business request.
     pub fn with_observer_plan(
@@ -511,6 +517,8 @@ pub trait ExecutionSession: Send {
     fn send_state(&self) -> UpstreamSendState {
         UpstreamSendState::Ambiguous
     }
+    fn bind_downstream_connection(&mut self, _cancellation: CancellationToken) {}
+
     /// Optional active-response control, scoped to this execution only.
     fn response_control(&self) -> Option<super::response_control::ResponseControl> {
         None
@@ -1165,6 +1173,7 @@ impl DefaultExecutionService {
             started_at,
             deadline_at,
             cancellation,
+            connection_cancellation,
         } = prepared;
         let request_settings = settings.clone();
         let settings = settings.execution_values().ok_or_else(|| {
@@ -1350,7 +1359,7 @@ impl DefaultExecutionService {
             created_at: started_at,
             stream: metadata.stream,
             session: Box::new(DefaultExecutionSession::new(
-                core,
+                core.with_connection_cancellation(connection_cancellation),
                 admission,
                 Arc::clone(&self.continuation),
                 self.budget.clone(),
@@ -1862,6 +1871,7 @@ impl ExecutionService for DefaultExecutionService {
             started_at,
             deadline_at,
             cancellation,
+            connection_cancellation: None,
         })
     }
     fn start_prepared(
@@ -2044,6 +2054,9 @@ impl ExecutionSession for DefaultExecutionSession {
     }
     fn response_control(&self) -> Option<super::response_control::ResponseControl> {
         Some(self.core.response_control())
+    }
+    fn bind_downstream_connection(&mut self, cancellation: CancellationToken) {
+        self.core.bind_downstream_connection(cancellation);
     }
     fn trace(&self) -> crate::diagnostics::TraceContext {
         self.core.trace()

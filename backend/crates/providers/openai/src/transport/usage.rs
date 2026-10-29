@@ -231,6 +231,17 @@ struct PricingRule {
 // 使用常规价，不采用 GPT-5.6 Sol 的临时 $4/$20 优惠；缓存、Flex、Fast 和长上下文
 // 档位也统一按常规价计算。
 const PRICING_RULES: &[PricingRule] = &[
+    // https://developers.openai.com/api/docs/models/gpt-6.1-terra，核验日期 2026-10-27
+    PricingRule {
+        model: "gpt-6.1-terra",
+        pricing: ModelPricing::new(10_000, 50_000, 500)
+            .with_cache_write(125)
+            .with_flex(5_000, 25_000, 250)
+            .with_fast(20_000, 100_000, 1_000)
+            .with_long(20_000, 75_000, 1_000)
+            .with_long_flex(10_000, 37_500, 500)
+            .with_long_fast(40_000, 150_000, 2_000),
+    },
     // Sol / Luna：https://developers.openai.com/api/docs/pricing
     PricingRule {
         model: "gpt-6-sol",
@@ -908,6 +919,7 @@ fn reasoning_model(model: &str) -> bool {
     let model = pricing_model_name(&normalized);
     model.starts_with("gpt-5")
         || model == "gpt-6-astra"
+        || model == "gpt-6.1-terra"
         || model.starts_with("o1")
         || model.starts_with("o3")
         || model.starts_with("o4")

@@ -52,9 +52,12 @@ const viewOptions = [
   { label: '首字', value: 'firstToken' },
   { label: '吞吐', value: 'throughput' },
   { label: '调度', value: 'scheduling' },
+  { label: '并发', value: 'concurrency' },
 ]
 
 const seriesLabels = computed(() => {
+  if (activeView.value === 'concurrency')
+    return ['平均并发', '峰值并发', ''] as const
   if (activeView.value === 'throughput')
     return ['P10', 'P50', 'P90'] as const
   if (activeView.value === 'scheduling')
@@ -64,7 +67,7 @@ const seriesLabels = computed(() => {
 
 const selectedPoints = computed(() => {
   const points = performancePoints.value
-  const active = requestActivity.value
+  const active = activeView.value === 'concurrency' ? points.map(() => true) : requestActivity.value
   const firstValues = zeroInactiveValues(
     points.map(point => seriesValue(point, 'first')),
     active,
@@ -87,6 +90,9 @@ const selectedPoints = computed(() => {
 
 const summaryMetrics = computed(() => {
   const performance = props.performance
+  if (activeView.value === 'concurrency') {
+    return [{ label: '区间峰值', value: formatCompactNumber(Math.max(0, ...performance.points.map(p => p.concurrencyPeak))) }, { label: '统计口径', value: '请求开始至终结' }, { label: '平均并发', value: '按持续时间加权' }]
+  }
   if (activeView.value === 'throughput') {
     return [
       { label: 'P10', value: formatThroughput(performance.outputThroughputP10) },
@@ -153,7 +159,7 @@ const chartOption = computed<EChartsOption>(() => {
       outerBoundsMode: 'same',
       outerBoundsContain: 'axisLabel',
     },
-    legend: usageLegend(theme, [...seriesLabels.value]),
+    legend: usageLegend(theme, seriesLabels.value.filter(Boolean)),
     tooltip: usageTooltip(theme, formatTooltip),
     xAxis: usageCategoryAxis(
       points.map(({ point }) => point.label),
@@ -170,15 +176,19 @@ const chartOption = computed<EChartsOption>(() => {
         ]
       : usageValueAxis(
           theme,
-          activeView.value === 'throughput'
-            ? value => `${formatCompactNumber(value)}/s`
-            : formatDurationAxis,
+          activeView.value === 'concurrency'
+            ? value => formatCompactNumber(value)
+            : activeView.value === 'throughput'
+              ? value => `${formatCompactNumber(value)}/s`
+              : formatDurationAxis,
         ),
-    series,
+    series: activeView.value === 'concurrency' ? series.filter(s => s.name) : series,
   }
 })
 
 function seriesValue(point: PerformancePoint, position: 'first' | 'second' | 'third') {
+  if (activeView.value === 'concurrency')
+    return position === 'first' ? point.concurrencyAverage : position === 'second' ? point.concurrencyPeak : null
   if (activeView.value === 'throughput') {
     if (position === 'first')
       return point.outputThroughputP10
@@ -216,15 +226,21 @@ function formatTooltip(params: unknown) {
       formatSeriesValue(selected.second, 'second'),
       theme.warning,
     ),
-    usageTooltipItem(
-      seriesLabels.value[2],
-      formatSeriesValue(selected.third, 'third'),
-      activeView.value === 'scheduling' ? theme.success : theme.danger,
-    ),
+    ...(activeView.value === 'concurrency'
+      ? []
+      : [
+          usageTooltipItem(
+            seriesLabels.value[2],
+            formatSeriesValue(selected.third, 'third'),
+            activeView.value === 'scheduling' ? theme.success : theme.danger,
+          ),
+        ]),
   ])
 }
 
 function formatSeriesValue(value: number | null, position: 'first' | 'second' | 'third') {
+  if (activeView.value === 'concurrency')
+    return value == null ? '—' : formatCompactNumber(value)
   if (activeView.value === 'throughput')
     return formatThroughput(value)
   if (activeView.value === 'scheduling' && position === 'third')
@@ -241,11 +257,11 @@ function formatThroughput(value: number | null) {
   <BaseCard
     as="article"
     title="响应速度"
-    description="延迟、吞吐与调度分位"
+    description="延迟、吞吐、调度与请求并发"
     class="min-h-90 xl:h-full"
   >
     <template #actions>
-      <BaseSegmented v-model="activeView" label="性能指标" :options="viewOptions" :disabled="loading" class="w-68" />
+      <BaseSegmented v-model="activeView" label="性能指标" :options="viewOptions" :disabled="loading" class="w-80" />
     </template>
 
     <template #body>

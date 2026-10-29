@@ -29,7 +29,7 @@ use super::{
         WebSocketPoolConnectLease, WebSocketPoolConnectOutcome, WebSocketPoolDecision,
         WebSocketPoolLease,
     },
-    pump::{PumpKeepalive, PumpLogContext, PumpedWebSocket, transport_metric_reason},
+    pump::{PumpLogContext, PumpedWebSocket, transport_metric_reason},
 };
 
 pub(crate) const WEBSOCKET_FAST_PATH_BUDGET: Duration = Duration::from_millis(800);
@@ -111,7 +111,11 @@ impl PreparedWebSocket {
 /// 只建立或租用 WebSocket，不发送 payload。
 pub(crate) async fn prepare_response_create_request_with_pool(
     request: &CodexWebSocketRequest,
-    pool: Option<(&CodexWebSocketPool, Option<CodexWebSocketPoolKey>)>,
+    pool: Option<(
+        &CodexWebSocketPool,
+        Option<CodexWebSocketPoolKey>,
+        Option<&gateway_core::lifecycle::CancellationToken>,
+    )>,
     breaker: &WebSocketOriginBreaker,
     origin_key: &str,
     fast_path_budget: Option<Duration>,
@@ -119,7 +123,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
     fallback_stream_idle_timeout: Option<Duration>,
 ) -> Result<WebSocketFastPath<PreparedWebSocket>, CodexWebSocketExchangeError> {
     let decision_started_at = Instant::now();
-    let Some((pool, Some(key))) = pool else {
+    let Some((pool, Some(key), downstream_cancellation)) = pool else {
         if require_pool || !request.continuation().permits_fresh_connection() {
             return Err(continuation_unavailable(
                 PreviousResponseUnavailableReason::PoolUnavailable,
@@ -132,7 +136,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
             fast_path_budget,
             fallback_stream_idle_timeout,
             decision_started_at,
-            pool.map(|(pool, _)| pool),
+            pool.map(|(pool, _, _)| pool),
         )
         .await;
     };
@@ -150,6 +154,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
             &key,
             required_response_id,
             request.connection().outbound_proxy.as_ref(),
+            downstream_cancellation,
         )
         .await
     {
@@ -236,7 +241,6 @@ async fn prepare_unpooled_websocket(
     let context = pump_log_context_from_connection(request.connection());
     let connected = connect_with_budget(
         request.connection(),
-        PumpKeepalive::disabled(),
         fast_path_budget,
         context,
         proxy_permit,
@@ -342,7 +346,6 @@ fn start_pooled_websocket_connect(
     let task_key = connect_lease.key().clone();
     let started_at = connect_lease.started_at();
     let cancellation = connect_lease.cancellation_token();
-    let keepalive = pool.keepalive();
     let context = PumpLogContext::new(
         Some(task_key.account_id().to_owned()),
         Some(task_key.conversation_id_hash()),
@@ -364,7 +367,7 @@ fn start_pooled_websocket_connect(
                 );
                 return;
             }
-            result = connect_websocket_connection(&connection, keepalive, context, fast_path, proxy_permit) => result,
+            result = connect_websocket_connection(&connection, context, fast_path, proxy_permit) => result,
         };
         match finish_breaker_attempt(permit, connected) {
             Ok((connection, connect_elapsed)) => {
@@ -464,7 +467,6 @@ fn pump_log_context_from_connection(connection: &CodexWebSocketConnection) -> Pu
 
 async fn connect_with_budget(
     connection: &CodexWebSocketConnection,
-    keepalive: PumpKeepalive,
     fast_path_budget: Option<Duration>,
     context: PumpLogContext,
     proxy_permit: Option<pool::ProxyConnectionPermit>,
@@ -474,7 +476,6 @@ async fn connect_with_budget(
         fast_path_budget,
         connect_websocket_connection(
             connection,
-            keepalive,
             context,
             fast_path_budget.is_some(),
             proxy_permit,
@@ -489,14 +490,13 @@ async fn connect_with_budget(
 
 async fn connect_websocket_connection(
     connection: &CodexWebSocketConnection,
-    keepalive: PumpKeepalive,
     context: PumpLogContext,
     fast_path: bool,
     proxy_permit: Option<pool::ProxyConnectionPermit>,
 ) -> Result<(PooledWebSocketConnection, Duration), CodexWebSocketExchangeError> {
     let started_at = Instant::now();
     let (websocket, response) =
-        connect_pumped_websocket(connection, keepalive, context, fast_path, proxy_permit).await?;
+        connect_pumped_websocket(connection, context, fast_path, proxy_permit).await?;
     Ok((
         PooledWebSocketConnection {
             websocket,

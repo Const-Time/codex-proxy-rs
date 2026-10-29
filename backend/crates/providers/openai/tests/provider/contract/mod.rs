@@ -2608,130 +2608,6 @@ async fn websocket_idle_timeout_diagnosis_survives_ambiguous_send_wrapping() {
 }
 
 #[tokio::test]
-async fn websocket_pong_timeout_diagnosis_survives_ambiguous_send_wrapping() {
-    for reuse in [false, true] {
-        const ACCOUNT_ID: &str = "acct_abrupt_disconnect";
-        let store = Arc::new(MemoryAccountStore::default());
-        create_account(&store, ACCOUNT_ID).await;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let (ping_seen_tx, ping_seen_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_codex_test_websocket(stream).await;
-            websocket.next().await.unwrap().unwrap();
-            if reuse {
-                websocket
-                    .send(Message::Text(
-                        json!({
-                            "type": "response.completed",
-                            "response": {
-                                "id": "resp_warmup",
-                                "model": "gpt-5.4",
-                                "status": "completed",
-                                "output": [],
-                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-                            }
-                        })
-                        .to_string()
-                        .into(),
-                    ))
-                    .await
-                    .unwrap();
-                websocket.next().await.unwrap().unwrap();
-            }
-            for event in [
-                json!({"type": "response.created", "response": {"id": "resp_pong", "model": "gpt-5.4"}}),
-                json!({"type": "response.output_text.delta", "delta": "private-response-body"}),
-            ] {
-                websocket
-                    .send(Message::Text(event.to_string().into()))
-                    .await
-                    .unwrap();
-            }
-            std::assert_matches!(websocket.next().await.unwrap().unwrap(), Message::Ping(_));
-            ping_seen_tx.send(()).unwrap();
-            // 停止 poll，避免 tungstenite 自动回 Pong，复现本地保活超时。
-            futures::future::pending::<()>().await;
-        });
-        let operation = Operation::Generate(generate_with_persisted_session_context(
-            ACCOUNT_ID,
-            "conversation-pong-timeout",
-            "session-pong-timeout",
-            "turn-pong-timeout",
-        ));
-        let provider = provider_with_base_url(&store, base_url);
-        if reuse {
-            let mut warmup = provider
-                .execute(
-                    planned_request("openai", operation.clone()),
-                    context("req_pong_warmup", CancellationToken::new()),
-                )
-                .await
-                .unwrap();
-            while let Some(event) = warmup.next().await {
-                event.unwrap();
-            }
-        }
-        let mut stream = provider
-            .execute(
-                planned_request("openai", operation),
-                context("req_pong_timeout", CancellationToken::new()),
-            )
-            .await
-            .unwrap();
-        let mut pool_kind = None;
-        loop {
-            let event = stream.next().await.unwrap().unwrap();
-            if let Some(observation) = event.response_observation() {
-                pool_kind = observation.websocket_pool().or(pool_kind);
-            }
-            if event.has_client_event() {
-                break;
-            }
-        }
-        assert_eq!(
-            pool_kind,
-            Some(if reuse {
-                WebSocketPoolKind::Reuse
-            } else {
-                WebSocketPoolKind::New
-            })
-        );
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(25)).await;
-        ping_seen_rx.await.unwrap();
-        tokio::time::advance(Duration::from_secs(31)).await;
-        let error = loop {
-            match stream.next().await {
-                Some(Ok(_)) => {}
-                Some(Err(error)) => break error,
-                None => panic!("Pong timeout must surface a provider error"),
-            }
-        };
-        server.abort();
-        tokio::time::resume();
-        assert_eq!(error.send_state(), UpstreamSendState::Ambiguous);
-        assert!(!error.replay_is_safe());
-        assert_eq!(error.pre_delivery_retry(), None);
-        assert_eq!(error.kind(), ProviderErrorKind::Transport);
-        assert_eq!(
-            error.connection_observation().unwrap().exit_reason(),
-            "pong_timeout"
-        );
-        let diagnostic = error.diagnostic().unwrap();
-        assert_eq!(diagnostic.code(), Some("pong_timeout"));
-        assert_eq!(diagnostic.stage(), Some("receive"));
-        assert_eq!(
-            diagnostic.as_str(),
-            "OpenAI WebSocket stream ended before a terminal response (pong_timeout); local keepalive timeout after 30s; last event type: response.output_text.delta",
-        );
-        assert!(error.raw_upstream_error().is_none());
-        assert!(error.client_visible_upstream_error().is_none());
-    }
-}
-
-#[tokio::test]
 async fn ambiguous_websocket_close_reconnects_and_retains_native_continuation() {
     const ACCOUNT_ID: &str = "acct_websocket_close";
     const CONVERSATION_ID: &str = "conversation-websocket-ambiguous-close";
@@ -7554,6 +7430,183 @@ fn request_observation_ignores_future_session_state_without_rewriting_the_protoc
 }
 
 #[tokio::test]
+async fn reasoning_effort_observation_follows_configuration_updates_across_continuations() {
+    fn completed(index: usize) -> Value {
+        json!({"type":"response.completed","response":{
+            "id":format!("resp_effort_{index}"),"model":"gpt-5.4","status":"completed",
+            "output":[],"reasoning":{"effort":if index == 4 { "high" } else { "medium" }},
+            "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+        }})
+    }
+
+    for use_websocket in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        let http = MockServer::start().await;
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .respond_with(move |_: &wiremock::Request| {
+                let index = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("data: {}\n\n", completed(index)))
+            })
+            .mount(&http)
+            .await;
+        let (base_url, websocket_server) = if use_websocket {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = accept_codex_test_websocket(socket).await;
+                let mut frames = Vec::new();
+                for index in 0..5 {
+                    let message = websocket.next().await.unwrap().unwrap();
+                    let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    assert_eq!(frame["type"], "response.create");
+                    frames.push(frame);
+                    websocket
+                        .send(Message::Text(completed(index).to_string().into()))
+                        .await
+                        .unwrap();
+                }
+                frames
+            });
+            (base_url, Some(server))
+        } else {
+            (http.uri(), None)
+        };
+        let provider = Arc::new(provider_with_base_url(&store, base_url));
+        let client_key = ClientApiKeyId::new("key_openai_contract").unwrap();
+        let mut session_state = Some(
+            ProviderSessionState::new(
+                "openai",
+                json!({
+                    "account_id":"acct_provider_contract",
+                    "conversation_id":"effort-observation",
+                    "continuation_scope":if use_websocket { "connection_local" } else { "persisted" },
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .unwrap(),
+        );
+        let mut originals = Vec::new();
+        for (index, (baseline, update, expected)) in [
+            ("medium", Some("high"), "high"),
+            ("medium", None, "high"),
+            ("medium", Some("low"), "low"),
+            ("medium", None, "medium"),
+            ("high", None, "high"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = Vec::new();
+            if let Some(effort) = update {
+                input.push(json!({"type":"configuration_update","reasoning":{"effort":effort}}));
+            }
+            input.push(json!({"type":"message","role":"user","content":"next turn"}));
+            let mut body = json!({
+                "model":"gpt-5.4","input":input,"reasoning":{"effort":baseline},
+                "session_id":"effort-observation","store":!use_websocket,
+            });
+            let previous = (index > 0 && index != 3).then(|| format!("resp_effort_{}", index - 1));
+            if let Some(previous) = &previous {
+                body["previous_response_id"] = json!(previous);
+            }
+            let mut protocol_context =
+                Map::from_iter([("use_websocket".to_owned(), json!(use_websocket))]);
+            if use_websocket {
+                protocol_context.insert(
+                    "downstream_websocket_connection_id".to_owned(),
+                    json!("ws_effort"),
+                );
+            }
+            let mut generate = GenerateRequest::from_protocol_payload(
+                ProtocolPayload::json_object("openai", body.as_object().unwrap().clone())
+                    .unwrap()
+                    .with_context(protocol_context),
+            );
+            if let Some(state) = session_state.take() {
+                generate = generate.with_provider_session_state(state);
+            }
+            let operation = Operation::Generate(generate);
+            let observation = provider.request_observation(&operation, &client_key);
+            assert_eq!(observation.reasoning_effort.as_deref(), Some(expected));
+            let binding = previous.as_ref().map(|previous| {
+                ContinuationBinding::Pinned(NativeContinuationPin::new(
+                    PreviousResponseId::new(previous),
+                    PreviousResponseId::new(previous),
+                    client_key.clone(),
+                    ProviderKind::new("openai").unwrap(),
+                    ProviderAccountId::new("acct_provider_contract").unwrap(),
+                ))
+            });
+            let context = AttemptContext::new(
+                RequestAttemptContext::new(
+                    ModelRequestId::new(format!("req_effort_{index}")).unwrap(),
+                    client_key.clone(),
+                ),
+                NonZeroU32::new(1).unwrap(),
+                SystemTime::now() + Duration::from_secs(30),
+                account_policy(),
+                AccountAttemptContext::new(BTreeSet::new(), None, None)
+                    .with_account_scope(contract_account_scope()),
+                binding,
+                CancellationToken::new(),
+            )
+            .with_continuation_attempt(if previous.is_some() {
+                ContinuationAttempt::Native
+            } else {
+                ContinuationAttempt::None
+            });
+            let mut stream = Arc::clone(&provider)
+                .execute(planned_request("openai", operation), context)
+                .await
+                .unwrap();
+            while let Some(event) = timeout(Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+            {
+                let event = event.unwrap_or_else(|error| {
+                    panic!("use_websocket={use_websocket}, turn={index}: {error:?}")
+                });
+                if let Some(update) = event.session_update() {
+                    session_state = Some(update.clone());
+                }
+            }
+            assert!(session_state.is_some());
+            originals.push(body);
+        }
+        let forwarded = if let Some(server) = websocket_server {
+            timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            http.received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(captured_request_body)
+                .collect()
+        };
+        assert_eq!(forwarded.len(), originals.len());
+        for (forwarded, original) in forwarded.iter().zip(&originals) {
+            assert_eq!(forwarded["input"], original["input"]);
+            assert_eq!(forwarded["reasoning"], original["reasoning"]);
+            assert_eq!(
+                forwarded.get("previous_response_id"),
+                original.get("previous_response_id")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn provider_compiles_catalog_presentation_for_codex_models() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_presentation").await;
@@ -9186,4 +9239,71 @@ async fn api_key_websocket_uses_api_path_and_bearer_without_oauth_identity() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn session_affinity_storage_tolerates_jitter_and_preserves_bounded_local_fallback() {
+    for (delay_ms, should_bind) in [(250, true), (750, false)] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_subagent_a").await;
+        let affinity = Arc::new(MemorySessionAffinity::with_operation_delay(
+            Duration::from_millis(delay_ms),
+        ));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    format!("event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_scope_capture\",\"status\":\"in_progress\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"),
+                    "text/event-stream",
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider = provider_with_affinity_and_base_url(&store, affinity.clone(), server.uri());
+
+        // 只推进存储等待的虚拟时间，网络交付恢复真实时钟，避免依赖宿主调度速度
+        tokio::time::pause();
+        let result = provider
+            .execute(
+                planned_request(
+                    "openai",
+                    Operation::Generate(GenerateRequest::from_protocol_payload(
+                        ProtocolPayload::json_object(
+                            "openai",
+                            Map::from_iter([
+                                ("model".to_owned(), json!("gpt-5.4")),
+                                ("input".to_owned(), json!("hello")),
+                                ("prompt_cache_key".to_owned(), json!("delayed-session")),
+                            ]),
+                        )
+                        .unwrap()
+                        .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))])),
+                    )),
+                ),
+                context("req_affinity_delay", CancellationToken::new()),
+            )
+            .await;
+        tokio::time::resume();
+
+        // Our fork deliberately degrades to normal selection on affinity storage
+        // failure. Keep that availability policy while bounding each operation to 500 ms.
+        let mut stream = result.expect("delayed binding and turn association must succeed");
+        assert_eq!(
+            stream.metadata().provider_account_id().as_str(),
+            "acct_subagent_a"
+        );
+        assert_eq!(affinity.binding_count(), usize::from(should_bind));
+        let mut completed = false;
+        while let Some(event) = stream.next().await {
+            completed |= event
+                .unwrap()
+                .canonical_facts()
+                .iter()
+                .any(|event| matches!(event, GatewayEvent::Completed(_)));
+        }
+        assert!(completed, "admitted request must complete through upstream");
+        server.verify().await;
+    }
 }

@@ -402,7 +402,10 @@ fn transport_should_require_websocket_for_store_false_warmup() {
         TransportRequirement::ExplicitWebSocketWarmup
     );
     assert!(transport_requirement(&request).requires_websocket());
-    assert_eq!(request.semantics().request_kind.as_deref(), Some("prewarm"));
+    assert_eq!(
+        request.semantics(None).request_kind.as_deref(),
+        Some("prewarm")
+    );
 }
 
 #[test]
@@ -412,5 +415,8 @@ fn real_inference_cannot_claim_prewarm_to_escape_usage_accounting() {
         .unwrap()
         .clone();
     let request = CodexResponsesRequest::from_body(body);
-    assert_ne!(request.semantics().request_kind.as_deref(), Some("prewarm"));
+    assert_ne!(
+        request.semantics(None).request_kind.as_deref(),
+        Some("prewarm")
+    );
 }

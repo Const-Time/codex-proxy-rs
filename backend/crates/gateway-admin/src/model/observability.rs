@@ -400,6 +400,8 @@ impl CostCoverage {
 /// 请求级聚合指标。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestMetrics {
+    pub concurrency_avg_milli: u64,
+    pub concurrency_peak: u64,
     pub request_count: u64,
     pub success_count: u64,
     pub failure_count: u64,
@@ -1100,6 +1102,8 @@ pub struct UsageInsightsHealth {
 /// 洞察性能时间点。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageInsightsPerformancePoint {
+    pub concurrency_avg_milli: u64,
+    pub concurrency_peak: u64,
     pub bucket_start: DateTime<Utc>,
     pub latency_percentiles: LatencyPercentiles,
     pub first_token_latency_percentiles: LatencyPercentiles,

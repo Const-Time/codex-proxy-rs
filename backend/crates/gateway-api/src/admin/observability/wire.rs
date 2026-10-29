@@ -621,6 +621,8 @@ pub struct OverviewHealthView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverviewPerformancePointView {
+    pub concurrency_average: f64,
+    pub concurrency_peak: u64,
     pub bucket: DateTime<Utc>,
     pub label: String,
     pub latency_p50_ms: Option<f64>,
