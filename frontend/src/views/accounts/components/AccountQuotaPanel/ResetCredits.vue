@@ -11,6 +11,7 @@ import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import { useAccountResetCredits } from '../../composables/useAccountResetCredits'
 import AccountQuotaCredits from './Credits.vue'
+import ResetCreditAutomation from './ResetCreditAutomation.vue'
 import UsageLimits from './UsageLimits.vue'
 
 const props = defineProps<{
@@ -148,6 +149,7 @@ function handleRequestConsume(creditId: string) {
     </div>
 
     <div v-else class="grid gap-4">
+      <ResetCreditAutomation :key="account.id" :account-id="account.id" />
       <UsageLimits :windows="account.quota.windows" />
       <AccountQuotaCredits :credits="account.quota.credits" />
 

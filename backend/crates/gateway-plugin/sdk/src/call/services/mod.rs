@@ -1,6 +1,7 @@
 //! 公开服务的类型化操作合同；名称用于分派，不承担授权
 
 pub mod local_settings_v1;
+pub mod local_settings_v2;
 pub mod settings;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};

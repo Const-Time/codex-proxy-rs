@@ -575,3 +575,11 @@ observer 也按常规计划执行；它不是插件执行期间的嵌套 `host.m
 `frontend_auth.identifier` 返回稳定认证器标识；`frontend_auth.authenticate` 接收敏感的 Authorization 载荷并返回
 外部 principal。插件不能指定 Client Key，宿主根据当前入口配置完成映射，并继续检查 Key 的启用状态、模型规则、
 账号组、并发和预算。该能力只处理数据面身份，不接管管理端登录
+
+
+### 重置卡设置服务版本
+
+`local.settings.v1.load/replace` 保持原有字段合同，旧插件写入不会改变自动重置卡条件。
+新增 `local.settings.v2.load/replace`（SDK `local_settings_v2`）支持 `reset_credit_lead_minutes` 和
+`reset_credit_max_weekly_remaining_percent`；省略字段保留原值，显式 null 清除周额度条件。
+SDK v2 将既有字段放在 `base` 成员，JSON 中仍为同层字段。管理设置页面使用 v2；定价服务仍使用 v1，RPC v7 不变。

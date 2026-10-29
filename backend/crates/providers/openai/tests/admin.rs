@@ -320,7 +320,7 @@ async fn reset_credit_explicit_http_rejection_should_preserve_the_raw_body() {
     Mock::given(method("POST"))
         .and(path("/api/codex/rate-limit-reset-credits/consume"))
         .respond_with(ResponseTemplate::new(409).set_body_raw(
-            r#"{"code":"nothing_to_reset","detail":"window is fresh"}"#,
+            r#"{"code":"other_rejection","detail":"window is fresh"}"#,
             "application/json",
         ))
         .expect(1)
@@ -338,12 +338,35 @@ async fn reset_credit_explicit_http_rejection_should_preserve_the_raw_body() {
     assert_eq!(
         error.message(),
         Some(
-            r#"OpenAI reset-credit upstream returned HTTP 409: {"code":"nothing_to_reset","detail":"window is fresh"}"#
+            r#"OpenAI reset-credit upstream returned HTTP 409: {"code":"other_rejection","detail":"window is fresh"}"#
         )
     );
     let debug = format!("{error:?}");
     assert!(debug.contains("<redacted>"));
     assert!(!debug.contains("window is fresh"));
+}
+
+#[tokio::test]
+async fn reset_credit_explicit_nothing_to_reset_is_a_confirmed_non_consumption() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .respond_with(ResponseTemplate::new(409).set_body_raw(
+            r#"{"code":"nothing_to_reset","detail":"window is fresh"}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (bundle, account_id, _config) = reset_credit_admin(&server).await;
+
+    let result = bundle
+        .admin_provider()
+        .consume_reset_credit(reset_credit_command(account_id))
+        .await
+        .unwrap();
+    assert_eq!(result.code, "nothing_to_reset");
+    assert!(result.credit.is_none());
 }
 
 #[tokio::test]

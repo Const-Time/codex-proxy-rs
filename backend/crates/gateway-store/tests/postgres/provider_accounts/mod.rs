@@ -1,3 +1,4 @@
+mod reset_credit_automation;
 use std::{
     collections::BTreeMap,
     num::NonZeroU32,

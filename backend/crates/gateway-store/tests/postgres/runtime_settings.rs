@@ -8,7 +8,7 @@ use gateway_store::postgres::{
 
 use super::TestDatabase;
 
-fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
+pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
     RuntimeSettingsUpdate {
         admin_api_key: None,
         refresh_margin_seconds,
@@ -24,6 +24,8 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
         min_codex_cli_version: None,
         usage_retention_days: 31,
         ops_event_retention_days: 30,
+        reset_credit_lead_minutes: None,
+        reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: None,
         audit_retention_days: 90,
     }

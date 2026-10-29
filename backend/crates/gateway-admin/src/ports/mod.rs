@@ -9,3 +9,5 @@ pub mod proxy;
 pub mod store;
 pub mod system;
 pub mod turn_state;
+
+pub mod reset_credit_automation;

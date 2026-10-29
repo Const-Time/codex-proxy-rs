@@ -4,6 +4,7 @@ use crate::model::provider_credentials::ProviderQuotaReadRequest;
 use std::{collections::BTreeMap, sync::Arc};
 
 mod forecast;
+mod reset_credit_automation;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -105,6 +106,29 @@ pub trait AccountsService: Send + Sync {
         _account_id: &ProviderAccountId,
     ) -> Result<ProviderProfileAvatar, AdminError> {
         Err(AdminError::invalid("当前 Provider 不支持账号头像"))
+    }
+
+    async fn reset_credit_automation_status(
+        &self,
+        _account_id: ProviderAccountId,
+    ) -> Result<crate::model::reset_credit_automation::ResetCreditAutomationStatus, AdminError>
+    {
+        Err(AdminError::invalid("账号不支持自动重置卡"))
+    }
+    async fn set_reset_credit_automation(
+        &self,
+        _context: &MutationContext,
+        _account_id: ProviderAccountId,
+        _enabled: bool,
+    ) -> Result<crate::model::reset_credit_automation::ResetCreditAutomationStatus, AdminError>
+    {
+        Err(AdminError::invalid("账号不支持自动重置卡"))
+    }
+    async fn reconcile_reset_credit_automation(
+        &self,
+        _account_id: ProviderAccountId,
+    ) -> Result<(), AdminError> {
+        Err(AdminError::invalid("账号不支持自动重置卡"))
     }
 
     async fn reset_credits(
@@ -850,27 +874,48 @@ impl AccountsService for DefaultAccountsService {
             .map_err(|error| map_provider_error(error, "provider profile avatar"))
     }
 
+    async fn reset_credit_automation_status(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<crate::model::reset_credit_automation::ResetCreditAutomationStatus, AdminError>
+    {
+        self.automation_status(&account_id).await
+    }
+    async fn set_reset_credit_automation(
+        &self,
+        context: &MutationContext,
+        account_id: ProviderAccountId,
+        enabled: bool,
+    ) -> Result<crate::model::reset_credit_automation::ResetCreditAutomationStatus, AdminError>
+    {
+        self.configure_automation(context, &account_id, enabled)
+            .await
+    }
+    async fn reconcile_reset_credit_automation(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<(), AdminError> {
+        self.reconcile_automation(&account_id).await
+    }
+
     async fn reset_credits(
         &self,
         context: &MutationContext,
         account_id: ProviderAccountId,
     ) -> Result<ProviderResetCredits, AdminError> {
-        let (_, provider) = self.provider_for_account(&account_id).await?;
-        match provider.reset_credits(&account_id).await {
-            Ok(credits) => Ok(credits),
-            Err(error)
-                if error.kind()
-                    == crate::ports::provider::ProviderAdminErrorKind::CredentialRefreshRequired =>
-            {
-                self.refresh(context, account_id.clone()).await?;
-                let (_, provider) = self.provider_for_account(&account_id).await?;
-                provider
-                    .reset_credits(&account_id)
-                    .await
-                    .map_err(map_reset_credits_error_after_refresh)
-            }
-            Err(error) => Err(map_provider_error(error, "provider reset credits")),
+        let lock = self.reset_credit_lock(&account_id).await;
+        let _guard = lock.lock().await;
+        let credits = self
+            .reset_credits_upstream(context, account_id.clone())
+            .await?;
+        if let Err(error) = self.remember_reset_credits(&account_id, &credits).await {
+            tracing::warn!(
+                account_id = account_id.as_str(),
+                error_kind = ?error.kind(),
+                "保存重置卡计划失败"
+            );
         }
+        Ok(credits)
     }
 
     async fn consume_reset_credit(
@@ -883,34 +928,24 @@ impl AccountsService for DefaultAccountsService {
         // 之间插入另一笔不可逆消费。
         let lock = self.reset_credit_lock(&account_id).await;
         let _guard = lock.lock().await;
-        let (_, provider) = self.provider_for_account(&account_id).await?;
-        let event_id = command.redeem_request_id.to_string();
-        let result = match provider.consume_reset_credit(command.clone()).await {
-            Ok(result) => Ok(result),
-            Err(error)
-                if error.kind()
-                    == crate::ports::provider::ProviderAdminErrorKind::CredentialRefreshRequired =>
-            {
-                self.refresh(context, account_id.clone()).await?;
-                let (_, provider) = self.provider_for_account(&account_id).await?;
-                provider
-                    .consume_reset_credit(command)
-                    .await
-                    .map_err(map_reset_credits_error_after_refresh)
-            }
-            Err(error) => Err(map_provider_error(error, "provider reset-credit consume")),
-        }?;
-        if matches!(result.code.as_str(), "reset" | "alreadyRedeemed") {
-            let event_id = result
-                .credit
-                .as_ref()
-                .map_or(event_id, |credit| format!("credit:{}", credit.id));
-            self.accounts
-                .reset_account_subscriptions(account_id.as_str(), &event_id)
-                .await
-                .map_err(|e| map_store_error(e, "subscription reset"))?;
+        if self
+            .accounts
+            .reset_credit_automation(command.account_id.as_str())
+            .await
+            .map_err(|e| map_store_error(e, "reset-credit automation"))?
+            .is_some_and(|record| {
+                record
+                    .state
+                    .pending
+                    .is_some_and(|pending| pending.credit.expires_at > Utc::now())
+            })
+        {
+            return Err(AdminError::new(
+                crate::model::AdminErrorKind::Conflict,
+                "自动重置结果待确认，请稍后刷新",
+            ));
         }
-        Ok(result)
+        self.consume_reset_credit_upstream(context, command).await
     }
 
     async fn models(

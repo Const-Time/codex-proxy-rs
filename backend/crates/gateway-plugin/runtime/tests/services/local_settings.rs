@@ -94,12 +94,17 @@ async fn typed_local_services_preserve_native_settings_pricing_audit_and_source_
         .await
         .unwrap()
         .unwrap();
+    sqlx::query("update runtime_settings set reset_credit_lead_minutes=25, reset_credit_max_weekly_remaining_percent=40 where id=1").execute(&env.pool).await.unwrap();
     let before = revision(&env).await;
     env.published.lock().unwrap().clear();
     let forged = json!({"actor":{"admin_session":{"admin_user_id":"forged-admin"}},"request_id":"forged-request"});
 
     let loaded = success(&api, &cookie, id, "load", Value::Null).await;
     assert_eq!(loaded["config_revision"], before);
+    assert!(
+        loaded.get("reset_credit_lead_minutes").is_none(),
+        "v1 response stays frozen"
+    );
     let mut replacement = loaded.clone();
     replacement
         .as_object_mut()
@@ -120,6 +125,8 @@ async fn typed_local_services_preserve_native_settings_pricing_audit_and_source_
         .await
         .unwrap();
     assert!(!settings.subscription_auto_reset_enabled);
+    assert_eq!(settings.reset_credit_lead_minutes, 25);
+    assert_eq!(settings.reset_credit_max_weekly_remaining_percent, Some(40));
     assert_eq!(settings.request_interval_ms, 37);
     assert_eq!(
         settings
@@ -237,6 +244,30 @@ async fn typed_local_services_preserve_native_settings_pricing_audit_and_source_
             0
         );
     }
+    let v2 = success(&api, &cookie, id, "load_v2", Value::Null).await;
+    assert_eq!(v2["reset_credit_lead_minutes"], 25);
+    assert_eq!(v2["reset_credit_max_weekly_remaining_percent"], 40);
+    let mut update = v2;
+    update.as_object_mut().unwrap().remove("config_revision");
+    update.as_object_mut().unwrap().remove("updated_at");
+    update["reset_credit_lead_minutes"] = json!(35);
+    update["reset_credit_max_weekly_remaining_percent"] = Value::Null;
+    let saved = success(&api, &cookie, id, "replace_v2", json!([forged, update])).await;
+    assert_eq!(saved["reset_credit_lead_minutes"], 35);
+    assert_eq!(
+        saved["reset_credit_max_weekly_remaining_percent"],
+        Value::Null
+    );
+    let stored = env
+        .store
+        .admin_ports()
+        .settings()
+        .load_runtime_settings()
+        .await
+        .unwrap();
+    assert_eq!(stored.reset_credit_lead_minutes, 35);
+    assert_eq!(stored.reset_credit_max_weekly_remaining_percent, None);
+    assert!(!stored.subscription_auto_reset_enabled);
     api.close().await;
     drop(api);
     manager.shutdown().await;

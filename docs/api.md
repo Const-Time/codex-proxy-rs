@@ -634,8 +634,7 @@ OAuth start 使用：
 
 ### OpenAI 主动额度重置卡
 
-`GET /api/admin/accounts/reset-credits?accountId=...` 每次都查询 OpenAI 上游；后端不把卡片列表写入
-PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用，并在当前浏览器会话内缓存最近一次成功
+`GET /api/admin/accounts/reset-credits?accountId=...` 每次都查询 OpenAI 上游；启用自动使用后，仅将可用卡的 ID、到期时间和执行状态写入 PostgreSQL，真实库存仍以上游为准。管理端在用户打开弹窗或点击刷新时调用，并在当前浏览器会话内缓存最近一次成功
 结果，用于账号行上的 `xN` 提示。
 
 查询响应：
@@ -659,7 +658,7 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 结果自动创建新消费。
 
 若服务无法确认不可逆消费是否完成，返回 HTTP `502` / 业务码 `50202`；客户端应先刷新卡片与额度状态，
-并在确需重试时复用原 `redeemRequestId`。明确的上游 HTTP 拒绝仍使用 `50201`，不会误标为结果未知。
+并在确需重试时复用原 `redeemRequestId`。明确的上游 HTTP 拒绝仍使用 `50201`，不会误标为结果未知；明确的 HTTP 409 / `nothing_to_reset` 返回同名结果码，表示当前没有需要重置的额度。
 
 ```json
 {
@@ -671,6 +670,15 @@ PostgreSQL 或 Redis。管理端只在用户打开弹窗或点击刷新时调用
 
 消费响应只返回上游结果 `code` 和可选 `credit`。消费端确认成功后应重新 GET 卡片列表，并显式调用
 `POST /api/admin/accounts/quota/refresh` 回读官方额度；不得直接改写本地 `resetAt`。xAI 不支持该能力。
+
+### 临期自动使用重置卡
+
+- `GET /api/admin/accounts/reset-credits/automation?accountId=...` 读取计划；`POST` 同一路径提交 `{ accountId, enabled }`。仅 OpenAI OAuth 账号支持，按账号开启，默认关闭；停用账号不执行。
+- 全局设置 `resetCreditLeadMinutes` 默认 10，范围 1～1440；`resetCreditMaxWeeklyRemainingPercent` 默认 null（不限制），可设 0～100。旧客户端省略字段时保留原值，显式 null 清除周额度条件。
+- 首次开启一分钟内错峰查询，此后按服务端本地日历每天随机查询一次。已知可用卡在到期前的提前窗口内错峰使用；每次新消费前重新查卡，有周额度条件时还主动刷新账号级周额度。剩余高于上限或无法确认时不消费，短期、月度和模型专属额度不参与判断。
+- Worker 每 5 秒只扫描本地到期计划，单轮最多 100 个账号，复用刷新并发限制和分布式租约。请求前持久化卡 ID 与 UUIDv4；重启、超时、关闭后重新开启都保留未决幂等键，未决消费期间手动新消费返回 409。卡已过期则停止重试并记录结果未确认。
+- `nothing_to_reset` 保留卡片，30～60 秒后重新检查并使用新幂等键；结果未知时只复用原键。成功或已兑换后先保存结果，再回读额度。本地单账号订阅的重置仍遵循现有联动设置和幂等事件规则，多账号组、账本和正常请求计费保持原规则。
+- 修改全局条件会原子唤醒已启用计划并增加计划版本，保留未决消费。删除账号同时删除其计划。迁移 `0047_reset_credit_automation.sql` 只增加设置、计划列与到期索引，不修改已发布迁移。
 
 ## 6. 账号分组
 
@@ -1099,3 +1107,11 @@ Usage 列表和详情（含个人视图）返回 `requestedServiceTier` 与 `ups
 `POST /v1/chat/completions` 使用现有 API Key 鉴权，转换为 Responses 后经过原权限、路由、请求插件和账本链路；支持 JSON 和 SSE、文本/图像输入、函数工具、结构化输出及可表示的拒答。`stream_options.include_usage=true` 在成功终态后附加 usage；不支持的多候选、音频等字段在发出上游请求前返回 400。该入口不增加独立的账号或扣费配置。
 
 使用统计 `performance.points` 增加 `concurrencyAverage`、`concurrencyPeak`，其余字段保持兼容；统计口径为请求从开始到终结的重叠量，均值按持续时间加权，包含跨桶和跨查询起点的活动请求。
+
+
+### 重置卡设置服务版本
+
+`local.settings.v1.load/replace` 保持原有字段合同，旧插件写入不会改变自动重置卡条件。
+新增 `local.settings.v2.load/replace`（SDK `local_settings_v2`）支持 `reset_credit_lead_minutes` 和
+`reset_credit_max_weekly_remaining_percent`；省略字段保留原值，显式 null 清除周额度条件。
+SDK v2 将既有字段放在 `base` 成员，JSON 中仍为同层字段。管理设置页面使用 v2；定价服务仍使用 v1，RPC v7 不变。

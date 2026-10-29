@@ -13,7 +13,7 @@ use crate::postgres::ObservabilityQueryBudget;
 /// 三个 PostgreSQL adapter 都保持私有，调用方只能取得 [`AccountStore`] 暴露的领域能力。
 #[derive(Clone)]
 pub struct PgAdminAccountStore {
-    pool: PgPool,
+    pub(super) pool: PgPool,
     accounts: PgProviderAccountRepository,
     observability: PgObservabilityRepository,
     control_plane: PgControlPlaneRepository,

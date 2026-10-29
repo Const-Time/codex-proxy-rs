@@ -250,6 +250,11 @@ pub trait ProviderAdmin: Send + Sync {
     }
 
     /// 查询 Provider 主动额度重置卡；不支持该能力的 Provider 使用默认拒绝。
+    /// Whether this authentication method supports automatic reset-card consumption.
+    fn supports_reset_credit_automation(&self, _authentication_kind: &str) -> bool {
+        false
+    }
+
     async fn reset_credits(
         &self,
         _account_id: &ProviderAccountId,

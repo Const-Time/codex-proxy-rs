@@ -50,7 +50,7 @@ async fn model_access_migration_preserves_existing_accounts_and_defaults_to_unre
         .await
         .expect("upgrade to 20");
     let after: serde_json::Value = sqlx::query_scalar(
-        "select to_jsonb(a) - 'model_access_json' from provider_accounts a where id='acct_upgrade'",
+        "select to_jsonb(a) - 'model_access_json' - 'reset_credit_automation_json' - 'reset_credit_next_run_at' from provider_accounts a where id='acct_upgrade'",
     )
     .fetch_one(&db.pool)
     .await
@@ -58,6 +58,12 @@ async fn model_access_migration_preserves_existing_accounts_and_defaults_to_unre
     assert_eq!(
         before, after,
         "migration must not alter existing account facts"
+    );
+    let automation: (bool, bool) = sqlx::query_as("select reset_credit_automation_json is null, reset_credit_next_run_at is null from provider_accounts where id='acct_upgrade'").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        automation,
+        (true, true),
+        "upgrades never enable automatic consumption"
     );
     let policy: serde_json::Value = sqlx::query_scalar(
         "select model_access_json from provider_accounts where id='acct_upgrade'",

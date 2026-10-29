@@ -322,7 +322,14 @@ impl SettingsService for DefaultSettingsService {
 }
 
 fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError> {
-    let valid = command.model_mappings.len() <= 512
+    let valid = command
+        .reset_credit_lead_minutes
+        .is_none_or(|v| (1..=1440).contains(&v))
+        && command
+            .reset_credit_max_weekly_remaining_percent
+            .flatten()
+            .is_none_or(|v| v <= 100)
+        && command.model_mappings.len() <= 512
         && i64::try_from(command.refresh_margin_seconds).is_ok()
         && command.refresh_margin_seconds > 0
         && command.refresh_concurrency > 0

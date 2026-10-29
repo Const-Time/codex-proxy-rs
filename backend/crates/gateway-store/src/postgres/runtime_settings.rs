@@ -18,6 +18,8 @@ use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub reset_credit_lead_minutes: u32,
+    pub reset_credit_max_weekly_remaining_percent: Option<u32>,
     pub subscription_auto_reset_enabled: bool,
     pub config_revision: Revision,
     pub admin_api_key: Option<String>,
@@ -65,6 +67,8 @@ impl fmt::Debug for RuntimeSettings {
 
 #[derive(Clone)]
 pub struct RuntimeSettingsUpdate {
+    pub reset_credit_lead_minutes: Option<u32>,
+    pub reset_credit_max_weekly_remaining_percent: Option<Option<u32>>,
     pub subscription_auto_reset_enabled: Option<bool>,
     pub admin_api_key: Option<String>,
     pub refresh_margin_seconds: u64,
@@ -96,7 +100,14 @@ impl fmt::Debug for RuntimeSettingsUpdate {
 
 impl RuntimeSettingsUpdate {
     pub fn validate(&self) -> StoreResult<()> {
-        if self.refresh_margin_seconds == 0
+        if self
+            .reset_credit_lead_minutes
+            .is_some_and(|value| !(1..=1440).contains(&value))
+            || self
+                .reset_credit_max_weekly_remaining_percent
+                .flatten()
+                .is_some_and(|value| value > 100)
+            || self.refresh_margin_seconds == 0
             || self.refresh_concurrency == 0
             || self.max_concurrent_per_account == 0
             || self.usage_retention_days < 31
@@ -166,7 +177,7 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                     rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
-                    min_codex_cli_version, updated_at, subscription_auto_reset_enabled
+                    min_codex_cli_version, updated_at, subscription_auto_reset_enabled, jsonb_build_array(reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent)
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -225,7 +236,7 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                 rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
-                min_codex_cli_version, updated_at, subscription_auto_reset_enabled
+                min_codex_cli_version, updated_at, subscription_auto_reset_enabled, jsonb_build_array(reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent)
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -243,6 +254,8 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     update: &RuntimeSettingsUpdate,
 ) -> StoreResult<Revision> {
     update.validate()?;
+    let previous = sqlx::query_as::<_, (i32, Option<i32>)>("select reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent from runtime_settings where id = 1 for update")
+        .fetch_one(&mut **transaction).await.map_err(|_| postgres_unavailable("lock reset-credit policy"))?;
     let refresh_margin_seconds =
         i64::try_from(update.refresh_margin_seconds).map_err(|_| invalid_numeric())?;
     let next = sqlx::query_scalar::<_, i64>(
@@ -261,6 +274,8 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 min_codex_desktop_version = $11,
 	                 min_codex_cli_version = $12,
                      subscription_auto_reset_enabled = coalesce($13, subscription_auto_reset_enabled),
+                     reset_credit_lead_minutes = coalesce($14, reset_credit_lead_minutes),
+                     reset_credit_max_weekly_remaining_percent = case when $16 then $15 else reset_credit_max_weekly_remaining_percent end,
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -278,6 +293,9 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(update.min_codex_desktop_version.as_deref())
     .bind(update.min_codex_cli_version.as_deref())
     .bind(update.subscription_auto_reset_enabled)
+    .bind(update.reset_credit_lead_minutes.map(i64::from))
+    .bind(update.reset_credit_max_weekly_remaining_percent.flatten().map(i64::from))
+    .bind(update.reset_credit_max_weekly_remaining_percent.is_some())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -285,6 +303,16 @@ pub(crate) async fn update_runtime_settings_in_transaction(
         entity: "runtime settings",
         id: "1".to_owned(),
     })?;
+    if update
+        .reset_credit_lead_minutes
+        .is_some_and(|v| i64::from(v) != i64::from(previous.0))
+        || update
+            .reset_credit_max_weekly_remaining_percent
+            .is_some_and(|v| v.map(i64::from) != previous.1.map(i64::from))
+    {
+        sqlx::query("update provider_accounts set reset_credit_next_run_at = least(reset_credit_next_run_at, now()), reset_credit_automation_json = jsonb_set(reset_credit_automation_json, '{revision}', to_jsonb((reset_credit_automation_json ->> 'revision')::bigint + 1)) where reset_credit_automation_json ->> 'enabled' = 'true'")
+            .execute(&mut **transaction).await.map_err(|_| postgres_unavailable("reschedule reset-credit automation"))?;
+    }
     Revision::new(u64::try_from(next).map_err(|_| invalid_numeric())?)
 }
 
@@ -341,10 +369,13 @@ type RuntimeSettingsRow = (
     Option<String>,
     DateTime<Utc>,
     bool,
+    sqlx::types::Json<(u32, Option<u32>)>,
 );
 
 fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSettings> {
     Ok(RuntimeSettings {
+        reset_credit_lead_minutes: row.15.0.0,
+        reset_credit_max_weekly_remaining_percent: row.15.0.1,
         subscription_auto_reset_enabled: row.14,
         config_revision: Revision::new(to_u64(row.0)?)?,
         admin_api_key: row.1,

@@ -769,6 +769,10 @@ impl ProviderAdmin for OpenAiAdminProvider {
             .map_err(map_profile_avatar_error)
     }
 
+    fn supports_reset_credit_automation(&self, authentication_kind: &str) -> bool {
+        authentication_kind == crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+    }
+
     async fn reset_credits(
         &self,
         account_id: &ProviderAccountId,
@@ -797,18 +801,37 @@ impl ProviderAdmin for OpenAiAdminProvider {
         {
             return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
         }
-        self.quota
+        let outcome = self
+            .quota
             .consume_reset_credit(
                 &command.account_id,
                 command.credit_id.as_deref(),
                 command.redeem_request_id,
             )
-            .await
-            .map(|result| ProviderResetCreditResult {
+            .await;
+        match outcome {
+            Ok(result) => Ok(ProviderResetCreditResult {
                 code: result.code,
                 credit: result.credit.map(project_reset_credit),
-            })
-            .map_err(map_reset_credits_error)
+            }),
+            Err(CodexResetCreditsError::Upstream {
+                status: 409,
+                ref body,
+                ..
+            }) if serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .is_some_and(|value| {
+                    value.get("code").and_then(serde_json::Value::as_str)
+                        == Some("nothing_to_reset")
+                }) =>
+            {
+                Ok(ProviderResetCreditResult {
+                    code: "nothing_to_reset".into(),
+                    credit: None,
+                })
+            }
+            Err(error) => Err(map_reset_credits_error(error)),
+        }
     }
 
     async fn models(

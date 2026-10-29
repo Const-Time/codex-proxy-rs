@@ -1,3 +1,4 @@
+mod reset_credit_automation;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -59,9 +60,16 @@ use gateway_admin::{
 };
 use serde_json::{Map, json};
 
+use std::collections::BTreeMap;
 pub(super) type EventLog = Arc<Mutex<Vec<&'static str>>>;
 
 pub(super) struct FakeProviderAdmin {
+    reset_credits: Mutex<Vec<gateway_admin::model::provider_credentials::ProviderResetCredit>>,
+    reset_credit_query_failure: Mutex<Option<ProviderAdminErrorKind>>,
+    reset_credit_query_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    reset_credit_query_started: tokio::sync::Notify,
+    reset_credit_failure: Mutex<Option<ProviderAdminErrorKind>>,
+    reset_credit_result: Mutex<String>,
     kind: ProviderKind,
     events: EventLog,
     failure: Mutex<Option<ProviderAdminError>>,
@@ -80,6 +88,12 @@ pub(super) struct FakeProviderAdmin {
 impl FakeProviderAdmin {
     pub(super) fn new(kind: &str, events: EventLog) -> Arc<Self> {
         Arc::new(Self {
+            reset_credits: Mutex::default(),
+            reset_credit_query_failure: Mutex::default(),
+            reset_credit_query_gate: Mutex::default(),
+            reset_credit_query_started: tokio::sync::Notify::new(),
+            reset_credit_failure: Mutex::default(),
+            reset_credit_result: Mutex::new("reset".into()),
             kind: ProviderKind::new(kind).expect("provider kind"),
             events,
             failure: Mutex::new(None),
@@ -415,6 +429,34 @@ impl ProviderAdmin for FakeProviderAdmin {
         Ok(self.quota.lock().expect("provider quota").clone())
     }
 
+    fn supports_reset_credit_automation(&self, authentication_kind: &str) -> bool {
+        authentication_kind == "oauth"
+    }
+    async fn reset_credits(
+        &self,
+        _: &ProviderAccountId,
+    ) -> Result<gateway_admin::model::provider_credentials::ProviderResetCredits, ProviderAdminError>
+    {
+        self.record("provider.reset_credits");
+        if let Some(kind) = self.reset_credit_query_failure.lock().unwrap().take() {
+            return Err(ProviderAdminError::new(kind));
+        }
+        self.require_available()?;
+        self.reset_credit_query_started.notify_one();
+        let gate = self.reset_credit_query_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
+
+        let credits = self.reset_credits.lock().unwrap().clone();
+        Ok(
+            gateway_admin::model::provider_credentials::ProviderResetCredits {
+                available_count: credits.len() as u64,
+                credits,
+            },
+        )
+    }
+
     async fn consume_reset_credit(
         &self,
         command: ConsumeProviderResetCredit,
@@ -425,8 +467,11 @@ impl ProviderAdmin for FakeProviderAdmin {
             .expect("provider reset-credit commands")
             .push(command);
         self.require_available()?;
+        if let Some(kind) = self.reset_credit_failure.lock().unwrap().take() {
+            return Err(ProviderAdminError::new(kind));
+        }
         Ok(ProviderResetCreditResult {
-            code: "reset".to_owned(),
+            code: self.reset_credit_result.lock().unwrap().clone(),
             credit: None,
         })
     }
@@ -463,6 +508,10 @@ impl ProviderAdmin for FakeProviderAdmin {
 }
 
 pub(super) struct FakeAccountStore {
+    reset_events: Mutex<Vec<(String, String)>>,
+    automations: Mutex<
+        BTreeMap<String, gateway_admin::model::reset_credit_automation::ResetCreditAutomation>,
+    >,
     estimate_observations: Mutex<Vec<String>>,
     subscription_observations: Mutex<Vec<String>>,
     quota_notify: tokio::sync::Notify,
@@ -488,6 +537,8 @@ impl FakeAccountStore {
     fn with_account(account: AccountRecord, events: EventLog) -> Arc<Self> {
         Arc::new(Self {
             events,
+            automations: Mutex::default(),
+            reset_events: Mutex::default(),
             accounts: Mutex::new(vec![account]),
             estimate_observations: Mutex::new(Vec::new()),
             subscription_observations: Mutex::new(Vec::new()),
@@ -583,6 +634,18 @@ impl FakeAccountStore {
 
 #[async_trait]
 impl AccountStore for FakeAccountStore {
+    async fn reset_account_subscriptions(
+        &self,
+        account_id: &str,
+        event_id: &str,
+    ) -> AdminStoreResult<()> {
+        self.reset_events
+            .lock()
+            .unwrap()
+            .push((account_id.into(), event_id.into()));
+        Ok(())
+    }
+
     async fn load_quota_forecast_history(
         &self,
         window: &AccountUsageWindowQuery,
@@ -915,7 +978,10 @@ impl AccountStore for FakeAccountStore {
     }
 }
 
-struct StaticSettingsStore;
+#[derive(Default)]
+struct StaticSettingsStore {
+    reset_credit_max_weekly_remaining_percent: Option<u32>,
+}
 
 #[async_trait]
 impl SettingsStore for StaticSettingsStore {
@@ -956,6 +1022,9 @@ impl SettingsStore for StaticSettingsStore {
             min_codex_cli_version: None,
             usage_retention_days: 30,
             ops_event_retention_days: 30,
+            reset_credit_lead_minutes: 10,
+            reset_credit_max_weekly_remaining_percent: self
+                .reset_credit_max_weekly_remaining_percent,
             subscription_auto_reset_enabled: true,
             audit_retention_days: 30,
             updated_at: Utc::now(),
@@ -1536,7 +1605,7 @@ async fn accounts_batch_update_should_commit_once_and_notify_each_provider() {
     store.set_accounts(vec![openai_account, xai_account]);
     let services = super::AdminHarness::new()
         .accounts(store.clone())
-        .settings(Arc::new(StaticSettingsStore))
+        .settings(Arc::new(StaticSettingsStore::default()))
         .provider(openai)
         .provider(xai)
         .probe(Arc::new(SuccessfulAccountProbe))
@@ -1731,7 +1800,7 @@ async fn accounts_list_should_degrade_quota_failure_to_empty_window_without_drop
     store.set_accounts(vec![account_record("openai"), xai_account]);
     let services = super::AdminHarness::new()
         .accounts(store.clone())
-        .settings(Arc::new(StaticSettingsStore))
+        .settings(Arc::new(StaticSettingsStore::default()))
         .provider(openai)
         .provider(failing)
         .probe(Arc::new(SuccessfulAccountProbe))
@@ -2528,7 +2597,7 @@ async fn accounts_service_with_probe(
 ) -> AdminServices {
     super::AdminHarness::new()
         .accounts(store)
-        .settings(Arc::new(StaticSettingsStore))
+        .settings(Arc::new(StaticSettingsStore::default()))
         .provider(provider)
         .probe(probe)
         .build()
@@ -2661,7 +2730,7 @@ async fn accounts_background_worker_samples_without_a_page_or_extra_upstream_que
     *store.fail_subscription_for.lock().unwrap() = Some("acct_subscription_failure".to_owned());
     let mut bundle = super::AdminHarness::new()
         .accounts(store.clone())
-        .settings(Arc::new(StaticSettingsStore))
+        .settings(Arc::new(StaticSettingsStore::default()))
         .provider(provider.clone())
         .build_bundle()
         .await;
@@ -3143,4 +3212,54 @@ async fn plugin_facts_validate_inputs_before_querying_stores() {
         AdminErrorKind::Invalid
     );
     assert!(provider.quota_requests().is_empty());
+}
+
+#[async_trait]
+impl gateway_admin::ports::reset_credit_automation::ResetCreditAutomationStore
+    for FakeAccountStore
+{
+    async fn reset_credit_automation(
+        &self,
+        account_id: &str,
+    ) -> AdminStoreResult<
+        Option<gateway_admin::model::reset_credit_automation::ResetCreditAutomation>,
+    > {
+        Ok(self.automations.lock().unwrap().get(account_id).cloned())
+    }
+    async fn due_reset_credit_automations(
+        &self,
+        now: chrono::DateTime<Utc>,
+        limit: u32,
+    ) -> AdminStoreResult<Vec<String>> {
+        let records = self.automations.lock().unwrap();
+        let mut due = records
+            .values()
+            .filter(|r| r.enabled && r.next_run_at <= now)
+            .collect::<Vec<_>>();
+        due.sort_by_key(|r| r.next_run_at);
+        Ok(due
+            .into_iter()
+            .take(limit as usize)
+            .map(|r| r.account_id.clone())
+            .collect())
+    }
+    async fn save_reset_credit_automation(
+        &self,
+        record: &gateway_admin::model::reset_credit_automation::ResetCreditAutomation,
+        _: Option<&MutationContext>,
+    ) -> AdminStoreResult<u64> {
+        let mut records = self.automations.lock().unwrap();
+        if records.get(&record.account_id).map_or(0, |r| r.revision) != record.revision {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Conflict,
+                "automation",
+                "stale revision",
+            ));
+        }
+        let mut next = record.clone();
+        next.revision += 1;
+        let revision = next.revision;
+        records.insert(next.account_id.clone(), next);
+        Ok(revision)
+    }
 }

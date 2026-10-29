@@ -13,6 +13,8 @@ export function useSettingsForm() {
   const error = shallowRef('')
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
   const form = reactive({
+    resetCreditLeadMinutes: 10 as number | null,
+    resetCreditMaxWeeklyRemainingPercent: null as number | null,
     subscriptionAutoResetEnabled: true,
     refreshMarginSeconds: null as number | null,
     refreshConcurrency: null as number | null,
@@ -26,7 +28,7 @@ export function useSettingsForm() {
     auditRetentionDays: 90,
   })
 
-  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs') {
+  function numericModel(key: 'resetCreditLeadMinutes' | 'resetCreditMaxWeeklyRemainingPercent' | 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -40,6 +42,8 @@ export function useSettingsForm() {
     })
   }
 
+  const resetCreditLeadMinutesValue = numericModel('resetCreditLeadMinutes')
+  const resetCreditMaxWeeklyRemainingPercentValue = numericModel('resetCreditMaxWeeklyRemainingPercent')
   const refreshMarginSecondsValue = numericModel('refreshMarginSeconds')
   const refreshConcurrencyValue = numericModel('refreshConcurrency')
   const maxConcurrentPerAccountValue = numericModel('maxConcurrentPerAccount')
@@ -53,6 +57,8 @@ export function useSettingsForm() {
   }
 
   function applySettings(data: Awaited<ReturnType<typeof getSettings>>) {
+    form.resetCreditLeadMinutes = data.resetCreditLeadMinutes ?? 10
+    form.resetCreditMaxWeeklyRemainingPercent = data.resetCreditMaxWeeklyRemainingPercent ?? null
     form.subscriptionAutoResetEnabled = data.subscriptionAutoResetEnabled ?? true
     form.refreshMarginSeconds = data.refreshMarginSeconds
     form.refreshConcurrency = data.refreshConcurrency
@@ -125,6 +131,15 @@ export function useSettingsForm() {
       toast.warning('请完整填写运行参数和调度策略')
       return
     }
+    const { resetCreditLeadMinutes, resetCreditMaxWeeklyRemainingPercent } = form
+    if (resetCreditLeadMinutes === null || !Number.isInteger(resetCreditLeadMinutes) || resetCreditLeadMinutes < 1 || resetCreditLeadMinutes > 1440) {
+      toast.warning('提前使用时间必须是 1～1440 的整数')
+      return
+    }
+    if (resetCreditMaxWeeklyRemainingPercent !== null && (!Number.isInteger(resetCreditMaxWeeklyRemainingPercent) || resetCreditMaxWeeklyRemainingPercent < 0 || resetCreditMaxWeeklyRemainingPercent > 100)) {
+      toast.warning('剩余周额度上限必须是 0～100 的整数，或留空不限制')
+      return
+    }
     if (minCodexDesktopVersionError.value || minCodexCliVersionError.value) {
       toast.warning('请修正客户端最低版本格式')
       return
@@ -132,6 +147,8 @@ export function useSettingsForm() {
     try {
       saving.value = true
       const result = await updateSettings({
+        resetCreditLeadMinutes,
+        resetCreditMaxWeeklyRemainingPercent,
         modelMappings: mappingPayload(),
         refreshMarginSeconds,
         refreshConcurrency,
@@ -167,6 +184,8 @@ export function useSettingsForm() {
     addMapping,
     updateMapping,
     removeMapping,
+    resetCreditLeadMinutesValue,
+    resetCreditMaxWeeklyRemainingPercentValue,
     refreshMarginSecondsValue,
     refreshConcurrencyValue,
     maxConcurrentPerAccountValue,

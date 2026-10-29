@@ -55,7 +55,7 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
   并在 API 与 Provider 层被过滤。客户端 WebSocket 开关与上游传输策略相互独立。
 - OpenAI 账号支持 OAuth、AT/RT 和 OAuth JSON；xAI 只接受 OAuth session/账号 JSON，
   不接受 API Key。
-- 主动额度重置卡只由 OpenAI 上游持有。查询由用户显式触发，消费使用 UUIDv4 幂等键；不得写本地卡库存
+- 主动额度重置卡只由 OpenAI 上游持有。查询由用户显式触发或按账号启用的临期计划触发，默认关闭自动使用。消费使用持久 UUIDv4 幂等键；可保存卡 ID、到期时间和计划状态，不建立本地真实卡库存
   或直接改 quota reset 时间。
 - credential 与 quota 是独立事实；刷新 token 不等于刷新额度，quota 401/403 也不等于 RT 永久失效。
 - `0001_initial.sql` 建立基线，后续编号迁移继续演进；完整清单以 `.frozen-sha256` 为准。

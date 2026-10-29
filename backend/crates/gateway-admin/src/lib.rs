@@ -9,8 +9,8 @@ use gateway_core::{
     routing::ProviderKind,
     runtime::SnapshotControl,
     task::{
-        DaemonRestartPolicy, WorkerContribution, WorkerId, WorkerKind, WorkerRegistration,
-        WorkerRunnable,
+        DaemonRestartPolicy, WorkerContribution, WorkerId, WorkerKind, WorkerLeaseRequest,
+        WorkerRegistration, WorkerRunnable, WorkerSchedule,
     },
 };
 use secrecy::{ExposeSecret as _, SecretString};
@@ -21,6 +21,7 @@ pub mod model;
 pub mod plugins;
 pub mod ports;
 mod pricing_task;
+mod reset_credit_automation;
 mod subscription_task;
 mod use_case;
 
@@ -460,10 +461,37 @@ pub async fn initialize(
                     Duration::from_secs(60),
                 )
                 .map_err(|_| AdminError::internal("invalid subscription restart policy"))?,
-                task: Box::new(subscription_task::SubscriptionTask(accounts)),
+                task: Box::new(subscription_task::SubscriptionTask(accounts.clone())),
             },
         )
         .map_err(|_| AdminError::internal("invalid subscription worker"))?,
+    ));
+    let id = WorkerId::try_new(WorkerKind::ResetCreditAutomation, "admin")
+        .map_err(|_| AdminError::internal("重置卡 Worker ID 不合法"))?;
+    let schedule = WorkerSchedule::try_new(
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+        Duration::from_secs(90),
+        Duration::from_secs(30),
+    )
+    .map_err(|_| AdminError::internal("重置卡 Worker 调度配置不合法"))?;
+    let lease = WorkerLeaseRequest::try_new(id.clone(), Duration::from_secs(90))
+        .map_err(|_| AdminError::internal("重置卡 Worker 租约配置不合法"))?;
+    worker_contributions.push(WorkerContribution::Registration(
+        WorkerRegistration::try_new(
+            id,
+            WorkerRunnable::Scheduled {
+                schedule,
+                lease: Some(lease),
+                task: Box::new(reset_credit_automation::ResetCreditAutomationTask {
+                    accounts,
+                    store: store.accounts(),
+                    settings: store.settings(),
+                }),
+            },
+        )
+        .map_err(|_| AdminError::internal("重置卡 Worker 注册失败"))?,
     ));
     Ok(AdminBundle {
         services,

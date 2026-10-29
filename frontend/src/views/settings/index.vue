@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Save } from '@lucide/vue'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -12,6 +12,7 @@ import AdminApiKeyCard from './components/AdminApiKeyCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
 import ClientVersionSettings from './components/client-version/index.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
+import ResetCreditCard from './components/ResetCreditCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
 import { useAdminApiKey } from './composables/useAdminApiKey'
@@ -37,6 +38,8 @@ const {
   addMapping,
   updateMapping,
   removeMapping,
+  resetCreditLeadMinutesValue,
+  resetCreditMaxWeeklyRemainingPercentValue,
   refreshMarginSecondsValue,
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
@@ -73,6 +76,12 @@ watch(
   },
   { immediate: true },
 )
+watch([() => route.hash, loading, section], async ([hash, isLoading, currentSection]) => {
+  if (hash === '#reset-credits' && !isLoading && currentSection === 'runtime') {
+    await nextTick()
+    document.getElementById('reset-credits')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}, { immediate: true })
 </script>
 
 <template>
@@ -125,6 +134,8 @@ watch(
         v-model:request-interval-ms="requestIntervalMsValue"
         :disabled="loading || saving"
       />
+
+      <ResetCreditCard v-model="resetCreditLeadMinutesValue" v-model:max-weekly-remaining-percent="resetCreditMaxWeeklyRemainingPercentValue" :disabled="loading || saving" />
 
       <ClientVersionSettings
         v-model:min-codex-desktop-version="form.minCodexDesktopVersion"

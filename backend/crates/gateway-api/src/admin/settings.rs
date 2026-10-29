@@ -32,6 +32,8 @@ pub type ModelMappings = BTreeMap<String, String>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettingsView {
+    pub reset_credit_lead_minutes: u32,
+    pub reset_credit_max_weekly_remaining_percent: Option<u32>,
     pub subscription_auto_reset_enabled: bool,
     pub model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
@@ -52,6 +54,10 @@ pub struct RuntimeSettingsView {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateRuntimeSettingsRequest {
     #[serde(default)]
+    pub reset_credit_lead_minutes: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_optional_threshold")]
+    pub reset_credit_max_weekly_remaining_percent: Option<Option<u32>>,
+    #[serde(default)]
     pub subscription_auto_reset_enabled: Option<bool>,
     pub model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
@@ -70,6 +76,21 @@ impl UpdateRuntimeSettingsRequest {
     /// 校验公共运行参数。
     pub fn validate(&self) -> Result<(), WireValidationError> {
         validate_model_mappings(&self.model_mappings)?;
+        if self
+            .reset_credit_lead_minutes
+            .is_some_and(|value| !(1..=1440).contains(&value))
+        {
+            return Err(WireValidationError::new("resetCreditLeadMinutes"));
+        }
+        if self
+            .reset_credit_max_weekly_remaining_percent
+            .flatten()
+            .is_some_and(|value| value > 100)
+        {
+            return Err(WireValidationError::new(
+                "resetCreditMaxWeeklyRemainingPercent",
+            ));
+        }
         for (value, field) in [
             (self.refresh_margin_seconds, "refreshMarginSeconds"),
             (self.refresh_concurrency, "refreshConcurrency"),
@@ -100,6 +121,9 @@ impl UpdateRuntimeSettingsRequest {
     fn into_command(self) -> Result<ReplaceRuntimeSettings, WireValidationError> {
         self.validate()?;
         Ok(ReplaceRuntimeSettings {
+            reset_credit_lead_minutes: self.reset_credit_lead_minutes,
+            reset_credit_max_weekly_remaining_percent: self
+                .reset_credit_max_weekly_remaining_percent,
             subscription_auto_reset_enabled: self.subscription_auto_reset_enabled,
             model_mappings: domain_model_mappings(self.model_mappings)?,
             refresh_margin_seconds: self.refresh_margin_seconds,
@@ -125,6 +149,9 @@ impl UpdateRuntimeSettingsRequest {
 impl From<RuntimeSettings> for RuntimeSettingsView {
     fn from(settings: RuntimeSettings) -> Self {
         Self {
+            reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
+            reset_credit_max_weekly_remaining_percent: settings
+                .reset_credit_max_weekly_remaining_percent,
             subscription_auto_reset_enabled: settings.subscription_auto_reset_enabled,
             model_mappings: wire_model_mappings(settings.model_mappings),
             refresh_margin_seconds: settings.refresh_margin_seconds,
@@ -652,4 +679,10 @@ fn map_wire_error(error: WireValidationError) -> AdminError {
 
 fn map_service_error(error: gateway_admin::model::AdminError) -> AdminError {
     map_admin_service_error(error)
+}
+
+fn deserialize_optional_threshold<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<u32>>, D::Error> {
+    <Option<u32> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }

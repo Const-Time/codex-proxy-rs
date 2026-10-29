@@ -110,6 +110,8 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         min_codex_cli_version: Some("0.40.0".to_owned()),
         usage_retention_days: 32,
         ops_event_retention_days: 31,
+        reset_credit_lead_minutes: 10,
+        reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: true,
         audit_retention_days: 91,
         updated_at: Utc
@@ -122,6 +124,8 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
     assert_eq!(
         value,
         json!({
+            "resetCreditLeadMinutes": 10,
+            "resetCreditMaxWeeklyRemainingPercent": null,
             "subscriptionAutoResetEnabled": true,
             "modelMappings": {
                 "gpt-5.4": "gpt-5.5",
@@ -185,6 +189,8 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         min_codex_cli_version: request.min_codex_cli_version,
         usage_retention_days: u32::try_from(request.usage_retention_days).expect("u32"),
         ops_event_retention_days: u32::try_from(request.ops_event_retention_days).expect("u32"),
+        reset_credit_lead_minutes: 10,
+        reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: true,
         audit_retention_days: u32::try_from(request.audit_retention_days).expect("u32"),
         updated_at: chrono::Utc::now(),
@@ -200,6 +206,8 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
             .collect();
     let mut expected_fields = request_fields;
     expected_fields.insert("updatedAt".to_owned());
+    expected_fields.insert("resetCreditLeadMinutes".to_owned());
+    expected_fields.insert("resetCreditMaxWeeklyRemainingPercent".to_owned());
 
     assert_eq!(response_fields, expected_fields);
 }
@@ -649,4 +657,96 @@ async fn pricing_sync_policy_is_admin_managed_and_disabled_sync_does_not_write()
     .await;
     assert!(data["data"]["synced"]["openai"]["gpt-5.4"].is_object());
     assert_eq!(data["data"]["sourceHash"], "a".repeat(64));
+}
+
+#[test]
+fn reset_credit_lead_minutes_requires_an_integer_within_one_day() {
+    for (value, valid) in [
+        (0, false),
+        (1, true),
+        (10, true),
+        (1440, true),
+        (1441, false),
+    ] {
+        let mut body = update_body();
+        body["resetCreditLeadMinutes"] = json!(value);
+        let request: UpdateRuntimeSettingsRequest = serde_json::from_value(body).unwrap();
+        let result = request.validate();
+        if valid {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(result.unwrap_err().field(), "resetCreditLeadMinutes");
+        }
+    }
+}
+
+#[test]
+fn reset_credit_policy_validates_bounds_and_distinguishes_omitted_from_null() {
+    let omitted: UpdateRuntimeSettingsRequest = serde_json::from_value(update_body()).unwrap();
+    assert_eq!(omitted.reset_credit_lead_minutes, None);
+    assert_eq!(omitted.reset_credit_max_weekly_remaining_percent, None);
+    for (lead, threshold, valid) in [
+        (1, Some(0), true),
+        (1440, Some(100), true),
+        (10, None, true),
+        (0, None, false),
+        (1441, None, false),
+        (10, Some(101), false),
+    ] {
+        let mut body = update_body();
+        body["resetCreditLeadMinutes"] = json!(lead);
+        body["resetCreditMaxWeeklyRemainingPercent"] = json!(threshold);
+        let request: UpdateRuntimeSettingsRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            request.reset_credit_max_weekly_remaining_percent,
+            Some(threshold)
+        );
+        assert_eq!(request.validate().is_ok(), valid);
+    }
+}
+
+#[tokio::test]
+async fn legacy_settings_updates_preserve_reset_credit_policy_and_null_clears_it() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let app = app(fixture.state());
+    let mut body = update_body();
+    body["resetCreditLeadMinutes"] = json!(25);
+    body["resetCreditMaxWeeklyRemainingPercent"] = json!(30);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(update_body()),
+        ))
+        .await
+        .unwrap();
+    let json = response_json(response).await;
+    assert_eq!(json["data"]["resetCreditLeadMinutes"], 25);
+    assert_eq!(json["data"]["resetCreditMaxWeeklyRemainingPercent"], 30);
+    let mut body = update_body();
+    body["resetCreditMaxWeeklyRemainingPercent"] = Value::Null;
+    let response = app
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response_json(response).await["data"]["resetCreditMaxWeeklyRemainingPercent"],
+        Value::Null
+    );
 }

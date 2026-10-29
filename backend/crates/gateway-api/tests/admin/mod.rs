@@ -562,6 +562,12 @@ impl SettingsStore for MemorySettingsStore {
         self.service_write(context).await;
         let mut settings = self.settings.lock().expect("settings");
         let updated = RuntimeSettings {
+            reset_credit_lead_minutes: command
+                .reset_credit_lead_minutes
+                .unwrap_or(settings.reset_credit_lead_minutes),
+            reset_credit_max_weekly_remaining_percent: command
+                .reset_credit_max_weekly_remaining_percent
+                .unwrap_or(settings.reset_credit_max_weekly_remaining_percent),
             config_revision: next_revision(settings.config_revision),
             model_mappings: command.model_mappings,
             refresh_margin_seconds: command.refresh_margin_seconds,
@@ -1442,6 +1448,8 @@ fn test_runtime_settings() -> RuntimeSettings {
         min_codex_cli_version: None,
         usage_retention_days: 31,
         ops_event_retention_days: 30,
+        reset_credit_lead_minutes: 10,
+        reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: true,
         audit_retention_days: 90,
         updated_at: Utc::now(),
@@ -1498,4 +1506,30 @@ fn unsupported_provider() -> ProviderAdminError {
 
 fn unavailable_system() -> SystemOperationError {
     SystemOperationError::new(SystemOperationErrorKind::Internal, "unused test operation")
+}
+
+#[async_trait]
+impl gateway_admin::ports::reset_credit_automation::ResetCreditAutomationStore for UnusedStore {
+    async fn reset_credit_automation(
+        &self,
+        _: &str,
+    ) -> AdminStoreResult<
+        Option<gateway_admin::model::reset_credit_automation::ResetCreditAutomation>,
+    > {
+        Ok(None)
+    }
+    async fn due_reset_credit_automations(
+        &self,
+        _: chrono::DateTime<chrono::Utc>,
+        _: u32,
+    ) -> AdminStoreResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+    async fn save_reset_credit_automation(
+        &self,
+        _: &gateway_admin::model::reset_credit_automation::ResetCreditAutomation,
+        _: Option<&gateway_admin::model::MutationContext>,
+    ) -> AdminStoreResult<u64> {
+        Err(unavailable("reset-credit automation"))
+    }
 }

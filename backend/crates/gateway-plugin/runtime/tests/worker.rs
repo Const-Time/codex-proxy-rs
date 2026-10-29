@@ -1459,6 +1459,8 @@ impl PluginHandler for Worker {
                     if input["mode"]=="local" {
                         use gateway_plugin_sdk::call::services::local_settings_v1 as local;
                         match input["local_operation"].as_str().unwrap() {
+                            "load_v2"=>typed_service::<gateway_plugin_sdk::call::services::local_settings_v2::Load>(&call.host,input["input"].clone()).await,
+                            "replace_v2"=>typed_service::<gateway_plugin_sdk::call::services::local_settings_v2::Replace>(&call.host,input["input"].clone()).await,
                             "load"=>typed_service::<local::Load>(&call.host,input["input"].clone()).await,
                             "replace"=>typed_service::<local::Replace>(&call.host,input["input"].clone()).await,
                             "pricing"=>typed_service::<local::Pricing>(&call.host,input["input"].clone()).await,

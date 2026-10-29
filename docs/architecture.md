@@ -367,7 +367,7 @@ PostgreSQL 周期对账才是正确性基础。已提交配置发布可打断慢
 | Client Key 金额窗口与费用事件 | PostgreSQL | 准入与幂等结算的权威账本，独立于请求观测与日志保留策略 |
 | admission、lease、cooldown、会话亲和、continuation、OAuth pending、目录 cache | Redis | 可重建、可过期的协调状态 |
 | 日志、OAuth 恢复记录、在线更新状态、备份暂存 | `.runtime/` | 部署节点本地运行文件 |
-| 重置卡库存与消费结果 | OpenAI upstream | 后端不建立本地卡库存；前端只保留当前浏览器会话的最近查询 |
+| 重置卡库存与消费结果 | OpenAI upstream | 后端不建立本地真实库存；Admin 编排按账号默认关闭的自动使用，Store 保存卡 ID、到期时间、CAS 计划与未决幂等键，Provider 执行上游查询与消费 |
 | Provider 公开模型与请求画像 | Provider/runtime cache | 由官方目录或发布源刷新，不写成第二份业务配置 |
 | Windows 安装包临时直链 | Host 进程内短缓存 | 按需解析、严格校验、到期前丢弃；不写 PostgreSQL/Redis，也不代理包字节 |
 

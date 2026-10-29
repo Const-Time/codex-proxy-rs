@@ -86,7 +86,9 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 
 /// 账号目录与公共账号写操作。
 #[async_trait]
-pub trait AccountStore: Send + Sync {
+pub trait AccountStore:
+    super::reset_credit_automation::ResetCreditAutomationStore + Send + Sync
+{
     async fn plugin_credential_accounts(
         &self,
         _scope: crate::model::plugins::PluginMutationScope,

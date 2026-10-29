@@ -391,8 +391,8 @@ async fn local_service_http_endpoints_share_the_same_middleware_operations() {
     assert_eq!(
         seen,
         vec![
-            "local.settings.v1.load",
-            "local.settings.v1.replace",
+            "local.settings.v2.load",
+            "local.settings.v2.replace",
             "local.settings.v1.pricing",
             "local.settings.v1.preview_pricing_sync",
             "local.settings.v1.update_pricing_sync_policy",

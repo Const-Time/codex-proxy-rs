@@ -539,3 +539,29 @@ export function updateAccountApiKey(data: { accountId: string, baseUrl: string, 
     data: { provider: 'openai', ...data },
   })
 }
+
+export interface AccountResetCreditAutomation {
+  enabled: boolean
+  leadMinutes: number
+  nextDiscoveryAtDisplay: string | null
+  nextConsumeAtDisplay: string | null
+  lastResult: string | null
+}
+
+export function getAccountResetCreditAutomation(data: AccountIdParam, options: RequestOptions = {}) {
+  return request<AccountResetCreditAutomation>({
+    url: '/api/admin/accounts/reset-credits/automation',
+    method: 'GET',
+    params: data,
+    ...options,
+  })
+}
+
+export function setAccountResetCreditAutomation(data: AccountIdParam & { enabled: boolean }, options: RequestOptions = {}) {
+  return request<AccountResetCreditAutomation>({
+    url: '/api/admin/accounts/reset-credits/automation',
+    method: 'POST',
+    data,
+    ...options,
+  })
+}
