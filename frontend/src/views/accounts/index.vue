@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { AccountExportFormat } from './utils/codexAuthExport'
 import { ChevronDown, Grid2X2 } from '@lucide/vue'
 import { ref } from 'vue'
 
@@ -17,6 +18,7 @@ import AccountBatchEditModal from './components/AccountBatchEditModal.vue'
 import AccountConnectionTestModal from './components/AccountConnectionTestModal.vue'
 import AccountCreateModal from './components/AccountCreateModal/index.vue'
 import AccountEditModal from './components/AccountEditModal.vue'
+import AccountExportModal from './components/AccountExportModal.vue'
 import AccountFilters from './components/AccountFilters.vue'
 import AccountIdentityCell from './components/AccountIdentityCell.vue'
 import AccountOverviewCards from './components/AccountOverviewCards.vue'
@@ -36,6 +38,7 @@ import { useAccountsTable } from './composables/useAccountsTable'
 import { accountColumns, derivedAccountStatus } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
+const showExportModal = ref(false)
 const {
   loading,
   hasLoaded,
@@ -94,6 +97,11 @@ const {
   reload: () => Promise.all([loadAccounts(), loadGroups()]),
   replaceAccount,
 })
+
+async function exportSelected(format: AccountExportFormat) {
+  if (await handleExportAccounts(format))
+    showExportModal.value = false
+}
 
 const {
   showConnectionTestModal,
@@ -211,7 +219,7 @@ const {
                 :batch-deleting="batchDeleting"
                 :exporting-accounts="exportingAccounts"
                 @delete-selected="showDeleteModal = true"
-                @export-selected="handleExportAccounts"
+                @export-selected="showExportModal = true"
                 @create="openCreateAccount"
                 @edit-selected="openBatchEdit"
               />
@@ -367,6 +375,13 @@ const {
       :status-view="connectionTestStatusView"
       @refresh-models="handleRefreshConnectionTestModels()"
       @test="handleTestConnection()"
+    />
+
+    <AccountExportModal
+      v-model="showExportModal"
+      :selected-count="selectedIds.size"
+      :loading="exportingAccounts"
+      @export="exportSelected"
     />
 
     <AccountCreateModal

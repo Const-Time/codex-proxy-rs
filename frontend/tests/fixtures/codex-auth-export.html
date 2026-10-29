@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Codex auth export verification</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createApp } from 'vue'
+      import { createPinia } from 'pinia'
+      import Preview from './CodexAuthExportPreview.vue'
+      import { loading } from '../../src/directives/loading'
+      import { useThemeStore } from '../../src/stores/modules/theme'
+      import '../../src/styles/index.css'
+      const app = createApp(Preview)
+      const pinia = createPinia()
+      app.use(pinia)
+      app.directive('loading', loading)
+      useThemeStore(pinia).initializeTheme()
+      app.mount('#app')
+    </script>
+  </body>
+</html>

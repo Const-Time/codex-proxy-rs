@@ -186,6 +186,41 @@ async fn direct_import_persists_opaque_tokens_without_profile_or_token_validatio
 }
 
 #[tokio::test]
+async fn codex_auth_file_import_preserves_nested_tokens_without_refreshing() {
+    let service = CodexCredentialAdminService::new(
+        Arc::new(UnusedRefresher),
+        Arc::new(TestLeaseCoordinator::default()),
+        runtime_policy(),
+    );
+    let prepared = service
+        .prepare_import_document(serde_json::json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "access_token": "export-fixture-access",
+                "refresh_token": "export-fixture-refresh",
+                "id_token": "export-fixture-id",
+                "account_id": "export-fixture-account"
+            }
+        }))
+        .await
+        .expect("Codex auth.json is directly importable");
+    assert_eq!(prepared.accounts().len(), 1);
+    let runtime = CodexCredentialCodec::decode(&prepared.accounts()[0].credential)
+        .expect("stored credential");
+    let oauth = runtime.authentication.oauth().expect("OAuth credential");
+    assert_eq!(oauth.access_token.expose_secret(), "export-fixture-access");
+    assert_eq!(
+        oauth.refresh_token.as_ref().unwrap().expose_secret(),
+        "export-fixture-refresh"
+    );
+    assert_eq!(
+        oauth.id_token.as_ref().unwrap().expose_secret(),
+        "export-fixture-id"
+    );
+}
+
+#[tokio::test]
 async fn direct_import_accepts_snake_case_oauth_token_aliases() {
     let service = CodexCredentialAdminService::new(
         Arc::new(UnusedRefresher),

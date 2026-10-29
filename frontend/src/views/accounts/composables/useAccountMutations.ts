@@ -1,4 +1,5 @@
 import type { Ref } from 'vue'
+import type { AccountExportFormat } from '../utils/codexAuthExport'
 import type { getAccounts } from '@/api'
 import dayjs from 'dayjs'
 import { ref, watch } from 'vue'
@@ -26,7 +27,7 @@ export function useAccountMutations(options: {
   replaceAccount: (account: AccountRow) => boolean
 }) {
   const loadAccounts = options.reload
-  const { downloadJson } = useDownload()
+  const { downloadJson, downloadBlob } = useDownload()
   const onboarding = useAccountOnboarding({
     reload: loadAccounts,
   })
@@ -122,7 +123,7 @@ export function useAccountMutations(options: {
     )
   }
 
-  async function handleExportAccounts() {
+  async function handleExportAccounts(format: AccountExportFormat = 'codex') {
     if (exportingAccounts.value)
       return
     const selected = [...options.selectedIds.value]
@@ -131,15 +132,23 @@ export function useAccountMutations(options: {
       return
     }
 
-    await exportingAccountsAction.run(
+    return exportingAccountsAction.run(
       async () => {
         const payload = await exportAccounts({
           accountIds: selected.join(','),
           confirm: 'export_sensitive_accounts',
         })
-        const fileName = `cpr-accounts-selected-${selected.length}-${dayjs().format('YYYY-MM-DD')}.json`
-        await downloadJson(payload, fileName)
+        if (format === 'codex') {
+          const { codexAuthDownload } = await import('../utils/codexAuthExport')
+          const result = codexAuthDownload(payload, selected)
+          await downloadBlob(result.blob, result.fileName)
+        }
+        else {
+          const fileName = `cpr-accounts-selected-${selected.length}-${dayjs().format('YYYY-MM-DD')}.json`
+          await downloadJson(payload, fileName)
+        }
         toast.success(`已导出 ${selected.length} 个账号`)
+        return true
       },
       { errorText: '导出失败' },
     )
