@@ -411,32 +411,47 @@ impl CodexCredentialSelector {
         {
             accounts.push(account);
         }
+        let listed_count = accounts.len();
+        let mut exclusions = std::collections::BTreeMap::<&str, usize>::new();
         let accounts = accounts
             .into_iter()
             .filter(|account| {
-                account.provider() == &self.provider_kind
-                        && (!request.oauth_only || account.authentication_kind() == CODEX_AUTHENTICATION_KIND_OAUTH)
-                    && (diagnostic
-                        || request
-                            .attempt
-                            .account_scope()
-                            .is_some_and(|scope| scope.allows(account.id())))
-                    && (diagnostic
-                        || match model_catalog_eligibility {
-                            ModelCatalogEligibility::Endpoint(model) => request.attempt.account_scope().is_some_and(|scope| {
+                let reason = if account.provider() != &self.provider_kind {
+                    Some("provider_mismatch")
+                } else if request.oauth_only
+                    && account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH {
+                    Some("oauth_required")
+                } else if diagnostic {
+                    None
+                } else if !request.attempt.account_scope().is_some_and(|scope| scope.allows(account.id())) {
+                    Some("outside_scope")
+                } else {
+                    match model_catalog_eligibility {
+                        ModelCatalogEligibility::Endpoint(model) => {
+                            let allowed = request.attempt.account_scope().is_some_and(|scope| {
                                 model.map_or_else(|| scope.directory().account(account.id()).is_some_and(|a| a.model_access().mode() == gateway_core::account::AccountModelAccessMode::All), |model| scope.allows_model(account.id(), model))
-                            }),
-                            ModelCatalogEligibility::Required(upstream_model) => {
-                                if !request.attempt.account_scope().is_some_and(|scope| {
-                                    scope.allows_model(account.id(), upstream_model)
-                                }) {
-                                    return false;
+                            });
+                            (!allowed).then_some("model_policy")
+                        }
+                        ModelCatalogEligibility::Required(model) => {
+                            if !request.attempt.account_scope().is_some_and(|scope| scope.allows_model(account.id(), model)) {
+                                Some("model_policy")
+                            } else {
+                                match self.catalog.observed_model_support(account, model) {
+                                    Ok(Some(true)) => None,
+                                    Ok(Some(false)) => Some("model_not_supported"),
+                                    Ok(None) if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY => Some("catalog_unobserved"),
+                                    Ok(None) => None,
+                                    Err(_) => Some("catalog_unavailable"),
                                 }
-                                let observed_support =
-                                    self.catalog.observed_model_support(account, upstream_model);
-                                if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY { matches!(observed_support, Ok(Some(true))) } else { matches!(observed_support, Ok(None | Some(true))) }
                             }
-                        })
+                        }
+                    }
+                };
+                if let Some(reason) = reason {
+                    *exclusions.entry(reason).or_default() += 1;
+                }
+                reason.is_none()
             })
             .collect::<Vec<_>>();
         let mut eligible = Vec::with_capacity(accounts.len());
@@ -448,12 +463,23 @@ impl CodexCredentialSelector {
                 if !matches!(runtime.authentication, CodexRuntimeAuthentication::ApiKey(ref auth)
                     if auth.configuration.transport == super::ApiKeyTransport::PreferWebsocket)
                 {
+                    *exclusions.entry("websocket_unsupported").or_default() += 1;
                     continue;
                 }
             }
             eligible.push(account);
         }
         let accounts = eligible;
+        // Bounded reason counts expose preselection failures without leaking
+        // identities or credentials from accounts outside the frozen scope.
+        request.attempt.trace().record(
+            "account.eligibility",
+            serde_json::json!({
+                "listedCount": listed_count,
+                "eligibleCount": accounts.len(),
+                "exclusions": exclusions,
+            }),
+        );
         if !diagnostic {
             self.quota.prepare_scheduling(&accounts).await;
         }

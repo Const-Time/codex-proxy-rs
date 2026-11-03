@@ -271,6 +271,7 @@ impl DaemonTask for OpenAiCatalogEtagTask {
     ) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
         let cancellation = context.cancellation().clone();
         Box::pin(async move {
+            let mut backoff = WORKER_INITIAL_BACKOFF;
             loop {
                 tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
@@ -281,7 +282,15 @@ impl DaemonTask for OpenAiCatalogEtagTask {
                         error = %error,
                         "OpenAI model catalog ETag refresh failed"
                     );
+                    // Failed refreshes requeue the ETag. Bound retries even when
+                    // only one scope is unavailable, while allowing shutdown.
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Ok(()),
+                        () = tokio::time::sleep(backoff) => {},
+                    }
+                    backoff = backoff.saturating_mul(2).min(WORKER_MAXIMUM_BACKOFF);
                 } else {
+                    backoff = WORKER_INITIAL_BACKOFF;
                     context.succeeded();
                 }
             }

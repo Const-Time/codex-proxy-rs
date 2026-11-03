@@ -137,6 +137,313 @@ fn client_scope(accounts: &[ProviderAccount]) -> FrozenAccountScope {
     )
 }
 
+async fn plan_response(server: &MockServer, account: &str, status: u16, models: &[&str]) {
+    Mock::given(method("GET"))
+        .and(path("/codex/models"))
+        .and(header("chatgpt-account-id", format!("chatgpt-{account}")))
+        .respond_with(ResponseTemplate::new(status).set_body_json(serde_json::json!({
+            "models": models.iter().map(|model| serde_json::json!({"slug":model,"display_name":model})).collect::<Vec<_>>()
+        })))
+        .mount(server).await;
+}
+
+#[tokio::test]
+async fn unavailable_plan_is_unknown_not_a_negative_model_entitlement() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let pro = seed_account_with_plan(&store, "acct_pro", "pro").await;
+    let team = seed_account_with_plan(&store, "acct_team", "team").await;
+    let server = MockServer::start().await;
+    plan_response(&server, "acct_pro", 503, &[]).await;
+    plan_response(&server, "acct_team", 200, &["gpt-5.4"]).await;
+    let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    service
+        .synchronize()
+        .await
+        .expect("healthy scope remains available on cold start");
+    assert_eq!(
+        service.observed_model_support(&pro, "gpt-5.4").unwrap(),
+        None
+    );
+    assert_eq!(
+        service.observed_model_support(&team, "gpt-5.4").unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        service.observed_model_support(&team, "not-listed").unwrap(),
+        Some(false)
+    );
+    assert!(service.read_account_catalog(&pro).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn partial_refresh_retains_only_the_failed_scopes_previous_entitlements() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let pro = seed_account_with_plan(&store, "acct_pro", "pro").await;
+    let team = seed_account_with_plan(&store, "acct_team", "team").await;
+    let server = MockServer::start().await;
+    plan_response(&server, "acct_pro", 200, &["pro-only"]).await;
+    plan_response(&server, "acct_team", 200, &["team-old"]).await;
+    let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    service.synchronize().await.unwrap();
+    let prior_pro = service.read_account_catalog(&pro).await.unwrap().unwrap();
+    server.reset().await;
+    plan_response(&server, "acct_pro", 503, &[]).await;
+    plan_response(&server, "acct_team", 200, &["team-new"]).await;
+    assert!(
+        service.refresh_catalogs().await.is_err(),
+        "partial refresh must not report complete success"
+    );
+    assert_eq!(
+        service.cached_account_models(&pro).unwrap().unwrap(),
+        ["pro-only"]
+    );
+    assert_eq!(
+        service.cached_account_models(&team).unwrap().unwrap(),
+        ["team-new"]
+    );
+    assert_eq!(
+        service.observed_model_support(&pro, "team-new").unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        service.read_account_catalog(&pro).await.unwrap().unwrap(),
+        prior_pro,
+        "failure must not extend the last observed Redis TTL or timestamp"
+    );
+    let snapshot = service.cached().unwrap().unwrap();
+    assert_eq!(
+        snapshot.model_catalog_accounts()["pro-only"],
+        std::collections::BTreeSet::from([pro.id().clone()])
+    );
+    assert!(!snapshot.model_catalog_accounts().contains_key("team-old"));
+    // A successful replacement revokes models absent from the new catalog.
+    server.reset().await;
+    plan_response(&server, "acct_pro", 200, &["pro-new"]).await;
+    plan_response(&server, "acct_team", 200, &["team-new"]).await;
+    service.refresh_catalogs().await.unwrap();
+    assert_eq!(
+        service.observed_model_support(&pro, "pro-only").unwrap(),
+        Some(false)
+    );
+    assert!(
+        !service
+            .cached()
+            .unwrap()
+            .unwrap()
+            .model_catalog_accounts()
+            .contains_key("pro-only")
+    );
+}
+
+#[tokio::test]
+async fn partial_etag_refresh_retries_until_every_scope_recovers() {
+    use std::time::Duration;
+    let store = Arc::new(MemoryAccountStore::default());
+    let pro = seed_account_with_plan(&store, "acct_pro", "pro").await;
+    seed_account_with_plan(&store, "acct_team", "team").await;
+    let server = MockServer::start().await;
+    plan_response(&server, "acct_pro", 503, &[]).await;
+    plan_response(&server, "acct_team", 200, &["team-model"]).await;
+    let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    service.observe_response_etag("new-version").unwrap();
+    service.wait_for_etag_refresh().await;
+    assert!(service.refresh().await.is_err());
+    assert!(service.cached().unwrap().is_some());
+    tokio::time::timeout(Duration::from_secs(1), service.wait_for_etag_refresh())
+        .await
+        .expect("partial refresh must requeue its ETag");
+    server.reset().await;
+    plan_response(&server, "acct_pro", 200, &["pro-model"]).await;
+    plan_response(&server, "acct_team", 200, &["team-model"]).await;
+    service.refresh().await.unwrap();
+    assert_eq!(
+        service.observed_model_support(&pro, "pro-model").unwrap(),
+        Some(true)
+    );
+    assert!(!service.observe_response_etag("new-version").unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), service.wait_for_etag_refresh())
+            .await
+            .is_err()
+    );
+    let generation = service.catalog_generation();
+    server.reset().await;
+    plan_response(&server, "acct_pro", 503, &[]).await;
+    plan_response(&server, "acct_team", 503, &[]).await;
+    assert!(service.refresh_catalogs().await.is_err());
+    assert_eq!(service.catalog_generation(), generation);
+    assert_eq!(
+        service.observed_model_support(&pro, "pro-model").unwrap(),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn retained_scope_uses_current_membership_and_cannot_survive_invalidation() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let original = seed_account_with_plan(&store, "acct_pro", "pro").await;
+    seed_account_with_plan(&store, "acct_team", "team").await;
+    let server = MockServer::start().await;
+    plan_response(&server, "acct_pro", 200, &["pro-model"]).await;
+    plan_response(&server, "acct_team", 200, &["team-model"]).await;
+    let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    service.synchronize().await.unwrap();
+    store.delete_account(original.id()).await.unwrap();
+    let replacement = seed_account_with_plan(&store, "acct_replacement", "pro").await;
+    server.reset().await;
+    plan_response(&server, "acct_replacement", 503, &[]).await;
+    plan_response(&server, "acct_team", 200, &["team-model"]).await;
+    assert!(service.refresh_catalogs().await.is_err());
+    assert_eq!(
+        service.cached().unwrap().unwrap().model_catalog_accounts()["pro-model"],
+        std::collections::BTreeSet::from([replacement.id().clone()])
+    );
+    service.invalidate().unwrap();
+    service.synchronize().await.unwrap();
+    assert_eq!(
+        service
+            .observed_model_support(&replacement, "pro-model")
+            .unwrap(),
+        None
+    );
+    assert!(
+        !service
+            .cached()
+            .unwrap()
+            .unwrap()
+            .model_catalog_accounts()
+            .contains_key("pro-model")
+    );
+}
+
+#[tokio::test]
+async fn selector_keeps_unobserved_oauth_available_but_rejects_explicit_model_denial() {
+    use crate::support::{
+        MemoryCooldownPort, MemorySessionAffinity, MemorySessionExclusions, TestLeaseCoordinator,
+        account_policy,
+    };
+    use gateway_core::{
+        account::AccountFeedbackStats,
+        diagnostics::TraceContext,
+        engine::{AccountAttemptContext, AttemptContext, ModelRequestId, RequestAttemptContext},
+        lifecycle::CancellationToken,
+        policy::ClientApiKeyId,
+    };
+    use provider_openai::credential::{
+        CodexCookiePolicy, CodexCredentialQuotaService, CodexCredentialSelector,
+        CredentialSelectionError, SelectCodexCredential,
+    };
+    use std::{
+        collections::BTreeSet,
+        num::NonZeroU32,
+        time::{Duration, SystemTime},
+    };
+    let store = Arc::new(MemoryAccountStore::default());
+    let pro = seed_account_with_plan(&store, "acct_pro", "pro").await;
+    seed_account_with_plan(&store, "acct_team", "team").await;
+    let server = MockServer::start().await;
+    store
+        .seed_api_key(
+            "acct_api",
+            format!("{}/api", server.uri()),
+            provider_openai::credential::ApiKeyTransport::Http,
+        )
+        .await;
+    let api = store.account("acct_api").unwrap();
+    plan_response(&server, "acct_pro", 503, &[]).await;
+    plan_response(&server, "acct_team", 200, &["gpt-5.4"]).await;
+    let catalog = Arc::new(service_with_catalog_cache(
+        &store,
+        server.uri(),
+        catalog_cache(),
+    ));
+    catalog.synchronize().await.unwrap();
+    let selector = CodexCredentialSelector::new(
+        ProviderKind::new("openai").unwrap(),
+        store.repository(),
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::new(MemorySessionAffinity::default()),
+        Arc::new(MemorySessionExclusions::default()),
+        catalog.clone(),
+        Arc::new(CodexCredentialQuotaService::new(
+            store.repository(),
+            wire_profile(),
+            reqwest::Client::new(),
+            server.uri(),
+            Arc::new(MemoryCooldownPort::new()),
+        )),
+        Arc::new(AccountFeedbackStats::default()),
+        CodexCookiePolicy::official().unwrap(),
+    );
+    let trace = TraceContext::new("req_partial_catalog");
+    let attempt = AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_partial_catalog").unwrap(),
+            ClientApiKeyId::new("key_catalog").unwrap(),
+        )
+        .with_trace(trace.clone()),
+        NonZeroU32::new(1).unwrap(),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(Arc::new(client_scope(&[pro.clone(), api]))),
+        None,
+        CancellationToken::new(),
+    );
+    let url = url::Url::parse(&format!("{}/codex/responses", server.uri())).unwrap();
+    let request = SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &url,
+        attempt: &attempt,
+        session_affinity_key: None,
+    };
+    let lease = selector
+        .select(&request)
+        .await
+        .expect("unobserved OAuth scope remains eligible");
+    assert_eq!(lease.account_id(), pro.id());
+    drop(lease);
+    server.reset().await;
+    plan_response(&server, "acct_pro", 200, &["different-model"]).await;
+    plan_response(&server, "acct_team", 200, &["gpt-5.4"]).await;
+    assert!(
+        catalog.refresh_catalogs().await.is_err(),
+        "API scope is still unavailable"
+    );
+    assert!(matches!(
+        selector.select(&request).await,
+        Err(CredentialSelectionError::NoEligibleCredential)
+    ));
+    let snapshot = trace.snapshot().unwrap();
+    let eligibility = snapshot["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["stage"] == "account.eligibility")
+        .collect::<Vec<_>>();
+    assert_eq!(eligibility.len(), 2);
+    assert_eq!(eligibility[0]["data"]["eligibleCount"], 1);
+    assert_eq!(eligibility[1]["data"]["eligibleCount"], 0);
+    assert_eq!(
+        eligibility[0]["data"]["exclusions"]["catalog_unobserved"],
+        1
+    );
+    assert_eq!(
+        eligibility[1]["data"]["exclusions"]["catalog_unobserved"],
+        1
+    );
+    assert_eq!(
+        eligibility[1]["data"]["exclusions"]["model_not_supported"],
+        1
+    );
+    assert_eq!(eligibility[1]["data"]["exclusions"]["outside_scope"], 1);
+    assert!(
+        !serde_json::to_string(&eligibility)
+            .unwrap()
+            .contains("acct_team")
+    );
+}
+
 #[tokio::test]
 async fn client_catalog_is_account_and_version_scoped_and_keeps_original_objects() {
     let store = Arc::new(MemoryAccountStore::default());

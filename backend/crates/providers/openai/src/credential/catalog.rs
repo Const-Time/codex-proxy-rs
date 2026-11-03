@@ -246,6 +246,7 @@ struct FetchedAccountModels {
 struct FetchedCatalog {
     snapshot: CodexCredentialCatalogSnapshot,
     etags: Vec<String>,
+    refresh_error: Option<CodexCredentialCatalogError>,
 }
 
 impl From<CredentialRepositoryError> for CodexCredentialCatalogError {
@@ -470,9 +471,10 @@ impl CodexCredentialCatalogService {
         let Some(snapshot) = self.cached()? else {
             return Ok(None);
         };
-        Ok(Some(snapshot.account_models(account)?.is_some_and(
-            |models| models.iter().any(|candidate| candidate == model),
-        )))
+        // A missing scope is unobserved, not an authoritative empty model list.
+        Ok(snapshot
+            .account_models(account)?
+            .map(|models| models.iter().any(|candidate| candidate == model)))
     }
 
     /// 优先读取套餐目录 cache；缺失时才用当前账号所属套餐的有限候选集实时填充。
@@ -558,6 +560,7 @@ impl CodexCredentialCatalogService {
     }
 
     async fn fetch_catalog(&self) -> Result<FetchedCatalog, CodexCredentialCatalogError> {
+        let previous = self.cached()?;
         let accounts = self.repository.list_for_provider().await?;
         let groups = catalog_candidates_by_scope(accounts)?;
         let client = CodexBackendClient::new(
@@ -570,25 +573,59 @@ impl CodexCredentialCatalogService {
         let mut scope_catalogs = BTreeMap::new();
         let mut etags = Vec::new();
         let mut last_error = None;
+        let mut fresh_scopes = 0;
         for (scope, candidates) in groups {
             let accounts = candidates
                 .iter()
                 .map(|account| account.id().clone())
                 .collect();
             let fetched = match self.fetch_scope_models(&client, candidates).await {
-                Ok(fetched) => fetched,
+                Ok(fetched) => {
+                    fresh_scopes += 1;
+                    self.replace_plan_catalog(&CodexPlanCatalog::new(
+                        scope.clone(),
+                        Utc::now(),
+                        model_ids(&fetched.models),
+                    ))
+                    .await?;
+                    fetched
+                }
                 Err(error) => {
+                    let retained = previous.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .scope_catalogs
+                            .get(&scope)
+                            .map(|catalog| FetchedAccountModels {
+                                models: snapshot
+                                    .models
+                                    .iter()
+                                    .filter(|model| {
+                                        catalog
+                                            .models
+                                            .iter()
+                                            .any(|id| id == model.request_model().as_str())
+                                    })
+                                    .cloned()
+                                    .collect(),
+                                etag: None,
+                            })
+                    });
+                    // Log only scope and classification: upstream text can contain secrets.
+                    tracing::warn!(
+                        scope = scope.as_str(),
+                        retained = retained.is_some(),
+                        "OpenAI model catalog scope refresh failed; preserving prior evidence or unknown support"
+                    );
                     last_error = Some(error);
-                    continue;
+                    let Some(retained) = retained else {
+                        continue;
+                    };
+                    // Retain only this exact scope, with current account membership below.
+                    // Do not refresh its Redis TTL/observedAt or borrow another plan's models.
+                    retained
                 }
             };
             let entitlement = model_ids(&fetched.models);
-            self.replace_plan_catalog(&CodexPlanCatalog::new(
-                scope.clone(),
-                Utc::now(),
-                entitlement.clone(),
-            ))
-            .await?;
             for model in &fetched.models {
                 let id = model.request_model().as_str().to_owned();
                 match union.entry(id) {
@@ -615,10 +652,10 @@ impl CodexCredentialCatalogService {
             );
             etags.extend(fetched.etag);
         }
-        if union.is_empty()
-            && let Some(error) = last_error
+        if fresh_scopes == 0
+            && let Some(error) = last_error.as_ref()
         {
-            return Err(error);
+            return Err(error.clone());
         }
         let observed_at = SystemTime::now();
         let snapshot = CodexCredentialCatalogSnapshot {
@@ -629,7 +666,11 @@ impl CodexCredentialCatalogService {
                 .collect(),
             scope_catalogs,
         };
-        Ok(FetchedCatalog { snapshot, etags })
+        Ok(FetchedCatalog {
+            snapshot,
+            etags,
+            refresh_error: last_error,
+        })
     }
 
     async fn fetch_scope_models(
@@ -809,7 +850,14 @@ impl CodexCredentialCatalogService {
     ) -> Result<CodexCredentialCatalogSnapshot, CodexCredentialCatalogError> {
         let cache_revision = self.cache_revision()?;
         let fetched = self.fetch_catalog().await?;
-        self.commit_catalog(cache_revision, fetched)
+        let error = fetched.refresh_error.clone();
+        let snapshot = self.commit_catalog(cache_revision, fetched)?;
+        // Healthy scopes can advance, but incomplete refreshes must not acknowledge
+        // an ETag or be reported as a successful background reconciliation.
+        match error {
+            Some(error) => Err(error),
+            None => Ok(snapshot),
+        }
     }
 
     fn record_applied_catalog_etags(
@@ -900,7 +948,9 @@ impl CodexCredentialCatalogService {
         if changed {
             self.invalidate_client_catalogs()?;
         }
-        self.record_applied_catalog_etags(fetched.etags)?;
+        if fetched.refresh_error.is_none() {
+            self.record_applied_catalog_etags(fetched.etags)?;
+        }
         Ok(snapshot)
     }
 }
