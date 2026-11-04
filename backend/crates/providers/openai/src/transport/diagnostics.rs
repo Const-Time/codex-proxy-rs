@@ -446,13 +446,18 @@ fn classify_upstream_failure(
         };
     }
 
-    if matches!(source, UpstreamFailureSource::SseFailure) && code == "invalid_prompt" {
+    if code == "unsupported_value"
+        || (matches!(source, UpstreamFailureSource::SseFailure) && code == "invalid_prompt")
+    {
         return CodexFailureCategory::InvalidRequest;
     }
-    if [code.as_str(), message.as_str(), body.as_str()]
-        .into_iter()
-        .any(is_model_unsupported)
-    {
+    if matches!(
+        (fields.code.as_deref(), status),
+        (
+            Some("model_not_found"),
+            None | Some(StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND)
+        )
+    ) {
         return CodexFailureCategory::ModelUnsupported;
     }
     let identity_signals = [
@@ -561,16 +566,6 @@ fn persistable_upstream_code(value: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|known| value.trim().eq_ignore_ascii_case(known))
-}
-
-fn is_model_unsupported(value: &str) -> bool {
-    value.contains("model_not_supported")
-        || value.contains("model_not_available")
-        || (value.contains("model")
-            && (value.contains("not supported")
-                || value.contains("not available")
-                || value.contains("not_supported")
-                || value.contains("not_available")))
 }
 
 fn is_identity_verification_required(value: &str) -> bool {

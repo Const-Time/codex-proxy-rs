@@ -733,7 +733,7 @@ async fn recovered_continuation_failure_should_be_visible_in_ops_but_hidden_from
     let repository = observability_repository(&database.pool);
 
     let overview = repository
-        .usage_summary(range, UsageRecordFilter::default())
+        .usage_summary(range, UsageRecordFilter::default(), Default::default())
         .await
         .expect("usage summary without recovered intermediates");
     assert_eq!(overview.requests.request_count, 2);
@@ -1169,6 +1169,7 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
                 outcome: Some(admin_observability::RequestOutcome::Succeeded),
                 ..admin_observability::UsageFilter::default()
             },
+            Default::default(),
         )
         .await
         .expect("admin usage trend");
@@ -1310,7 +1311,11 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
     );
 
     let overview = store
-        .usage_summary(range, admin_observability::UsageFilter::default())
+        .usage_summary(
+            range,
+            admin_observability::UsageFilter::default(),
+            Default::default(),
+        )
         .await
         .expect("admin usage overview");
     assert_eq!(overview.range, range);
@@ -1694,7 +1699,7 @@ async fn observability_queries_preserve_request_account_cost_and_diagnostic_fact
     );
 
     let overview = repository
-        .usage_summary(range, UsageRecordFilter::default())
+        .usage_summary(range, UsageRecordFilter::default(), Default::default())
         .await
         .expect("usage summary");
     assert_eq!(overview.attempts.attempt_count, 4);
@@ -1718,6 +1723,7 @@ async fn observability_queries_preserve_request_account_cost_and_diagnostic_fact
                 outcome: Some("succeeded".to_owned()),
                 ..UsageRecordFilter::default()
             },
+            Default::default(),
         )
         .await
         .expect("filtered usage summary");
@@ -2024,7 +2030,10 @@ async fn personal_usage_is_scoped_for_lists_details_totals_and_trends() {
         if count == 1 {
             assert_eq!(page.items[0].id, expected);
         }
-        let totals = repo.usage_summary(range, filter.clone()).await.unwrap();
+        let totals = repo
+            .usage_summary(range, filter.clone(), Default::default())
+            .await
+            .unwrap();
         assert_eq!(totals.requests.request_count, count);
         let grouped = repo
             .usage_diagnostics(range, filter.clone(), DiagnosticDimension::KeyModel)
@@ -2052,7 +2061,10 @@ async fn personal_usage_is_scoped_for_lists_details_totals_and_trends() {
                 "personal scope must not expose upstream identities by searching"
             );
         }
-        let trend = repo.usage_trend(range, filter).await.unwrap();
+        let trend = repo
+            .usage_trend(range, filter, Default::default())
+            .await
+            .unwrap();
         assert_eq!(
             trend.iter().map(|p| p.metrics.request_count).sum::<u64>(),
             count
@@ -2472,7 +2484,10 @@ async fn lightweight_cards_match_full_summary_scopes_and_empty_results() {
                 ..Default::default()
             },
         ] {
-            let full = store.usage_summary(range, filter.clone()).await.unwrap();
+            let full = store
+                .usage_summary(range, filter.clone(), Default::default())
+                .await
+                .unwrap();
             let cards = store.usage_card_summary(range, filter).await.unwrap();
             assert_eq!(cards.total_cost_usd, full.total_cost_usd);
             assert_eq!(cards.success_count, full.requests.success_count);
@@ -2512,7 +2527,10 @@ async fn request_concurrency_weights_overlap_and_preserves_filters() {
         model: Some("concurrency".into()),
         ..Default::default()
     };
-    let points = repo.usage_trend(range, filter).await.unwrap();
+    let points = repo
+        .usage_trend(range, filter, Default::default())
+        .await
+        .unwrap();
     assert_eq!(points.len(), 2);
     assert_eq!(
         (
@@ -2538,6 +2556,7 @@ async fn request_concurrency_weights_overlap_and_preserves_filters() {
                 model: Some("concurrency".into()),
                 ..Default::default()
             },
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2557,6 +2576,7 @@ async fn request_concurrency_weights_overlap_and_preserves_filters() {
                 model: Some("concurrency".into()),
                 ..Default::default()
             },
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2572,6 +2592,7 @@ async fn request_concurrency_weights_overlap_and_preserves_filters() {
                 model: Some("missing-model".into()),
                 ..Default::default()
             },
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2580,4 +2601,113 @@ async fn request_concurrency_weights_overlap_and_preserves_filters() {
             .iter()
             .all(|p| p.metrics.concurrency_peak == 0 && p.metrics.concurrency_avg_milli == 0)
     );
+}
+
+#[tokio::test]
+async fn selected_insight_metrics_match_full_results_without_unselected_costs_or_percentiles() {
+    use gateway_admin::model::observability::{
+        UsageInsightSelection as S, UsagePerformanceMetric as M,
+    };
+    let Some(db) = TestDatabase::create("selected_insight_metrics").await else {
+        return;
+    };
+    let start = Utc::now() - TimeDelta::hours(1);
+    seed_observability_facts(&db.pool, start).await.unwrap();
+    let repo = observability_repository(&db.pool);
+    let range = ObservabilityRange::new(
+        start - TimeDelta::minutes(1),
+        start + TimeDelta::minutes(30),
+    )
+    .unwrap();
+    for filter in [
+        UsageRecordFilter::default(),
+        UsageRecordFilter {
+            model: Some("public-model".into()),
+            ..Default::default()
+        },
+        UsageRecordFilter {
+            model: Some("absent".into()),
+            ..Default::default()
+        },
+    ] {
+        let full = repo
+            .usage_summary(range, filter.clone(), S::All)
+            .await
+            .unwrap();
+        let all_points = repo
+            .usage_trend(range, filter.clone(), S::All)
+            .await
+            .unwrap();
+        for selection in [
+            S::Health,
+            S::Cost,
+            S::Performance(M::Total),
+            S::Performance(M::FirstToken),
+            S::Performance(M::Throughput),
+            S::Performance(M::Scheduling),
+            S::Performance(M::Concurrency),
+        ] {
+            let card = repo
+                .usage_summary(range, filter.clone(), selection)
+                .await
+                .unwrap();
+            assert_eq!(card.requests.request_count, full.requests.request_count);
+            assert_eq!(card.requests.success_count, full.requests.success_count);
+            if selection == S::Cost {
+                assert_eq!(card.attempts, full.attempts);
+                assert_eq!(card.total_cost_usd, full.total_cost_usd);
+            } else {
+                assert!(card.attempts.costs.is_empty());
+            }
+            if selection == S::Performance(M::Total) {
+                assert_eq!(
+                    card.requests.latency_percentiles,
+                    full.requests.latency_percentiles
+                );
+            } else {
+                assert_eq!(card.requests.latency_percentiles, Default::default());
+            }
+            if selection == S::Performance(M::FirstToken) {
+                assert_eq!(
+                    card.requests.first_token_latency_percentiles,
+                    full.requests.first_token_latency_percentiles
+                );
+            } else {
+                assert_eq!(
+                    card.requests.first_token_latency_percentiles,
+                    Default::default()
+                );
+            }
+            let points = repo
+                .usage_trend(range, filter.clone(), selection)
+                .await
+                .unwrap();
+            assert_eq!(points.len(), all_points.len());
+            for (point, full) in points.iter().zip(&all_points) {
+                assert_eq!(point.bucket_start, full.bucket_start);
+                assert_eq!(point.metrics.total_tokens, full.metrics.total_tokens);
+                if selection == S::Cost {
+                    assert_eq!(point.costs, full.costs);
+                } else {
+                    assert!(point.costs.is_empty());
+                }
+                match selection {
+                    S::Performance(M::Throughput) => assert_eq!(
+                        point.metrics.output_throughput_p50,
+                        full.metrics.output_throughput_p50
+                    ),
+                    S::Performance(M::Scheduling) => assert_eq!(
+                        point.metrics.admission_decision_percentiles,
+                        full.metrics.admission_decision_percentiles
+                    ),
+                    S::Performance(M::Concurrency) => assert_eq!(
+                        point.metrics.concurrency_peak,
+                        full.metrics.concurrency_peak
+                    ),
+                    _ => assert_eq!(point.metrics.concurrency_peak, 0),
+                }
+            }
+        }
+    }
+    db.close().await;
 }

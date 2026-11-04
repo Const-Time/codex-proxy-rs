@@ -64,7 +64,11 @@ async fn completed_usage_projections_should_accept_statusless_websocket_but_reje
     );
 
     let overview = repository
-        .usage_summary(range_around(started_at), UsageRecordFilter::default())
+        .usage_summary(
+            range_around(started_at),
+            UsageRecordFilter::default(),
+            Default::default(),
+        )
         .await
         .expect("summarize statusless transport usage");
     assert_eq!(
@@ -824,7 +828,11 @@ async fn tokenless_provider_endpoints_should_remain_in_health_but_not_usage_reco
         .await
         .expect("list usage records");
     let overview = repository
-        .usage_summary(range_around(started_at), UsageRecordFilter::default())
+        .usage_summary(
+            range_around(started_at),
+            UsageRecordFilter::default(),
+            Default::default(),
+        )
         .await
         .expect("summarize request health");
 

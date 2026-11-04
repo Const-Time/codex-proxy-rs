@@ -32,6 +32,7 @@ pub type ModelMappings = BTreeMap<String, String>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettingsView {
+    pub max_retry_after_seconds: u32,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
     pub subscription_auto_reset_enabled: bool,
@@ -54,6 +55,7 @@ pub struct RuntimeSettingsView {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateRuntimeSettingsRequest {
     #[serde(default)]
+    pub max_retry_after_seconds: Option<u32>,
     pub reset_credit_lead_minutes: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_optional_threshold")]
     pub reset_credit_max_weekly_remaining_percent: Option<Option<u32>>,
@@ -121,6 +123,7 @@ impl UpdateRuntimeSettingsRequest {
     fn into_command(self) -> Result<ReplaceRuntimeSettings, WireValidationError> {
         self.validate()?;
         Ok(ReplaceRuntimeSettings {
+            max_retry_after_seconds: self.max_retry_after_seconds,
             reset_credit_lead_minutes: self.reset_credit_lead_minutes,
             reset_credit_max_weekly_remaining_percent: self
                 .reset_credit_max_weekly_remaining_percent,
@@ -149,6 +152,7 @@ impl UpdateRuntimeSettingsRequest {
 impl From<RuntimeSettings> for RuntimeSettingsView {
     fn from(settings: RuntimeSettings) -> Self {
         Self {
+            max_retry_after_seconds: settings.max_retry_after_seconds,
             reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
             reset_credit_max_weekly_remaining_percent: settings
                 .reset_credit_max_weekly_remaining_percent,

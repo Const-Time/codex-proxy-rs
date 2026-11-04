@@ -1886,6 +1886,9 @@ where
                 error.pre_delivery_retry(),
                 Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { .. })
             );
+        let retry_after_exceeds_limit = error
+            .retry_after()
+            .is_some_and(|delay| delay > self.plan.max_retry_after());
         let transport_recovery = match error.pre_delivery_retry() {
             Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { transport })
                 if !self.connection_budget.exhausted()
@@ -1905,7 +1908,8 @@ where
             Some(crate::error::PreDeliveryRetry::SameAccountTransportRetry {
                 retry_index,
                 delay,
-            }) if !self.connection_budget.exhausted()
+            }) if !retry_after_exceeds_limit
+                && !self.connection_budget.exhausted()
                 && !self.replay_barrier_reached
                 && !self.delivery_pending
                 && attempt_send_state != UpstreamSendState::Ambiguous =>
@@ -1913,7 +1917,8 @@ where
                 Some((AttemptTransport::Retry(retry_index), delay))
             }
             Some(crate::error::PreDeliveryRetry::SameAccountTransportFallback)
-                if !self.connection_budget.exhausted()
+                if !retry_after_exceeds_limit
+                    && !self.connection_budget.exhausted()
                     && !self.replay_barrier_reached
                     && !self.delivery_pending
                     && attempt_send_state != UpstreamSendState::Ambiguous =>
@@ -1939,7 +1944,7 @@ where
                 max_retries,
                 initial_delay,
                 max_delay,
-            }) if ordinary_retry => {
+            }) if ordinary_retry && !retry_after_exceeds_limit => {
                 let retries = self
                     .transient_retry_counts
                     .entry(current.metadata.provider_account_id().clone())
@@ -1980,6 +1985,8 @@ where
             "sameAccountRetry": same_account_retry, "accountRotationRetry": account_rotation_retry,
             "ordinaryRetry": ordinary_retry, "transportRecovery": transport_recovery.is_some(),
             "transientRetry": transient_retry.is_some(),
+            "retryAfterExceeded": retry_after_exceeds_limit,
+            "maxRetryAfterSeconds": self.plan.max_retry_after().as_secs(),
             "connectionRetry": connection_retry_requested,
             "connectionRetries": self.connection_retries,
             "connectionBudgetRemainingMs": self.connection_budget.remaining().map(duration_ms),

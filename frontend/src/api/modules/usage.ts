@@ -560,6 +560,20 @@ export function getUsageRecordInsightsOverview(data: UsageRangeQuery, signal?: A
   })
 }
 
+export type UsagePerformanceMetric = 'total' | 'firstToken' | 'throughput' | 'scheduling' | 'concurrency'
+export type UsageInsightCard = 'health' | 'performance' | 'cost'
+export function getUsageRecordInsightCard<C extends UsageInsightCard>(
+  data: UsageRangeQuery & { card: C, metric?: UsagePerformanceMetric },
+  signal?: AbortSignal,
+) {
+  return request<Pick<UsageInsightsOverviewResponse, 'granularity' | C>>({
+    url: '/api/admin/usage/insights/overview',
+    method: 'GET',
+    params: data,
+    signal,
+  })
+}
+
 export function getUsageRecordInsightsDiagnostics(data: UsageDiagnosticsQuery, signal?: AbortSignal) {
   return request<UsageDiagnosticsResponse>({
     url: '/api/admin/usage/insights/diagnostics',

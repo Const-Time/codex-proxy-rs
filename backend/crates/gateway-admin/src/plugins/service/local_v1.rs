@@ -66,6 +66,7 @@ impl TryFrom<RuntimeSettings> for domain::RuntimeSettings {
     type Error = AdminError;
     fn try_from(value: RuntimeSettings) -> Result<Self, Self::Error> {
         Ok(Self {
+            max_retry_after_seconds: 240,
             reset_credit_lead_minutes: 10,
             reset_credit_max_weekly_remaining_percent: None,
             subscription_auto_reset_enabled: value.subscription_auto_reset_enabled,
@@ -115,6 +116,7 @@ impl TryFrom<ReplaceRuntimeSettings> for domain::ReplaceRuntimeSettings {
     type Error = AdminError;
     fn try_from(value: ReplaceRuntimeSettings) -> Result<Self, Self::Error> {
         Ok(Self {
+            max_retry_after_seconds: None,
             reset_credit_lead_minutes: None,
             reset_credit_max_weekly_remaining_percent: None,
             subscription_auto_reset_enabled: value.subscription_auto_reset_enabled,

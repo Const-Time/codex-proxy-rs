@@ -50,10 +50,10 @@ async fn concurrent_insights_share_work_only_for_the_same_authorized_filter() {
     let (summary, insights) = tokio::join!(
         services
             .observability()
-            .usage_insights(range, filter.clone()),
+            .usage_insights(range, filter.clone(), Default::default()),
         services
             .observability()
-            .usage_insights(range, filter.clone())
+            .usage_insights(range, filter.clone(), Default::default())
     );
     summary.unwrap();
     insights.unwrap();
@@ -70,7 +70,7 @@ async fn concurrent_insights_share_work_only_for_the_same_authorized_filter() {
     ] {
         services
             .observability()
-            .usage_insights(range, filter)
+            .usage_insights(range, filter, Default::default())
             .await
             .unwrap();
     }
@@ -78,7 +78,7 @@ async fn concurrent_insights_share_work_only_for_the_same_authorized_filter() {
     tokio::time::sleep(StdDuration::from_millis(2100)).await;
     services
         .observability()
-        .usage_insights(range, filter)
+        .usage_insights(range, filter, Default::default())
         .await
         .unwrap();
     assert_eq!(store.usage_summary_calls.load(Ordering::Relaxed), 4);
@@ -483,7 +483,7 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
 
     let insights = services
         .observability()
-        .usage_insights(range, UsageFilter::default())
+        .usage_insights(range, UsageFilter::default(), Default::default())
         .await
         .expect("usage insights");
     let diagnostics = services
@@ -755,7 +755,7 @@ async fn usage_insights_should_reject_partial_costs_when_billing_stream_fails() 
     assert!(
         services
             .observability()
-            .usage_insights(range, UsageFilter::default())
+            .usage_insights(range, UsageFilter::default(), Default::default())
             .await
             .is_err()
     );
@@ -890,6 +890,7 @@ impl ObservabilityStore for FixtureObservabilityStore {
         &self,
         _: TimeRange,
         _: UsageFilter,
+        _selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>> {
         Ok(self.trend.lock().expect("trend").clone())
     }
@@ -955,6 +956,7 @@ impl ObservabilityStore for FixtureObservabilityStore {
         &self,
         range: TimeRange,
         _: UsageFilter,
+        _selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<UsageOverview> {
         self.summary_ranges.lock().unwrap().push(range);
         self.usage_summary_calls.fetch_add(1, Ordering::Relaxed);
@@ -1017,6 +1019,7 @@ impl SettingsStore for FixtureSettingsStore {
             min_codex_cli_version: None,
             usage_retention_days: 31,
             ops_event_retention_days: 30,
+            max_retry_after_seconds: 240,
             reset_credit_lead_minutes: 10,
             reset_credit_max_weekly_remaining_percent: None,
             subscription_auto_reset_enabled: true,
@@ -1226,7 +1229,7 @@ async fn grouped_billing_scenarios_match_repeated_per_request_rounding() {
         let services = observability_services_with_calculated_billing(store).await;
         let insights = services
             .observability()
-            .usage_insights(range, UsageFilter::default())
+            .usage_insights(range, UsageFilter::default(), Default::default())
             .await
             .unwrap();
         results.push(format!("{:?}", insights.cost));

@@ -545,3 +545,51 @@ async fn provider_renewal_loss_cancels_only_its_execution_and_explicit_deadline_
         drop(guard);
     }
 }
+
+#[tokio::test]
+async fn batched_runtime_signals_preserve_order_duplicates_and_release() {
+    let Some((repository, _, _)) = repository().await else {
+        return;
+    };
+    let mut ids = (0..260)
+        .map(|i| format!("acct_batch_{i}"))
+        .collect::<Vec<_>>();
+    let first = acquired(
+        repository
+            .try_acquire_bounded_lease(&scheduling_request(
+                &ids[128],
+                "batch-worker",
+                2,
+                Duration::ZERO,
+            ))
+            .await
+            .unwrap(),
+    );
+    ids.push(ids[128].clone());
+    let signals = repository.credential_runtime_signals(&ids).await.unwrap();
+    assert_eq!(signals.len(), ids.len());
+    for (id, signal) in ids.iter().zip(&signals) {
+        assert_eq!(id, &signal.resource_id);
+        assert_eq!(signal.in_flight, u32::from(id == &ids[128]));
+        assert_eq!(signal.last_started_at.is_some(), id == &ids[128]);
+    }
+    assert_eq!(signals[128].last_started_at, signals[260].last_started_at);
+    assert!(
+        repository
+            .credential_runtime_signals(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .credential_runtime_signals(&["valid".into(), "".into()])
+            .await
+            .is_err()
+    );
+    first.release().await.unwrap();
+    assert_eq!(
+        repository.credential_runtime_signals(&ids).await.unwrap()[128].in_flight,
+        0
+    );
+}

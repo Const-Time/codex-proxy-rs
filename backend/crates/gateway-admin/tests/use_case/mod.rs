@@ -650,6 +650,7 @@ impl ObservabilityStore for UnavailableStore {
         &self,
         _: TimeRange,
         _: UsageFilter,
+        _selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>> {
         Err(unavailable("usage trend"))
     }
@@ -684,7 +685,12 @@ impl ObservabilityStore for UnavailableStore {
         Err(unavailable("usage cards"))
     }
 
-    async fn usage_summary(&self, _: TimeRange, _: UsageFilter) -> AdminStoreResult<UsageOverview> {
+    async fn usage_summary(
+        &self,
+        _: TimeRange,
+        _: UsageFilter,
+        _selection: gateway_admin::model::observability::UsageInsightSelection,
+    ) -> AdminStoreResult<UsageOverview> {
         Err(unavailable("usage summary"))
     }
 

@@ -110,6 +110,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         min_codex_cli_version: Some("0.40.0".to_owned()),
         usage_retention_days: 32,
         ops_event_retention_days: 31,
+        max_retry_after_seconds: 240,
         reset_credit_lead_minutes: 10,
         reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: true,
@@ -124,6 +125,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
     assert_eq!(
         value,
         json!({
+            "maxRetryAfterSeconds": 240,
             "resetCreditLeadMinutes": 10,
             "resetCreditMaxWeeklyRemainingPercent": null,
             "subscriptionAutoResetEnabled": true,
@@ -189,6 +191,7 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         min_codex_cli_version: request.min_codex_cli_version,
         usage_retention_days: u32::try_from(request.usage_retention_days).expect("u32"),
         ops_event_retention_days: u32::try_from(request.ops_event_retention_days).expect("u32"),
+        max_retry_after_seconds: 240,
         reset_credit_lead_minutes: 10,
         reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: true,
@@ -206,6 +209,7 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
             .collect();
     let mut expected_fields = request_fields;
     expected_fields.insert("updatedAt".to_owned());
+    expected_fields.insert("maxRetryAfterSeconds".to_owned());
     expected_fields.insert("resetCreditLeadMinutes".to_owned());
     expected_fields.insert("resetCreditMaxWeeklyRemainingPercent".to_owned());
 

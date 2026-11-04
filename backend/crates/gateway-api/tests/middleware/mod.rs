@@ -391,8 +391,8 @@ async fn local_service_http_endpoints_share_the_same_middleware_operations() {
     assert_eq!(
         seen,
         vec![
-            "local.settings.v2.load",
-            "local.settings.v2.replace",
+            "local.settings.v3.load",
+            "local.settings.v3.replace",
             "local.settings.v1.pricing",
             "local.settings.v1.preview_pricing_sync",
             "local.settings.v1.update_pricing_sync_policy",
@@ -1519,5 +1519,46 @@ async fn local_service_invalid_post_write_result_is_uncertain_and_does_not_undo_
     assert_eq!(saved.request_interval_ms, 25);
     assert_eq!(saved.rotation_strategy.as_str(), "round_robin");
     assert_eq!(f.admin.settings.service_mutations.lock().unwrap().len(), 1);
+    f.manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_settings_versions_preserve_retry_cap_and_reset_policy() {
+    use serde_json::json;
+    let (f, cookie) = service_fixture(Mode::MessageIdentity).await;
+    let mut input = local_settings_input();
+    input["max_retry_after_seconds"] = json!(61);
+    input["reset_credit_lead_minutes"] = json!(25);
+    input["reset_credit_max_weekly_remaining_percent"] = json!(30);
+    let result = host_service_reply(
+        host_service_request(
+            &f,
+            &cookie,
+            "local.settings.v3.replace",
+            json!([untrusted_actor(), input]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(result["Ok"]["max_retry_after_seconds"], 61, "{result}");
+    assert_eq!(result["Ok"]["reset_credit_lead_minutes"], 25);
+    for version in ["v1", "v2"] {
+        let result = host_service_reply(
+            host_service_request(
+                &f,
+                &cookie,
+                &format!("local.settings.{version}.replace"),
+                json!([untrusted_actor(), local_settings_input()]),
+            )
+            .await,
+        )
+        .await;
+        assert!(result.get("Ok").is_some(), "{result}");
+        assert!(result["Ok"].get("max_retry_after_seconds").is_none());
+        let settings = f.admin.services.settings().load().await.unwrap();
+        assert_eq!(settings.max_retry_after_seconds, 61);
+        assert_eq!(settings.reset_credit_lead_minutes, 25);
+        assert_eq!(settings.reset_credit_max_weekly_remaining_percent, Some(30));
+    }
     f.manager.shutdown().await;
 }

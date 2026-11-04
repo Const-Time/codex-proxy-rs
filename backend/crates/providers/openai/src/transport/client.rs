@@ -601,6 +601,7 @@ pub type CodexResponseMetadataUpdates = CodexWebSocketResponseMetadataUpdates;
 
 /// Codex Responses 上游 live SSE 响应。
 pub struct CodexBackendStreamingResponse {
+    pub(crate) routing_affinity: Option<super::routing_affinity::ChatGptRoutingAffinity>,
     /// 上游 SSE 字节流。
     pub body: CodexBackendSseStream,
     /// 实际使用的上游传输。
@@ -667,6 +668,7 @@ impl OpenAiUpstreamProtocol {
 /// Codex HTTP/SSE 上游客户端。
 #[derive(Clone)]
 pub struct CodexBackendClient {
+    pub(super) routing_affinity: Option<super::routing_affinity::ChatGptRoutingAffinity>,
     pub(super) response_control: Option<gateway_core::engine::response_control::ResponseControl>,
     pub(super) connection_budget: Option<gateway_core::engine::connection::ConnectionBudget>,
     pub(super) client: Client,
@@ -682,6 +684,14 @@ pub struct CodexBackendClient {
 }
 
 impl CodexBackendClient {
+    pub(crate) fn with_routing_affinity(
+        mut self,
+        affinity: Option<super::routing_affinity::ChatGptRoutingAffinity>,
+    ) -> Self {
+        self.routing_affinity = affinity;
+        self
+    }
+
     pub(crate) fn with_response_control(
         mut self,
         control: Option<gateway_core::engine::response_control::ResponseControl>,

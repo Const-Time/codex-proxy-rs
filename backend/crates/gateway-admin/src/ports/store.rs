@@ -607,6 +607,7 @@ pub trait ObservabilityStore: Send + Sync {
         &self,
         range: TimeRange,
         filter: UsageFilter,
+        selection: crate::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>>;
 
     /// 流式返回可由 Provider 重新校验的已计算费用事实，不保证顺序。
@@ -635,6 +636,7 @@ pub trait ObservabilityStore: Send + Sync {
         &self,
         range: TimeRange,
         filter: UsageFilter,
+        selection: crate::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<UsageOverview>;
 
     async fn usage_diagnostics(

@@ -131,6 +131,7 @@ impl CodexWebSocketPool {
         &self,
         key: &CodexWebSocketPoolKey,
         required_response_id: Option<&str>,
+        requires_search: bool,
         proxy: Option<&gateway_core::account::OutboundProxy>,
         downstream_cancellation: Option<&gateway_core::lifecycle::CancellationToken>,
     ) -> WebSocketPoolAcquire {
@@ -204,6 +205,16 @@ impl CodexWebSocketPool {
                                     .observation()
                                     .with_exit_reason("downstream_connection_closed")
                             })
+                        });
+                        let loss = loss.or_else(|| {
+                            // Codex initializes hosted search on the first payload, including generate=false.
+                            (requires_search && connection.initial_search_declared == Some(false))
+                                .then(|| {
+                                    connection
+                                        .websocket
+                                        .observation()
+                                        .with_exit_reason("search_activation_required")
+                                })
                         });
                         let Some(observation) = loss else {
                             let retired = state.take_downstream_connections(

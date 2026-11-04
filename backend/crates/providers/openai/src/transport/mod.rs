@@ -19,6 +19,7 @@ pub mod request;
 pub mod request_profile;
 pub mod reset_credits;
 mod response_meta;
+pub(crate) mod routing_affinity;
 pub(crate) mod session;
 mod time;
 pub(crate) use endpoints::parse_upstream_base_url;
@@ -31,7 +32,7 @@ pub use self::{
     catalog::{
         CodexCatalogCapabilities, CodexCatalogCapabilityEvidence, CodexCatalogLimits,
         CodexCatalogMetadata, CodexCatalogModel, CodexCatalogVisibility, CodexModelCatalogError,
-        CodexModelCatalogSnapshot, MAX_CODEX_MODEL_CATALOG_BYTES, parse_codex_model_catalog,
+        CodexModelCatalogSnapshot, parse_codex_model_catalog,
     },
     client::{
         CodexAccountSelectionTelemetry, CodexBackendClient, CodexBackendJsonResponse,

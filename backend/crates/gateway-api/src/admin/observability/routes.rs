@@ -164,6 +164,7 @@ pub(crate) async fn usage_insights_overview<S>(
 where
     S: AdminSessionState + Send + Sync,
 {
+    let selection = query.selection().map_err(map_wire_error)?;
     let range = usage_range(query.start_time.as_deref(), query.end_time.as_deref())
         .map_err(map_wire_error)?;
     let mut filter = usage_filter(&query).map_err(map_wire_error)?;
@@ -171,13 +172,27 @@ where
     let result = state
         .admin_services()
         .observability()
-        .usage_insights(range, filter)
+        .usage_insights(range, filter, selection)
         .await
         .map_err(map_service_error)?;
-    Ok(AdminResponse::new(
-        StatusCode::OK,
-        AdminEnvelope::ok(usage_insights_view(result)),
-    ))
+    let view = usage_insights_view(result);
+    let body = match selection {
+        domain::UsageInsightSelection::All => serde_json::to_value(view).map_err(|_| {
+            map_service_error(gateway_admin::model::AdminError::internal(
+                "usage response serialization",
+            ))
+        })?,
+        domain::UsageInsightSelection::Health => {
+            serde_json::json!({"granularity":view.granularity,"health":view.health})
+        }
+        domain::UsageInsightSelection::Cost => {
+            serde_json::json!({"granularity":view.granularity,"cost":view.cost})
+        }
+        domain::UsageInsightSelection::Performance(_) => {
+            serde_json::json!({"granularity":view.granularity,"performance":view.performance})
+        }
+    };
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(body)))
 }
 
 pub(crate) async fn usage_insights_diagnostics<S>(

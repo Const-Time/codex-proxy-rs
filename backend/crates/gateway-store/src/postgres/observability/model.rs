@@ -808,6 +808,7 @@ pub trait ObservabilityRepository: Send + Sync {
         &self,
         range: ObservabilityRange,
         filter: UsageRecordFilter,
+        selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> StoreResult<Vec<RequestMetricPoint>>;
     fn usage_calculated_billing_facts(
         &self,
@@ -828,6 +829,7 @@ pub trait ObservabilityRepository: Send + Sync {
         &self,
         range: ObservabilityRange,
         filter: UsageRecordFilter,
+        selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> StoreResult<UsageOverview>;
     async fn usage_diagnostics(
         &self,

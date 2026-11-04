@@ -4,6 +4,8 @@ use std::{collections::BTreeMap, sync::Arc};
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsValues {
+    #[serde(default = "default_max_retry_after_seconds")]
+    pub(crate) max_retry_after_seconds: u32,
     pub(crate) pricing: Arc<crate::metering::PricingOverrides>,
     pub(crate) max_concurrent_per_account: u32,
     pub(crate) request_interval_ms: u64,
@@ -30,6 +32,7 @@ impl SettingsValues {
         min_codex_cli_version: Option<String>,
     ) -> Self {
         Self {
+            max_retry_after_seconds: default_max_retry_after_seconds(),
             pricing: Arc::default(),
             max_concurrent_per_account,
             request_interval_ms,
@@ -76,6 +79,17 @@ impl SettingsValues {
     #[must_use]
     pub fn with_model_mappings(mut self, mappings: BTreeMap<String, String>) -> Self {
         self.model_mappings = mappings;
+        self
+    }
+}
+
+const fn default_max_retry_after_seconds() -> u32 {
+    240
+}
+impl SettingsValues {
+    #[must_use]
+    pub fn with_max_retry_after_seconds(mut self, seconds: u32) -> Self {
+        self.max_retry_after_seconds = seconds;
         self
     }
 }

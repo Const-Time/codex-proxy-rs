@@ -1022,6 +1022,7 @@ impl SettingsStore for StaticSettingsStore {
             min_codex_cli_version: None,
             usage_retention_days: 30,
             ops_event_retention_days: 30,
+            max_retry_after_seconds: 240,
             reset_credit_lead_minutes: 10,
             reset_credit_max_weekly_remaining_percent: self
                 .reset_credit_max_weekly_remaining_percent,

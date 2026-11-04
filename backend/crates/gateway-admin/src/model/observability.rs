@@ -6,6 +6,34 @@ use chrono::{DateTime, TimeDelta, Timelike as _, Utc};
 
 use super::{AdminModelError, PageSize};
 
+/// Controls which expensive aggregates a usage card actually needs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageInsightSelection {
+    #[default]
+    All,
+    Health,
+    Cost,
+    Performance(UsagePerformanceMetric),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsagePerformanceMetric {
+    Total,
+    FirstToken,
+    Throughput,
+    Scheduling,
+    Concurrency,
+}
+
+impl UsageInsightSelection {
+    pub fn costs(self) -> bool {
+        matches!(self, Self::All | Self::Cost)
+    }
+    pub fn performance(self, metric: UsagePerformanceMetric) -> bool {
+        self == Self::All || self == Self::Performance(metric)
+    }
+}
+
 /// 观测日界所用的东八区(UTC+8)固定偏移秒数。
 const CHINA_OFFSET_SECONDS: i64 = 8 * 60 * 60;
 

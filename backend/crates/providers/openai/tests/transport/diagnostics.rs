@@ -458,3 +458,27 @@ fn turn_rate_limit_does_not_grant_proxy_replay_or_account_cooldown() {
         CodexFailureCategory::RateLimited
     );
 }
+
+#[test]
+fn model_rejection_requires_structured_code_and_supported_status() {
+    for status in [400, 403, 404] {
+        assert_eq!(
+            classify(
+                status,
+                r#"{"error":{"code":"model_not_found","message":"not found"}}"#
+            ),
+            CodexFailureCategory::ModelUnsupported
+        );
+    }
+    for body in [
+        r#"{"error":{"code":"unsupported_value","message":"model not supported"}}"#,
+        r#"{"error":{"message":"model not available"}}"#,
+        r#"{"input":"model_not_available","error":{"message":"bad input"}}"#,
+    ] {
+        assert_eq!(classify(400, body), CodexFailureCategory::InvalidRequest);
+    }
+    assert_ne!(
+        classify(500, r#"{"error":{"code":"model_not_found"}}"#),
+        CodexFailureCategory::ModelUnsupported
+    );
+}

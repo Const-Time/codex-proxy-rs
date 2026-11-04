@@ -100,6 +100,8 @@ impl CodexWebSocketConnection {
             connection,
             payload_text: websocket_response_create_payload_text(request)?,
             continuation: WebSocketContinuationRequirement::from_request(request),
+            codex_search_declared: (path == CODEX_RESPONSES_PATH)
+                .then(|| crate::compat::declares_hosted_search(request.body())),
         })
     }
 }
@@ -143,8 +145,13 @@ pub(super) async fn send_websocket_request(
 
 pub(super) fn websocket_connection_metadata(
     response: &WsResponse<Option<Vec<u8>>>,
+    connection: &CodexWebSocketConnection,
 ) -> CodexWebSocketConnectionMetadata {
     CodexWebSocketConnectionMetadata {
+        routing_affinity: crate::transport::routing_affinity::ChatGptRoutingAffinity::from_response(
+            &connection.endpoint,
+            response.headers(),
+        ),
         turn_state: response_meta::turn_state(response.headers()),
         set_cookie_headers: response_meta::set_cookie_headers(response.headers()),
         rate_limit_headers: response_meta::rate_limit_headers(response.headers()),

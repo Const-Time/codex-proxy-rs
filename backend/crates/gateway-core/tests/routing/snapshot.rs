@@ -414,3 +414,50 @@ fn catalog_visibility_requires_a_source_account_in_the_current_scope() {
         );
     }
 }
+
+struct RacingSnapshotStore {
+    loads: AtomicUsize,
+    persistent: bool,
+    race_after_read: bool,
+}
+impl SnapshotStorePort for RacingSnapshotStore {
+    fn load_snapshot_facts(&self) -> BoxFuture<'_, Result<SnapshotFacts, SnapshotStoreError>> {
+        Box::pin(async move {
+            let call = self.loads.fetch_add(1, Ordering::SeqCst);
+            Ok(if call == 0 || self.persistent {
+                facts(1, if self.race_after_read { 1 } else { 2 })
+            } else {
+                facts(2, 2)
+            })
+        })
+    }
+    fn current_config_revision(&self) -> BoxFuture<'_, Result<ConfigRevision, SnapshotStoreError>> {
+        Box::pin(async { Ok(ConfigRevision::new(2).unwrap()) })
+    }
+}
+#[test]
+fn compiler_reloads_whole_snapshot_after_a_revision_race() {
+    for race_after_read in [false, true] {
+        let store = Arc::new(RacingSnapshotStore {
+            loads: AtomicUsize::new(0),
+            persistent: false,
+            race_after_read,
+        });
+        let snapshot = block_on(compiler(store.clone()).compile()).unwrap();
+        assert_eq!(snapshot.revision().get(), 2);
+        assert_eq!(store.loads.load(Ordering::SeqCst), 2);
+    }
+}
+#[test]
+fn compiler_bounds_retries_when_revision_keeps_changing() {
+    let store = Arc::new(RacingSnapshotStore {
+        loads: AtomicUsize::new(0),
+        persistent: true,
+        race_after_read: false,
+    });
+    assert_eq!(
+        block_on(compiler(store.clone()).compile()).unwrap_err(),
+        RuntimeSnapshotCompileError::RevisionChanged
+    );
+    assert_eq!(store.loads.load(Ordering::SeqCst), 4);
+}

@@ -18,7 +18,7 @@ export function useAccountBatchEditor(options: {
 }) {
   const selectedAccountsById = new Map<string, AccountRow>()
   const showBatchEditModal = shallowRef(false)
-  const schedulingEnabled = shallowRef(true)
+  const schedulingEnabled = shallowRef<boolean | undefined>()
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
   const modelAccess = ref<AccountModelAccess | undefined>()
@@ -38,7 +38,7 @@ export function useAccountBatchEditor(options: {
     modelAccess.value = undefined
     updateScheduling.value = false
     catalogAccountId.value = accounts[0]?.id
-    schedulingEnabled.value = accounts.every(account => account.enabled)
+    schedulingEnabled.value = undefined
     proxyMode.value = 'preserve'
     proxyId.value = ''
     concurrencyLimit.value = sharedConcurrencyLimit(accounts)
@@ -118,7 +118,7 @@ export function useAccountBatchEditor(options: {
   watch([showBatchEditModal, saving], ([open, isSaving]) => {
     if (open || isSaving)
       return
-    schedulingEnabled.value = true
+    schedulingEnabled.value = undefined
     proxyMode.value = 'preserve'
     proxyId.value = ''
     concurrencyLimit.value = ''

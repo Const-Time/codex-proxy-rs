@@ -17,6 +17,7 @@ pub use gateway_core::account::RotationStrategy;
 /// 完整运行设置事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub max_retry_after_seconds: u32,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
     pub subscription_auto_reset_enabled: bool,
@@ -38,6 +39,7 @@ pub struct RuntimeSettings {
 /// 原子替换运行设置的命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceRuntimeSettings {
+    pub max_retry_after_seconds: Option<u32>,
     pub reset_credit_lead_minutes: Option<u32>,
     pub reset_credit_max_weekly_remaining_percent: Option<Option<u32>>,
     pub subscription_auto_reset_enabled: Option<bool>,

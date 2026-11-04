@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
-import type { getUsageRecordInsightsOverview } from '@/api'
+import type { getUsageRecordInsightsOverview, UsagePerformanceMetric } from '@/api'
 
-import { computed, shallowRef } from 'vue'
+import { computed } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
@@ -39,7 +39,7 @@ const props = withDefaults(
   },
 )
 
-const activeView = shallowRef('total')
+const activeView = defineModel<UsagePerformanceMetric>('metric', { default: 'total' })
 const { palette } = useChartPalette()
 const performancePoints = computed<PerformancePoint[]>(() => props.performance.points)
 const requestActivity = computed(() => requestActivityByBucket(

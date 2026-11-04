@@ -82,3 +82,64 @@ fn scalar_query_parsers_should_reject_out_of_range_values_without_echoing_input(
         "timeRange"
     );
 }
+
+#[test]
+fn usage_cards_validate_metric_combinations_and_preserve_filters() {
+    use gateway_admin::model::observability::{
+        UsageInsightSelection as S, UsagePerformanceMetric as M,
+    };
+    use gateway_api::admin::observability::UsageQuery;
+    for (card, metric, expected) in [
+        ("health", None, S::Health),
+        ("cost", None, S::Cost),
+        ("performance", Some("total"), S::Performance(M::Total)),
+        (
+            "performance",
+            Some("firstToken"),
+            S::Performance(M::FirstToken),
+        ),
+        (
+            "performance",
+            Some("throughput"),
+            S::Performance(M::Throughput),
+        ),
+        (
+            "performance",
+            Some("scheduling"),
+            S::Performance(M::Scheduling),
+        ),
+        (
+            "performance",
+            Some("concurrency"),
+            S::Performance(M::Concurrency),
+        ),
+    ] {
+        let query: UsageQuery = serde_json::from_value(json!({"card":card,"metric":metric,"personal":true,"groupId":"g1","startTime":"2026-11-01T00:00:00Z"})).unwrap();
+        assert_eq!(query.selection().unwrap(), expected);
+        assert!(query.personal);
+        assert_eq!(query.group_id.as_deref(), Some("g1"));
+    }
+    for value in [
+        json!({"card":"health","metric":"total"}),
+        json!({"metric":"total"}),
+        json!({"card":"performance","metric":"bad"}),
+        json!({"card":"bad"}),
+    ] {
+        assert!(
+            serde_json::from_value::<UsageQuery>(value)
+                .unwrap()
+                .selection()
+                .is_err()
+        );
+    }
+    assert_eq!(UsageQuery::default().selection().unwrap(), S::All);
+    assert!(serde_json::from_value::<UsageQuery>(json!({"unknown":"bad"})).is_err());
+}
+
+#[test]
+fn usage_card_url_query_accepts_personal_and_numeric_filters() {
+    let query = axum::extract::Query::<gateway_api::admin::observability::UsageQuery>::try_from_uri(&"/api/admin/usage/insights/overview?card=performance&metric=concurrency&personal=true&statusCode=200&startTime=2026-11-01T00%3A00%3A00Z".parse().unwrap()).unwrap().0;
+    assert!(query.personal);
+    assert_eq!(query.status_code, Some(200));
+    assert!(query.selection().is_ok());
+}

@@ -318,15 +318,18 @@ fn overlapping_refreshes_should_not_restore_revoked_account_scope() {
         assert_eq!(handle.revision(), Some(revision(9)));
 
         release.send(()).expect("release old catalog query");
-        assert_eq!(old.await.expect("old refresh"), revision(10));
+        assert_eq!(
+            old.await.expect("old refresh retries the race"),
+            revision(11)
+        );
         let frozen_old = handle.acquire().expect("old request snapshot");
-        assert!(removed_account_allowed(&frozen_old));
+        assert!(!removed_account_allowed(&frozen_old));
         assert_eq!(new.await.expect("new refresh"), revision(11));
         let current = handle.acquire().expect("new request snapshot");
         assert!(!removed_account_allowed(&current));
         assert_eq!(current.revision(), revision(11));
-        assert!(removed_account_allowed(&frozen_old));
-        assert_eq!(frozen_old.revision(), revision(10));
+        assert!(!removed_account_allowed(&frozen_old));
+        assert_eq!(frozen_old.revision(), revision(11));
     });
 }
 
@@ -429,6 +432,7 @@ fn subscription_refresh_should_wait_for_inflight_compile_and_reload_authoritativ
         let mut old = Box::pin(publisher.refresh());
         assert!(futures::poll!(old.as_mut()).is_pending());
         *store.facts.lock().expect("facts lock") = Ok(scoped_facts(11, false));
+        *store.current_revision.lock().expect("revision lock") = Ok(revision(11));
         // 通知只是提示，即使版本过期也要在取得发布权后重新读取 Store。
         notifications
             .unbounded_send(Ok(revision(3)))
@@ -570,6 +574,7 @@ fn pending_notification_should_not_block_next_local_refresh() {
         assert!(futures::poll!(committed.as_mut()).is_pending());
         assert_eq!(handle.revision(), Some(revision(10)));
         *store.facts.lock().expect("facts lock") = Ok(facts(11, 11));
+        *store.current_revision.lock().expect("revision lock") = Ok(revision(11));
         let mut next = Box::pin(publisher.refresh());
         assert_eq!(
             futures::poll!(next.as_mut()),

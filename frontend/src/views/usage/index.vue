@@ -49,6 +49,10 @@ const {
   insights,
   refreshingList,
   diagnosticDimension,
+  performanceMetric,
+  healthLoading,
+  costLoading,
+  performanceLoading,
   loadUsageRecords,
   refreshUsageRecords,
   handlePageChange,
@@ -85,6 +89,10 @@ watch([timeRange, customDates], () => {
     <UsageSummaryCards :summary="summary" />
     <UsageInsightsGrid
       v-model:diagnostic-dimension="diagnosticDimension"
+      v-model:performance-metric="performanceMetric"
+      :health-loading="healthLoading"
+      :cost-loading="costLoading"
+      :performance-loading="performanceLoading"
       :overview="insights.overview"
       :diagnostics="insights.diagnostics"
       :loading="analyticsLoading"

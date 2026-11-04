@@ -21,7 +21,7 @@ use super::{
     RoutingGroupSnapshot, RoutingPlan, RuntimeAccount, RuntimeAccountDirectory, UpstreamModelId,
 };
 
-const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
+const MAXIMUM_SNAPSHOT_STABILITY_ATTEMPTS: usize = 4;
 
 type ModelCatalogAccounts = BTreeMap<ProviderKind, BTreeMap<String, BTreeSet<ProviderAccountId>>>;
 
@@ -238,7 +238,8 @@ impl RuntimeSnapshotCompiler {
         &self,
         previous: Option<&RuntimeSnapshot>,
     ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
-        for _ in 0..MAXIMUM_CATALOG_STABILITY_ATTEMPTS {
+        let mut instability = RuntimeSnapshotCompileError::CatalogChanged;
+        for _ in 0..MAXIMUM_SNAPSHOT_STABILITY_ATTEMPTS {
             let catalog_generations = self.providers.catalog_generations();
             let facts = self
                 .store
@@ -246,10 +247,22 @@ impl RuntimeSnapshotCompiler {
                 .await
                 .map_err(|_| RuntimeSnapshotCompileError::StoreUnavailable)?;
             if facts.config_revision != facts.observed_current_revision {
-                return Err(RuntimeSnapshotCompileError::RevisionChanged);
+                instability = RuntimeSnapshotCompileError::RevisionChanged;
+                continue;
             }
+            let revision = facts.config_revision;
             let snapshot =
                 compile_runtime_snapshot(facts, self.providers.as_ref(), previous).await?;
+            if self
+                .store
+                .current_config_revision()
+                .await
+                .map_err(|_| RuntimeSnapshotCompileError::StoreUnavailable)?
+                != revision
+            {
+                instability = RuntimeSnapshotCompileError::RevisionChanged;
+                continue;
+            }
             let observed_generations = self.providers.catalog_generations();
             if catalog_generations == observed_generations {
                 return Ok(
@@ -260,8 +273,9 @@ impl RuntimeSnapshotCompiler {
                     }),
                 );
             }
+            instability = RuntimeSnapshotCompileError::CatalogChanged;
         }
-        Err(RuntimeSnapshotCompileError::CatalogChanged)
+        Err(instability)
     }
 }
 
@@ -1022,6 +1036,7 @@ impl RuntimeSnapshot {
         }
 
         Ok(RoutingPlan {
+            max_retry_after_seconds: self.values.max_retry_after_seconds,
             fast_mode: crate::account::FastMode::Default,
             config_revision: self.revision,
             pricing: Arc::clone(&self.values.pricing),
@@ -1066,6 +1081,7 @@ impl RuntimeSnapshot {
             account_scope: Arc::clone(&account_scope),
         };
         Ok(RoutingPlan {
+            max_retry_after_seconds: self.values.max_retry_after_seconds,
             fast_mode: crate::account::FastMode::Default,
             config_revision: self.revision,
             pricing: Arc::clone(&self.values.pricing),

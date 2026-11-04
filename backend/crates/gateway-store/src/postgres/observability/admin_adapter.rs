@@ -178,11 +178,12 @@ impl ObservabilityRepository for PgObservabilityRepository {
         &self,
         range: ObservabilityRange,
         filter: UsageRecordFilter,
+        selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> StoreResult<Vec<RequestMetricPoint>> {
         self.query_budget
             .run(
                 "load usage request trend",
-                request_metric_series(&self.pool, range, &filter),
+                request_metric_series(&self.pool, range, &filter, selection),
             )
             .await
     }
@@ -235,37 +236,48 @@ impl ObservabilityRepository for PgObservabilityRepository {
         &self,
         range: ObservabilityRange,
         filter: UsageRecordFilter,
+        selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> StoreResult<UsageOverview> {
         filter.validate()?;
         let requests = self
             .query_budget
             .run(
                 "load usage request metrics",
-                request_metrics(&self.pool, range, &filter),
+                selected_request_metrics(&self.pool, range, &filter, selection),
             )
             .await?;
-        let attempts = self
-            .query_budget
-            .run(
-                "load usage attempt metrics",
-                attempt_metrics(&self.pool, range, &filter),
-            )
-            .await?;
-        let providers = self
-            .query_budget
-            .run(
-                "load usage provider observations",
-                provider_observations(&self.pool, range, &filter),
-            )
-            .await?;
-        Ok(UsageOverview {
-            total_cost_usd: self
-                .query_budget
+        let attempts = if selection.costs() {
+            self.query_budget
                 .run(
-                    "load billed consumption",
-                    total_billed_consumption(&self.pool, range, &filter),
+                    "load usage attempt metrics",
+                    attempt_metrics(&self.pool, range, &filter),
                 )
-                .await?,
+                .await?
+        } else {
+            AttemptMetrics::default()
+        };
+        let providers =
+            if selection == gateway_admin::model::observability::UsageInsightSelection::All {
+                self.query_budget
+                    .run(
+                        "load usage provider observations",
+                        provider_observations(&self.pool, range, &filter),
+                    )
+                    .await?
+            } else {
+                Vec::new()
+            };
+        Ok(UsageOverview {
+            total_cost_usd: if selection.costs() {
+                self.query_budget
+                    .run(
+                        "load billed consumption",
+                        total_billed_consumption(&self.pool, range, &filter),
+                    )
+                    .await?
+            } else {
+                DecimalAmount::from_str("0")?
+            },
             range,
             requests,
             attempts,
@@ -392,9 +404,10 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
         &self,
         range: admin_observability::TimeRange,
         filter: admin_observability::UsageFilter,
+        selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<Vec<admin_observability::RequestMetricPoint>> {
         self.repository
-            .usage_trend(store_range(range)?, store_usage_filter(filter))
+            .usage_trend(store_range(range)?, store_usage_filter(filter), selection)
             .await
             .map_err(observability_error)?
             .into_iter()
@@ -475,10 +488,11 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
         &self,
         range: admin_observability::TimeRange,
         filter: admin_observability::UsageFilter,
+        selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<admin_observability::UsageOverview> {
         let overview = self
             .repository
-            .usage_summary(store_range(range)?, store_usage_filter(filter))
+            .usage_summary(store_range(range)?, store_usage_filter(filter), selection)
             .await
             .map_err(observability_error)?;
         admin_usage_overview(overview)

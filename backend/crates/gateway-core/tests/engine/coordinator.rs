@@ -625,6 +625,14 @@ fn plan_with_policy(
     operation: &Operation,
     account_selection_policy: AccountSelectionPolicy,
 ) -> RoutingPlan {
+    plan_with_retry_after(operation, account_selection_policy, 240)
+}
+
+fn plan_with_retry_after(
+    operation: &Operation,
+    account_selection_policy: AccountSelectionPolicy,
+    limit: u32,
+) -> RoutingPlan {
     let provider = ProviderKind::new("openai").expect("provider");
     let public_model = PublicModelId::new("gpt-5").expect("public model");
     let capabilities = ModelCapabilities::new(BTreeSet::from([operation.kind()]), Some(32_000))
@@ -667,7 +675,13 @@ fn plan_with_policy(
     )
     .expect("snapshot")
     .with_account_directory(Arc::clone(&directory));
+    let settings = snapshot
+        .settings()
+        .clone()
+        .with_max_retry_after_seconds(limit);
     snapshot
+        .resolve_settings(settings)
+        .unwrap()
         .plan(
             &public_model,
             operation,
@@ -6568,4 +6582,104 @@ fn heartbeat_then_upstream_failure_preserves_http_status_and_incomplete_outcome(
         state.commits, 0,
         "heartbeat is not a business delivery acknowledgment"
     );
+}
+
+fn retry_after_plan(operation: &Operation, limit: u32) -> RoutingPlan {
+    plan_with_retry_after(
+        operation,
+        AccountSelectionPolicy::new(
+            RotationStrategy::Smart,
+            NonZeroU32::new(2).unwrap(),
+            Duration::ZERO,
+        ),
+        limit,
+    )
+}
+
+#[test]
+fn retry_after_at_or_below_the_configured_limit_keeps_the_full_wait() {
+    for (limit, seconds) in [(240, 240), (60, 60), (400, 308)] {
+        let operation = generate_operation();
+        let route_plan = retry_after_plan(&operation, limit);
+        let (coordinator, _, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(
+                transient_rejection().with_retry_after(Duration::from_secs(seconds))
+            )],
+        }]);
+        let cancellation = CancellationToken::new();
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(600)),
+            operation,
+            route_plan,
+            None,
+            None,
+            cancellation.clone(),
+        ))
+        .unwrap();
+        let trace = session.trace().clone();
+        let mut collection = Box::pin(session.collect_uncommitted());
+        assert!(block_on(async { futures::poll!(&mut collection) }).is_pending());
+        let trace = trace.snapshot().unwrap();
+        let retry = trace["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["stage"] == "retry.prepared")
+            .unwrap();
+        assert_eq!(retry["data"]["delayMs"], seconds * 1000);
+        assert_eq!(retry["data"]["retryAfterExceeded"], false);
+        cancellation.cancel();
+        assert!(matches!(block_on(collection), Err(EngineError::Cancelled)));
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn retry_after_above_the_configured_limit_rotates_without_waiting() {
+    for (limit, seconds) in [(240, 241), (240, 308), (60, 61), (0, 1)] {
+        for rejection in [
+            transient_rejection(),
+            ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::NotSent)
+                .with_pre_delivery_transport_fallback(),
+            ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::NotSent)
+                .with_pre_delivery_transport_retry(NonZeroU32::MIN, Duration::from_secs(seconds)),
+        ] {
+            let operation = generate_operation();
+            let route_plan = retry_after_plan(&operation, limit);
+            let (coordinator, _, provider) = coordinator(vec![
+                Script::Stream {
+                    account_id: "acct_first",
+                    items: vec![Err(rejection.with_retry_after(Duration::from_secs(seconds)))],
+                },
+                Script::Stream {
+                    account_id: "acct_second",
+                    items: complete_stream(None),
+                },
+            ]);
+            let mut session = block_on(coordinator.start(
+                model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                operation,
+                route_plan,
+                None,
+                None,
+                CancellationToken::new(),
+            ))
+            .unwrap();
+            let mut collection = Box::pin(session.collect_uncommitted());
+            assert!(matches!(
+                block_on(async { futures::poll!(&mut collection) }),
+                std::task::Poll::Ready(Ok(_))
+            ));
+            drop(collection);
+            let contexts = provider.contexts.lock().unwrap();
+            assert_eq!(contexts.len(), 2);
+            assert_eq!(contexts[1].required_account(), None);
+            assert!(
+                contexts[1]
+                    .excluded_accounts()
+                    .contains(&ProviderAccountId::new("acct_first").unwrap())
+            );
+        }
+    }
 }

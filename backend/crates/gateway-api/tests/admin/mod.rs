@@ -562,6 +562,9 @@ impl SettingsStore for MemorySettingsStore {
         self.service_write(context).await;
         let mut settings = self.settings.lock().expect("settings");
         let updated = RuntimeSettings {
+            max_retry_after_seconds: command
+                .max_retry_after_seconds
+                .unwrap_or(settings.max_retry_after_seconds),
             reset_credit_lead_minutes: command
                 .reset_credit_lead_minutes
                 .unwrap_or(settings.reset_credit_lead_minutes),
@@ -1170,6 +1173,7 @@ impl ObservabilityStore for UnusedStore {
         &self,
         _: TimeRange,
         _: UsageFilter,
+        _selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>> {
         Err(unavailable("usage trend"))
     }
@@ -1218,6 +1222,7 @@ impl ObservabilityStore for UnusedStore {
         &self,
         range: TimeRange,
         _: UsageFilter,
+        _selection: gateway_admin::model::observability::UsageInsightSelection,
     ) -> AdminStoreResult<UsageOverview> {
         if self.dashboard_observation.lock().unwrap().is_none() {
             return Err(unavailable("usage summary"));
@@ -1448,6 +1453,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         min_codex_cli_version: None,
         usage_retention_days: 31,
         ops_event_retention_days: 30,
+        max_retry_after_seconds: 240,
         reset_credit_lead_minutes: 10,
         reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: true,

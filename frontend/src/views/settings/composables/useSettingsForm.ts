@@ -13,6 +13,7 @@ export function useSettingsForm() {
   const error = shallowRef('')
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
   const form = reactive({
+    maxRetryAfterSeconds: 240 as number | null,
     resetCreditLeadMinutes: 10 as number | null,
     resetCreditMaxWeeklyRemainingPercent: null as number | null,
     subscriptionAutoResetEnabled: true,
@@ -28,7 +29,7 @@ export function useSettingsForm() {
     auditRetentionDays: 90,
   })
 
-  function numericModel(key: 'resetCreditLeadMinutes' | 'resetCreditMaxWeeklyRemainingPercent' | 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs') {
+  function numericModel(key: 'maxRetryAfterSeconds' | 'resetCreditLeadMinutes' | 'resetCreditMaxWeeklyRemainingPercent' | 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -42,6 +43,7 @@ export function useSettingsForm() {
     })
   }
 
+  const maxRetryAfterSecondsValue = numericModel('maxRetryAfterSeconds')
   const resetCreditLeadMinutesValue = numericModel('resetCreditLeadMinutes')
   const resetCreditMaxWeeklyRemainingPercentValue = numericModel('resetCreditMaxWeeklyRemainingPercent')
   const refreshMarginSecondsValue = numericModel('refreshMarginSeconds')
@@ -57,6 +59,7 @@ export function useSettingsForm() {
   }
 
   function applySettings(data: Awaited<ReturnType<typeof getSettings>>) {
+    form.maxRetryAfterSeconds = data.maxRetryAfterSeconds ?? 240
     form.resetCreditLeadMinutes = data.resetCreditLeadMinutes ?? 10
     form.resetCreditMaxWeeklyRemainingPercent = data.resetCreditMaxWeeklyRemainingPercent ?? null
     form.subscriptionAutoResetEnabled = data.subscriptionAutoResetEnabled ?? true
@@ -131,7 +134,11 @@ export function useSettingsForm() {
       toast.warning('请完整填写运行参数和调度策略')
       return
     }
-    const { resetCreditLeadMinutes, resetCreditMaxWeeklyRemainingPercent } = form
+    const { maxRetryAfterSeconds, resetCreditLeadMinutes, resetCreditMaxWeeklyRemainingPercent } = form
+    if (maxRetryAfterSeconds === null || !Number.isInteger(maxRetryAfterSeconds) || maxRetryAfterSeconds < 0 || maxRetryAfterSeconds > 4294967295) {
+      toast.warning('重试等待上限必须是 0～4294967295 的整数')
+      return
+    }
     if (resetCreditLeadMinutes === null || !Number.isInteger(resetCreditLeadMinutes) || resetCreditLeadMinutes < 1 || resetCreditLeadMinutes > 1440) {
       toast.warning('提前使用时间必须是 1～1440 的整数')
       return
@@ -147,6 +154,7 @@ export function useSettingsForm() {
     try {
       saving.value = true
       const result = await updateSettings({
+        maxRetryAfterSeconds,
         resetCreditLeadMinutes,
         resetCreditMaxWeeklyRemainingPercent,
         modelMappings: mappingPayload(),
@@ -184,6 +192,7 @@ export function useSettingsForm() {
     addMapping,
     updateMapping,
     removeMapping,
+    maxRetryAfterSecondsValue,
     resetCreditLeadMinutesValue,
     resetCreditMaxWeeklyRemainingPercentValue,
     refreshMarginSecondsValue,

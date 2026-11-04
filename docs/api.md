@@ -190,7 +190,10 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 
 OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足错误时，代理在允许安全重放且
 尚未交付输出的前提下，先做最多 3 次同账号指数退避，再通过现有调度换号。默认间隔从 500ms 开始，
-上游 `Retry-After` 参与退避计算，单次等待不超过 8 秒；重试同时受请求总尝试次数和截止时间约束。
+本地指数退避最多 8 秒；有效的上游 `Retry-After` 优先，按原值等待，不截短为本地退避时间。
+系统设置 `maxRetryAfterSeconds`（默认 240，范围 0..4294967295）控制可接受的上游等待上限。
+超过上限时跳过同账号等待，仅在原安全重放、账号范围及尝试预算允许时换号；不能换号则返回原错误。
+设置为 0 只禁止正值服务端等待，零延迟建议仍有效。所有重试同时受请求截止时间和取消约束。
 容量不足不扣 Smart 账号健康分，也不作为账号额度耗尽写入冷却状态。网关不再维护 Provider 全局熔断。
 最终交付的上游错误仍按上述透明边界保留原始状态码、错误码和正文。
 明确额度耗尽继续走现有账号隔离与安全换号流程，
@@ -207,6 +210,12 @@ Responses 编码时仅为缺失的顶层 `store` 补齐 `false`；显式提供�
 字段保持原样。HTTP/SSE 与 WebSocket 共用此规则，Images 与独立 Search 不受影响。
 
 启用的 `model_catalog` 插件可向上述模型列表及详情贡献别名，Codex 目录保留真实目标字段，仅替换 `slug`。别名固定到声明的内置 Provider，Responses JSON/SSE/WS 与插件模型调用使用同一别名事实；原账号模型限制、倍率和结算继续生效。目录与设置冲突、目标不可用或插件代次被撤销时拒绝使用，不静默回退到其他 Provider。模型目录查询期间发生撤销也不会返回旧目录。
+
+Codex 模型目录保留完整原生对象，允许超过 1 MiB 的合法目录，客户端目录缓存按 32 MiB 原生正文总预算淘汰。
+Guardian 子代理只有在同一个 Client Key、同一个已选账号内找到已观察到的父响应时，才携带父响应 ID 和原上游路由 Cookie；未知或越权父引用会移除。
+路由 Cookie 遵循来源、路径和到期时间，不作为登录凭据，也不改变账号选择权限。
+上游 WebSocket 每 25 秒发送保活 Ping；心跳不刷新业务等待超时或连接寿命。
+复用连接首次未启用搜索、后续请求新增 hosted search 时，在发送前重建连接并重放完整请求。
 
 管理员按账号刷新 OpenAI / xAI 模型目录时，会优先使用被指定账号自身的凭据，即使该账号已停用。
 此例外只服务于管理端目录查询与连接测试，不允许停用账号参与普通客户端调度或后台目录发现。
@@ -888,6 +897,12 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 | `GET` | `/api/admin/usage/insights/diagnostics` | 按维度聚合诊断 |
 | `GET` | `/api/admin/operations/errors` | 运维错误分页列表 |
 
+`/api/admin/usage/insights/overview` 可选 `card=health|performance|cost`，不传时保留完整响应。
+指定卡片只返回 `granularity` 和对应的 `health`、`performance` 或 `cost` 对象。
+性能卡支持 `metric=total|firstToken|throughput|scheduling|concurrency`（默认 total）；其他卡片不接受 metric。
+账号、用户、分组、个人范围和时间筛选与原接口一致；仅计算所选分位数，并发扫描仅在选择 concurrency 时执行。
+前端卡片独立加载，切换性能指标按需查询，当前页面相同条件的成功结果复用 15 秒；手动刷新会清空该缓存。
+
 用量查询可组合页码/游标、时间范围、Provider、Client Key、账号、模型、route、transport、状态码、
 request/response/upstream ID、outcome 与搜索文本。诊断 `dimension` 可取 `model`、`account`、
 `apiKey`、`provider`、`transport`、`failureClass`、`status`。
@@ -1115,3 +1130,7 @@ Usage 列表和详情（含个人视图）返回 `requestedServiceTier` 与 `ups
 新增 `local.settings.v2.load/replace`（SDK `local_settings_v2`）支持 `reset_credit_lead_minutes` 和
 `reset_credit_max_weekly_remaining_percent`；省略字段保留原值，显式 null 清除周额度条件。
 SDK v2 将既有字段放在 `base` 成员，JSON 中仍为同层字段。管理设置页面使用 v2；定价服务仍使用 v1，RPC v7 不变。
+
+
+`local.settings.v3.load/replace`（SDK `local_settings_v3`）在 v2 基础上增加 `max_retry_after_seconds`。
+更新时省略该字段保留当前值。已发布的 v1/v2 wire 不变，旧插件更新设置不会重置此上限。

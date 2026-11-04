@@ -20,7 +20,7 @@ withDefaults(defineProps<{
 }>(), { preserveProxy: true })
 
 const modelAccess = defineModel<AccountModelAccess | undefined>('modelAccess', { required: true })
-const enabled = defineModel<boolean>('enabled', { required: true })
+const enabled = defineModel<boolean>('enabled')
 const concurrencyLimit = defineModel<string>('concurrencyLimit', { required: true })
 const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
@@ -32,14 +32,16 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
   <div class="grid gap-5">
     <AccountModelAccessField v-model="modelAccess" :account-id="accountId" :disabled="disabled" :allow-preserve="preserveModelAccess" />
     <template v-if="!modelOnly">
-      <div class="flex min-h-6 items-center justify-between gap-3">
-        <span class="text-cp leading-none font-medium text-cp-text-secondary">调度</span>
-        <BaseSwitch
-          v-model="enabled"
-          label="切换账号调度"
-          :disabled="disabled"
-        />
-      </div>
+      <slot name="scheduling">
+        <div class="flex min-h-6 items-center justify-between gap-3">
+          <span class="text-cp leading-none font-medium text-cp-text-secondary">调度</span>
+          <BaseSwitch
+            v-model="enabled"
+            label="切换账号调度"
+            :disabled="disabled"
+          />
+        </div>
+      </slot>
 
       <div class="grid gap-4 sm:grid-cols-2">
         <BaseFormItem label="并发限制">

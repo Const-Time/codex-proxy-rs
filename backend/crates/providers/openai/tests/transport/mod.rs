@@ -256,6 +256,7 @@ async fn collect_backend_response(
         response_metadata,
         mut transport_metrics,
         connection_local_continuation,
+        ..
     } = response;
     let mut body_bytes = Vec::new();
     while let Some(chunk) = body.next().await {

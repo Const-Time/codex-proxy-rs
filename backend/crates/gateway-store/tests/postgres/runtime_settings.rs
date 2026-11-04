@@ -24,6 +24,7 @@ pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettin
         min_codex_cli_version: None,
         usage_retention_days: 31,
         ops_event_retention_days: 30,
+        max_retry_after_seconds: None,
         reset_credit_lead_minutes: None,
         reset_credit_max_weekly_remaining_percent: None,
         subscription_auto_reset_enabled: None,
@@ -260,4 +261,46 @@ async fn account_refresh_facts(pool: &sqlx::PgPool, account_id: &str) -> Account
 
 fn timestamp_micros(value: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp_micros(value.timestamp_micros()).expect("valid test timestamp")
+}
+
+#[tokio::test]
+async fn retry_after_limit_persists_zero_maximum_and_omission() {
+    let Some(database) = TestDatabase::create("retry_after_setting").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    assert_eq!(
+        repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .max_retry_after_seconds,
+        240
+    );
+    for cap in [0, 60, u32::MAX] {
+        let mut update = settings_with_margin(3600);
+        update.max_retry_after_seconds = Some(cap);
+        repository.update_runtime_settings(update).await.unwrap();
+        assert_eq!(
+            repository
+                .load_runtime_settings()
+                .await
+                .unwrap()
+                .max_retry_after_seconds,
+            cap
+        );
+        repository
+            .update_runtime_settings(settings_with_margin(1800))
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .load_runtime_settings()
+                .await
+                .unwrap()
+                .max_retry_after_seconds,
+            cap
+        );
+    }
+    database.close().await;
 }

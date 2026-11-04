@@ -27,6 +27,8 @@ impl DashboardQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageQuery {
+    pub card: Option<String>,
+    pub metric: Option<String>,
     #[serde(default)]
     pub personal: bool,
     pub user_id: Option<String>,
@@ -64,6 +66,26 @@ impl UsageQuery {
             return Err(WireValidationError::new("pageSize"));
         }
         Ok((current_page, page_size))
+    }
+}
+
+impl UsageQuery {
+    pub fn selection(&self) -> Result<domain::UsageInsightSelection, WireValidationError> {
+        use domain::{UsageInsightSelection as S, UsagePerformanceMetric as M};
+        match (self.card.as_deref(), self.metric.as_deref()) {
+            (None, None) => Ok(S::All),
+            (Some("health"), None) => Ok(S::Health),
+            (Some("cost"), None) => Ok(S::Cost),
+            (Some("performance"), metric) => Ok(S::Performance(match metric.unwrap_or("total") {
+                "total" => M::Total,
+                "firstToken" => M::FirstToken,
+                "throughput" => M::Throughput,
+                "scheduling" => M::Scheduling,
+                "concurrency" => M::Concurrency,
+                _ => return Err(WireValidationError::new("metric")),
+            })),
+            _ => Err(WireValidationError::new("card")),
+        }
     }
 }
 

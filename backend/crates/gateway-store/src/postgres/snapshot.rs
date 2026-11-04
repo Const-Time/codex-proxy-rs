@@ -20,6 +20,7 @@ use super::ClientApiKeySnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRuntimeSettings {
+    pub max_retry_after_seconds: u32,
     pub pricing: gateway_core::metering::PricingOverrides,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
@@ -150,7 +151,8 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 data.settings.min_codex_desktop_version,
                 data.settings.min_codex_cli_version,
             )
-            .with_pricing(data.settings.pricing);
+            .with_pricing(data.settings.pricing)
+            .with_max_retry_after_seconds(data.settings.max_retry_after_seconds);
             let client_policies = data
                 .client_api_keys
                 .into_iter()
@@ -247,12 +249,13 @@ async fn load_settings(
             sqlx::types::Json<BTreeMap<String, String>>,
             Option<String>,
             Option<String>,
+            i64,
         ),
     >(
         "select config_revision, refresh_margin_seconds, refresh_concurrency,
                 max_concurrent_per_account, request_interval_ms, rotation_strategy,
                 model_mappings_json, min_codex_desktop_version,
-                min_codex_cli_version
+                min_codex_cli_version, max_retry_after_seconds
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -265,6 +268,7 @@ async fn load_settings(
     Ok((
         revision_from_i64(row.0)?,
         SnapshotRuntimeSettings {
+            max_retry_after_seconds: to_u32(row.9)?,
             refresh_margin_seconds: to_u64(row.1)?,
             refresh_concurrency: to_u32(row.2)?,
             max_concurrent_per_account: to_u32(row.3)?,

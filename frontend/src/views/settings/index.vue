@@ -38,6 +38,7 @@ const {
   addMapping,
   updateMapping,
   removeMapping,
+  maxRetryAfterSecondsValue,
   resetCreditLeadMinutesValue,
   resetCreditMaxWeeklyRemainingPercentValue,
   refreshMarginSecondsValue,
@@ -128,6 +129,7 @@ watch([() => route.hash, loading, section], async ([hash, isLoading, currentSect
 
       <RuntimeSettingsCard
         v-model:subscription-auto-reset-enabled="form.subscriptionAutoResetEnabled"
+        v-model:max-retry-after-seconds="maxRetryAfterSecondsValue"
         v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
         v-model:refresh-margin-seconds="refreshMarginSecondsValue"
         v-model:refresh-concurrency="refreshConcurrencyValue"

@@ -214,7 +214,10 @@ async fn compare(pool: &PgPool, range: admin_observability::TimeRange) {
             ..Default::default()
         },
     ] {
-        let full = store.usage_summary(range, filter.clone()).await.unwrap();
+        let full = store
+            .usage_summary(range, filter.clone(), Default::default())
+            .await
+            .unwrap();
         let cards = store.usage_card_summary(range, filter).await.unwrap();
         assert_eq!(cards.total_cost_usd, full.total_cost_usd);
         assert_eq!(cards.success_count, full.requests.success_count);
@@ -335,13 +338,13 @@ async fn hourly_rollups_keep_exact_global_p95_and_handle_moved_or_deleted_facts(
     };
     let store = admin_observability_store(&db.pool);
     let before = store
-        .usage_summary(range, Default::default())
+        .usage_summary(range, Default::default(), Default::default())
         .await
         .unwrap();
     let worker = PgUsageRollupRepository::new(db.pool.clone());
     worker.refresh_batch(now).await.unwrap();
     let after = store
-        .usage_summary(range, Default::default())
+        .usage_summary(range, Default::default(), Default::default())
         .await
         .unwrap();
     assert_eq!(

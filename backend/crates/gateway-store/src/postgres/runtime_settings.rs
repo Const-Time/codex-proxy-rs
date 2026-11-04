@@ -18,6 +18,7 @@ use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub max_retry_after_seconds: u32,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
     pub subscription_auto_reset_enabled: bool,
@@ -67,6 +68,7 @@ impl fmt::Debug for RuntimeSettings {
 
 #[derive(Clone)]
 pub struct RuntimeSettingsUpdate {
+    pub max_retry_after_seconds: Option<u32>,
     pub reset_credit_lead_minutes: Option<u32>,
     pub reset_credit_max_weekly_remaining_percent: Option<Option<u32>>,
     pub subscription_auto_reset_enabled: Option<bool>,
@@ -177,7 +179,7 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                     rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
-                    min_codex_cli_version, updated_at, subscription_auto_reset_enabled, jsonb_build_array(reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent)
+                    min_codex_cli_version, updated_at, subscription_auto_reset_enabled, jsonb_build_array(reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, max_retry_after_seconds)
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -236,7 +238,7 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                 rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
-                min_codex_cli_version, updated_at, subscription_auto_reset_enabled, jsonb_build_array(reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent)
+                min_codex_cli_version, updated_at, subscription_auto_reset_enabled, jsonb_build_array(reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, max_retry_after_seconds)
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -276,7 +278,8 @@ pub(crate) async fn update_runtime_settings_in_transaction(
                      subscription_auto_reset_enabled = coalesce($13, subscription_auto_reset_enabled),
                      reset_credit_lead_minutes = coalesce($14, reset_credit_lead_minutes),
                      reset_credit_max_weekly_remaining_percent = case when $16 then $15 else reset_credit_max_weekly_remaining_percent end,
-	                 updated_at = now()
+	                 max_retry_after_seconds = coalesce($17, max_retry_after_seconds),
+                     updated_at = now()
 	             where id = 1
 	             returning config_revision",
     )
@@ -296,6 +299,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(update.reset_credit_lead_minutes.map(i64::from))
     .bind(update.reset_credit_max_weekly_remaining_percent.flatten().map(i64::from))
     .bind(update.reset_credit_max_weekly_remaining_percent.is_some())
+    .bind(update.max_retry_after_seconds.map(i64::from))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -369,11 +373,12 @@ type RuntimeSettingsRow = (
     Option<String>,
     DateTime<Utc>,
     bool,
-    sqlx::types::Json<(u32, Option<u32>)>,
+    sqlx::types::Json<(u32, Option<u32>, u32)>,
 );
 
 fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSettings> {
     Ok(RuntimeSettings {
+        max_retry_after_seconds: row.15.0.2,
         reset_credit_lead_minutes: row.15.0.0,
         reset_credit_max_weekly_remaining_percent: row.15.0.1,
         subscription_auto_reset_enabled: row.14,

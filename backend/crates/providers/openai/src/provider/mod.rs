@@ -100,6 +100,7 @@ use crate::transport::{
 
 mod execution;
 mod failure;
+mod guardian;
 mod observation;
 mod upstream_adapter;
 mod workers;
@@ -149,6 +150,7 @@ pub struct CodexProvider {
     search_url: Url,
     session_identity: Option<CodexSessionIdentity>,
     session_transport_recovery: CodexSessionTransportRecovery,
+    guardian_routing: guardian::GuardianRouting,
     stream_max_retries: u32,
 }
 
@@ -190,6 +192,7 @@ impl CodexProvider {
             search_url,
             session_identity: None,
             session_transport_recovery: CodexSessionTransportRecovery::default(),
+            guardian_routing: guardian::GuardianRouting::default(),
             stream_max_retries,
         })
     }
@@ -611,11 +614,48 @@ impl Provider for CodexProvider {
             "changes": location_application,
             "phase": "prepared_payload",
         }));
+        let is_codex_guardian = upstream_request.subagent_kind().as_deref() == Some("guardian")
+            && matches!(
+                lease.authentication(),
+                crate::credential::CodexRuntimeAuthentication::OAuth(_)
+            );
+        let guardian_parent = (!state_owner_cross_account && is_codex_guardian)
+            .then(|| {
+                upstream_request
+                    .client_metadata()?
+                    .get("parent_response_id")?
+                    .as_str()
+            })
+            .flatten()
+            .and_then(|response_id| {
+                self.guardian_routing
+                    .get(
+                        context.client_api_key_ref(),
+                        lease.account_id(),
+                        response_id,
+                    )
+                    .map(|affinity| (response_id.to_owned(), affinity))
+            });
         scope_request_to_account(
             &mut upstream_request,
             lease.installation_id(),
             account_scope,
         );
+        if is_codex_guardian
+            && let Some(Value::Object(metadata)) =
+                upstream_request.body_mut().get_mut("client_metadata")
+        {
+            metadata.remove("parent_response_id");
+        }
+        if let Some((response_id, _)) = &guardian_parent
+            && let Some(Value::Object(metadata)) =
+                upstream_request.body_mut().get_mut("client_metadata")
+        {
+            metadata.insert(
+                "parent_response_id".into(),
+                Value::String(response_id.clone()),
+            );
+        }
         // 本地 turn/affinity 保持原客户端身份；只在最终账号确定后做 wire 投影。
         let original_client_turn_id = upstream_request.client_turn_id.clone();
         if let Some(manager) = &self.turn_state {
@@ -809,6 +849,7 @@ impl Provider for CodexProvider {
                     provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
                 })?
                 .with_authentication(lease.authentication())
+                .with_routing_affinity(guardian_parent.map(|(_, affinity)| affinity))
                 .with_connection_budget(context.connection_budget().clone())
                 .with_response_control(context.response_control().cloned()),
             response_origin: self.responses_url.clone(),
@@ -824,6 +865,7 @@ impl Provider for CodexProvider {
             session_affinity_key,
             session_affinity_key_hash,
             session_transport_recovery: self.session_transport_recovery.clone(),
+            guardian_routing: self.guardian_routing.clone(),
             websocket_retry_count,
             stream_max_retries: self.stream_max_retries,
             session_capture,

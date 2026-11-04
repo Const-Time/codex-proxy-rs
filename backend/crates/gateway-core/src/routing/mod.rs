@@ -543,6 +543,7 @@ impl ProviderCandidate {
 /// 一次请求冻结的 Provider 尝试顺序。
 #[derive(Debug, Clone)]
 pub struct RoutingPlan {
+    max_retry_after_seconds: u32,
     fast_mode: crate::account::FastMode,
     pricing: Arc<crate::metering::PricingOverrides>,
     config_revision: ConfigRevision,
@@ -554,6 +555,10 @@ pub struct RoutingPlan {
 }
 
 impl RoutingPlan {
+    #[must_use]
+    pub fn max_retry_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.max_retry_after_seconds))
+    }
     pub fn fast_mode(&self) -> crate::account::FastMode {
         self.fast_mode
     }

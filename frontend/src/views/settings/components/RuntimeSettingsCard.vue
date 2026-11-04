@@ -8,6 +8,7 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 
 defineProps<{ disabled?: boolean }>()
+const maxRetryAfterSeconds = defineModel<string>('maxRetryAfterSeconds', { required: true })
 const subscriptionAutoResetEnabled = defineModel<boolean>('subscriptionAutoResetEnabled', { required: true })
 
 const maxConcurrentPerAccount = defineModel<string>('maxConcurrentPerAccount', { required: true })
@@ -22,6 +23,9 @@ const requestIntervalMs = defineModel<string>('requestIntervalMs', { required: t
     description="请求节奏、账号并发和 Token 刷新"
   >
     <BaseForm class="max-w-6xl sm:grid-cols-2">
+      <BaseFormItem label="上游重试等待上限（秒）" description="超过上限时按安全条件换号或返回错误；0 表示不等待上游建议的延迟">
+        <BaseInput v-model="maxRetryAfterSeconds" aria-label="上游重试等待上限（秒）" type="number" min="0" max="4294967295" :disabled="disabled" />
+      </BaseFormItem>
       <BaseFormItem
         label="单账号默认最大并发"
         description="账号未单独设置时使用的并发上限"

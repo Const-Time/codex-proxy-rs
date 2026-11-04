@@ -1,12 +1,13 @@
 import type { Ref } from 'vue'
 import type { UsageDisplayRecord } from '../utils/records'
 import type { UsageTimeRangeParams } from './useUsageTimeRange'
+import type { getUsageRecordInsightsOverview, UsageInsightCard, UsageInsightsOverviewResponse, UsagePerformanceMetric } from '@/api'
 import { watchDebounced } from '@vueuse/core'
 
 import { computed, onMounted, onScopeDispose, shallowRef, watch } from 'vue'
 import {
+  getUsageRecordInsightCard,
   getUsageRecordInsightsDiagnostics,
-  getUsageRecordInsightsOverview,
   getUsageRecords,
   getUsageRecordSummary,
 } from '@/api'
@@ -34,6 +35,13 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   const loading = shallowRef(true)
   const analyticsLoading = shallowRef(true)
   const diagnosticsLoading = shallowRef(true)
+  const healthLoading = shallowRef(true)
+  const costLoading = shallowRef(true)
+  const performanceLoading = shallowRef(true)
+  const performanceMetric = shallowRef<UsagePerformanceMetric>('total')
+  const cardRequests = { health: 0, cost: 0, performance: 0 }
+  const cardAborts: Partial<Record<UsageInsightCard, AbortController>> = {}
+  const cardCache = new Map<string, { expires: number, value: Partial<UsageInsightsOverviewResponse> }>()
   const records = shallowRef<UsageDisplayRecord[]>([])
   const summary = shallowRef(emptySummary())
   const insights = shallowRef(emptyInsights())
@@ -141,20 +149,50 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
           toast.error(errorMessage(error, '加载汇总失败'))
         }
       }),
-      getUsageRecordInsightsOverview(globalParams, signal).then((overview) => {
-        if (requestId === analyticsRequestId)
-          insights.value = { ...insights.value, overview }
-      }).catch((error: unknown) => {
-        if (requestId === analyticsRequestId) {
-          insights.value = { ...insights.value, overview: emptyOverview() }
-          toast.error(errorMessage(error, '加载趋势失败'))
-        }
-      }).finally(() => {
+      Promise.all([loadCard('health', background), loadCard('cost', background), loadCard('performance', background)]).finally(() => {
         if (requestId === analyticsRequestId)
           analyticsLoading.value = false
       }),
       loadDiagnostics(background),
     ])
+    if (requestId === analyticsRequestId)
+      analyticsLoading.value = false
+  }
+
+  async function loadCard(card: UsageInsightCard, background = false) {
+    const requestId = ++cardRequests[card]
+    cardAborts[card]?.abort()
+    const controller = new AbortController()
+    cardAborts[card] = controller
+    const loading = { health: healthLoading, cost: costLoading, performance: performanceLoading }[card]
+    const params = { ...scopedParams(), card, ...(card === 'performance' ? { metric: performanceMetric.value } : {}) }
+    const key = JSON.stringify(params)
+    const cached = cardCache.get(key)
+    if (cached && cached.expires > Date.now()) {
+      insights.value = { ...insights.value, overview: { ...insights.value.overview, ...cached.value } }
+      loading.value = false
+      return
+    }
+    loading.value = !background
+    try {
+      const value = await getUsageRecordInsightCard(params, controller.signal)
+      if (requestId !== cardRequests[card])
+        return
+      cardCache.set(key, { expires: Date.now() + 15000, value })
+      while (cardCache.size > 20)
+        cardCache.delete(cardCache.keys().next().value!)
+      insights.value = { ...insights.value, overview: { ...insights.value.overview, ...value } }
+    }
+    catch (error: unknown) {
+      if (requestId !== cardRequests[card])
+        return
+      insights.value = { ...insights.value, overview: { ...insights.value.overview, [card]: emptyOverview()[card] } }
+      toast.error(errorMessage(error, '加载统计卡片失败'))
+    }
+    finally {
+      if (requestId === cardRequests[card])
+        loading.value = false
+    }
   }
 
   async function loadDiagnostics(background = false) {
@@ -192,6 +230,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
       return
     refreshingList.value = true
     try {
+      cardCache.clear()
       options.refreshTimeRangeEnd()
       await loadUsageRecords()
     }
@@ -215,6 +254,10 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     loadUsageRecords()
   })
 
+  watch(performanceMetric, () => {
+    void loadCard('performance')
+  })
+
   watch(diagnosticDimension, () => {
     void loadDiagnostics()
   })
@@ -233,6 +276,11 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   )
 
   onScopeDispose(() => {
+    for (const card of ['health', 'cost', 'performance'] as const) {
+      cardRequests[card] += 1
+      cardAborts[card]?.abort()
+    }
+    cardCache.clear()
     tableRequestId += 1
     analyticsRequestId += 1
     diagnosticRequestId += 1
@@ -249,6 +297,10 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     usagePagination,
     loading,
     analyticsLoading,
+    healthLoading,
+    costLoading,
+    performanceLoading,
+    performanceMetric,
     diagnosticsLoading,
     records,
     summary,

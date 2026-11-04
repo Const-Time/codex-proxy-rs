@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures::future::join_all;
 use gateway_core::account::{AccountRuntimeSignals, ProviderAccountId};
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::{
@@ -104,13 +103,19 @@ end
 return removed
 "#;
 
+const RUNTIME_SIGNAL_BATCH_SIZE: usize = 128;
+
 const SIGNAL_SCRIPT: &str = r#"
 local clock = redis.call('TIME')
 local now_ms = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
-local in_flight = redis.call('ZCARD', KEYS[1])
-local last_started = redis.call('GET', KEYS[2]) or '0'
-return {tostring(in_flight), tostring(last_started)}
+local signals = {}
+for i = 1, #KEYS, 2 do
+  redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', now_ms)
+  local in_flight = redis.call('ZCARD', KEYS[i])
+  local last_started = redis.call('GET', KEYS[i + 1]) or '0'
+  signals[#signals + 1] = {tostring(in_flight), tostring(last_started)}
+end
+return signals
 "#;
 
 const ADVANCE_SCHEDULING_CURSOR_SCRIPT: &str = r#"
@@ -487,34 +492,49 @@ impl RedisCredentialLeaseRepository {
         })
     }
 
-    async fn load_signal(&self, resource_id: String) -> StoreResult<CredentialRuntimeSignal> {
-        let request = CredentialLeaseRequest {
-            scope: CredentialLeaseScope::ProviderAccount,
-            resource_id: resource_id.clone(),
-            owner_id: "signal-reader".to_owned(),
-            ttl: Duration::from_secs(1),
-        };
-        let keys = self.keys(&request)?;
+    async fn load_signal_batch(
+        &self,
+        resource_ids: &[String],
+    ) -> StoreResult<Vec<CredentialRuntimeSignal>> {
+        let script = Script::new(SIGNAL_SCRIPT);
+        let mut invocation = script.prepare_invoke();
+        for resource_id in resource_ids {
+            let request = CredentialLeaseRequest {
+                scope: CredentialLeaseScope::ProviderAccount,
+                resource_id: resource_id.clone(),
+                owner_id: "signal-reader".to_owned(),
+                ttl: Duration::from_secs(1),
+            };
+            let keys = self.keys(&request)?;
+            invocation.key(&keys[0]).key(&keys[2]);
+        }
         let mut connection = self.connection.clone();
-        let (in_flight, last_started): (String, String) = Script::new(SIGNAL_SCRIPT)
-            .key(&keys[0])
-            .key(&keys[2])
+        let signals: Vec<(String, String)> = invocation
             .invoke_async(&mut connection)
             .await
-            .map_err(|_| redis_unavailable("load credential runtime signal"))?;
-        let in_flight = in_flight
-            .parse::<u32>()
-            .map_err(|_| invalid("Redis returned an invalid in-flight count"))?;
-        let last_started_at = if last_started == "0" {
-            None
-        } else {
-            Some(timestamp(&last_started)?)
-        };
-        Ok(CredentialRuntimeSignal {
-            resource_id,
-            in_flight,
-            last_started_at,
-        })
+            .map_err(|_| redis_unavailable("load credential runtime signals"))?;
+        if signals.len() != resource_ids.len() {
+            return Err(invalid("Redis returned an invalid runtime signal count"));
+        }
+        resource_ids
+            .iter()
+            .zip(signals)
+            .map(|(resource_id, (in_flight, last_started))| {
+                let in_flight = in_flight
+                    .parse::<u32>()
+                    .map_err(|_| invalid("Redis returned an invalid in-flight count"))?;
+                let last_started_at = if last_started == "0" {
+                    None
+                } else {
+                    Some(timestamp(&last_started)?)
+                };
+                Ok(CredentialRuntimeSignal {
+                    resource_id: resource_id.clone(),
+                    in_flight,
+                    last_started_at,
+                })
+            })
+            .collect()
     }
 }
 
@@ -766,14 +786,11 @@ impl CredentialLeaseRepository for RedisCredentialLeaseRepository {
         for resource_id in resource_ids {
             require_nonempty("credential runtime signal", "resource_id", resource_id)?;
         }
-        let signals = join_all(
-            resource_ids
-                .iter()
-                .cloned()
-                .map(|resource_id| self.load_signal(resource_id)),
-        )
-        .await;
-        signals.into_iter().collect()
+        let mut signals = Vec::with_capacity(resource_ids.len());
+        for ids in resource_ids.chunks(RUNTIME_SIGNAL_BATCH_SIZE) {
+            signals.extend(self.load_signal_batch(ids).await?);
+        }
+        Ok(signals)
     }
 
     async fn try_acquire_bounded_lease(

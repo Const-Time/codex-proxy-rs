@@ -126,6 +126,7 @@ pub trait ObservabilityService: Send + Sync {
         &self,
         range: TimeRange,
         filter: UsageFilter,
+        selection: crate::model::observability::UsageInsightSelection,
     ) -> Result<UsageInsights, AdminError>;
     async fn diagnostics(
         &self,
@@ -194,7 +195,7 @@ impl DefaultObservabilityService {
         };
         cell.get_or_init(|| async {
             self.store
-                .usage_summary(range, filter)
+                .usage_summary(range, filter, Default::default())
                 .await
                 .map_err(|error| map_store_error(error, "usage summary"))
         })
@@ -217,7 +218,7 @@ impl DefaultObservabilityService {
             self.settings.load_runtime_settings(),
             self.store.dashboard_runtime_slots(observed_at),
             self.store
-                .usage_summary(yesterday_range, UsageFilter::default()),
+                .usage_summary(yesterday_range, UsageFilter::default(), Default::default()),
         )
         .map_err(|error| map_store_error(error, "dashboard"))?;
         self.enrich_list_billing(&mut observation.recent_requests);
@@ -378,23 +379,40 @@ impl ObservabilityService for DefaultObservabilityService {
         &self,
         range: TimeRange,
         filter: UsageFilter,
+        selection: crate::model::observability::UsageInsightSelection,
     ) -> Result<UsageInsights, AdminError> {
         let aggregates = async {
-            futures::try_join!(self.shared_usage_summary(range, filter.clone()), async {
-                self.store
-                    .usage_trend(range, filter.clone())
-                    .await
-                    .map_err(|error| map_store_error(error, "usage insights"))
-            },)
+            futures::try_join!(
+                async {
+                    if selection == crate::model::observability::UsageInsightSelection::All {
+                        self.shared_usage_summary(range, filter.clone()).await
+                    } else {
+                        self.store
+                            .usage_summary(range, filter.clone(), selection)
+                            .await
+                            .map_err(|error| map_store_error(error, "usage card summary"))
+                    }
+                },
+                async {
+                    self.store
+                        .usage_trend(range, filter.clone(), selection)
+                        .await
+                        .map_err(|error| map_store_error(error, "usage insights"))
+                },
+            )
         };
-        let ((overview, trend), standard_costs) = futures::try_join!(
-            aggregates,
-            recover_standard_costs(
-                &self.providers,
-                self.store
-                    .usage_calculated_billing_facts(range, filter.clone()),
-            ),
-        )?;
+        let ((overview, trend), standard_costs) = futures::try_join!(aggregates, async {
+            if selection.costs() {
+                recover_standard_costs(
+                    &self.providers,
+                    self.store
+                        .usage_calculated_billing_facts(range, filter.clone()),
+                )
+                .await
+            } else {
+                Ok(UsageCostScenarios::default())
+            }
+        },)?;
         build_usage_insights(overview, trend, standard_costs)
     }
 

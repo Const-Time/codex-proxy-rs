@@ -583,3 +583,8 @@ observer 也按常规计划执行；它不是插件执行期间的嵌套 `host.m
 新增 `local.settings.v2.load/replace`（SDK `local_settings_v2`）支持 `reset_credit_lead_minutes` 和
 `reset_credit_max_weekly_remaining_percent`；省略字段保留原值，显式 null 清除周额度条件。
 SDK v2 将既有字段放在 `base` 成员，JSON 中仍为同层字段。管理设置页面使用 v2；定价服务仍使用 v1，RPC v7 不变。
+
+
+`local_settings_v3::{Load, Replace}` 对应 `local.settings.v3.load/replace`，增加 `max_retry_after_seconds`。
+其余字段放在类型的 `base`（序列化时扁平化），默认上限 240 秒，更新省略该字段保留当前配置。
+v1/v2 操作名与字段保持原合同；本次无需升级模型体检插件的 RPC 协议或重新安装其配置。

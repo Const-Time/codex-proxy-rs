@@ -73,6 +73,42 @@ impl Service {
         origin: Option<Origin>,
     ) -> Result<domain::RuntimeSettings, AdminError> {
         let inner = self.inner.clone();
+        let result: super::local_v3::RuntimeSettings =
+            invoke(origin, "local.settings.v3.load", (), move |()| {
+                Box::pin(async move { inner.load().await.map(Into::into) })
+            })
+            .await?;
+        result.try_into()
+    }
+    pub async fn replace(
+        &self,
+        origin: Option<Origin>,
+        context: MutationContext,
+        command: domain::ReplaceRuntimeSettings,
+    ) -> Result<domain::RuntimeSettings, AdminError> {
+        let inner = self.inner.clone();
+        mutation(
+            origin,
+            "local.settings.v3.replace",
+            (
+                context,
+                super::local_v3::ReplaceRuntimeSettings::from(command),
+            ),
+            |input| &input.0,
+            TryInto::try_into,
+            move |(context, command)| {
+                Box::pin(async move {
+                    inner
+                        .replace(&context, command.try_into()?)
+                        .await
+                        .map(super::local_v3::RuntimeSettings::from)
+                })
+            },
+        )
+        .await
+    }
+    async fn load_v2(&self, origin: Option<Origin>) -> Result<domain::RuntimeSettings, AdminError> {
+        let inner = self.inner.clone();
         let result: local::RuntimeSettings =
             invoke(origin, "local.settings.v2.load", (), move |()| {
                 Box::pin(async move { inner.load().await.map(Into::into) })
@@ -80,7 +116,7 @@ impl Service {
             .await?;
         result.try_into()
     }
-    pub async fn replace(
+    async fn replace_v2(
         &self,
         origin: Option<Origin>,
         context: MutationContext,
@@ -412,14 +448,22 @@ impl gateway_core::engine::middleware::service::Dispatcher for Dispatcher {
                     .replace_v1(Some(origin), host.actor, command)
                     .await
                     .and_then(|result| encode(super::local_v1::RuntimeSettings::from(result))),
+                Command::LoadV2 => service
+                    .load_v2(Some(origin))
+                    .await
+                    .and_then(|result| encode(local::RuntimeSettings::from(result))),
+                Command::ReplaceV2(command) => service
+                    .replace_v2(Some(origin), host.actor, command)
+                    .await
+                    .and_then(|result| encode(local::RuntimeSettings::from(result))),
                 Command::Load => service
                     .load(Some(origin))
                     .await
-                    .and_then(|result| encode(local::RuntimeSettings::from(result))),
+                    .and_then(|result| encode(super::local_v3::RuntimeSettings::from(result))),
                 Command::Replace(command) => service
                     .replace(Some(origin), host.actor, command)
                     .await
-                    .and_then(|result| encode(local::RuntimeSettings::from(result))),
+                    .and_then(|result| encode(super::local_v3::RuntimeSettings::from(result))),
                 Command::Pricing => service.pricing(Some(origin)).await.and_then(encode),
                 Command::Preview => service
                     .preview_pricing_sync(Some(origin))
@@ -449,6 +493,8 @@ enum Command {
     Exists,
     Regenerate,
     Delete,
+    LoadV2,
+    ReplaceV2(domain::ReplaceRuntimeSettings),
     LoadV1,
     ReplaceV1(domain::ReplaceRuntimeSettings),
     Load,
@@ -492,11 +538,20 @@ impl Command {
             }
             "local.settings.v2.load" => {
                 decode::<()>(input)?;
-                Self::Load
+                Self::LoadV2
             }
             "local.settings.v2.replace" => {
                 let (_, command) =
                     decode::<(MutationContext, local::ReplaceRuntimeSettings)>(input)?;
+                Self::ReplaceV2(command.try_into().map_err(super::encode_error)?)
+            }
+            "local.settings.v3.load" => {
+                decode::<()>(input)?;
+                Self::Load
+            }
+            "local.settings.v3.replace" => {
+                let (_, command) =
+                    decode::<(MutationContext, super::local_v3::ReplaceRuntimeSettings)>(input)?;
                 Self::Replace(command.try_into().map_err(super::encode_error)?)
             }
             "local.settings.v1.pricing" => {

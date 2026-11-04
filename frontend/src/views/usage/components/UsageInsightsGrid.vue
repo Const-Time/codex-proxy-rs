@@ -2,6 +2,7 @@
 import type {
   getUsageRecordInsightsDiagnostics,
   getUsageRecordInsightsOverview,
+  UsagePerformanceMetric,
 } from '@/api'
 
 import UsageCostCard from './UsageCostCard.vue'
@@ -15,11 +16,16 @@ withDefaults(
     diagnostics: Awaited<ReturnType<typeof getUsageRecordInsightsDiagnostics>>
     loading?: boolean
     diagnosticsLoading?: boolean
+    healthLoading?: boolean
+    costLoading?: boolean
+    performanceLoading?: boolean
   }>(),
   {
     loading: false,
   },
 )
+
+const performanceMetric = defineModel<UsagePerformanceMetric>('performanceMetric', { default: 'total' })
 
 const diagnosticDimension = defineModel('diagnosticDimension', {
   type: String,
@@ -36,7 +42,7 @@ const diagnosticDimension = defineModel('diagnosticDimension', {
       :health="overview.health"
       :cost="overview.cost"
       :granularity="overview.granularity"
-      :loading="loading"
+      :loading="healthLoading ?? loading"
       :show-ranking="Boolean($slots.ranking)"
     >
       <template v-if="$slots.ranking" #ranking>
@@ -51,15 +57,16 @@ const diagnosticDimension = defineModel('diagnosticDimension', {
     />
 
     <UsagePerformanceCard
+      v-model:metric="performanceMetric"
       :performance="overview.performance"
       :activity="overview.health.points"
-      :loading="loading"
+      :loading="performanceLoading ?? loading"
     />
 
     <UsageCostCard
       :cost="overview.cost"
       :activity="overview.health.points"
-      :loading="loading"
+      :loading="costLoading ?? loading"
     />
   </section>
 </template>

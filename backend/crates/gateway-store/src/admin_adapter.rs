@@ -115,6 +115,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
             .map_err(|error| admin_store_error("runtime settings", error))?;
         let replacement = postgres::ControlPlaneReplacement {
             settings: postgres::RuntimeSettingsUpdate {
+                max_retry_after_seconds: command.max_retry_after_seconds,
                 reset_credit_lead_minutes: command.reset_credit_lead_minutes,
                 reset_credit_max_weekly_remaining_percent: command
                     .reset_credit_max_weekly_remaining_percent,
@@ -241,6 +242,7 @@ pub(crate) fn admin_runtime_settings(
         })
         .collect::<AdminStoreResult<ModelMappings>>()?;
     Ok(AdminRuntimeSettings {
+        max_retry_after_seconds: settings.max_retry_after_seconds,
         reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
         reset_credit_max_weekly_remaining_percent: settings
             .reset_credit_max_weekly_remaining_percent,

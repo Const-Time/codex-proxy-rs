@@ -1,16 +1,178 @@
 //! Dashboard 与趋势查询族。
 
 use super::super::*;
+use gateway_admin::model::observability::{UsageInsightSelection, UsagePerformanceMetric};
 
-pub(crate) async fn request_metrics(
+// One projection keeps summary and trend percentile contracts aligned. Only trusted
+// SQL fragments are used here; user filters are bound separately by QueryBuilder.
+fn performance_projection(selection: UsageInsightSelection, fact: &str) -> String {
+    let latency_p50_ms = if selection.performance(UsagePerformanceMetric::Total) {
+        format!(
+            "percentile_cont(0.50) within group (order by latency_ms)
+                  filter (where {fact})"
+        )
+    } else {
+        "null::double precision".to_owned()
+    };
+    let latency_p95_ms = if selection.performance(UsagePerformanceMetric::Total) {
+        format!(
+            "percentile_cont(0.95) within group (order by latency_ms)
+                  filter (where {fact})"
+        )
+    } else {
+        "null::double precision".to_owned()
+    };
+    let latency_p99_ms = if selection.performance(UsagePerformanceMetric::Total) {
+        format!(
+            "percentile_cont(0.99) within group (order by latency_ms)
+                  filter (where {fact})"
+        )
+    } else {
+        "null::double precision".to_owned()
+    };
+    let first_token_p50_ms = if selection.performance(UsagePerformanceMetric::FirstToken) {
+        format!(
+            "percentile_cont(0.50) within group (order by first_token_ms)
+                  filter (where {fact})"
+        )
+    } else {
+        "null::double precision".to_owned()
+    };
+    let first_token_p95_ms = if selection.performance(UsagePerformanceMetric::FirstToken) {
+        format!(
+            "percentile_cont(0.95) within group (order by first_token_ms)
+                  filter (where {fact})"
+        )
+    } else {
+        "null::double precision".to_owned()
+    };
+    let first_token_p99_ms = if selection.performance(UsagePerformanceMetric::FirstToken) {
+        format!(
+            "percentile_cont(0.99) within group (order by first_token_ms)
+                  filter (where {fact})"
+        )
+    } else {
+        "null::double precision".to_owned()
+    };
+    let admission_decision_p50_ms = if selection.performance(UsagePerformanceMetric::Scheduling) {
+        "percentile_cont(0.50) within group (order by admission_decision_ms)".to_owned()
+    } else {
+        "null::double precision".to_owned()
+    };
+    let admission_decision_p95_ms = if selection.performance(UsagePerformanceMetric::Scheduling) {
+        "percentile_cont(0.95) within group (order by admission_decision_ms)".to_owned()
+    } else {
+        "null::double precision".to_owned()
+    };
+    let admission_decision_p99_ms = if selection.performance(UsagePerformanceMetric::Scheduling) {
+        "percentile_cont(0.99) within group (order by admission_decision_ms)".to_owned()
+    } else {
+        "null::double precision".to_owned()
+    };
+    let account_selection_wait_p50_ms = if selection.performance(UsagePerformanceMetric::Scheduling)
+    {
+        "percentile_cont(0.50) within group (order by account_selection_wait_ms)".to_owned()
+    } else {
+        "null::double precision".to_owned()
+    };
+    let account_selection_wait_p95_ms = if selection.performance(UsagePerformanceMetric::Scheduling)
+    {
+        "percentile_cont(0.95) within group (order by account_selection_wait_ms)".to_owned()
+    } else {
+        "null::double precision".to_owned()
+    };
+    let account_selection_wait_p99_ms = if selection.performance(UsagePerformanceMetric::Scheduling)
+    {
+        "percentile_cont(0.99) within group (order by account_selection_wait_ms)".to_owned()
+    } else {
+        "null::double precision".to_owned()
+    };
+    let output_throughput_p10 = if selection.performance(UsagePerformanceMetric::Throughput) {
+        format!(
+            "round((percentile_cont(0.10) within group (
+                  order by output_tokens::double precision * 1000.0
+                    / greatest(latency_ms - first_token_ms, 1)
+                ) filter (where {fact} and output_tokens > 0
+                          and latency_ms > first_token_ms)))::bigint"
+        )
+    } else {
+        "null::bigint".to_owned()
+    };
+    let output_throughput_p50 = if selection.performance(UsagePerformanceMetric::Throughput) {
+        format!(
+            "round((percentile_cont(0.50) within group (
+                  order by output_tokens::double precision * 1000.0
+                    / greatest(latency_ms - first_token_ms, 1)
+                ) filter (where {fact} and output_tokens > 0
+                          and latency_ms > first_token_ms)))::bigint"
+        )
+    } else {
+        "null::bigint".to_owned()
+    };
+    let output_throughput_p90 = if selection.performance(UsagePerformanceMetric::Throughput) {
+        format!(
+            "round((percentile_cont(0.90) within group (
+                  order by output_tokens::double precision * 1000.0
+                    / greatest(latency_ms - first_token_ms, 1)
+                ) filter (where {fact} and output_tokens > 0
+                          and latency_ms > first_token_ms)))::bigint"
+        )
+    } else {
+        "null::bigint".to_owned()
+    };
+    let capacity_utilization_p95_basis_points =
+        if selection.performance(UsagePerformanceMetric::Scheduling) {
+            "round(percentile_cont(0.95) within group (
+                  order by capacity_used_slots::double precision
+                    / nullif(capacity_total_slots, 0)
+                ) * 10000)::bigint"
+                .to_owned()
+        } else {
+            "null::bigint".to_owned()
+        };
+    format!(
+        "{latency_p50_ms} as latency_p50_ms,
+                {latency_p95_ms} as latency_p95_ms,
+                {latency_p99_ms} as latency_p99_ms,
+                {first_token_p50_ms} as first_token_p50_ms,
+                {first_token_p95_ms} as first_token_p95_ms,
+                {first_token_p99_ms} as first_token_p99_ms,
+                count(admission_decision_ms)::bigint as admission_decision_count,
+                {admission_decision_p50_ms}
+                  as admission_decision_p50_ms,
+                {admission_decision_p95_ms}
+                  as admission_decision_p95_ms,
+                {admission_decision_p99_ms}
+                  as admission_decision_p99_ms,
+                count(account_selection_wait_ms)::bigint as account_selection_wait_count,
+                {account_selection_wait_p50_ms}
+                  as account_selection_wait_p50_ms,
+                {account_selection_wait_p95_ms}
+                  as account_selection_wait_p95_ms,
+                {account_selection_wait_p99_ms}
+                  as account_selection_wait_p99_ms,
+                {output_throughput_p10} as output_throughput_p10,
+                {output_throughput_p50} as output_throughput_p50,
+                {output_throughput_p90} as output_throughput_p90,
+                count(capacity_total_slots)::bigint as capacity_sample_count,
+                round(avg(capacity_used_slots::double precision
+                          / nullif(capacity_total_slots, 0)) * 10000)::bigint
+                  as capacity_utilization_avg_basis_points,
+                {capacity_utilization_p95_basis_points} as capacity_utilization_p95_basis_points"
+    )
+}
+
+pub(crate) async fn selected_request_metrics(
     pool: &PgPool,
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
+    selection: UsageInsightSelection,
 ) -> StoreResult<RequestMetrics> {
     filter.validate()?;
     // 结果计数覆盖范围内全部请求（成功率/失败率的分母分子）；用量、缓存、
     // 延迟与成本聚合仅统计用量事实（已完整交付客户端的成功响应）。
     let fact = completed_usage_fact_predicate("mr");
+    let performance_projection = performance_projection(selection, &fact);
     let mut query = QueryBuilder::<Postgres>::new(format!(
         "select count(*)::bigint as request_count,
                 count(*) filter (where outcome = 'succeeded')::bigint as success_count,
@@ -39,55 +201,7 @@ pub(crate) async fn request_metrics(
                 count(*) filter (where {fact} and input_tokens is not null
                                    and cached_tokens > 0)::bigint
                   as cache_hit_request_count,
-                percentile_cont(0.50) within group (order by latency_ms)
-                  filter (where {fact}) as latency_p50_ms,
-                percentile_cont(0.95) within group (order by latency_ms)
-                  filter (where {fact}) as latency_p95_ms,
-                percentile_cont(0.99) within group (order by latency_ms)
-                  filter (where {fact}) as latency_p99_ms,
-                percentile_cont(0.50) within group (order by first_token_ms)
-                  filter (where {fact}) as first_token_p50_ms,
-                percentile_cont(0.95) within group (order by first_token_ms)
-                  filter (where {fact}) as first_token_p95_ms,
-                percentile_cont(0.99) within group (order by first_token_ms)
-                  filter (where {fact}) as first_token_p99_ms,
-                count(admission_decision_ms)::bigint as admission_decision_count,
-                percentile_cont(0.50) within group (order by admission_decision_ms)
-                  as admission_decision_p50_ms,
-                percentile_cont(0.95) within group (order by admission_decision_ms)
-                  as admission_decision_p95_ms,
-                percentile_cont(0.99) within group (order by admission_decision_ms)
-                  as admission_decision_p99_ms,
-                count(account_selection_wait_ms)::bigint as account_selection_wait_count,
-                percentile_cont(0.50) within group (order by account_selection_wait_ms)
-                  as account_selection_wait_p50_ms,
-                percentile_cont(0.95) within group (order by account_selection_wait_ms)
-                  as account_selection_wait_p95_ms,
-                percentile_cont(0.99) within group (order by account_selection_wait_ms)
-                  as account_selection_wait_p99_ms,
-                round((percentile_cont(0.10) within group (
-                  order by output_tokens::double precision * 1000.0
-                    / greatest(latency_ms - first_token_ms, 1)
-                ) filter (where {fact} and output_tokens > 0
-                          and latency_ms > first_token_ms)))::bigint as output_throughput_p10,
-                round((percentile_cont(0.50) within group (
-                  order by output_tokens::double precision * 1000.0
-                    / greatest(latency_ms - first_token_ms, 1)
-                ) filter (where {fact} and output_tokens > 0
-                          and latency_ms > first_token_ms)))::bigint as output_throughput_p50,
-                round((percentile_cont(0.90) within group (
-                  order by output_tokens::double precision * 1000.0
-                    / greatest(latency_ms - first_token_ms, 1)
-                ) filter (where {fact} and output_tokens > 0
-                          and latency_ms > first_token_ms)))::bigint as output_throughput_p90,
-                count(capacity_total_slots)::bigint as capacity_sample_count,
-                round(avg(capacity_used_slots::double precision
-                          / nullif(capacity_total_slots, 0)) * 10000)::bigint
-                  as capacity_utilization_avg_basis_points,
-                round(percentile_cont(0.95) within group (
-                  order by capacity_used_slots::double precision
-                    / nullif(capacity_total_slots, 0)
-                ) * 10000)::bigint as capacity_utilization_p95_basis_points
+                {performance_projection}
          from model_requests mr where mr.started_at >= "
     ));
     query.push_bind(range.start);
@@ -135,8 +249,9 @@ pub(crate) async fn request_metric_series(
     pool: &PgPool,
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
+    selection: UsageInsightSelection,
 ) -> StoreResult<Vec<RequestMetricPoint>> {
-    request_metric_series_inner(pool, range, filter, true).await
+    request_metric_series_inner(pool, range, filter, selection, true).await
 }
 
 pub(crate) async fn dashboard_request_metric_series(
@@ -144,13 +259,14 @@ pub(crate) async fn dashboard_request_metric_series(
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
 ) -> StoreResult<Vec<RequestMetricPoint>> {
-    request_metric_series_inner(pool, range, filter, false).await
+    request_metric_series_inner(pool, range, filter, UsageInsightSelection::All, false).await
 }
 
 async fn request_metric_series_inner(
     pool: &PgPool,
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
+    selection: UsageInsightSelection,
     load_costs: bool,
 ) -> StoreResult<Vec<RequestMetricPoint>> {
     filter.validate()?;
@@ -158,6 +274,7 @@ async fn request_metric_series_inner(
     // 与 request_metrics 同一契约：结果计数覆盖全部请求，用量/延迟/成本
     // 聚合仅统计用量事实。
     let fact = completed_usage_fact_predicate("mr");
+    let performance_projection = performance_projection(selection, &fact);
     let mut query = QueryBuilder::<Postgres>::new("select date_bin(");
     query.push_bind(granularity.sql_interval());
     query.push(format!(
@@ -189,55 +306,7 @@ async fn request_metric_series_inner(
                 count(*) filter (where {fact} and input_tokens is not null
                                    and cached_tokens > 0)::bigint
                   as cache_hit_request_count,
-                percentile_cont(0.50) within group (order by latency_ms)
-                  filter (where {fact}) as latency_p50_ms,
-                percentile_cont(0.95) within group (order by latency_ms)
-                  filter (where {fact}) as latency_p95_ms,
-                percentile_cont(0.99) within group (order by latency_ms)
-                  filter (where {fact}) as latency_p99_ms,
-                percentile_cont(0.50) within group (order by first_token_ms)
-                  filter (where {fact}) as first_token_p50_ms,
-                percentile_cont(0.95) within group (order by first_token_ms)
-                  filter (where {fact}) as first_token_p95_ms,
-                percentile_cont(0.99) within group (order by first_token_ms)
-                  filter (where {fact}) as first_token_p99_ms,
-                count(admission_decision_ms)::bigint as admission_decision_count,
-                percentile_cont(0.50) within group (order by admission_decision_ms)
-                  as admission_decision_p50_ms,
-                percentile_cont(0.95) within group (order by admission_decision_ms)
-                  as admission_decision_p95_ms,
-                percentile_cont(0.99) within group (order by admission_decision_ms)
-                  as admission_decision_p99_ms,
-                count(account_selection_wait_ms)::bigint as account_selection_wait_count,
-                percentile_cont(0.50) within group (order by account_selection_wait_ms)
-                  as account_selection_wait_p50_ms,
-                percentile_cont(0.95) within group (order by account_selection_wait_ms)
-                  as account_selection_wait_p95_ms,
-                percentile_cont(0.99) within group (order by account_selection_wait_ms)
-                  as account_selection_wait_p99_ms,
-                round((percentile_cont(0.10) within group (
-                  order by output_tokens::double precision * 1000.0
-                    / greatest(latency_ms - first_token_ms, 1)
-                ) filter (where {fact} and output_tokens > 0
-                          and latency_ms > first_token_ms)))::bigint as output_throughput_p10,
-                round((percentile_cont(0.50) within group (
-                  order by output_tokens::double precision * 1000.0
-                    / greatest(latency_ms - first_token_ms, 1)
-                ) filter (where {fact} and output_tokens > 0
-                          and latency_ms > first_token_ms)))::bigint as output_throughput_p50,
-                round((percentile_cont(0.90) within group (
-                  order by output_tokens::double precision * 1000.0
-                    / greatest(latency_ms - first_token_ms, 1)
-                ) filter (where {fact} and output_tokens > 0
-                          and latency_ms > first_token_ms)))::bigint as output_throughput_p90,
-                count(capacity_total_slots)::bigint as capacity_sample_count,
-                round(avg(capacity_used_slots::double precision
-                          / nullif(capacity_total_slots, 0)) * 10000)::bigint
-                  as capacity_utilization_avg_basis_points,
-                round(percentile_cont(0.95) within group (
-                  order by capacity_used_slots::double precision
-                    / nullif(capacity_total_slots, 0)
-                ) * 10000)::bigint as capacity_utilization_p95_basis_points,
+                {performance_projection},
                 count(*) filter (where {fact} and cost_source = 'provider_reported')::bigint
                   as provider_reported_count,
                 count(*) filter (where {fact} and cost_source = 'calculated')::bigint
@@ -272,7 +341,7 @@ async fn request_metric_series_inner(
             },
         );
     }
-    if load_costs {
+    if load_costs && selection.costs() {
         let bucket_costs = request_costs_by_bucket(pool, range, filter, granularity).await?;
         for (bucket, costs) in bucket_costs {
             if let Some(point) = points.get_mut(&bucket) {
@@ -281,7 +350,7 @@ async fn request_metric_series_inner(
         }
     }
     let mut points = fill_metric_gaps(range, granularity, points)?;
-    if load_costs {
+    if load_costs && selection.performance(UsagePerformanceMetric::Concurrency) {
         let concurrency = request_concurrency(pool, range, filter, granularity).await?;
         for point in &mut points {
             if let Some((average, peak)) = concurrency.get(&point.bucket_start) {

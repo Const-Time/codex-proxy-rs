@@ -84,14 +84,14 @@ test('superseded usage requests and component disposal abort network work withou
     return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
   }
   const fixture = load<{ useUsageRecordsTable: typeof import('../src/views/usage/composables/useUsageRecordsTable.ts').useUsageRecordsTable }>('../src/views/usage/composables/useUsageRecordsTable.ts', {
-    '@/api': { getUsageRecords: pending, getUsageRecordSummary: pending, getUsageRecordInsightsOverview: pending, getUsageRecordInsightsDiagnostics: pending },
+    '@/api': { getUsageRecords: pending, getUsageRecordSummary: pending, getUsageRecordInsightCard: pending, getUsageRecordInsightsDiagnostics: pending },
   })
   const view = fixture.module.useUsageRecordsTable({ timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
   const first = view.loadUsageRecords()
-  assert.equal(signals.length, 4)
+  assert.equal(signals.length, 6)
   const second = view.loadUsageRecords()
-  assert(signals.slice(0, 4).every(signal => signal.aborted))
-  assert(signals.slice(4).every(signal => !signal.aborted))
+  assert(signals.slice(0, 6).every(signal => signal.aborted))
+  assert(signals.slice(6).every(signal => !signal.aborted))
   fixture.dispose()
   await Promise.all([first, second])
   assert(signals.every(signal => signal.aborted))
@@ -104,7 +104,7 @@ test('slow or failed diagnostics do not delay or discard successful usage panels
     '@/api': {
       getUsageRecords: async () => ({ items: [], pageSize: 10, total: 0, currentPage: 1 }),
       getUsageRecordSummary: async () => ({ totalRequests: '42' }),
-      getUsageRecordInsightsOverview: async () => ({ marker: 'ready' }),
+      getUsageRecordInsightCard: async ({ card }: { card: string }) => ({ [card]: { marker: 'ready' } }),
       getUsageRecordInsightsDiagnostics: () => new Promise((_resolve, reject) => { rejectDiagnostics = reject }),
     },
   })
@@ -117,7 +117,7 @@ test('slow or failed diagnostics do not delay or discard successful usage panels
   rejectDiagnostics(new Error('diagnostics unavailable'))
   await request
   assert.equal(view.summary.value.totalRequests, '42')
-  assert.equal((view.insights.value.overview as unknown as { marker: string }).marker, 'ready')
+  assert.equal((view.insights.value.overview.health as unknown as { marker: string }).marker, 'ready')
   assert.equal(view.diagnosticsLoading.value, false)
   assert.equal(fixture.errors.length, 1)
   fixture.dispose()
@@ -156,4 +156,38 @@ test('dashboard cancels superseded trends and disposed requests, and skips hidde
   await Promise.all([first, second, summary])
   assert(signals.every(signal => signal.aborted))
   assert.equal(view.trendError.value, '')
+})
+
+test('usage cards cache selected metrics independently and never share another filter scope', async () => {
+  const calls: Array<{ card: string, metric?: string, userId?: string }> = []
+  const fixture = load<{ useUsageRecordsTable: typeof import('../src/views/usage/composables/useUsageRecordsTable.ts').useUsageRecordsTable }>('../src/views/usage/composables/useUsageRecordsTable.ts', {
+    '@/api': {
+      getUsageRecords: async () => ({ items: [], pageSize: 10, total: 0, currentPage: 1 }),
+      getUsageRecordSummary: async () => ({ totalRequests: '42' }),
+      getUsageRecordInsightCard: async (query: { card: string, metric?: string, userId?: string }) => {
+        calls.push(query)
+        return { [query.card]: { marker: query.metric || query.card } }
+      },
+      getUsageRecordInsightsDiagnostics: async () => ({ items: [] }),
+    },
+  })
+  const filters = { value: { userId: 'first' } }
+  const view = fixture.module.useUsageRecordsTable({ timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {}, recordFilters: filters })
+  await view.loadUsageRecords()
+  assert.deepEqual(calls.map(c => c.card), ['health', 'cost', 'performance'])
+  assert.equal(calls[2]?.metric, 'total')
+  view.performanceMetric.value = 'concurrency'
+  await view.loadUsageRecords()
+  assert.equal(calls.length, 4)
+  assert.equal(calls[3]?.metric, 'concurrency')
+  view.performanceMetric.value = 'total'
+  await view.loadUsageRecords()
+  assert.equal(calls.length, 4)
+  filters.value = { userId: 'second' }
+  await view.loadUsageRecords()
+  assert.equal(calls.length, 7)
+  assert(calls.slice(4).every(c => c.userId === 'second'))
+  await view.refreshUsageRecords()
+  assert.equal(calls.length, 10)
+  fixture.dispose()
 })

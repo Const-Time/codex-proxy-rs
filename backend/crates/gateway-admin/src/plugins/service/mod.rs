@@ -3,6 +3,7 @@ mod authority;
 mod factory;
 mod local;
 mod local_v1;
+mod local_v3;
 pub use authority::PluginServiceAuthority;
 pub mod settings;
 use crate::ports::plugins::PluginProcess;
