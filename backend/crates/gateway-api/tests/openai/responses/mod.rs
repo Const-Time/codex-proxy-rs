@@ -1,6 +1,6 @@
 mod http;
 mod request;
-mod websocket;
+pub(crate) mod websocket;
 
 use axum::http::{HeaderMap, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};

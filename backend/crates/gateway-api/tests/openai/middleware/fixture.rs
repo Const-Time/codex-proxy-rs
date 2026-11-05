@@ -653,6 +653,7 @@ pub(crate) struct Effects {
     pub(crate) operations: Mutex<Vec<Operation>>,
     pub(crate) settings: Mutex<Vec<gateway_core::routing::RequestSettings>>,
     pub(crate) interrupt: AtomicBool,
+    pub(crate) steering: AtomicBool,
     pub(crate) state: Mutex<Option<gateway_core::operation::ProviderSessionState>>,
     pub(crate) raw_response: Mutex<Option<Bytes>>,
 }
@@ -971,6 +972,12 @@ impl Provider for Effects {
                 .with_replay_safe())]),
                 (),
             ));
+        }
+        if self.steering.load(Ordering::SeqCst) {
+            return crate::openai::responses::websocket::interrupt::steering_stream(
+                request,
+                context.response_control().unwrap().clone(),
+            );
         }
         let created = ProviderEvent::canonical_with_wire(
             vec![GatewayEvent::Started(ResponseMeta::new(

@@ -40,6 +40,7 @@ pub(super) struct Delivery {
     pending: VecDeque<Bytes>,
     response_id: Option<String>,
     wire_terminal: bool,
+    response_chain: bool,
     _connection: Option<Box<dyn ConnectionGuard>>,
 }
 impl Delivery {
@@ -63,6 +64,7 @@ impl Delivery {
             pending: VecDeque::new(),
             response_id: None,
             wire_terminal: false,
+            response_chain: false,
             _connection: connection,
         };
         (delivery, headers)
@@ -250,7 +252,7 @@ impl Delivery {
         Ok(())
     }
     fn observe_message(&mut self, payload: &[u8]) -> Result<(), MiddlewareError> {
-        if self.wire_terminal {
+        if self.wire_terminal && !self.response_chain {
             return Err(MiddlewareError::InvalidState);
         }
         let value: serde_json::Value =
@@ -260,7 +262,10 @@ impl Delivery {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .ok_or(MiddlewareError::InvalidState)?;
-        self.wire_terminal = matches!(
+        if kind == "response.created" && self.response_chain {
+            self.wire_terminal = false;
+        }
+        self.wire_terminal |= matches!(
             kind,
             "response.completed" | "response.incomplete" | "response.failed" | "error"
         );
@@ -349,6 +354,9 @@ impl Delivery {
                 && let Some(envelope) = envelope.as_ref()
             {
                 for event in envelope.events() {
+                    if event.is_response_boundary() {
+                        self.response_chain = true;
+                    }
                     if let Some(state) = event.session_update() {
                         self.provider_state = Some(state.clone());
                     }

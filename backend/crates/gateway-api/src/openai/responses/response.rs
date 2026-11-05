@@ -23,6 +23,7 @@ pub struct OpenAiResponsesEncoder {
     response_snapshot: Option<Value>,
     wire_terminal: Option<Value>,
     wire_failure: bool,
+    execution_pending: bool,
 }
 
 impl OpenAiResponsesEncoder {
@@ -34,6 +35,7 @@ impl OpenAiResponsesEncoder {
             response_snapshot: None,
             wire_terminal: None,
             wire_failure: false,
+            execution_pending: false,
         }
     }
 
@@ -118,7 +120,7 @@ impl OpenAiResponsesEncoder {
     /// 返回是否已经看到客户端可见的 wire 终态。
     #[must_use]
     pub fn is_completed(&self) -> bool {
-        self.wire_terminal.is_some()
+        self.wire_terminal.is_some() && !self.execution_pending
     }
 
     /// 返回是否已把 Provider 原生失败 event 交付给客户端。
@@ -144,6 +146,15 @@ impl OpenAiResponsesEncoder {
     }
 
     fn observe_canonical_identity(&mut self, event: &ProviderEvent) {
+        if event.is_response_boundary() {
+            self.execution_pending = true;
+        } else if event
+            .canonical_facts()
+            .iter()
+            .any(|fact| matches!(fact, GatewayEvent::Completed(_)))
+        {
+            self.execution_pending = false;
+        }
         for fact in event.canonical_facts() {
             let metadata = match fact {
                 GatewayEvent::Started(metadata) | GatewayEvent::Completed(metadata) => metadata,
@@ -172,6 +183,9 @@ impl OpenAiResponsesEncoder {
             .filter(|value| value.is_object())
         {
             self.response_snapshot = Some(response.clone());
+            if effective_type == Some("response.created") {
+                self.wire_terminal = None;
+            }
         }
         if matches!(
             effective_type,

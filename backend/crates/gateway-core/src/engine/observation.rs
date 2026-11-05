@@ -702,6 +702,11 @@ pub(super) struct ResponseObservation {
     pub(super) timings: ModelRequestTimings,
     pub(super) client_response_id: Option<String>,
     pub(super) upstream_response_id: Option<String>,
+    previous_responses: Option<(Usage, CostEstimate)>,
+    response_usage: Usage,
+    response_cost: CostEstimate,
+    known_response_cost_usd: crate::metering::Decimal,
+    known_response_components: [crate::metering::Decimal; 4],
 }
 
 impl ResponseObservation {
@@ -713,6 +718,11 @@ impl ResponseObservation {
             timings: ModelRequestTimings::default(),
             client_response_id: None,
             upstream_response_id: None,
+            previous_responses: None,
+            response_usage: Usage::new(),
+            response_cost: CostEstimate::unavailable(),
+            known_response_cost_usd: crate::metering::Decimal::ZERO,
+            known_response_components: [crate::metering::Decimal::ZERO; 4],
         }
     }
 
@@ -727,17 +737,66 @@ impl ResponseObservation {
     pub(super) fn observe_event(&mut self, event: &GatewayEvent) {
         let elapsed = self.elapsed_ms();
         observe_event_timing(&mut self.timings, event, elapsed);
+        if matches!(event, GatewayEvent::Started(_)) && self.previous_responses.is_some() {
+            // A successor may fail before publishing a price. Keep known budget
+            // charges, but do not present the parent's cost as a complete chain cost.
+            self.update_response_cost();
+        }
         if let GatewayEvent::Usage(observed) = event {
-            self.usage.merge(observed);
+            self.response_usage.merge(observed);
+            self.usage = self.previous_responses.as_ref().map_or_else(
+                || self.response_usage.clone(),
+                |(usage, _)| usage.add_responses(&self.response_usage),
+            );
         }
         if let GatewayEvent::CalculatedCost(observed) = event
-            && self.cost.source() != CostSource::ProviderReported
+            && self.response_cost.source() != CostSource::ProviderReported
         {
-            self.cost = observed.clone().into_estimate();
+            self.response_cost = observed.clone().into_estimate();
+            self.update_response_cost();
         }
         if let GatewayEvent::ProviderCost(observed) = event {
-            self.cost = observed.into_estimate();
+            self.response_cost = observed.into_estimate();
+            self.update_response_cost();
         }
+    }
+
+    fn update_response_cost(&mut self) {
+        self.cost = self.previous_responses.as_ref().map_or_else(
+            || self.response_cost.clone(),
+            |(_, cost)| cost.add_responses(&self.response_cost),
+        );
+    }
+
+    pub(super) fn response_boundary(&mut self) {
+        // A finished response without price/usage cannot silently inherit the prior price.
+        self.update_response_cost();
+        self.previous_responses = Some((self.usage.clone(), self.cost.clone()));
+        self.known_response_cost_usd = self.known_cost_usd();
+        self.known_response_components = self.known_cost_components();
+        self.response_usage = Usage::new();
+        self.response_cost = CostEstimate::unavailable();
+    }
+
+    pub(super) fn known_cost_usd(&self) -> crate::metering::Decimal {
+        use crate::metering::Decimal;
+        let current = self
+            .response_cost
+            .total()
+            .filter(|cost| cost.currency().as_str() == "USD")
+            .map_or(Decimal::ZERO, |cost| cost.amount());
+        self.known_response_cost_usd
+            .checked_add(current)
+            .unwrap_or(Decimal::MAX)
+    }
+
+    pub(super) fn known_cost_components(&self) -> [crate::metering::Decimal; 4] {
+        let current = super::budget::budget_components(&self.response_cost);
+        std::array::from_fn(|index| {
+            self.known_response_components[index]
+                .checked_add(current[index])
+                .unwrap_or(crate::metering::Decimal::MAX)
+        })
     }
 
     pub(super) fn observe_identity(&mut self, event: &GatewayEvent) {
@@ -751,6 +810,11 @@ impl ResponseObservation {
     }
 
     pub(super) fn reset_for_attempt(&mut self) {
+        self.known_response_cost_usd = crate::metering::Decimal::ZERO;
+        self.known_response_components = [crate::metering::Decimal::ZERO; 4];
+        self.previous_responses = None;
+        self.response_usage = Usage::new();
+        self.response_cost = CostEstimate::unavailable();
         self.usage = Usage::new();
         self.cost = CostEstimate::unavailable();
         self.client_response_id = None;

@@ -41,3 +41,49 @@ fn matching_response_ids_do_not_share_control_between_root_executions() {
     assert_eq!(active_first.requested().now_or_never(), Some(()));
     assert!(active_second.requested().now_or_never().is_none());
 }
+
+#[test]
+fn steering_is_bounded_owned_and_releases_with_the_native_response() {
+    use gateway_core::engine::response_control::ResponseSteerError;
+    use serde_json::json;
+    let control = ResponseControl::default();
+    assert_eq!(
+        control.steer("a", json!({})),
+        Err(ResponseSteerError::Unavailable)
+    );
+    let unsupported = control.activate("a".into()).unwrap();
+    assert_eq!(
+        control.steer("a", json!({})),
+        Err(ResponseSteerError::Unsupported)
+    );
+    drop(unsupported);
+    let (active, mut commands) = control.activate_with_steering("a".into()).unwrap();
+    assert_eq!(
+        control.steer("b", json!({})),
+        Err(ResponseSteerError::ResponseMismatch)
+    );
+    let mut accepted = 0;
+    while control.steer("a", json!({"index":accepted})).is_ok() {
+        accepted += 1;
+        assert!(accepted <= 17);
+    }
+    assert_eq!(
+        control.steer("a", json!({})),
+        Err(ResponseSteerError::QueueFull)
+    );
+    commands.close();
+    assert_eq!(
+        control.steer("a", json!({})),
+        Err(ResponseSteerError::Unavailable)
+    );
+    for index in 0..accepted {
+        assert_eq!(commands.try_recv().unwrap()["index"], index);
+    }
+    drop(active);
+    assert_eq!(
+        control.steer("a", json!({})),
+        Err(ResponseSteerError::Unavailable)
+    );
+    let (_next, mut commands) = control.activate_with_steering("b".into()).unwrap();
+    assert!(commands.try_recv().is_err());
+}

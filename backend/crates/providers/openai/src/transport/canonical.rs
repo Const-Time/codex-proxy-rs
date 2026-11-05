@@ -54,6 +54,8 @@ pub struct CodexCanonicalDecoder {
     web_search_pricing: Option<WebSearchPricing>,
     timing_signals: ResponseEventSignals,
     raw_sse_passthrough: bool,
+    response_chains: bool,
+    last_response_boundary: Option<ResponseMeta>,
 }
 
 /// 上游 Responses 事件的两类失败：协议损坏，或上游明确报告业务失败。
@@ -164,6 +166,8 @@ impl CodexCanonicalDecoder {
             pricing: None,
             timing_signals: ResponseEventSignals::default(),
             raw_sse_passthrough: false,
+            response_chains: false,
+            last_response_boundary: None,
         }
     }
 
@@ -173,6 +177,12 @@ impl CodexCanonicalDecoder {
     #[must_use]
     pub fn with_raw_sse_passthrough(mut self) -> Self {
         self.raw_sse_passthrough = true;
+        self
+    }
+
+    /// Native WS steering may produce multiple responses before transport EOF.
+    pub fn with_response_chains(mut self, enabled: bool) -> Self {
+        self.response_chains = enabled;
         self
     }
 
@@ -212,7 +222,8 @@ impl CodexCanonicalDecoder {
         self.timing_signals = ResponseEventSignals::default();
         if self.raw_sse_passthrough {
             let frames = self.decoder.finish_frames();
-            return self.decode_frames(frames);
+            let outcome = self.decode_frames(frames);
+            return self.finish_response_chain(outcome);
         }
         let events = match self.decoder.finish() {
             Ok(events) => events,
@@ -223,7 +234,20 @@ impl CodexCanonicalDecoder {
                 );
             }
         };
-        self.decode(events)
+        let outcome = self.decode(events);
+        self.finish_response_chain(outcome)
+    }
+
+    fn finish_response_chain(&mut self, outcome: CodexCanonicalOutcome) -> CodexCanonicalOutcome {
+        match outcome {
+            CodexCanonicalOutcome::Events(mut events) if self.response_chains && self.completed => {
+                if let Some(meta) = self.last_response_boundary.take() {
+                    events.push(ProviderEvent::canonical(GatewayEvent::Completed(meta)));
+                }
+                CodexCanonicalOutcome::Events(events)
+            }
+            outcome => outcome,
+        }
     }
 
     /// 取走最近一次解码中由原始 Responses 事件观察到的计时语义。
@@ -327,6 +351,19 @@ impl CodexCanonicalDecoder {
             // It must not become client output or start first-output timing.
             return Ok(());
         }
+        if self.response_chains && self.completed && event_type == Some("response.created") {
+            self.started = false;
+            self.completed = false;
+            self.response_id = None;
+            self.content.clear();
+            self.tool_arguments_seen.clear();
+            self.text_output_seen.clear();
+            self.reasoning_output_seen.clear();
+            self.usage_emitted = false;
+            self.response_service_tier = None;
+            self.response_model = ResponseModelObservation::default();
+            self.reported_model = None;
+        }
         self.observe_response_service_tier(&value);
         self.response_model.observe(event_type, &value);
         if let Some(model) = super::response_meta::reported_model_from_event(&value) {
@@ -358,16 +395,37 @@ impl CodexCanonicalDecoder {
             return Err(CodexCanonicalError::Upstream(Box::new(failure)));
         }
         let mut canonical = Vec::new();
+        let response_boundary = self.response_chains
+            && !self.completed
+            && matches!(
+                event_type,
+                Some("response.completed" | "response.incomplete")
+            );
         if let Some(event_type) = event_type {
             let _ = self.decode_event(event_type, &value, &mut canonical);
+        }
+        if response_boundary {
+            canonical.retain(|fact| {
+                if let GatewayEvent::Completed(meta) = fact {
+                    self.last_response_boundary = Some(meta.clone());
+                    false
+                } else {
+                    true
+                }
+            });
         }
         let Some(wire) = Self::wire_for_event(event, value, raw_sse_frame) else {
             return Ok(());
         };
-        output.push(if canonical.is_empty() {
+        let event = if canonical.is_empty() {
             ProviderEvent::wire(wire)
         } else {
             ProviderEvent::canonical_with_wire(canonical, wire)
+        };
+        output.push(if response_boundary {
+            event.with_response_boundary()
+        } else {
+            event
         });
         self.semantic_output_seen |= signals.semantic_output;
         Ok(())

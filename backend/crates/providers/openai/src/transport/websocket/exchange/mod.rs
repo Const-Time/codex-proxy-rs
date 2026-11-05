@@ -2,6 +2,7 @@
 
 mod io;
 mod reducer;
+mod steering;
 mod stream;
 
 use std::{pin::Pin, sync::Arc};

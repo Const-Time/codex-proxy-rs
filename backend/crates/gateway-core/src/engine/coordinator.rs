@@ -736,19 +736,14 @@ where
         }
         // Key 只累计已取得的 USD 费用；缺少费用的请求按零结算。
         // 发送状态仍用于判断重放是否安全并保留在诊断中，不能据此推断存在欠费。
-        self.observation
-            .cost
-            .total()
-            .filter(|money| money.currency().as_str() == "USD")
-            .map(crate::metering::Money::amount)
-            .unwrap_or(Decimal::ZERO)
+        self.observation.known_cost_usd()
     }
 
     fn budget_total_components(&self) -> [Decimal; 4] {
         let current = if self.budget_attempt_already_counted {
             [Decimal::ZERO; 4]
         } else {
-            super::budget::budget_components(&self.observation.cost)
+            self.observation.known_cost_components()
         };
         std::array::from_fn(|index| {
             self.budget_prior_components_usd[index]
@@ -962,6 +957,9 @@ where
         }
         for fact in event.canonical_facts() {
             self.observe_event(fact).await;
+        }
+        if event.is_response_boundary() {
+            self.observation.response_boundary();
         }
         if event.wire_event().is_some() && !event.has_canonical_facts() {
             self.observe_wire_event().await;

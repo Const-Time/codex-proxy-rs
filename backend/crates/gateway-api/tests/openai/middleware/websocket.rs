@@ -267,6 +267,77 @@ async fn ws_layers_keeps_control_future_alive_and_queues_creates_serially() {
     }
 }
 #[tokio::test]
+async fn ws_layers_steering_failure_preserves_normal_completion_and_billing() {
+    for mounts in mount_combinations() {
+        let f = Fixture::with_mounts(Mode::Rewrite, mounts.clone()).await;
+        let completion = Arc::new(tokio::sync::Notify::new());
+        f.effects.interrupt.store(true, Ordering::SeqCst);
+        *f.effects.completion.lock().unwrap() = Some(completion.clone());
+        let (_server, mut socket) = connect(&f).await;
+        send(&mut socket, create()).await;
+        assert_eq!(event(&mut socket).await["type"], "response.created");
+        send(
+            &mut socket,
+            json!({
+                "type":"response.steer", "previous_response_id":"resp_original",
+                "input":"keep this input for the next create"
+            }),
+        )
+        .await;
+        let failed = event(&mut socket).await;
+        assert_eq!(failed["type"], "response.steer.failed");
+        assert_eq!(failed["error"]["code"], "steering_not_supported");
+        assert_eq!(
+            failed["steer"]["input"],
+            "keep this input for the next create"
+        );
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.plugin.seen.lock().unwrap().len(), mounts.len());
+        assert!(f.effects.finalizations.lock().unwrap().is_empty());
+        send(&mut socket, json!({"type":"response.interrupt","response_id":"resp_original","mode":"discard_partial_items"})).await;
+        completion.notify_one();
+        assert_eq!(event(&mut socket).await["type"], "response.completed");
+        f.settled().await;
+        assert_eq!(f.effects.finalizations.lock().unwrap().len(), 1);
+        assert_eq!(f.effects.charges.lock().unwrap().len(), 1);
+        socket.close(None).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ws_layers_steering_successor_preserves_boundaries_and_single_settlement() {
+    for mounts in mount_combinations() {
+        let f = Fixture::with_mounts(Mode::Rewrite, mounts).await;
+        f.effects.steering.store(true, Ordering::SeqCst);
+        let (_server, mut socket) = connect(&f).await;
+        send(&mut socket, create()).await;
+        assert_eq!(event(&mut socket).await["response"]["id"], "resp_parent");
+        send(&mut socket, json!({"type":"response.steer","previous_response_id":"resp_parent","input":"support Windows"})).await;
+        for kind in [
+            "response.steer.accepted",
+            "response.incomplete",
+            "response.created",
+            "response.completed",
+        ] {
+            let value = event(&mut socket).await;
+            assert_eq!(value["type"], kind, "{value}");
+        }
+        released(&f).await;
+        assert_eq!(f.effects.calls.load(Ordering::SeqCst), 1);
+        let finalized = f.effects.finalizations.lock().unwrap();
+        assert_eq!(finalized.len(), 1);
+        assert_eq!(finalized[0].usage.total_tokens, Some(34));
+        assert_eq!(
+            finalized[0].client_response_id.as_deref(),
+            Some("resp_child")
+        );
+        let charges = f.effects.charges.lock().unwrap();
+        assert_eq!(charges.len(), 1);
+        assert_eq!(charges[0].amount_usd.scaled(), 300);
+    }
+}
+
+#[tokio::test]
 async fn ws_layers_preserves_native_replay_state_and_connection_identity() {
     for mounts in mount_combinations() {
         let f = Fixture::with_mounts(Mode::MessageRewrite, mounts.clone()).await;

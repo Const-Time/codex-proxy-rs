@@ -3,6 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use futures::StreamExt;
 use gateway_core::diagnostics::{TraceContext, diagnostic_json};
 use gateway_core::engine::response_control::{ActiveResponseInterrupt, ResponseControl};
 use serde_json::json;
@@ -173,6 +174,8 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
     let mut interrupt_requested: futures::future::BoxFuture<'static, ()> =
         Box::pin(std::future::pending());
     let mut interrupt_sent = false;
+    let mut steering = super::steering::SteeringState::default();
+    let mut steer_commands: Option<futures::channel::mpsc::Receiver<serde_json::Value>> = None;
     // 官方 run_websocket_response_stream 按响应消费 metadata 事件；它们不属于握手头。
     // 复用连接时恢复握手快照，避免上一轮模型信息及普通响应头随每次请求累积。
     let opening_response_metadata = metadata.response_metadata.clone();
@@ -185,6 +188,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                     None => std::future::pending().await,
                 }
             } => {
+                drop(active_interrupt.take());
                 trace.record("upstream.cancelled", json!({"reason": "downstream_connection_closed"}));
                 discard_stream_websocket(
                     websocket,
@@ -231,6 +235,23 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                 }
                 interrupt_sent = true;
                 trace.record("upstream.interrupt.sent", json!({"mode": "discard_partial_items"}));
+                continue;
+            }
+            command = async {
+                match &mut steer_commands {
+                    Some(commands) => commands.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(command) = command else { steer_commands = None; continue; };
+                if let Err(error) = super::super::handshake::send_websocket_request(&websocket, &command.to_string()).await {
+                    drop(active_interrupt.take());
+                    discard_stream_websocket(websocket, pool_return, StreamWebSocketDiscardReason::UpstreamReceiveFailed).await;
+                    let _ = tx.send(Err(error)).await;
+                    return;
+                }
+                steering.sent();
+                trace.record("upstream.steer.sent", json!({}));
                 continue;
             }
             message = next_websocket_message(
@@ -330,27 +351,28 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             _ => continue,
         };
         trace.capture("upstream.event", raw.as_bytes());
-        let reduced = match reduce_websocket_event(&raw, &mut metadata, &mut continuation) {
-            Ok(reduced) => reduced,
-            Err(error) => {
-                drop(active_interrupt.take());
-                let observation =
-                    (!matches!(error.classified(), CodexWebSocketExchangeError::Upstream(_)))
-                        .then(|| connection_observation(&websocket, &error));
-                discard_stream_websocket(
-                    websocket,
-                    pool_return,
-                    StreamWebSocketDiscardReason::UpstreamReceiveFailed,
-                )
-                .await;
-                let error = match observation {
-                    Some(observation) => error.with_connection_observation(observation),
-                    None => error,
-                };
-                let _ = tx.send(Err(error)).await;
-                return;
-            }
-        };
+        let reduced =
+            match reduce_websocket_event(&raw, &mut metadata, &mut continuation, &mut steering) {
+                Ok(reduced) => reduced,
+                Err(error) => {
+                    drop(active_interrupt.take());
+                    let observation =
+                        (!matches!(error.classified(), CodexWebSocketExchangeError::Upstream(_)))
+                            .then(|| connection_observation(&websocket, &error));
+                    discard_stream_websocket(
+                        websocket,
+                        pool_return,
+                        StreamWebSocketDiscardReason::UpstreamReceiveFailed,
+                    )
+                    .await;
+                    let error = match observation {
+                        Some(observation) => error.with_connection_observation(observation),
+                        None => error,
+                    };
+                    let _ = tx.send(Err(error)).await;
+                    return;
+                }
+            };
         if let Some(event_type) = reduced.diagnostic_event_type {
             last_event_type = Some(event_type);
         }
@@ -358,7 +380,11 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             && let (Some(control), Some(response_id)) =
                 (&response_control, reduced.created_response_id)
         {
-            active_interrupt = control.activate(response_id);
+            if let Some((active, commands)) = control.activate_with_steering(response_id) {
+                active_interrupt = Some(active);
+                steer_commands = Some(commands);
+                interrupt_sent = false;
+            }
             if let Some(active) = &active_interrupt {
                 // 跨消息复用同一个等待 future，避免每帧留下新的取消等待者。
                 interrupt_requested = Box::pin(active.requested());
@@ -397,8 +423,34 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             ExchangeAction::Ignore => continue,
         };
         if terminal.is_some() {
+            // Close admission before draining: a successful local enqueue must not
+            // disappear when the terminal and a control command race each other.
+            if let Some(mut commands) = steer_commands.take() {
+                commands.close();
+                while let Ok(command) = commands.try_recv() {
+                    if let Err(error) = super::super::handshake::send_websocket_request(
+                        &websocket,
+                        &command.to_string(),
+                    )
+                    .await
+                    {
+                        drop(active_interrupt.take());
+                        discard_stream_websocket(
+                            websocket,
+                            pool_return,
+                            StreamWebSocketDiscardReason::UpstreamReceiveFailed,
+                        )
+                        .await;
+                        let _ = tx.send(Err(error)).await;
+                        return;
+                    }
+                    steering.sent();
+                }
+            }
+            steering.terminal = terminal;
             // 先撤销控制权，再交付终态和归还连接，避免迟到的中断影响下一轮。
             drop(active_interrupt.take());
+            interrupt_requested = Box::pin(std::future::pending());
         }
         if tx.send(Ok(Bytes::from(frame))).await.is_err() {
             drop(active_interrupt.take());
@@ -414,7 +466,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             .await;
             return;
         }
-        if let Some(terminal) = terminal {
+        if let Some(terminal) = steering.finished() {
             trace.record(
                 "upstream.terminal",
                 json!({"kind": format!("{terminal:?}")}),

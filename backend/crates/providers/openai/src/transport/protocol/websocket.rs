@@ -152,7 +152,7 @@ pub(crate) fn websocket_response_is_interrupted(value: &Value) -> bool {
         && value
             .pointer("/response/incomplete_details/reason")
             .and_then(Value::as_str)
-            == Some("interrupted")
+            .is_some_and(|reason| matches!(reason, "interrupted" | "steered"))
 }
 
 /// 生成 Responses WebSocket payload 审计快照。

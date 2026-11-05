@@ -1,6 +1,9 @@
 use super::*;
 use crate::openai::*;
 use gateway_core::engine::AttemptContext;
+use gateway_core::engine::budget::{
+    ClientBudgetCharge, ClientBudgetError, ClientBudgetPort, ClientBudgetScope,
+};
 use gateway_core::engine::provider::{
     Provider, ProviderCallMetadata, ProviderCatalogGeneration, ProviderRequest, ProviderStream,
 };
@@ -13,6 +16,8 @@ use gateway_core::engine::response_control::{ResponseControl, ResponseInterruptE
 struct InterruptProvider {
     calls: AtomicUsize,
     controls: Mutex<Vec<ResponseControl>>,
+    inputs: Mutex<Vec<Value>>,
+    steering: bool,
 }
 
 #[async_trait]
@@ -35,11 +40,21 @@ impl Provider for InterruptProvider {
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         let number = self.calls.fetch_add(1, Ordering::SeqCst);
+        let Operation::Generate(generate) = request.operation() else {
+            panic!("expected response generation");
+        };
+        self.inputs
+            .lock()
+            .unwrap()
+            .push(generate.protocol_payload().body()["input"].clone());
         let id = format!("resp_interrupt_{number}");
         let control = context
             .response_control()
             .expect("root control propagated through Core")
             .clone();
+        if self.steering {
+            return steering_stream(request, control);
+        }
         let active = control.activate(id.clone()).unwrap();
         self.controls.lock().unwrap().push(control);
         let candidate = request.candidate();
@@ -165,12 +180,12 @@ async fn next(socket: &mut TestSocket) -> Value {
 }
 
 #[tokio::test]
-async fn interrupt_is_live_scoped_and_keeps_queued_creates_serial() {
+async fn controls_keep_active_response_and_queued_creates_isolated() {
     let provider = Arc::new(InterruptProvider::default());
     let admissions = Arc::new(InterruptAdmissions::default());
     let execution = Arc::new(DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(snapshot("sk_ws_interrupt", "openai")),
-        Arc::new(InterruptStore),
+        Arc::new(InterruptStore::default()),
         ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
         admissions.clone(),
         Arc::new(UnusedContinuation),
@@ -198,11 +213,19 @@ async fn interrupt_is_live_scoped_and_keeps_queued_creates_serial() {
         interrupt("resp_interrupt_0", "discard_partial_items"),
     )
     .await;
-    assert_eq!(next(&mut socket).await["type"], "error");
+    let idle_interrupt = next(&mut socket).await;
+    assert_eq!(idle_interrupt["type"], "error");
+    assert_eq!(idle_interrupt["error"]["param"], "response_id");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    // Idle controls must not pass through the response.create decoder/admission.
+    assert_steer_rejected(&mut socket, "resp_interrupt_0", "response_not_found").await;
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     send(&mut socket, create.clone()).await;
     assert_eq!(next(&mut socket).await["type"], "response.created");
-    send(&mut socket, create).await;
+    send(&mut socket, create.clone()).await;
+    // A queued create must not delay the steering failure until after the terminal.
+    assert_steer_rejected(&mut socket, "resp_interrupt_0", "steering_not_supported").await;
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     for invalid in [
         interrupt("resp_other", "discard_partial_items"),
         interrupt("resp_interrupt_0", "unknown"),
@@ -240,6 +263,36 @@ async fn interrupt_is_live_scoped_and_keeps_queued_creates_serial() {
         provider.controls.lock().unwrap()[0].interrupt("resp_interrupt_0"),
         Err(ResponseInterruptError::Unavailable)
     );
+    send(
+        &mut socket,
+        interrupt("resp_interrupt_1", "discard_partial_items"),
+    )
+    .await;
+    assert_eq!(next(&mut socket).await["type"], "response.incomplete");
+    // Late controls retain their meaning after the response owner has gone away.
+    send(
+        &mut socket,
+        interrupt("resp_interrupt_1", "discard_partial_items"),
+    )
+    .await;
+    assert_eq!(next(&mut socket).await["error"]["param"], "response_id");
+    assert_steer_rejected(&mut socket, "resp_interrupt_1", "response_not_found").await;
+    let mut fallback = create;
+    fallback["input"] = json!("additional requirement");
+    send(&mut socket, fallback).await;
+    assert_eq!(
+        next(&mut socket).await["response"]["id"],
+        "resp_interrupt_2"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *provider.inputs.lock().unwrap(),
+        vec![
+            json!("hello"),
+            json!("hello"),
+            json!("additional requirement")
+        ]
+    );
     socket.close(None).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while admissions.active.load(Ordering::SeqCst) != 0 {
@@ -249,13 +302,56 @@ async fn interrupt_is_live_scoped_and_keeps_queued_creates_serial() {
     .await
     .expect("disconnect releases active execution");
     assert_eq!(
-        provider.controls.lock().unwrap()[1].interrupt("resp_interrupt_1"),
+        provider.controls.lock().unwrap()[2].interrupt("resp_interrupt_2"),
         Err(ResponseInterruptError::Unavailable)
     );
 }
 
+async fn assert_steer_rejected(socket: &mut TestSocket, response_id: &str, code: &str) {
+    for input in [
+        json!("additional requirement"),
+        json!([{"role":"user","content":[
+            {"type":"input_text","text":"inspect these"},
+            {"type":"input_image","image_url":"https://example.test/image.png"},
+            {"type":"input_file","file_id":"file_test"}
+        ]}]),
+    ] {
+        send(
+            socket,
+            json!({
+                "type":"response.steer", "previous_response_id":response_id, "input":input
+            }),
+        )
+        .await;
+        let failed = next(socket).await;
+        assert_eq!(failed["type"], "response.steer.failed");
+        assert_eq!(failed["error"]["type"], "invalid_request_error");
+        assert_eq!(failed["error"]["code"], code);
+        assert_eq!(failed["steer"]["previous_response_id"], response_id);
+        assert_eq!(failed["steer"]["input"], input);
+        assert!(
+            failed["steer"].get("id").is_none(),
+            "unaccepted input has no steering ID"
+        );
+        assert!(failed["sequence_number"].is_u64());
+    }
+    for invalid in [
+        json!({"type":"response.steer","input":"missing target"}),
+        json!({"type":"response.steer","previous_response_id":response_id,"input":[]}),
+        json!({"type":"response.steer","previous_response_id":response_id,"input":"hello","stream_id":"wrong"}),
+    ] {
+        send(socket, invalid).await;
+        let failed = next(socket).await;
+        assert_eq!(failed["type"], "response.steer.failed");
+        assert_eq!(failed["error"]["code"], "invalid_input");
+    }
+}
+
 #[derive(Default)]
-struct InterruptStore;
+struct InterruptStore {
+    finalizations: Mutex<Vec<ModelRequestFinalization>>,
+    charges: Mutex<Vec<ClientBudgetCharge>>,
+}
 
 #[async_trait]
 impl ExecutionStore for InterruptStore {
@@ -301,7 +397,11 @@ impl ExecutionStore for InterruptStore {
         Ok(())
     }
 
-    async fn finalize_model_request(&self, _: ModelRequestFinalization) -> Result<(), StoreError> {
+    async fn finalize_model_request(
+        &self,
+        value: ModelRequestFinalization,
+    ) -> Result<(), StoreError> {
+        self.finalizations.lock().unwrap().push(value);
         Ok(())
     }
 
@@ -315,3 +415,178 @@ impl gateway_core::engine::admission::ClientAdmissionLeaseGuard for TestAdmissio
 
 struct TestExecutionRecoveryLease;
 impl gateway_core::engine::ExecutionRecoveryLeaseGuard for TestExecutionRecoveryLease {}
+
+pub(crate) fn steering_stream(
+    request: ProviderRequest,
+    control: ResponseControl,
+) -> Result<ProviderStream, ProviderError> {
+    let (active, commands) = control
+        .activate_with_steering("resp_parent".into())
+        .unwrap();
+    let candidate = request.candidate();
+    let metadata = ProviderCallMetadata::new(
+        candidate.provider().clone(),
+        candidate.upstream_model().unwrap().clone(),
+        ProviderAccountId::new("acct_api_test").unwrap(),
+        UpstreamTransport::new("websocket").unwrap(),
+    );
+    let body = futures::stream::unfold(
+        (0, Some(active), commands, control),
+        |(phase, mut active, mut commands, control)| async move {
+            use gateway_core::metering::{CalculatedCost, Usage};
+            let event = match phase {
+                0 | 3 => {
+                    let id = if phase == 0 {
+                        "resp_parent"
+                    } else {
+                        "resp_child"
+                    };
+                    if phase == 3 {
+                        let (owner, receiver) = control.activate_with_steering(id.into()).unwrap();
+                        active = Some(owner);
+                        commands = receiver;
+                    }
+                    ProviderEvent::canonical_with_wire(vec![GatewayEvent::Started(ResponseMeta::new(id,"model-a"))], ProtocolWireEvent::json("openai",Some("response.created".into()),json!({"type":"response.created","response":{"id":id,"model":"model-a","status":"in_progress","output":[]}})).unwrap())
+                }
+                1 => {
+                    let command = commands.next().await.unwrap();
+                    assert_eq!(command["previous_response_id"], "resp_parent");
+                    assert_eq!(command["input"], "support Windows");
+                    ProviderEvent::wire(ProtocolWireEvent::json("openai", Some("response.steer.accepted".into()),json!({"type":"response.steer.accepted","sequence_number":1,"steer":{"id":"steer_test","previous_response_id":"resp_parent"}})).unwrap())
+                }
+                2 | 4 => {
+                    drop(active.take());
+                    let (id, kind, tokens, cost) = if phase == 2 {
+                        ("resp_parent", "response.incomplete", 10, 100)
+                    } else {
+                        ("resp_child", "response.completed", 20, 200)
+                    };
+                    let mut response = json!({"id":id,"model":"model-a","status":if phase == 2 {"incomplete"} else {"completed"},"output":[]});
+                    if phase == 2 {
+                        response["incomplete_details"] = json!({"reason":"steered"});
+                    }
+                    ProviderEvent::canonical_with_wire(
+                        vec![
+                            GatewayEvent::Usage(Usage {
+                                input_tokens: Some(tokens),
+                                output_tokens: Some(2),
+                                total_tokens: Some(tokens + 2),
+                                ..Usage::new()
+                            }),
+                            GatewayEvent::CalculatedCost(
+                                CalculatedCost::from_usd_ticks(cost).unwrap(),
+                            ),
+                        ],
+                        ProtocolWireEvent::json(
+                            "openai",
+                            Some(kind.into()),
+                            json!({"type":kind,"response":response}),
+                        )
+                        .unwrap(),
+                    )
+                    .with_response_boundary()
+                }
+                5 => ProviderEvent::canonical(GatewayEvent::Completed(ResponseMeta::new(
+                    "resp_child",
+                    "model-a",
+                ))),
+                _ => return None,
+            };
+            Some((Ok(event), (phase + 1, active, commands, control)))
+        },
+    );
+    Ok(ProviderStream::new(metadata, body, ()))
+}
+
+#[tokio::test]
+async fn steering_successor_streams_without_another_create_and_settles_combined_usage_once() {
+    let provider = Arc::new(InterruptProvider {
+        steering: true,
+        ..Default::default()
+    });
+    let admissions = Arc::new(InterruptAdmissions::default());
+    let store = Arc::new(InterruptStore::default());
+    let execution = Arc::new(
+        DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(snapshot("sk_ws_steer", "openai")),
+            store.clone(),
+            ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(IgnoredClientApiKeyUsage),
+        )
+        .with_budget(store.clone()),
+    );
+    let app = api_router(execution).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _server = Server(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap()
+    }));
+    let mut request = format!("ws://{address}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_static("Bearer sk_ws_steer"),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    send(
+        &mut socket,
+        json!({"type":"response.create","model":"model-a","input":"hello"}),
+    )
+    .await;
+    assert_eq!(next(&mut socket).await["response"]["id"], "resp_parent");
+    send(&mut socket,json!({"type":"response.steer","previous_response_id":"resp_parent","input":"support Windows"})).await;
+    assert_eq!(next(&mut socket).await["type"], "response.steer.accepted");
+    assert_eq!(next(&mut socket).await["type"], "response.incomplete");
+    assert_eq!(next(&mut socket).await["response"]["id"], "resp_child");
+    assert_eq!(next(&mut socket).await["type"], "response.completed");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while admissions.active.load(Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let charges = store.charges.lock().unwrap();
+    assert_eq!(charges.len(), 1);
+    assert_eq!(charges[0].amount_usd.scaled(), 300);
+    let finalized = store.finalizations.lock().unwrap();
+    assert_eq!(finalized.len(), 1);
+    assert_eq!(finalized[0].usage.input_tokens, Some(30));
+    assert_eq!(finalized[0].usage.output_tokens, Some(4));
+    assert_eq!(finalized[0].usage.total_tokens, Some(34));
+    assert_eq!(finalized[0].cost.total().unwrap().amount().scaled(), 300);
+    assert_eq!(
+        finalized[0].client_response_id.as_deref(),
+        Some("resp_child")
+    );
+}
+
+impl ClientBudgetPort for InterruptStore {
+    fn admit(
+        &self,
+        _: ClientApiKeyId,
+        _: Option<gateway_core::routing::AccountGroupId>,
+        _: Option<PublicModelId>,
+    ) -> BoxFuture<'_, Result<ClientBudgetScope, GatewayError>> {
+        Box::pin(async {
+            Ok(ClientBudgetScope {
+                billing: Default::default(),
+                user_id: "steering-user".into(),
+                group_id: gateway_core::routing::AccountGroupId::new(
+                    "grp_00000000000000000000000000000001",
+                )
+                .unwrap(),
+            })
+        })
+    }
+    fn settle(&self, charge: ClientBudgetCharge) -> BoxFuture<'_, Result<(), ClientBudgetError>> {
+        Box::pin(async move {
+            self.charges.lock().unwrap().push(charge);
+            Ok(())
+        })
+    }
+}

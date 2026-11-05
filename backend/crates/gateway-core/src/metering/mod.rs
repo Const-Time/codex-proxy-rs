@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use crate::validation::MeteringError;
 
+mod aggregate;
 mod pricing;
 mod scope;
 pub use pricing::{

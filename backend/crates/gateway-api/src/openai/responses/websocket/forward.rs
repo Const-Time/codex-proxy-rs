@@ -14,7 +14,10 @@ use crate::openai::error::{gateway_error_contract, gateway_error_from_engine};
 use super::{
     super::{DecodedResponsesRequest, OpenAiResponsesEncoder, PendingExecution, ProtocolErrorBody},
     connection::{ConnectionEvent, FramePhase, ResponsesWebSocketConnection, WriteContext},
-    protocol::{decode_response_interrupt, error_event, response_metadata_event},
+    protocol::{
+        ResponseControlFrame, decode_response_control, error_event, response_metadata_event,
+        steering_envelope_valid, steering_failed_event,
+    },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -470,17 +473,11 @@ pub(in crate::openai) async fn await_active<T>(
                 let Some(event) = event else { break None; };
                 match &event.event {
                     ConnectionEvent::Text(payload) => {
-                        let error = match decode_response_interrupt(payload) {
-                            Ok(Some(response_id)) => {
-                                let result = control().as_ref().ok_or(gateway_core::engine::response_control::ResponseInterruptError::Unavailable).and_then(|control| control.interrupt(&response_id));
-                                result.err().map(|_| super::super::RequestDecodeError::InvalidValue { field: "response_id".to_owned() }.protocol_body())
-                            }
-                            Ok(None) => { connection.defer(event); continue; }
-                            Err(error) => Some(error.protocol_body()),
-                        };
-                        if let Some(error) = error
-                            && send_protocol_error(connection, StatusCode::BAD_REQUEST, error, request_id).await == ForwardOutcome::Disconnect
-                        { break None; }
+                        match handle_control(connection, payload, control(), request_id).await {
+                            Some(ForwardOutcome::Disconnect) => break None,
+                            Some(ForwardOutcome::Continue) => {},
+                            None => connection.defer(event),
+                        }
                     }
                     ConnectionEvent::Expired => {},
                     ConnectionEvent::Binary => connection.defer(event),
@@ -499,6 +496,79 @@ pub(in crate::openai) async fn await_active<T>(
         );
     }
     outcome
+}
+
+/// Controls never enter model admission or the queued response.create path.
+pub(super) async fn handle_control(
+    connection: &mut ResponsesWebSocketConnection,
+    payload: &str,
+    control: Option<gateway_core::engine::response_control::ResponseControl>,
+    request_id: &Arc<str>,
+) -> Option<ForwardOutcome> {
+    let decoded = match decode_response_control(payload) {
+        Ok(None) => return None,
+        Ok(Some(frame)) => Ok(frame),
+        Err(error) => Err(error),
+    };
+    let trace = gateway_core::diagnostics::TraceContext::new(request_id);
+    trace.capture("client.control.body", payload.as_bytes());
+    let error = match decoded {
+        Ok(ResponseControlFrame::Steer(frame)) => {
+            use gateway_core::engine::response_control::ResponseSteerError;
+            let code = if !steering_envelope_valid(&frame) {
+                "invalid_input"
+            } else {
+                let response_id = frame["previous_response_id"]
+                    .as_str()
+                    .expect("validated target");
+                match control
+                    .as_ref()
+                    .ok_or(ResponseSteerError::Unavailable)
+                    .and_then(|control| control.steer(response_id, frame.clone()))
+                {
+                    Ok(()) => return Some(ForwardOutcome::Continue),
+                    Err(ResponseSteerError::Unavailable | ResponseSteerError::ResponseMismatch) => {
+                        "response_not_found"
+                    }
+                    Err(ResponseSteerError::Unsupported) => "steering_not_supported",
+                    Err(ResponseSteerError::QueueFull) => "too_many_pending_steers",
+                }
+            };
+            trace.record(
+                "client.control.rejected",
+                serde_json::json!({"type": "response.steer"}),
+            );
+            return Some(
+                if connection
+                    .send_text(
+                        steering_failed_event(&frame, code),
+                        WriteContext::request(request_id, FramePhase::Error),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    ForwardOutcome::Continue
+                } else {
+                    ForwardOutcome::Disconnect
+                },
+            );
+        }
+        Ok(ResponseControlFrame::Interrupt(response_id)) => {
+            let result = control
+                .as_ref()
+                .ok_or(gateway_core::engine::response_control::ResponseInterruptError::Unavailable)
+                .and_then(|control| control.interrupt(&response_id));
+            match result {
+                Ok(()) => return Some(ForwardOutcome::Continue),
+                Err(_) => super::super::RequestDecodeError::InvalidValue {
+                    field: "response_id".to_owned(),
+                }
+                .protocol_body(),
+            }
+        }
+        Err(error) => error.protocol_body(),
+    };
+    Some(send_protocol_error(connection, StatusCode::BAD_REQUEST, error, request_id).await)
 }
 
 pub(in crate::openai) async fn send_gateway_error(

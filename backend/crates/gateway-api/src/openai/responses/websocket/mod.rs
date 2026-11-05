@@ -219,6 +219,14 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
         }
         request_count = request_count.saturating_add(1);
         let correlation_id = Arc::<str>::from(service.next_request_id());
+        if let Some(outcome) =
+            forward::handle_control(&mut connection, &payload, None, &correlation_id).await
+        {
+            if outcome == ForwardOutcome::Disconnect {
+                break;
+            }
+            continue;
+        }
         let decoded = match decode_response_create_with_context(&payload, &request_headers) {
             Ok(decoded) => decoded.with_client_context(client_ip, user_agent.clone()),
             Err(error) => {

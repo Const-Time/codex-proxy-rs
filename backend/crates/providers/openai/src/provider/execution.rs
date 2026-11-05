@@ -284,19 +284,25 @@ pub(super) fn attach_openai_session_update(
     events: &mut [ProviderEvent],
     capture: &mut Option<OpenAiSessionCapture>,
 ) {
-    let Some(terminal_index) = events
-        .iter()
-        .position(|event| terminal_response_output(event).is_some())
-    else {
+    let Some(terminal_index) = events.iter().position(|event| {
+        terminal_response_output(event).is_some()
+            || event
+                .canonical_facts()
+                .iter()
+                .any(|fact| matches!(fact, GatewayEvent::Completed(_)))
+    }) else {
         return;
     };
-    let Some(capture) = capture.take() else {
+    let Some(current) = capture.as_ref() else {
         return;
     };
-    let Ok(update) = encode_openai_session_capture(&capture) else {
+    let Ok(update) = encode_openai_session_capture(current) else {
         return;
     };
     events[terminal_index].attach_session_update(update);
+    if !events[terminal_index].is_response_boundary() {
+        capture.take();
+    }
 }
 
 pub(super) fn terminal_response_output(event: &ProviderEvent) -> Option<&[Value]> {
@@ -763,12 +769,14 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         // WS 帧由 reducer 以 encode_sse_event(&event, raw) 逐字节内嵌上游原始 JSON
         // （transport/protocol/websocket.rs），push_frames 抽出的 data 即上游原文。
         let mut decoder = CodexCanonicalDecoder::new(upstream_model.as_str())
+            .with_response_chains(response_transport == CodexBackendTransport::WebSocket && context.response_control().is_some())
             .with_pricing(context.pricing().get("openai").and_then(|models| models.get(upstream_model.as_str())).cloned())
             .with_reported_model(response.response_metadata.effective_model.as_deref())
             .with_requested_service_tier(request.service_tier())
             .with_request_tool_pricing(upstream_model.as_str(), request.tools())
             .with_raw_sse_passthrough();
         let mut client_events = ClientEventDelivery::new(true);
+        let mut last_boundary_incomplete = false;
         loop {
             if context.deadline().is_elapsed() {
                 if allows_account_state_mutation {
@@ -942,6 +950,9 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 .iter()
                 .flat_map(ProviderEvent::canonical_facts)
                 .any(|event| matches!(event, GatewayEvent::Completed(_)));
+            if events.iter().any(ProviderEvent::is_response_boundary) {
+                last_boundary_incomplete = terminal_response_is_incomplete(&events);
+            }
             let terminal_changed = completed
                 && observation_state.mark_completed(terminal_response_is_incomplete(&events));
             if completed && terminal_failure.is_none()
@@ -1091,15 +1102,15 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             .iter()
             .flat_map(ProviderEvent::canonical_facts)
             .any(|event| matches!(event, GatewayEvent::Completed(_)));
-        let terminal_changed = completed
-            && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+        let incomplete = last_boundary_incomplete || terminal_response_is_incomplete(&events);
+        let terminal_changed = completed && observation_state.mark_completed(incomplete);
         if completed && terminal_failure.is_none()
             && let Some(manager) = &turn_state
             && let Some(token) = observation_state.returned_turn_state()
         {
             manager.observe_response(&active_account, upstream_model.as_str(), token,
                 response_transport != CodexBackendTransport::WebSocket && !request.managed_turn_state
-                    && !terminal_response_is_incomplete(&events), request.turn_state_generation, request.turn_state_binding).await;
+                    && !incomplete, request.turn_state_generation, request.turn_state_binding).await;
         }
         if response_transport == CodexBackendTransport::WebSocket
             && completed && terminal_failure.is_none()

@@ -25,10 +25,15 @@ pub fn decode_response_create_with_context(
     decode_response_create_inner(payload, request_headers)
 }
 
-/// 中断只引用活动响应；普通创建帧仍交给原有解码与串行准入路径。
-pub(super) fn decode_response_interrupt(
+pub(super) enum ResponseControlFrame {
+    Interrupt(String),
+    Steer(Value),
+}
+
+/// 控制消息在活动和空闲状态使用同一分类；普通创建帧保留串行准入。
+pub(super) fn decode_response_control(
     payload: &str,
-) -> Result<Option<String>, ResponseCreateFrameError> {
+) -> Result<Option<ResponseControlFrame>, ResponseCreateFrameError> {
     #[derive(serde::Deserialize)]
     struct FrameType {
         #[serde(rename = "type")]
@@ -39,11 +44,17 @@ pub(super) fn decode_response_interrupt(
     let Ok(frame) = serde_json::from_str::<FrameType>(payload) else {
         return Ok(None);
     };
-    if frame.message_type.as_deref() != Some("response.interrupt") {
+    if !matches!(
+        frame.message_type.as_deref(),
+        Some("response.interrupt" | "response.steer")
+    ) {
         return Ok(None);
     }
     let value: Value =
         serde_json::from_str(payload).map_err(|_| ResponseCreateFrameError::InvalidJson)?;
+    if frame.message_type.as_deref() == Some("response.steer") {
+        return Ok(Some(ResponseControlFrame::Steer(value)));
+    }
     if value.get("mode").and_then(Value::as_str) != Some("discard_partial_items") {
         return Err(ResponseCreateFrameError::Request(
             RequestDecodeError::InvalidValue {
@@ -60,7 +71,49 @@ pub(super) fn decode_response_interrupt(
                 field: "response_id".to_owned(),
             })
         })?;
-    Ok(Some(id.to_owned()))
+    Ok(Some(ResponseControlFrame::Interrupt(id.to_owned())))
+}
+
+pub(super) fn steering_envelope_valid(frame: &Value) -> bool {
+    frame.as_object().is_some_and(|body| {
+        body.keys()
+            .all(|key| matches!(key.as_str(), "type" | "previous_response_id" | "input"))
+            && body
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+            && matches!(
+                body.get("input"),
+                Some(Value::String(_)) | Some(Value::Array(_))
+            )
+            && !matches!(body.get("input"), Some(Value::Array(items)) if items.is_empty())
+    })
+}
+
+/// Return only unaccepted input; accepted failures are forwarded with the upstream steering ID.
+pub(super) fn steering_failed_event(frame: &Value, code: &str) -> String {
+    let message = match code {
+        "invalid_input" => {
+            "Invalid response.steer event. Expected previous_response_id and input, with no additional fields."
+        }
+        "response_not_found" => "The target response is not active on this connection.",
+        "too_many_pending_steers" => "The steering queue is full. The input was not accepted.",
+        _ => {
+            "This response execution does not support steering. The input was not accepted; include it in a subsequent response.create."
+        }
+    };
+    json!({
+        "type": "response.steer.failed",
+        // This is a standalone, unaccepted control submission, not an event
+        // produced by the active upstream response. Preserve upstream sequences.
+        "sequence_number": 0,
+        "steer": {
+            "previous_response_id": frame.get("previous_response_id").cloned().unwrap_or(Value::Null),
+            "input": frame.get("input").cloned().unwrap_or(Value::Null),
+        },
+        "error": {"type": "invalid_request_error", "code": code, "message": message},
+    })
+    .to_string()
 }
 
 fn decode_response_create_inner(

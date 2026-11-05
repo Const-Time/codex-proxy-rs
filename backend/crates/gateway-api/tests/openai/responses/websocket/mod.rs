@@ -1,5 +1,5 @@
 mod connection;
-mod interrupt;
+pub(crate) mod interrupt;
 mod protocol;
 
 use std::sync::{

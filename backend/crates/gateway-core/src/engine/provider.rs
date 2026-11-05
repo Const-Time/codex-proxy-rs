@@ -367,6 +367,9 @@ impl Stream for ProviderStream {
                         }
                     }
                 }
+                if event.is_response_boundary() {
+                    this.validator.response_boundary();
+                }
                 if let Some(feedback) = this.account_feedback.as_mut() {
                     feedback.observe(&event);
                 }

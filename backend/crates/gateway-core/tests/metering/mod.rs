@@ -142,3 +142,36 @@ fn usage_merge_should_only_replace_observed_fields() {
         (Some(10), Some(5))
     );
 }
+
+#[test]
+fn response_costs_sum_exact_prices_and_preserve_unknowns() {
+    let a = CalculatedCost::from_usd_ticks(137).unwrap().into_estimate();
+    let b = CalculatedCost::from_usd_ticks(283).unwrap().into_estimate();
+    assert_eq!(a.add_responses(&b).total().unwrap().amount().scaled(), 420);
+    assert_eq!(
+        a.add_responses(&CostEstimate::unavailable()).status(),
+        CostEstimateStatus::Unknown
+    );
+    assert_eq!(
+        CostEstimate::unavailable().add_responses(&b).status(),
+        CostEstimateStatus::Unknown
+    );
+    let a = Usage {
+        input_tokens: Some(10),
+        output_tokens: Some(5),
+        total_tokens: Some(99),
+        ..Usage::new()
+    };
+    let b = Usage {
+        input_tokens: Some(20),
+        output_tokens: Some(8),
+        total_tokens: Some(77),
+        ..Usage::new()
+    };
+    let sum = a.add_responses(&b);
+    assert_eq!(
+        (sum.input_tokens, sum.output_tokens, sum.total_tokens),
+        (Some(30), Some(13), Some(176))
+    );
+    assert_eq!(sum.cached_tokens, None);
+}

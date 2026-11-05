@@ -21,6 +21,7 @@ struct Output {
     status: u16,
     original_response_id: Option<String>,
     wire_terminal: bool,
+    response_chain: bool,
     finished: bool,
 }
 pub(super) fn decode(
@@ -38,6 +39,7 @@ pub(super) fn decode(
         original_response_id: None,
         raw_error: !(200..300).contains(&status),
         wire_terminal: false,
+        response_chain: false,
         finished: false,
     };
     if protocol != "openai" || !(200..=599).contains(&status) {
@@ -92,6 +94,7 @@ impl Output {
         let mut bytes = 0usize;
         let mut batch = VecDeque::new();
         let mut facts = vec![];
+        let mut response_boundary = false;
         for _ in 0..MAX_FRAMES {
             let Some(frame) = self.body()?.next_frame().await? else {
                 if !self.wire_terminal || !batch.is_empty() {
@@ -109,6 +112,8 @@ impl Output {
             }
             let boundary = envelope.is_some() || !transformed;
             if let Some(envelope) = envelope {
+                response_boundary |= envelope.events().any(ProviderEvent::is_response_boundary);
+                self.response_chain |= response_boundary;
                 if self.websocket {
                     for fact in envelope.events().flat_map(|event| event.canonical_facts()) {
                         if let GatewayEvent::Started(meta) | GatewayEvent::Completed(meta) = fact {
@@ -134,14 +139,25 @@ impl Output {
                     }
                     sse(payload)?
                 };
-                if self.wire_terminal {
+                if self.wire_terminal && !self.response_chain {
                     return Err(MiddlewareError::InvalidState);
                 }
+                if self.response_chain && wire.data()["type"] == "response.created" {
+                    self.wire_terminal = false;
+                }
                 self.wire_terminal |= is_terminal;
-                batch.push_back(ProviderEvent::canonical_with_wire(
-                    std::mem::take(&mut facts),
-                    wire,
-                ));
+                let mut event =
+                    ProviderEvent::canonical_with_wire(std::mem::take(&mut facts), wire);
+                if std::mem::take(&mut response_boundary) {
+                    event = event.with_response_boundary();
+                }
+                batch.push_back(event);
+            } else if boundary {
+                batch.extend(
+                    std::mem::take(&mut facts)
+                        .into_iter()
+                        .map(ProviderEvent::canonical),
+                );
             }
             if terminal {
                 if !self.wire_terminal {

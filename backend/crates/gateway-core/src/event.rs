@@ -785,9 +785,20 @@ pub struct ProviderEvent {
     observation: Option<Box<ProviderResponseObservation>>,
     session_update: Option<Box<ProviderSessionState>>,
     replayable_prelude: bool,
+    response_boundary: bool,
 }
 
 impl ProviderEvent {
+    /// A native response ended, but its owning execution still awaits steering or EOF.
+    #[must_use]
+    pub fn with_response_boundary(mut self) -> Self {
+        self.response_boundary = true;
+        self
+    }
+    #[must_use]
+    pub const fn is_response_boundary(&self) -> bool {
+        self.response_boundary
+    }
     /// Provider proof that the empty prelude can be replaced by a later safe attempt.
     #[must_use]
     pub fn with_replayable_prelude(mut self) -> Self {
@@ -826,6 +837,7 @@ impl ProviderEvent {
             observation: None,
             session_update: None,
             replayable_prelude: false,
+            response_boundary: false,
         }
     }
 
@@ -838,6 +850,7 @@ impl ProviderEvent {
             observation: None,
             session_update: None,
             replayable_prelude: false,
+            response_boundary: false,
         }
     }
 
@@ -850,6 +863,7 @@ impl ProviderEvent {
             observation: None,
             session_update: None,
             replayable_prelude: false,
+            response_boundary: false,
         }
     }
 
@@ -862,6 +876,7 @@ impl ProviderEvent {
             observation: Some(Box::new(observation)),
             session_update: None,
             replayable_prelude: false,
+            response_boundary: false,
         }
     }
 
@@ -966,6 +981,7 @@ pub enum EventSequenceError {
 pub struct EventSequenceValidator {
     started: bool,
     completed: bool,
+    between_responses: bool,
     content: BTreeMap<u32, ContentKind>,
 }
 
@@ -976,6 +992,7 @@ impl EventSequenceValidator {
         Self {
             started: false,
             completed: false,
+            between_responses: false,
             content: BTreeMap::new(),
         }
     }
@@ -989,7 +1006,10 @@ impl EventSequenceValidator {
         if self.completed {
             return Err(EventSequenceError::EventAfterCompleted);
         }
-        if !self.started && !matches!(event, GatewayEvent::Started(_)) {
+        if !self.started
+            && !matches!(event, GatewayEvent::Started(_))
+            && !(self.between_responses && matches!(event, GatewayEvent::Completed(_)))
+        {
             return Err(EventSequenceError::MissingStarted);
         }
 
@@ -999,6 +1019,7 @@ impl EventSequenceValidator {
                     return Err(EventSequenceError::DuplicateStarted);
                 }
                 self.started = true;
+                self.between_responses = false;
             }
             GatewayEvent::ContentAdded(item) => {
                 if self.content.insert(item.index(), item.kind()).is_some() {
@@ -1026,13 +1047,21 @@ impl EventSequenceValidator {
         Ok(())
     }
 
+    /// The response's usage has been observed; the next response owns fresh content indices.
+    pub fn response_boundary(&mut self) {
+        self.started = false;
+        self.completed = false;
+        self.between_responses = true;
+        self.content.clear();
+    }
+
     /// 校验 stream 是否以 `Completed` 正常结束。
     ///
     /// # Errors
     ///
     /// 未开始或未完成时返回错误。
     pub fn finish(&self) -> Result<(), EventSequenceError> {
-        if !self.started {
+        if !self.started && !self.between_responses {
             return Err(EventSequenceError::MissingStarted);
         }
         if !self.completed {

@@ -1022,6 +1022,16 @@ OpenAI Responses 的 `serviceTier` 与本地费用估算统一采用 Provider �
 - Responses WS 支持 `{"type":"response.interrupt","response_id":"当前响应 ID","mode":"discard_partial_items"}`。
   只允许中断当前执行的活动上游 WS 响应；ID 不匹配、模式无效或当前没有可中断响应时返回 400。
   中断不创建新执行、不重放请求；后续 response.create 继续串行，断连仍走正常取消与结算。
+  空闲或响应结束后到达的中断同样按控制消息处理：无活动目标时指向 `response_id`，不误报 `type` 无效。
+- Responses WS 支持向当前活动的原生上游 WS 响应发送 `response.steer`，只使用该响应的原连接。
+  `response.steer.accepted`、`pending`、`failed` 均由上游决定并原样转发；网关入队成功不等于上游接受。
+  接受后持续转发原响应及自动 successor，无需客户端额外发送 `response.create`；各段独立计价后累加，
+  在整次执行结束时统一结算，不能把合并 token 按单次长上下文重新计价。
+  `response.steer.pending` 等待工具结果时结束本次执行，保留原连接与上游待处理输入；客户端提交带工具结果的
+  `response.create` 续接，不重复追加已经接受的输入。断连后不自动重放结果不确定的 steering。
+  无已注册的活动目标或 ID 不匹配返回 `response_not_found`；目标已注册但不支持 steering 时返回 `steering_not_supported`；
+  本地队列满返回 `too_many_pending_steers`。这些 `response.steer.failed` 归还原始输入，不中止当前生成。
+  缺少目标、输入形状错误或多余顶层字段返回同类事件的 `invalid_input`，未知消息类型仍拒绝。
 - OpenAI response.create 达到 15 MiB 时，允许降级的请求在发送前转 HTTP；依赖原 WS 的增量续接在无法安全继续时
   要求客户端携带完整历史重试。上游 1009 按请求过大处理，保留关闭诊断。
 - OpenAI 的空 `response.created` / `response.in_progress` 和响应元数据即时交付；只有这些可替换前导事件时，仍允许 Provider 已证明安全且在原预算内的恢复。正文、推理、工具调用或未知业务事件一旦交付，不再自动重放；插件改写事件也按不可重放处理。

@@ -41,6 +41,7 @@ pub(super) fn reduce_websocket_event(
     raw: &str,
     metadata: &mut CodexWebSocketConnectionMetadata,
     continuation: &mut WebSocketContinuationState,
+    steering: &mut super::steering::SteeringState,
 ) -> Result<ReducedWebSocketEvent, CodexWebSocketExchangeError> {
     // 每帧只解析一次 JSON，后续提取全部复用同一 Value；
     // 不可解析的帧不承载可路由的事件类型，忽略。
@@ -53,6 +54,7 @@ pub(super) fn reduce_websocket_event(
         });
     };
     let diagnostic_event_type = diagnostic_event_type(websocket_event_type(&value));
+    steering.observe(&value);
     if let Some(parsed) = events::parse_rate_limits_event(&value) {
         let headers = events::rate_limits_to_header_pairs(&parsed);
         metadata.rate_limit_headers.extend(headers);
