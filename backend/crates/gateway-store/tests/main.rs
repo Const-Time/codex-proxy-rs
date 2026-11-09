@@ -1,3 +1,5 @@
+use gateway_store::StoreResult;
+
 mod backup;
 mod config;
 mod postgres;

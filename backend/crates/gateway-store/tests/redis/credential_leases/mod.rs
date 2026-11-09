@@ -1,3 +1,4 @@
+mod cleanup;
 use std::time::Duration;
 
 use gateway_store::redis::{

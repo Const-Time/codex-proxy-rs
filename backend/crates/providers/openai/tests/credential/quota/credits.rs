@@ -54,6 +54,7 @@ async fn credits_allow_exhausted_subscription_without_bypassing_spend_restrictio
     ] {
         let store = Arc::new(MemoryAccountStore::default());
         create_account_with_enabled(&store, "acct_credits", false).await;
+        store.set_quota_credits("acct_credits", true);
         let account = store.account("acct_credits").expect("account");
         persist_credential_state(&store, &account, CredentialState::Expired).await;
         let server = MockServer::start().await;
@@ -87,6 +88,7 @@ async fn credits_refresh_clears_old_recovery_and_locks_again_only_when_spent() {
     for periodic in [false, true] {
         let store = Arc::new(MemoryAccountStore::default());
         create_account(&store, "acct_credits_recovery").await;
+        store.set_quota_credits("acct_credits_recovery", true);
         let account = store.account("acct_credits_recovery").expect("account");
         let server = MockServer::start().await;
         let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
@@ -162,6 +164,7 @@ async fn credits_refresh_clears_old_recovery_and_locks_again_only_when_spent() {
 async fn credits_query_started_before_new_exhaustion_cannot_restore_access() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_stale_credits").await;
+    store.set_quota_credits("acct_stale_credits", true);
     let account = store.account("acct_stale_credits").expect("account");
     let server = MockServer::start().await;
     let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
@@ -210,6 +213,40 @@ async fn credits_query_started_before_new_exhaustion_cannot_restore_access() {
             .await
             .expect("persisted quota")
             .expect("snapshot")
+            .quota()
+            .is_exhausted()
+    );
+}
+
+#[tokio::test]
+async fn credits_are_opt_in_and_do_not_override_exhausted_plan_by_default() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_credit_default").await;
+    let server = MockServer::start().await;
+    let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
+    let mut usage = exhausted_usage();
+    usage["credits"] = json!({"has_credits": true, "balance": "100"});
+    mount_usage(&server, usage).await;
+    let id = gateway_core::account::ProviderAccountId::new("acct_credit_default").unwrap();
+    assert!(
+        service
+            .refresh_account(&id)
+            .await
+            .unwrap()
+            .quota()
+            .is_exhausted()
+    );
+    store.set_quota_credits(id.as_str(), true);
+    let quota = service.refresh_account(&id).await.unwrap().quota();
+    assert_eq!(quota.evidence(), Some(QuotaEvidence::CreditsAvailable));
+    assert_eq!(quota.access(), QuotaAccessState::Allowed);
+    assert!(quota.reset_at().is_some());
+    store.set_quota_credits(id.as_str(), false);
+    assert!(
+        service
+            .refresh_account(&id)
+            .await
+            .unwrap()
             .quota()
             .is_exhausted()
     );

@@ -1569,6 +1569,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     let result = store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                auto_use_quota_credits: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_ids: account_ids.clone(),
@@ -1606,6 +1607,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                auto_use_quota_credits: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_ids: account_ids.clone(),
@@ -2315,6 +2317,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
 
     let revision = repository
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
+            auto_use_quota_credits: None,
             model_access: Default::default(),
             outbound_proxy: None,
             account_ids: vec!["acct_admin_a".to_owned()],
@@ -3265,6 +3268,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     .expect("policy");
     let store = admin_account_store(&database.pool);
     let command = BatchUpdateAccounts {
+        auto_use_quota_credits: None,
         account_ids: vec![input.id.clone()],
         enabled: None,
         concurrency_limit: None,
@@ -3313,6 +3317,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                auto_use_quota_credits: None,
                 model_access: Some(AccountModelAccess::all()),
                 ..command
             },
@@ -3330,3 +3335,135 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
 }
 
 mod timestamps;
+
+#[tokio::test]
+async fn scoped_scheduling_reads_only_enabled_matching_provider_accounts() {
+    let Some(db) = TestDatabase::create("scoped_selection").await else {
+        return;
+    };
+    let repo = PgProviderAccountRepository::new(db.pool.clone());
+    for id in ["acct_allowed", "acct_other", "acct_disabled"] {
+        repo.insert_provider_account(account(id, id)).await.unwrap();
+    }
+    repo.set_provider_account_enabled("acct_disabled", false)
+        .await
+        .unwrap();
+    let provider = ProviderKind::new("openai").unwrap();
+    let ids = ["acct_allowed", "acct_disabled", "acct_missing"]
+        .map(|id| ProviderAccountId::new(id).unwrap());
+    let accounts = repo
+        .list_for_provider_accounts(&provider, &ids)
+        .await
+        .unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id().as_str(), "acct_allowed");
+    assert!(
+        repo.list_for_provider_accounts(&provider, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.list_for_provider_accounts(&ProviderKind::new("xai").unwrap(), &ids)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn quota_credit_policy_is_opt_in_and_fences_late_observations() {
+    let Some(db) = TestDatabase::create("credit_policy").await else {
+        return;
+    };
+    let repo = PgProviderAccountRepository::new(db.pool.clone());
+    repo.insert_provider_account(account("acct_credit", "credit"))
+        .await
+        .unwrap();
+    let id = ProviderAccountId::new("acct_credit").unwrap();
+    let initial = repo.get_account(&id).await.unwrap().unwrap();
+    assert!(!initial.auto_use_quota_credits());
+    let admin = admin_account_store(&db.pool);
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "credits".into(),
+    };
+    let mut command = BatchUpdateAccounts {
+        auto_use_quota_credits: Some(true),
+        account_ids: vec![id.to_string()],
+        enabled: None,
+        concurrency_limit: None,
+        weight: None,
+        model_access: None,
+        group_ids: None,
+        outbound_proxy: None,
+    };
+    admin
+        .batch_update_accounts(command.clone(), &context)
+        .await
+        .unwrap();
+    let enabled = repo.get_account(&id).await.unwrap().unwrap();
+    assert!(enabled.auto_use_quota_credits());
+    assert_eq!(enabled.revision(), initial.revision());
+    let now = SystemTime::now();
+    let reset = now + Duration::from_secs(1800);
+    let observation = QuotaObservation {
+        account_id: id.clone(),
+        expected_revision: enabled.revision(),
+        plan_type: None,
+        quota: OpaqueProviderData::new(serde_json::Map::new()),
+        observed_at: now,
+        state: QuotaState::credits_only(now, Some(reset)),
+    };
+    repo.compare_and_swap_quota(observation.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.get_account(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quota()
+            .evidence(),
+        Some(QuotaEvidence::CreditsAvailable)
+    );
+    command.auto_use_quota_credits = Some(false);
+    admin
+        .batch_update_accounts(command.clone(), &context)
+        .await
+        .unwrap();
+    assert!(
+        repo.get_account(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quota()
+            .is_exhausted()
+    );
+    // A query started before the opt-out cannot resurrect paid access.
+    repo.compare_and_swap_quota(QuotaObservation {
+        observed_at: now + Duration::from_secs(1),
+        ..observation
+    })
+    .await
+    .unwrap();
+    let current = repo.get_account(&id).await.unwrap().unwrap();
+    assert!(current.quota().is_exhausted());
+    assert!(current.quota().reset_at().is_some());
+    command.auto_use_quota_credits = Some(true);
+    admin
+        .batch_update_accounts(command, &context)
+        .await
+        .unwrap();
+    assert!(
+        repo.get_account(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quota()
+            .is_exhausted(),
+        "re-enabling requires new upstream evidence"
+    );
+    db.close().await;
+}

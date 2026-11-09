@@ -5,6 +5,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, shallowRef, useTemplate
 
 const props = withDefaults(
   defineProps<{
+    wrapClass?: string
     maxHeight?: string
     height?: string
     horizontal?: boolean
@@ -12,6 +13,7 @@ const props = withDefaults(
     alwaysVisible?: boolean
   }>(),
   {
+    wrapClass: undefined,
     maxHeight: undefined,
     height: undefined,
     horizontal: false,
@@ -82,6 +84,7 @@ const rootClasses = computed(() => [
   props.maxHeight || props.height ? undefined : 'h-full',
 ])
 const wrapClasses = computed(() => [
+  props.wrapClass,
   'min-h-0 max-h-[inherit] overflow-auto outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&::-webkit-scrollbar]:size-0',
   props.maxHeight ? undefined : 'h-full',
 ])

@@ -436,7 +436,10 @@ async fn selector_keeps_unobserved_oauth_available_but_rejects_explicit_model_de
         eligibility[1]["data"]["exclusions"]["model_not_supported"],
         1
     );
-    assert_eq!(eligibility[1]["data"]["exclusions"]["outside_scope"], 1);
+    assert!(
+        eligibility[1]["data"]["exclusions"]["outside_scope"].is_null(),
+        "out-of-scope accounts are excluded by the storage query"
+    );
     assert!(
         !serde_json::to_string(&eligibility)
             .unwrap()

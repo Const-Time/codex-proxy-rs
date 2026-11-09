@@ -7294,7 +7294,7 @@ async fn successful_http_sse_rate_limit_event_persists_structured_exhaustion() {
         .account(account_id)
         .expect("account after HTTP SSE response");
     assert_eq!(account.credential_state(), CredentialState::Ready);
-    assert_eq!(account.quota().access(), QuotaAccessState::Allowed);
+    assert_eq!(account.quota().access(), QuotaAccessState::Exhausted);
     assert!(store.has_quota(account_id));
 }
 

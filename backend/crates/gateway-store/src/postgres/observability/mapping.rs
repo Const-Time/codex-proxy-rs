@@ -344,6 +344,7 @@ pub(crate) fn admin_dashboard_account_model_usage(
     usage: ProviderAccountModelUsageObservation,
 ) -> AdminStoreResult<admin_observability::DashboardAccountModelUsage> {
     Ok(admin_observability::DashboardAccountModelUsage {
+        health_request_count: usage.health_request_count,
         model: usage.model,
         request_count: usage.request_count,
         success_count: usage.success_count,

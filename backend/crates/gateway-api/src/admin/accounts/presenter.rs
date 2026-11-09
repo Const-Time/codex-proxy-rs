@@ -78,6 +78,7 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
     }
     let (quota, refresh_token_expires_at) = account_quota_view(quota, rate_limited_until, now);
     AccountView {
+        auto_use_quota_credits: account.auto_use_quota_credits,
         id: account.id.clone(),
         name: account.name,
         provider: account.provider_kind.to_string(),
@@ -345,14 +346,14 @@ pub(super) fn account_model_usage_view(
         model: usage.model,
         request_count: usage.request_count,
         request_count_display: format_number(usage.request_count),
-        success_rate: (usage.request_count > 0)
-            .then(|| usage.success_count as f64 * 100.0 / usage.request_count as f64),
-        success_rate_display: if usage.request_count == 0 {
+        success_rate: (usage.health_request_count > 0)
+            .then(|| usage.success_count as f64 * 100.0 / usage.health_request_count as f64),
+        success_rate_display: if usage.health_request_count == 0 {
             "—".to_owned()
         } else {
             format!(
                 "{:.1}%",
-                usage.success_count as f64 * 100.0 / usage.request_count as f64
+                usage.success_count as f64 * 100.0 / usage.health_request_count as f64
             )
         },
         input_tokens: usage.input_tokens,
@@ -390,8 +391,10 @@ pub(super) fn account_model_usage_view(
         partial_cost_count: u64::from(cost_estimate_status == "partial"),
         unknown_cost_count: usage.cost_coverage.unavailable_count,
         costs: usage.costs.iter().map(account_currency_cost_view).collect(),
-        last_used_at: china_rfc3339(&usage.last_used_at),
-        last_used_at_display: relative_time(usage.last_used_at, now),
+        last_used_at: usage.last_used_at.as_ref().map(china_rfc3339),
+        last_used_at_display: usage
+            .last_used_at
+            .map_or_else(|| "—".to_owned(), |at| relative_time(at, now)),
     }
 }
 

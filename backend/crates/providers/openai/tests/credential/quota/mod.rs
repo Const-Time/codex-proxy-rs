@@ -132,7 +132,7 @@ fn exhausted_quota(reset_at: Option<SystemTime>) -> QuotaState {
 }
 
 #[tokio::test]
-async fn successful_inference_headers_are_authoritative_even_at_full_display_usage() {
+async fn successful_inference_preserves_exhaustion_for_the_next_request_without_credit_opt_in() {
     let store = Arc::new(MemoryAccountStore::default());
     let account_id = "acct_passive_allowed";
     create_account(&store, account_id).await;
@@ -159,11 +159,11 @@ async fn successful_inference_headers_are_authoritative_even_at_full_display_usa
         .expect("quota snapshot");
 
     assert_eq!(snapshot.fact().remaining_percent(), Some(0));
-    assert_eq!(snapshot.quota().access(), QuotaAccessState::Allowed);
-    assert_eq!(current.quota().access(), QuotaAccessState::Allowed);
+    assert_eq!(snapshot.quota().access(), QuotaAccessState::Exhausted);
+    assert_eq!(current.quota().access(), QuotaAccessState::Exhausted);
     assert_eq!(
         current.status_projection(SystemTime::now(), None).status,
-        AccountStatus::Normal
+        AccountStatus::QuotaExhausted
     );
 }
 

@@ -236,7 +236,7 @@ impl Environment {
                 tasks.spawn(async move { task.run(cancellation).await.unwrap() });
             }
         }
-        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks.len(), 4);
         self.store_writers = Some(StoreWriters {
             cancellation,
             tasks,

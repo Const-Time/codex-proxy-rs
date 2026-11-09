@@ -288,6 +288,16 @@ impl FrozenAccountScope {
                 .is_some_and(|account| account.model_access.allows(upstream_model))
     }
 
+    #[must_use]
+    pub fn account_ids(&self, provider: &ProviderKind) -> Vec<ProviderAccountId> {
+        self.directory
+            .accounts
+            .iter()
+            .filter(|(id, account)| account.provider_kind() == provider && self.allows(id))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// 目录按整个授权账号池过滤，不能只看用于获取元数据的账号政策。
     #[must_use]
     pub fn allows_provider_model(&self, provider: &ProviderKind, upstream_model: &str) -> bool {

@@ -12,13 +12,19 @@ use std::{
 };
 
 pub(crate) struct Registry {
+    proxies: Option<Arc<dyn gateway_admin::ports::proxy::PluginProxyAccess>>,
     client: SharedClient,
     cancellation: CancellationToken,
     scopes: Mutex<BTreeMap<String, (CallContext, Arc<HttpScope>)>>,
 }
 impl Registry {
-    pub(crate) fn new(client: SharedClient, cancellation: CancellationToken) -> Arc<Self> {
+    pub(crate) fn new(
+        client: SharedClient,
+        cancellation: CancellationToken,
+        proxies: Option<Arc<dyn gateway_admin::ports::proxy::PluginProxyAccess>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            proxies,
             client,
             cancellation,
             scopes: Mutex::default(),
@@ -150,6 +156,7 @@ impl Registry {
                 expected == context
             })
             .map(|(_, scope)| scope.clone());
+        let proxies = self.proxies.clone();
         let client = self.client.clone();
         let cancellation = self.cancellation.clone();
         Box::pin(async move {
@@ -166,7 +173,7 @@ impl Registry {
                 ()=cancellation.cancelled()=>Err(scope.fault(ErrorCode::Cancelled, "plugin access ended")),
                 ()=scope.closed.cancelled()=>Err(scope.fault(ErrorCode::Cancelled, "network callback scope ended")),
                 ()=scope.cancellation.cancelled()=>Err(scope.fault(ErrorCode::Cancelled, "network invocation cancelled")),
-                result=scope.dispatch(client, &method, params, payload)=>result,
+                result=super::proxies::dispatch(&scope, client, proxies.as_deref(), &method, params, payload)=>result,
             }
         })
     }

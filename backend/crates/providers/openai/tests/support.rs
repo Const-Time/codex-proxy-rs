@@ -124,6 +124,13 @@ impl MemoryAccountStore {
         .expect("seed API account");
     }
 
+    pub(crate) fn set_quota_credits(&self, id: &str, enabled: bool) {
+        let id = ProviderAccountId::new(id).unwrap();
+        let mut accounts = self.accounts.lock().unwrap();
+        let stored = accounts.get_mut(&id).unwrap();
+        stored.account = stored.account.clone().with_auto_use_quota_credits(enabled);
+    }
+
     pub(crate) fn account(&self, id: &str) -> Option<ProviderAccount> {
         let id = ProviderAccountId::new(id).ok()?;
         self.accounts
@@ -251,6 +258,19 @@ impl ProviderAccountStore for MemoryAccountStore {
             .values()
             .filter(|stored| stored.account.provider() == provider && stored.account.enabled())
             .map(|stored| stored.account.clone())
+            .collect())
+    }
+
+    async fn list_for_provider_accounts(
+        &self,
+        provider: &ProviderKind,
+        ids: &[ProviderAccountId],
+    ) -> Result<Vec<ProviderAccount>, StoreError> {
+        Ok(self
+            .list_for_provider(provider)
+            .await?
+            .into_iter()
+            .filter(|account| ids.contains(account.id()))
             .collect())
     }
 
@@ -638,6 +658,7 @@ fn rebuild_account(current: &ProviderAccount, rebuild: AccountRebuild) -> Provid
         rebuild.last_error_reason,
         rebuild.last_error_message,
     )
+    .with_auto_use_quota_credits(current.auto_use_quota_credits())
     .with_scheduling(current.concurrency_limit(), current.weight())
     .with_refresh_schedule(rebuild.has_refresh_token, rebuild.next_refresh_at)
 }
@@ -1104,6 +1125,20 @@ impl ProviderCooldownPort for MemoryCooldownPort {
                 .expect("cooldown lock")
                 .get(account_id)
                 .cloned())
+        })
+    }
+
+    fn read_many<'a>(
+        &'a self,
+        accounts: &'a [ProviderAccountId],
+    ) -> futures::future::BoxFuture<'a, Vec<Result<Option<ProviderCooldown>, ProviderStoreError>>>
+    {
+        Box::pin(async move {
+            let mut results = Vec::new();
+            for account in accounts {
+                results.push(self.read(account).await);
+            }
+            results
         })
     }
 

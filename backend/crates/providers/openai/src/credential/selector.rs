@@ -397,7 +397,21 @@ impl CodexCredentialSelector {
         model_catalog_eligibility: ModelCatalogEligibility<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let diagnostic = request.attempt.is_diagnostic_required_account();
-        let mut accounts = self.repository.list_for_provider().await?;
+        let mut accounts = if let Some(required) = request.attempt.required_account() {
+            self.repository
+                .store()
+                .get_account(required)
+                .await
+                .map_err(|_| CredentialSelectionError::Store)?
+                .into_iter()
+                .collect()
+        } else if let Some(scope) = request.attempt.account_scope() {
+            self.repository
+                .list_for_accounts(&scope.account_ids(&self.provider_kind))
+                .await?
+        } else {
+            Vec::new()
+        };
         // 正常调度列表不含停用账号；仅管理端固定账号诊断允许补回。
         if diagnostic
             && let Some(required) = request.attempt.required_account()
@@ -483,17 +497,11 @@ impl CodexCredentialSelector {
         if !diagnostic {
             self.quota.prepare_scheduling(&accounts).await;
         }
-        let mut rate_limits = HashMap::with_capacity(accounts.len());
-        if !diagnostic {
-            for account in &accounts {
-                let until = self
-                    .quota
-                    .rate_limited_until(account.id())
-                    .await
-                    .unwrap_or(None);
-                rate_limits.insert(account.id().clone(), until);
-            }
-        }
+        let rate_limits = if diagnostic {
+            Default::default()
+        } else {
+            self.quota.rate_limits(&accounts).await
+        };
         let account_ids = accounts
             .iter()
             .map(|account| account.id().clone())

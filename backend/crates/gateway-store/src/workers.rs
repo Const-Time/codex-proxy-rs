@@ -85,6 +85,25 @@ pub(crate) fn store_worker_contributions(
     ])
 }
 
+pub(crate) fn lease_cleanup_worker(
+    task: impl gateway_core::task::DaemonTask + 'static,
+) -> StoreResult<WorkerContribution> {
+    let id = WorkerId::try_new(WorkerKind::OpsFlush, "redis_account_leases")
+        .map_err(worker_definition_error)?;
+    let restart = DaemonRestartPolicy::try_new(Duration::from_secs(1), Duration::from_secs(60))
+        .map_err(worker_definition_error)?;
+    Ok(WorkerContribution::Registration(
+        WorkerRegistration::try_new(
+            id,
+            WorkerRunnable::Daemon {
+                restart,
+                task: Box::new(task),
+            },
+        )
+        .map_err(worker_definition_error)?,
+    ))
+}
+
 pub(crate) fn scheduled_worker(
     id: WorkerId,
     interval: Duration,

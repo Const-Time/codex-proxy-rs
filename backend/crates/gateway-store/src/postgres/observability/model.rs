@@ -418,6 +418,7 @@ pub struct ProviderAccountModelUsageObservation {
     pub model: String,
     pub request_count: u64,
     pub success_count: u64,
+    pub health_request_count: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,
@@ -430,7 +431,7 @@ pub struct ProviderAccountModelUsageObservation {
     pub total_tokens: Option<u64>,
     pub cost_coverage: CostCoverage,
     pub costs: Vec<CurrencyCostTotal>,
-    pub last_used_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

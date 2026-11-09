@@ -400,6 +400,84 @@ impl ProviderCooldownPort for RedisCredentialCooldownRepository {
         })
     }
 
+    fn read_many<'a>(
+        &'a self,
+        accounts: &'a [ProviderAccountId],
+    ) -> futures::future::BoxFuture<'a, Vec<Result<Option<ProviderCooldown>, ProviderStoreError>>>
+    {
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(accounts.len());
+            for batch in accounts.chunks(128) {
+                let mut pipeline = redis::pipe();
+                pipeline.ignore_errors();
+                for account in batch {
+                    let key = match self.key(account.as_str()) {
+                        Ok(key) => key,
+                        Err(_) => {
+                            return accounts
+                                .iter()
+                                .map(|_| Err(provider_invalid("encode cooldown account")))
+                                .collect();
+                        }
+                    };
+                    pipeline
+                        .cmd("EVAL")
+                        .arg(READ_SCRIPT)
+                        .arg(2)
+                        .arg(key)
+                        .arg(self.active_index_key())
+                        .arg(account.as_str());
+                }
+                let mut connection = self.connection.clone();
+                match pipeline
+                    .query_async::<Vec<redis::RedisResult<redis::Value>>>(&mut connection)
+                    .await
+                {
+                    Ok(values) => {
+                        let mut values = values.into_iter();
+                        for account in batch {
+                            let result = (|| {
+                                let value = values
+                                    .next()
+                                    .ok_or_else(|| provider_invalid("missing cooldown response"))?
+                                    .map_err(|_| provider_unavailable("read cooldown batch"))?;
+                                let (present, revision, until): (i64, String, String) =
+                                    redis::from_redis_value(value)
+                                        .map_err(|_| provider_invalid("decode cooldown batch"))?;
+                                if present == 0 {
+                                    return Ok(None);
+                                }
+                                let revision =
+                                    CredentialRevision::new(revision.parse().map_err(|_| {
+                                        provider_invalid("decode cooldown revision")
+                                    })?)
+                                    .map_err(|_| provider_invalid("decode cooldown revision"))?;
+                                let until = DateTime::from_timestamp_millis(
+                                    until
+                                        .parse()
+                                        .map_err(|_| provider_invalid("decode cooldown expiry"))?,
+                                )
+                                .ok_or_else(|| provider_invalid("decode cooldown expiry"))?;
+                                Ok(Some(ProviderCooldown::new(
+                                    account.clone(),
+                                    revision,
+                                    until.into(),
+                                )))
+                            })();
+                            results.push(result);
+                        }
+                    }
+                    Err(_) => results.extend(
+                        batch
+                            .iter()
+                            .map(|_| Err(provider_unavailable("read cooldown batch"))),
+                    ),
+                }
+            }
+            results
+        })
+    }
+
     fn clear<'a>(
         &'a self,
         account_id: &'a ProviderAccountId,

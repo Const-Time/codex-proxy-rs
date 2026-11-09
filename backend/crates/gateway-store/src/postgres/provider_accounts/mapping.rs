@@ -6,6 +6,7 @@ pub(crate) fn admin_account_record(
     summary: ProviderAccountSummary,
 ) -> AdminStoreResult<AccountRecord> {
     Ok(AccountRecord {
+        auto_use_quota_credits: summary.auto_use_quota_credits,
         outbound_proxy: summary.outbound_proxy,
         id: summary.id,
         provider_kind: ProviderKind::new(summary.provider_kind).map_err(|_| {
@@ -160,6 +161,7 @@ pub(crate) fn admin_account_usage_window_model(
     Ok((
         (account_id, window_key, model.clone()),
         AccountModelUsage {
+            health_request_count: window_usage_count(row, "health_request_count")?,
             model,
             request_count: window_usage_count(row, "request_count")?,
             success_count: window_usage_count(row, "success_count")?,
@@ -287,6 +289,7 @@ pub(crate) fn admin_account_model_usage(
     usage: ProviderAccountModelUsageObservation,
 ) -> AdminStoreResult<AccountModelUsage> {
     Ok(AccountModelUsage {
+        health_request_count: usage.health_request_count,
         model: usage.model,
         request_count: usage.request_count,
         success_count: usage.success_count,

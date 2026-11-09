@@ -908,6 +908,7 @@ impl CodexCredentialQuotaService {
         };
         let state = reconcile_refresh(
             account.quota(),
+            account.auto_use_quota_credits(),
             &mut snapshot,
             previous.as_ref(),
             &mut object,
@@ -991,26 +992,11 @@ impl CodexCredentialQuotaService {
             })
             .next();
         let plan_type = observed_account_plan(account.plan_type(), observed_plan);
-        // 套餐、credits 等元数据可以更新，但没有额度窗口事实时必须保留旧观察时刻，
-        // 也不能借旧快照重新推导 quota state。
-        if !has_quota_facts {
-            let Some(state) = existing_state else {
-                return Ok(false);
-            };
-            let outcome = self
-                .store
-                .compare_and_swap_quota(QuotaObservation {
-                    plan_type,
-                    account_id: account.id().clone(),
-                    expected_revision: account.revision(),
-                    quota: OpaqueProviderData::new(merge_passive_quota(existing, rate_limits)),
-                    observed_at: SystemTime::now(),
-                    state,
-                })
-                .await?;
-            return Ok(outcome != QuotaWriteOutcome::Conflict);
+        if !has_quota_facts && existing_state.is_none() {
+            return Ok(false);
         }
-        let quota = merge_passive_quota(existing, rate_limits);
+        let prior = existing_state.unwrap_or_else(|| account.quota());
+        let (quota, updated_default) = merge_passive_quota(existing, rate_limits);
         let observed_at = SystemTime::now();
         let snapshot = parse_account_quota_snapshot(
             account.id().clone(),
@@ -1018,8 +1004,33 @@ impl CodexCredentialQuotaService {
             observed_at,
             &Value::Object(quota.clone()),
         )?;
-        // 这些 headers 来自一次成功推理，访问结论优先于可能滞后的百分比。
-        let state = QuotaState::allowed(observed_at);
+        let credit_access = prior.evidence() == Some(QuotaEvidence::CreditsAvailable);
+        let fresh_credits = rate_limits.iter().any(|limits| limits.credits.is_some());
+        // 具名桶和元数据不改变套餐结论；点数不能再用时，仍须撤销原先仅凭点数的放行
+        let subscription = if !updated_default
+            || (snapshot.quota().access() == QuotaAccessState::Unknown
+                && (credit_access || prior.is_exhausted()))
+        {
+            if credit_access {
+                QuotaState::exhausted(
+                    QuotaEvidence::AccountLimitReached,
+                    observed_at,
+                    prior.reset_at(),
+                )
+            } else {
+                prior
+            }
+        } else if snapshot.quota().is_exhausted() {
+            snapshot.quota()
+        } else {
+            QuotaState::allowed(observed_at)
+        };
+        // 套餐刚耗尽时不能拿合并快照里的旧余额作为首次放行依据
+        let state = snapshot.access_with_credits(
+            subscription,
+            account.auto_use_quota_credits()
+                && (credit_access || (updated_default && fresh_credits)),
+        );
         let outcome = self
             .store
             .compare_and_swap_quota(QuotaObservation {
@@ -1034,7 +1045,9 @@ impl CodexCredentialQuotaService {
         if outcome == QuotaWriteOutcome::Conflict {
             return Ok(false);
         }
-        self.scheduling.observe(&snapshot);
+        if has_quota_facts {
+            self.scheduling.observe(&snapshot);
+        }
         Ok(true)
     }
 
@@ -1062,6 +1075,33 @@ impl CodexCredentialQuotaService {
                 detail: error.to_string(),
             })?;
         Ok(())
+    }
+
+    pub(crate) async fn rate_limits(
+        &self,
+        accounts: &[ProviderAccount],
+    ) -> BTreeMap<ProviderAccountId, Option<SystemTime>> {
+        let ids = accounts
+            .iter()
+            .map(|account| account.id().clone())
+            .collect::<Vec<_>>();
+        let now = SystemTime::now();
+        ids.iter()
+            .cloned()
+            .zip(
+                self.cooldowns
+                    .read_many(&ids)
+                    .await
+                    .into_iter()
+                    .map(|result| {
+                        result
+                            .ok()
+                            .flatten()
+                            .filter(|cooldown| cooldown.until() > now)
+                            .map(|cooldown| cooldown.until())
+                    }),
+            )
+            .collect()
     }
 
     /// 读取账号当前是否处于临时限流（429）冷却，及到期时间。
@@ -1225,8 +1265,8 @@ impl CodexCredentialQuotaService {
         } else {
             None
         };
-        let observe_access =
-            matches!(authority, QuotaRefreshAuthority::ObserveAccess) || snapshot.credits_usable();
+        let observe_access = matches!(authority, QuotaRefreshAuthority::ObserveAccess)
+            || (account.auto_use_quota_credits() && snapshot.credits_usable());
         if account.quota().is_exhausted() && !observe_access {
             if self
                 .store
@@ -1254,6 +1294,7 @@ impl CodexCredentialQuotaService {
         let state = if observe_access {
             reconcile_refresh(
                 account.quota(),
+                account.auto_use_quota_credits(),
                 &mut snapshot,
                 previous.as_ref(),
                 &mut object,
@@ -1541,7 +1582,8 @@ fn access_token_is_current(account: &ProviderAccount, now: SystemTime) -> bool {
 fn merge_passive_quota(
     mut quota: Map<String, Value>,
     observations: &[ParsedRateLimits],
-) -> Map<String, Value> {
+) -> (Map<String, Value>, bool) {
+    let mut updated_default = false;
     let mut snapshots = RateLimitSnapshotsByLimitId::take_from_document(&mut quota);
     for rate_limits in observations {
         let default_is_named_alias = default_limit_is_named_alias(rate_limits);
@@ -1558,6 +1600,7 @@ fn merge_passive_quota(
             let Some(rate_limit) = passive_rate_limit_snapshot(details) else {
                 continue;
             };
+            updated_default |= limit_id == DEFAULT_CODEX_LIMIT_ID;
             snapshots.upsert(&limit_id, details, rate_limit);
             resolved_limit_ids.insert(wire_limit_id.as_str(), limit_id);
         }
@@ -1578,7 +1621,7 @@ fn merge_passive_quota(
         merge_passive_metadata(&mut quota, rate_limits);
     }
     snapshots.write_to_document(&mut quota);
-    quota
+    (quota, updated_default)
 }
 
 fn merge_passive_metadata(quota: &mut Map<String, Value>, rate_limits: &ParsedRateLimits) {

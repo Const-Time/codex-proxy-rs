@@ -6,6 +6,7 @@ on:
       - main
     paths-ignore:
       - 'release/version.yaml'
+      - 'release/channels.json'
   pull_request:
     branches:
       - main

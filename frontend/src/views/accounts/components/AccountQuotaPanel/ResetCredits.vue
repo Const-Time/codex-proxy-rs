@@ -151,7 +151,7 @@ function handleRequestConsume(creditId: string) {
     <div v-else class="grid gap-4">
       <ResetCreditAutomation :key="account.id" :account-id="account.id" />
       <UsageLimits :windows="account.quota.windows" />
-      <AccountQuotaCredits :credits="account.quota.credits" />
+      <AccountQuotaCredits :account="account" @account-updated="emit('accountUpdated', $event)" />
 
       <section v-if="ambiguous" class="flex items-start gap-3 rounded-cp bg-cp-warning-container px-4 py-3.5" role="status">
         <AlertTriangle class="mt-0.5 size-4 shrink-0 text-cp-warning-on-container" />

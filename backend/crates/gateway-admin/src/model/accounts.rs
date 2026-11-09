@@ -83,6 +83,7 @@ pub enum AccountGroupFilter {
 /// 账号公共存储投影；Provider 专属字段不进入此结构。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
+    pub auto_use_quota_credits: bool,
     pub id: String,
     pub provider_kind: ProviderKind,
     pub groups: Vec<AccountGroupRef>,
@@ -124,6 +125,7 @@ pub struct AccountModelUsage {
     pub model: String,
     pub request_count: u64,
     pub success_count: u64,
+    pub health_request_count: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,
@@ -136,7 +138,7 @@ pub struct AccountModelUsage {
     pub total_tokens: Option<u64>,
     pub cost_coverage: super::observability::CostCoverage,
     pub costs: Vec<AccountCost>,
-    pub last_used_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 /// 账号在一个小时窗口内的请求数。
@@ -238,6 +240,7 @@ pub struct AccountUpdateResult {
 /// 仅修改显式字段的批量账号设置命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchUpdateAccounts {
+    pub auto_use_quota_credits: Option<bool>,
     pub account_ids: Vec<String>,
     pub enabled: Option<bool>,
     pub concurrency_limit: Option<Option<AccountConcurrencyLimit>>,

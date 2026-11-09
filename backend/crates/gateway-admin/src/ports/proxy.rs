@@ -3,13 +3,20 @@ use gateway_core::account::{OutboundProxy, ProviderAccountId};
 
 use super::store::AdminStoreResult;
 use crate::model::{
-    MutationContext, Revision,
+    AdminError, MutationContext, Revision,
     proxies::{
         ImportProxyBinding, NewProxy, ProxyAccountListQuery, ProxyAccountPage, ProxyListQuery,
         ProxyMutation, ProxyPage, ProxyQualityCheck, ProxyQualityReport, ProxyRecord,
         ProxyTestResult, UpdateProxy,
     },
 };
+
+/// 插件受管网络读取代理的窄端口，连接配置仅供宿主发送请求
+#[async_trait]
+pub trait PluginProxyAccess: Send + Sync {
+    async fn list(&self, query: ProxyListQuery) -> Result<ProxyPage, AdminError>;
+    async fn resolve(&self, id: &str) -> Result<OutboundProxy, AdminError>;
+}
 
 #[async_trait]
 pub trait ProxyStore: Send + Sync {

@@ -126,7 +126,7 @@ fn encoder_should_remove_unsupported_fields_from_upstream_body() {
         json!({
             "model": "gpt-test",
             "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],
-            "max_tokens": 256,
+            "max_output_tokens": 512,
             "store": false,
         })
     );
@@ -727,4 +727,46 @@ fn codex_body_adaptation_is_narrow_and_preserves_history() {
     assert_eq!(encoded.body()["future"]["role"], "system");
     assert_eq!(encoded.body()["prompt_cache_key"], "keep");
     assert!(!encoded.body().contains_key("prompt_cache_retention"));
+}
+
+#[test]
+fn oauth_options_preserve_effective_settings_and_nested_business_fields() {
+    let input = json!({
+        "input": [{"type":"message","role":"user","content":[],"metadata":{"user":"nested"}}],
+        "top_p":1,"frequency_penalty":0,"presence_penalty":0,"chat_template_kwargs":{},
+        "user":"top","metadata":{"trace":"x"},"safety_identifier":"id",
+        "stream_options":{"include_usage":true,"include_obfuscation":false},
+        "truncation":"disabled","stop_sequences":[],"prompt_cache_options":{},
+        "max_tokens":10,"max_completion_tokens":20
+    });
+    let encoded =
+        encode_generate_request(&request(input.as_object().unwrap().clone()), "test").unwrap();
+    let body = Value::Object(encoded.body().clone());
+    for key in [
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "chat_template_kwargs",
+        "user",
+        "metadata",
+        "safety_identifier",
+        "truncation",
+        "stop_sequences",
+        "prompt_cache_options",
+        "max_tokens",
+        "max_completion_tokens",
+    ] {
+        assert!(body.get(key).is_none(), "{key}");
+    }
+    assert_eq!(body["max_output_tokens"], 20);
+    assert_eq!(body["input"][0]["metadata"]["user"], "nested");
+    assert_eq!(body["stream_options"], json!({"include_obfuscation":false}));
+    let input = json!({"truncation":"auto","stop_sequences":["stop"],"prompt_cache_options":{"mode":"custom"},"max_output_tokens":99,"max_tokens":10});
+    let encoded =
+        encode_generate_request(&request(input.as_object().unwrap().clone()), "test").unwrap();
+    let body = Value::Object(encoded.body().clone());
+    assert_eq!(body["max_output_tokens"], 99);
+    assert_eq!(body["truncation"], "auto");
+    assert_eq!(body["stop_sequences"], json!(["stop"]));
+    assert_eq!(body["prompt_cache_options"], json!({"mode":"custom"}));
 }

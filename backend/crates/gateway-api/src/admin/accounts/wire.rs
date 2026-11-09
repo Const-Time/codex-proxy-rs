@@ -61,6 +61,7 @@ pub struct ListQuery {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BatchUpdateAccountsRequest {
+    pub auto_use_quota_credits: Option<bool>,
     pub outbound_proxy_id: Option<String>,
     pub outbound_proxy_url: Option<AccountProxyUpdate>,
     pub account_ids: Vec<String>,
@@ -117,7 +118,8 @@ impl BatchUpdateAccountsRequest {
             .map(parse_concurrency_limit)
             .transpose()?;
         self.weight.map(parse_account_weight).transpose()?;
-        if self.enabled.is_none()
+        if self.auto_use_quota_credits.is_none()
+            && self.enabled.is_none()
             && self.concurrency_limit.is_none()
             && self.weight.is_none()
             && self.group_ids.is_none()
@@ -133,6 +135,7 @@ impl BatchUpdateAccountsRequest {
     pub(super) fn into_command(self) -> Result<BatchUpdateAccounts, WireValidationError> {
         self.validate()?;
         Ok(BatchUpdateAccounts {
+            auto_use_quota_credits: self.auto_use_quota_credits,
             outbound_proxy: proxy_selection(self.outbound_proxy_id, self.outbound_proxy_url)?,
             account_ids: self.account_ids,
             enabled: self.enabled,
@@ -266,6 +269,7 @@ pub struct AccountSummaryView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountView {
+    pub auto_use_quota_credits: bool,
     pub outbound_proxy_endpoint: Option<String>,
     pub id: String,
     pub name: String,
@@ -457,7 +461,7 @@ pub struct ModelUsageView {
     pub partial_cost_count: u64,
     pub unknown_cost_count: u64,
     pub costs: Vec<CurrencyCostView>,
-    pub last_used_at: String,
+    pub last_used_at: Option<String>,
     pub last_used_at_display: String,
 }
 

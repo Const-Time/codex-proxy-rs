@@ -588,3 +588,7 @@ SDK v2 将既有字段放在 `base` 成员，JSON 中仍为同层字段。管理
 `local_settings_v3::{Load, Replace}` 对应 `local.settings.v3.load/replace`，增加 `max_retry_after_seconds`。
 其余字段放在类型的 `base`（序列化时扁平化），默认上限 240 秒，更新省略该字段保留当前配置。
 v1/v2 操作名与字段保持原合同；本次无需升级模型体检插件的 RPC 协议或重新安装其配置。
+
+### 按保存的代理发送 HTTP 请求
+
+`HostClient::list_proxies(ProxyListRequest)` 分页返回代理 ID、名称和可用标记，不返回地址或凭据。`HostClient::proxy_http(ProxyHttpRequest, body)` 按代理 ID 读取当前连接配置，返回与普通受管 HTTP 相同的流式正文句柄。请求不需要绑定账号，也不会自动注入账号认证；代理查询或连接失败时不会回退直连。父调用结束、取消或超时后，正文句柄同时回收。

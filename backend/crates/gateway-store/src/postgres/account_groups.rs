@@ -428,7 +428,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
                     account.upstream_user_id, account.upstream_account_id, account.plan_type,
                     account.authentication_kind, account.credential_revision, outbound_proxy_request_context(account.outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = account.outbound_proxy_id), 0) as proxy_ws_capacity, account.outbound_proxy_url,
                     account.has_refresh_token, account.access_token_expires_at,
-                    account.next_refresh_at, account.enabled, account.concurrency_limit,
+                    account.next_refresh_at, account.enabled, account.auto_use_quota_credits, account.concurrency_limit,
                     account.weight, account.model_access_json, account.credential_state, account.quota_access_state,
                     account.quota_evidence, account.quota_access_observed_at,
                     account.quota_reset_at, account.last_error_reason,

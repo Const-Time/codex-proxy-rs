@@ -682,6 +682,33 @@ mod worker_outbound {
         let body = input["body"]
             .as_str()
             .map_or_else(|| vec![0, 255, 1, 0], |s| s.as_bytes().to_vec());
+        if mode == "proxies" {
+            return Ok(serde_json::to_value(
+                host.list_proxies(gateway_plugin_sdk::call::host::ProxyListRequest {
+                    page: 1,
+                    page_size: 20,
+                    search: String::new(),
+                })
+                .await?,
+            )
+            .unwrap());
+        }
+        if mode == "proxy" {
+            let mut response = host
+                .proxy_http(
+                    gateway_plugin_sdk::call::host::ProxyHttpRequest {
+                        proxy_id: input["proxy_id"].as_str().unwrap().into(),
+                        request,
+                    },
+                    body,
+                )
+                .await?;
+            let mut bytes = vec![];
+            while let Some(chunk) = response.body.read().await? {
+                bytes.extend(chunk);
+            }
+            return Ok(json!({"status": response.status, "bytes": bytes}));
+        }
         if mode == "raw" {
             return match host
                 .call(

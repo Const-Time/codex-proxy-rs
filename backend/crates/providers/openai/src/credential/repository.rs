@@ -132,6 +132,18 @@ impl CodexCredentialRepository {
             .map_err(Into::into)
     }
 
+    pub(crate) async fn list_for_accounts(
+        &self,
+        ids: &[gateway_core::account::ProviderAccountId],
+    ) -> Result<Vec<ProviderAccount>, CredentialRepositoryError> {
+        let provider = ProviderKind::new(PROVIDER_NAME)
+            .map_err(|_| CredentialRepositoryError::InvalidCredentialData)?;
+        self.store
+            .list_for_provider_accounts(&provider, ids)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn list_refresh_candidates(
         &self,
         query: ProviderRefreshQuery,

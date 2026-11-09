@@ -152,6 +152,7 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    plugin_proxies: Arc<dyn ports::proxy::PluginProxyAccess>,
     plugin_credentials: Arc<dyn ports::plugins::PluginCredentialService>,
     plugin_quota: Arc<dyn ports::plugins::PluginQuotaService>,
     plugin_resources: Arc<dyn ports::plugins::PluginResourceService>,
@@ -173,6 +174,9 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    pub fn plugin_proxies(&self) -> Arc<dyn ports::proxy::PluginProxyAccess> {
+        self.plugin_proxies.clone()
+    }
     pub fn plugin_credentials(&self) -> Arc<dyn ports::plugins::PluginCredentialService> {
         self.plugin_credentials.clone()
     }
@@ -390,6 +394,9 @@ pub async fn initialize(
         )),
         plugins: None,
         turn_state: None,
+        plugin_proxies: Arc::new(use_case::proxies::DefaultPluginProxyAccess {
+            store: store.proxies(),
+        }),
         proxies: Arc::new(use_case::proxies::DefaultProxiesService::new(
             store.proxies(),
             proxy_probe,

@@ -27,13 +27,13 @@ pub(crate) fn account_usage_by_windows_sql() -> String {
                 mr.cache_write_tokens, mr.reasoning_tokens,
                 mr.image_input_tokens, mr.image_output_tokens,
                 mr.image_generation_succeeded, mr.total_tokens,
-                mr.cost_source, mr.cost_amount, mr.billed_cost_amount, mr.cost_currency, mr.started_at
+                mr.cost_source, mr.cost_amount, mr.billed_cost_amount, case when ({completed_usage}) then mr.cost_currency end as cost_currency, mr.started_at, mr.client_status_code, ({completed_usage}) as is_completed_usage
            from requested_windows requested
            left join model_requests mr
              on mr.provider_account_ref = requested.account_id
             and mr.started_at >= requested.window_start
             and mr.started_at < requested.window_end
-            and {completed_usage}
+            and mr.recovered_at is null
      )
      select account_id,
             window_key,
@@ -41,31 +41,32 @@ pub(crate) fn account_usage_by_windows_sql() -> String {
             cost_currency,
             grouping(model)::integer as model_grouping,
             grouping(cost_currency)::integer as currency_grouping,
-            count(request_id)::bigint as request_count,
-            count(request_id) filter (where outcome = 'succeeded')::bigint as success_count,
-            sum(input_tokens)::bigint as input_tokens,
-            sum(output_tokens)::bigint as output_tokens,
-            sum(cached_tokens)::bigint as cached_tokens,
-            sum(cache_write_tokens)::bigint as cache_write_tokens,
-            sum(reasoning_tokens)::bigint as reasoning_tokens,
-            sum(image_input_tokens)::bigint as image_input_tokens,
-            sum(image_output_tokens)::bigint as image_output_tokens,
-            count(request_id) filter (where image_generation_succeeded is true)::bigint
+            count(request_id) filter (where is_completed_usage)::bigint as request_count,
+            case when grouping(model) = 0 then count(request_id) filter (where outcome = 'succeeded') else count(request_id) filter (where is_completed_usage) end::bigint as success_count,
+            count(request_id) filter (where outcome = 'succeeded' or (outcome in ('failed','incomplete') and (client_status_code is null or client_status_code not between 400 and 499)))::bigint as health_request_count,
+            sum(input_tokens) filter (where is_completed_usage)::bigint as input_tokens,
+            sum(output_tokens) filter (where is_completed_usage)::bigint as output_tokens,
+            sum(cached_tokens) filter (where is_completed_usage)::bigint as cached_tokens,
+            sum(cache_write_tokens) filter (where is_completed_usage)::bigint as cache_write_tokens,
+            sum(reasoning_tokens) filter (where is_completed_usage)::bigint as reasoning_tokens,
+            sum(image_input_tokens) filter (where is_completed_usage)::bigint as image_input_tokens,
+            sum(image_output_tokens) filter (where is_completed_usage)::bigint as image_output_tokens,
+            count(request_id) filter (where is_completed_usage and image_generation_succeeded is true)::bigint
               as image_request_count,
-            count(request_id) filter (where image_generation_succeeded is false)::bigint
+            count(request_id) filter (where is_completed_usage and image_generation_succeeded is false)::bigint
               as image_request_failed_count,
             coalesce(sum(coalesce(
               total_tokens,
               coalesce(input_tokens, 0) + coalesce(output_tokens, 0)
-            )), 0)::bigint as total_tokens,
-            count(request_id) filter (where cost_source = 'provider_reported')::bigint
+            )) filter (where is_completed_usage), 0)::bigint as total_tokens,
+            count(request_id) filter (where is_completed_usage and cost_source = 'provider_reported')::bigint
               as provider_reported_count,
-            count(request_id) filter (where cost_source = 'calculated')::bigint
+            count(request_id) filter (where is_completed_usage and cost_source = 'calculated')::bigint
               as calculated_count,
-            count(request_id) filter (where cost_source = 'unavailable')::bigint
+            count(request_id) filter (where is_completed_usage and cost_source = 'unavailable')::bigint
               as unavailable_count,
-            max(started_at) as last_used_at,
-            sum(cost_amount)::text as amount, sum(billed_cost_amount)::text as billed_amount
+            max(started_at) filter (where is_completed_usage) as last_used_at,
+            sum(cost_amount) filter (where is_completed_usage)::text as amount, sum(billed_cost_amount) filter (where is_completed_usage)::text as billed_amount
        from matched
       group by grouping sets (
         (account_id, window_key),
@@ -120,6 +121,7 @@ pub(crate) fn parse_error_reason(value: Option<String>) -> StoreResult<Option<Ac
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAccountSummary {
+    pub auto_use_quota_credits: bool,
     pub outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     pub id: String,
     pub provider_kind: String,
@@ -333,6 +335,7 @@ impl fmt::Debug for RotateProviderAccount {
 
 #[derive(Debug, Clone)]
 pub struct BatchUpdateProviderAccountsAdmin {
+    pub auto_use_quota_credits: Option<bool>,
     pub outbound_proxy: Option<gateway_admin::model::proxies::AccountProxySelection>,
     pub account_ids: Vec<String>,
     pub enabled: Option<bool>,
@@ -403,7 +406,7 @@ impl ProviderAccountStateUpdate {
 
 pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -411,7 +414,7 @@ pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_request_context(o
 
 pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -421,7 +424,7 @@ pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_request_co
 
 pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -494,6 +497,7 @@ pub(crate) fn core_account_from_summary(
     )
     .with_scheduling(summary.concurrency_limit, summary.weight)
     .with_model_access(summary.model_access)
+    .with_auto_use_quota_credits(summary.auto_use_quota_credits)
     .with_outbound_proxy(summary.outbound_proxy)
     .with_refresh_schedule(
         summary.has_refresh_token,
@@ -559,6 +563,7 @@ pub(crate) fn account_summary_from_row(
     let proxy_ws_capacity = u32::try_from(get::<i64>(&row, "proxy_ws_capacity")?)
         .map_err(|_| invalid("invalid proxy capacity"))?;
     Ok(ProviderAccountSummary {
+        auto_use_quota_credits: get(&row, "auto_use_quota_credits")?,
         outbound_proxy: get::<Option<String>>(&row, "outbound_proxy_url")?
             .map(|url| {
                 gateway_core::account::OutboundProxy::parse(&url)

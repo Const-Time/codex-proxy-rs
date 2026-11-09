@@ -440,7 +440,7 @@ impl ProcessSystemOperations {
 #[async_trait]
 impl SystemOperations for ProcessSystemOperations {
     async fn version(&self) -> Result<SystemVersion, OperationError> {
-        let detail = self.update_detail(false).await?;
+        let detail = self.release_cache.local(&self.config).await;
         Ok(SystemVersion {
             version: self.config.version.clone(),
             git_sha: self.config.git_sha.clone(),

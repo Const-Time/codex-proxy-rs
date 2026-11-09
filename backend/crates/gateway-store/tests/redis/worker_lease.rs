@@ -167,3 +167,108 @@ fn split_connection_url(value: &str) -> (String, String) {
         .expect("connection URL supports credentials");
     (url.to_string(), password)
 }
+
+#[tokio::test]
+async fn shutdown_releases_only_owned_account_slots_and_rejects_new_acquisitions() {
+    use gateway_core::{
+        account::{CredentialRevision, ProviderAccountId},
+        lifecycle::{CancellationToken, Deadline},
+        provider_ports::{
+            ProviderLeaseAcquisition, ProviderLeaseRequest, ProviderSchedulingLeaseRequest,
+        },
+        routing::ProviderKind,
+    };
+    use std::num::NonZeroU32;
+    let (Some(database_url), Some(redis_url)) = (
+        crate::support::test_env("CPR_TEST_DATABASE_URL"),
+        crate::support::test_env("CPR_TEST_REDIS_URL"),
+    ) else {
+        return;
+    };
+    let database = TestDatabase::create(&database_url).await;
+    let runtime_data = tempfile::tempdir().unwrap();
+    let mut config = store_config(&database.url, &redis_url);
+    config.resolve_and_validate(runtime_data.path()).unwrap();
+    let mut first = initialize(config.clone()).await.unwrap();
+    let second = initialize(config).await.unwrap();
+    let own = first.provider_ports().leases();
+    let other = second.provider_ports().leases();
+    let account =
+        ProviderAccountId::new(format!("acct_shutdown_{}", Uuid::new_v4().simple())).unwrap();
+    let cancellation = CancellationToken::new();
+    let request = |token| {
+        ProviderLeaseRequest::Scheduling(ProviderSchedulingLeaseRequest::new(
+            ProviderKind::new("openai").unwrap(),
+            account.clone(),
+            CredentialRevision::new(1).unwrap(),
+            NonZeroU32::new(2).unwrap(),
+            Duration::ZERO,
+            Deadline::default(),
+            token,
+        ))
+    };
+    let first_guard = own
+        .try_acquire(request(cancellation.clone()))
+        .await
+        .unwrap();
+    let other_token = CancellationToken::new();
+    let second_guard = other
+        .try_acquire(request(other_token.clone()))
+        .await
+        .unwrap();
+    assert!(matches!(first_guard, ProviderLeaseAcquisition::Acquired(_)));
+    assert!(matches!(
+        second_guard,
+        ProviderLeaseAcquisition::Acquired(_)
+    ));
+    assert!(matches!(
+        other
+            .try_acquire(request(CancellationToken::new()))
+            .await
+            .unwrap(),
+        ProviderLeaseAcquisition::Busy { .. }
+    ));
+    let cleanup = first
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|c| {
+            let WorkerContribution::Registration(r) = c else {
+                return None;
+            };
+            if r.id.owner() != "redis_account_leases" {
+                return None;
+            }
+            let WorkerRunnable::Daemon { task, .. } = r.runnable else {
+                panic!("cleanup must be daemon")
+            };
+            Some(task)
+        })
+        .unwrap();
+    let stop = CancellationToken::new();
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(3), cleanup.run(stop))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cancellation.is_cancelled());
+    assert!(!other_token.is_cancelled());
+    assert!(
+        own.try_acquire(request(CancellationToken::new()))
+            .await
+            .is_err()
+    );
+    let replacement = other
+        .try_acquire(request(CancellationToken::new()))
+        .await
+        .unwrap();
+    assert!(matches!(replacement, ProviderLeaseAcquisition::Acquired(_)));
+    assert!(matches!(
+        other
+            .try_acquire(request(CancellationToken::new()))
+            .await
+            .unwrap(),
+        ProviderLeaseAcquisition::Busy { .. }
+    ));
+    drop((first_guard, second_guard, replacement, first, second));
+    database.close().await;
+}

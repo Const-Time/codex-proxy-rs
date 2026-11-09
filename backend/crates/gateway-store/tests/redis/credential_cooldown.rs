@@ -311,3 +311,29 @@ async fn namespace_keys(connection: &mut ConnectionManager, namespace: &str) -> 
         .await
         .expect("list isolated cooldown keys")
 }
+
+#[tokio::test]
+async fn cooldown_batch_preserves_order_across_batch_boundaries() {
+    let Some((repository, _, _)) = repository().await else {
+        return;
+    };
+    let ids = (0..260)
+        .map(|i| ProviderAccountId::new(format!("acct_batch_{i}")).unwrap())
+        .collect::<Vec<_>>();
+    for i in [0, 127, 128, 259] {
+        repository
+            .cache_credential_cooldown(&cooldown(ids[i].as_str(), 2, 120))
+            .await
+            .unwrap();
+    }
+    let batch = repository.read_many(&ids).await;
+    assert_eq!(batch.len(), ids.len());
+    for (i, result) in batch.into_iter().enumerate() {
+        let value = result.unwrap();
+        assert_eq!(value.is_some(), [0, 127, 128, 259].contains(&i));
+        if let Some(value) = value {
+            assert_eq!(value.account_id(), &ids[i]);
+        }
+    }
+    assert!(repository.read_many(&[]).await.is_empty());
+}

@@ -108,23 +108,8 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         provider_kind: Option<&str>,
         include_disabled: bool,
     ) -> StoreResult<Vec<ProviderAccountSummary>> {
-        let rows = sqlx::query(
-            "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
-                    upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
-                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
-                    credential_observed_at, quota_access_state, quota_evidence,
-                    quota_access_observed_at, quota_reset_at,
-                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
-             from provider_accounts
-             where ($1::text is null or provider_kind = $1) and ($2 or enabled)
-             order by provider_kind, name, id",
-        )
-        .bind(provider_kind)
-        .bind(include_disabled)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|_| postgres_unavailable("list provider accounts"))?;
-        rows.into_iter().map(account_summary_from_row).collect()
+        self.list_scoped_provider_accounts(provider_kind, include_disabled, None)
+            .await
     }
 
     async fn insert_provider_account(&self, account: NewProviderAccount) -> StoreResult<()> {
@@ -628,6 +613,11 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 command.outbound_proxy.as_ref(),
             )
             .await?;
+            if let Some(enabled) = command.auto_use_quota_credits {
+                sqlx::query("update provider_accounts set auto_use_quota_credits = $2 where id = any($1) and auto_use_quota_credits <> $2")
+                    .bind(&command.account_ids).bind(enabled).execute(&mut *transaction).await
+                    .map_err(|_| postgres_unavailable("set account quota credits policy"))?;
+            }
             if let Some(group_ids) = &command.group_ids {
                 replace_account_group_assignments_in_transaction(
                     &mut transaction,
@@ -1103,5 +1093,33 @@ pub(crate) async fn finish_admin_transaction<T>(
                 .map_err(|_| postgres_unavailable(operation))?;
             Err(error)
         }
+    }
+}
+
+impl PgProviderAccountRepository {
+    pub(super) async fn list_scoped_provider_accounts(
+        &self,
+        provider_kind: Option<&str>,
+        include_disabled: bool,
+        account_ids: Option<&[String]>,
+    ) -> StoreResult<Vec<ProviderAccountSummary>> {
+        let rows = sqlx::query(
+            "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
+                    upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
+                    access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
+                    credential_observed_at, quota_access_state, quota_evidence,
+                    quota_access_observed_at, quota_reset_at,
+                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
+             from provider_accounts
+             where ($1::text is null or provider_kind = $1) and ($2 or enabled) and ($3::text[] is null or id = any($3))
+             order by provider_kind, name, id",
+        )
+        .bind(provider_kind)
+        .bind(include_disabled)
+        .bind(account_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| postgres_unavailable("list provider accounts"))?;
+        rows.into_iter().map(account_summary_from_row).collect()
     }
 }

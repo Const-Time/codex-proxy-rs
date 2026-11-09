@@ -25,6 +25,9 @@ jobs:
   release-info:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       image_name: ${{ steps.version.outputs.image_name }}
       tag: ${{ steps.version.outputs.tag }}
@@ -38,6 +41,7 @@ jobs:
       docker_platforms: ${{ steps.version.outputs.docker_platforms }}
       previous_tag: ${{ steps.version.outputs.previous_tag }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      reuse_backend: ${{ steps.quality-evidence.outputs.reuse_backend }}
 
     steps:
       - name: Checkout
@@ -48,6 +52,15 @@ jobs:
 
       - name: Test release promotion ordering
         run: python3 .github/scripts/test_promote_release.py
+
+      - name: Verify reusable quality evidence
+        id: quality-evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/test_published_channels.py
+          python3 .github/scripts/test_release_quality.py
+          python3 .github/scripts/release-quality.py >> "$GITHUB_OUTPUT"
 
       - name: Read release metadata
         id: version
@@ -177,6 +190,7 @@ jobs:
     with:
       ref: ${{ needs.release-info.outputs.git_sha }}
       upload_frontend: true
+      run_backend: ${{ needs.release-info.outputs.reuse_backend != 'true' }}
 
   build-docker-binary:
     name: build-docker-binary (${{ matrix.os }}-${{ matrix.arch }})
@@ -752,6 +766,12 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/release/*
+
+      - name: Publish verified channel index
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-info.outputs.tag }}
+        run: python3 .github/scripts/published-channels.py
 
       - name: Promote newest stable release
         env:

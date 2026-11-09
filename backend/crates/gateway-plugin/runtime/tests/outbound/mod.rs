@@ -1,4 +1,5 @@
 //! Real SDK child processes exercise Host TCP dispatch without model services.
+mod proxies;
 use crate::support::{MemoryStore, actor, archive, request, update};
 use gateway_admin::{plugins::PluginManager, ports::plugins::PluginService};
 use gateway_plugin_runtime::PluginEngine;
@@ -105,13 +106,23 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_proxies(None).await
+    }
+    async fn with_proxies(
+        proxies: Option<Arc<dyn gateway_admin::ports::proxy::PluginProxyAccess>>,
+    ) -> Self {
         let cache = tempfile::tempdir().unwrap();
         let store = Arc::new(MemoryStore::default());
-        let runtime = Arc::new(PluginEngine::new(
+        let runtime = PluginEngine::new(
             cache.path().into(),
             "3.11.2".parse().unwrap(),
             store.clone(),
-        ));
+        );
+        let runtime = Arc::new(if let Some(proxies) = proxies {
+            runtime.with_proxies(proxies)
+        } else {
+            runtime
+        });
         let manager = Arc::new(PluginManager::new(store, runtime));
         let artifact = manager
             .upload(archive("1.0.0", false), &actor())

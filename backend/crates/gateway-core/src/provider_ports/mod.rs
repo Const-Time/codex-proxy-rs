@@ -725,6 +725,12 @@ pub trait ProviderCooldownPort: Send + Sync {
         account_id: &'a ProviderAccountId,
     ) -> BoxFuture<'a, Result<Option<ProviderCooldown>, ProviderStoreError>>;
 
+    /// Return one result per account, in input order; bound each Redis batch.
+    fn read_many<'a>(
+        &'a self,
+        accounts: &'a [ProviderAccountId],
+    ) -> BoxFuture<'a, Vec<Result<Option<ProviderCooldown>, ProviderStoreError>>>;
+
     fn clear<'a>(
         &'a self,
         account_id: &'a ProviderAccountId,

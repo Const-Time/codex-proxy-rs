@@ -972,6 +972,20 @@ impl ProviderCooldownPort for StaticCooldowns {
         Box::pin(async move { Ok(self.cooldowns.get(account_id).cloned()) })
     }
 
+    fn read_many<'a>(
+        &'a self,
+        accounts: &'a [ProviderAccountId],
+    ) -> futures::future::BoxFuture<'a, Vec<Result<Option<ProviderCooldown>, ProviderStoreError>>>
+    {
+        Box::pin(async move {
+            let mut results = Vec::new();
+            for account in accounts {
+                results.push(self.read(account).await);
+            }
+            results
+        })
+    }
+
     fn clear<'a>(
         &'a self,
         _account_id: &'a ProviderAccountId,
@@ -2709,5 +2723,56 @@ async fn selected_insight_metrics_match_full_results_without_unselected_costs_or
             }
         }
     }
+    db.close().await;
+}
+
+#[tokio::test]
+async fn account_model_health_counts_failures_without_changing_usage() {
+    let Some(db) = TestDatabase::create("model_health").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    let repository = observability_repository(&db.pool);
+    let range =
+        ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1)).unwrap();
+    for (outcome, status, recovered, expected) in [
+        ("failed", 502, false, 3),
+        ("incomplete", 502, false, 3),
+        ("failed", 400, false, 2),
+        ("cancelled", 499, false, 2),
+        ("failed", 502, true, 2),
+    ] {
+        sqlx::query("update model_requests set outcome=$1, client_status_code=$2, recovered_at=case when $3 then now() else null end, recovery_request_id=case when $3 then 'req_observe_success' else null end, recovery_attempt_count=case when $3 then 1 else 0 end, recovery_retry_delay_ms=case when $3 then 0 else null end, recovery_total_latency_ms=case when $3 then 1 else null end where id='req_observe_failed'")
+            .bind(outcome).bind(status).bind(recovered).execute(&db.pool).await.unwrap();
+        let usage = repository
+            .provider_account_usage(
+                ProviderAccountUsageQuery::for_accounts(range, vec!["acct_observe".to_owned()])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let model = &usage[0].models[0];
+        assert_eq!(model.health_request_count, expected);
+        assert_eq!(model.success_count, 2);
+        assert_eq!(model.request_count, 1);
+        assert_eq!(model.total_tokens, Some(120));
+        assert_eq!(usage[0].costs[0].amount.as_str(), "1.25");
+    }
+    sqlx::query("update model_requests set outcome='failed', client_status_code=502, recovered_at=null, recovery_request_id=null, recovery_attempt_count=0, recovery_retry_delay_ms=null, recovery_total_latency_ms=null where id='req_observe_failed';").execute(&db.pool).await.unwrap();
+    sqlx::query("delete from model_requests where outcome='succeeded'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let usage = repository
+        .provider_account_usage(
+            ProviderAccountUsageQuery::for_accounts(range, vec!["acct_observe".to_owned()])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(usage[0].models[0].health_request_count, 1);
+    assert_eq!(usage[0].models[0].success_count, 0);
+    assert!(usage[0].models[0].last_used_at.is_none());
     db.close().await;
 }

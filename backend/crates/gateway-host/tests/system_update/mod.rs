@@ -17,7 +17,7 @@ use gateway_host::system_update::{
 };
 use sha2::{Digest as _, Sha256};
 use tar::{Builder, EntryType, Header};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TARGET_VERSION: &str = "1.9.9";
@@ -225,6 +225,9 @@ async fn update_detail_should_report_refresh_failure_and_clear_previous_update()
     let service = fixture.service(&server);
     service.update_detail(true).await.expect("prime cache");
 
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::time::resume();
     let detail = service.update_detail(true).await.expect("failure detail");
     assert!(!detail.has_update);
     assert!(detail.warning.is_some());
@@ -244,8 +247,8 @@ async fn update_detail_should_offer_latest_non_draft_release_in_current_channel(
     let server = MockServer::start().await;
     let fixture = Fixture::new();
     Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+        .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
+        .respond_with(ReleaseCatalog(serde_json::json!([
             {
                 "tag_name": "v1.1.0-beta.3",
                 "name": "Draft 1.1.0-beta.3",
@@ -316,8 +319,8 @@ async fn experimental_build_should_ignore_newer_stable_and_other_experimental_re
     let server = MockServer::start().await;
     let fixture = Fixture::new();
     Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+        .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
+        .respond_with(ReleaseCatalog(serde_json::json!([
             { "tag_name": "v4.0.0", "prerelease": false },
             { "tag_name": "v3.12.0", "prerelease": false },
             { "tag_name": "v3.10.0", "prerelease": false },
@@ -329,7 +332,7 @@ async fn experimental_build_should_ignore_newer_stable_and_other_experimental_re
             { "tag_name": "v3.10.0-exp.4", "prerelease": false },
             { "tag_name": "invalid", "prerelease": true }
         ])))
-        .expect(1)
+        .expect(2)
         .mount(&server)
         .await;
     let mut config = fixture.config(&format!("{}/repos", server.uri()));
@@ -350,46 +353,6 @@ async fn experimental_build_should_ignore_newer_stable_and_other_experimental_re
     let cached = service.update_detail(false).await.expect("cached detail");
     assert!(cached.cached);
     assert!(!cached.has_update);
-}
-
-#[tokio::test]
-async fn experimental_update_should_find_highest_same_channel_version_across_pages() {
-    let server = MockServer::start().await;
-    let fixture = Fixture::new();
-    let mut first_page = vec![
-        serde_json::json!({
-            "tag_name": "v3.12.0", "prerelease": false
-        });
-        100
-    ];
-    first_page[1] = serde_json::json!({ "tag_name": "v3.10.0-exp.3", "prerelease": true });
-    Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
-        .and(query_param("page", "1"))
-        .and(query_param("per_page", "100"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(first_page))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
-        .and(query_param("page", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            { "tag_name": "v3.10.0-exp.10", "prerelease": true, "body": "exp.10 notes" },
-            { "tag_name": "v3.10.0-exp.2", "prerelease": true }
-        ])))
-        .mount(&server)
-        .await;
-    let mut config = fixture.config(&format!("{}/repos", server.uri()));
-    config.version = "3.10.0-exp.2".to_owned();
-    config.build_type = "experimental".to_owned();
-    let service = ProcessSystemOperations::new(CancellationToken::new(), config);
-
-    let detail = service.update_detail(true).await.expect("detail");
-    assert_eq!(detail.latest_version, "3.10.0-exp.10");
-    assert_eq!(detail.notes.as_deref(), Some("exp.10 notes"));
-    assert!(detail.has_update);
-    assert!(detail.update_supported);
-    assert!(service.version().await.expect("version").has_update);
 }
 
 #[tokio::test]
@@ -541,8 +504,8 @@ async fn update_detail_should_keep_current_release_notes_without_allowing_reinst
         let fixture = Fixture::new();
         let release_url = format!("https://github.com/owner/repository/releases/tag/v{current}");
         Mock::given(method("GET"))
-            .and(path("/repos/owner/repository/releases"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
+            .respond_with(ReleaseCatalog(serde_json::json!([
                 {
                     "tag_name": format!("v{current}"),
                     "prerelease": !semver::Version::parse(current).expect("version").pre.is_empty(),
@@ -550,7 +513,7 @@ async fn update_detail_should_keep_current_release_notes_without_allowing_reinst
                     "html_url": release_url,
                 }
             ])))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
         let mut config = fixture.config(&format!("{}/repos", server.uri()));
@@ -606,8 +569,8 @@ async fn update_detail_should_prefer_available_update_notes_over_current_release
             releases.reverse();
         }
         Mock::given(method("GET"))
-            .and(path("/repos/owner/repository/releases"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(releases))
+            .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
+            .respond_with(ReleaseCatalog(serde_json::json!(releases)))
             .mount(&server)
             .await;
 
@@ -627,46 +590,13 @@ async fn update_detail_should_prefer_available_update_notes_over_current_release
 }
 
 #[tokio::test]
-async fn update_detail_should_find_current_release_notes_across_pages() {
-    let server = MockServer::start().await;
-    let fixture = Fixture::new();
-    Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
-        .and(query_param("page", "1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(vec![
-            serde_json::json!({ "tag_name": "v2.0.0", "prerelease": false });
-            100
-        ]))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
-        .and(query_param("page", "2"))
-        .respond_with(release_response("1.0.0", Vec::new()))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let detail = fixture
-        .service(&server)
-        .update_detail(true)
-        .await
-        .expect("detail");
-    assert!(!detail.has_update);
-    assert_eq!(detail.latest_version, "1.0.0");
-    assert_eq!(detail.notes.as_deref(), Some("notes"));
-    assert!(detail.release_url.is_some());
-}
-
-#[tokio::test]
 async fn update_detail_should_not_use_draft_or_mislabeled_current_release_notes() {
     for (current, prerelease) in [("1.0.0", false), ("1.0.0-beta.1", true)] {
         let server = MockServer::start().await;
         let fixture = Fixture::new();
         Mock::given(method("GET"))
-            .and(path("/repos/owner/repository/releases"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
+            .respond_with(ReleaseCatalog(serde_json::json!([
                 { "tag_name": format!("v{current}"), "prerelease": prerelease, "draft": true, "body": "draft notes" },
                 { "tag_name": format!("v{current}"), "prerelease": !prerelease, "body": "mislabeled notes" },
                 { "tag_name": "v0.9.0", "prerelease": false, "body": "older notes" },
@@ -749,8 +679,8 @@ async fn stable_update_should_select_allowed_version_below_newer_major_releases(
     let server = MockServer::start().await;
     let fixture = Fixture::new();
     Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+        .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
+        .respond_with(ReleaseCatalog(serde_json::json!([
             { "tag_name": "v4.0.0", "prerelease": false },
             { "tag_name": "v3.13.0-beta.1", "prerelease": true },
             { "tag_name": "v3.12.1", "prerelease": true },
@@ -1654,9 +1584,9 @@ impl Fixture {
     async fn mount_release_once(&self, server: &MockServer, version: &str) {
         let assets = Vec::new();
         Mock::given(method("GET"))
-            .and(path("/repos/owner/repository/releases"))
+            .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
             .respond_with(release_response(version, assets))
-            .up_to_n_times(1)
+            .up_to_n_times(2)
             .mount(server)
             .await;
     }
@@ -1746,15 +1676,15 @@ async fn mount_release_json(
     times: Option<u64>,
 ) {
     let mock = Mock::given(method("GET"))
-        .and(path("/repos/owner/repository/releases"))
+        .and(path_regex(r"^/(?:owner/repository/refs/heads/main/release/channels\.json|repos/owner/repository/releases/tags/[^/]+)$"))
         .respond_with(release_response(version, assets));
     match times {
-        Some(times) => mock.up_to_n_times(times).mount(server).await,
+        Some(times) => mock.up_to_n_times(times * 2).mount(server).await,
         None => mock.mount(server).await,
     }
 }
 
-fn release_response(version: &str, assets: Vec<serde_json::Value>) -> ResponseTemplate {
+fn release_response(version: &str, assets: Vec<serde_json::Value>) -> ReleaseCatalog {
     let prerelease = !semver::Version::parse(version)
         .expect("version")
         .pre
@@ -1768,7 +1698,7 @@ fn release_response(version: &str, assets: Vec<serde_json::Value>) -> ResponseTe
         "published_at": "2026-07-19T00:00:00Z",
         "assets": assets,
     });
-    ResponseTemplate::new(200).set_body_json(serde_json::json!([release]))
+    ReleaseCatalog(serde_json::json!([release]))
 }
 
 #[cfg(target_os = "linux")]
@@ -1823,4 +1753,95 @@ async fn restart_uses_install_path_after_running_binary_is_renamed() {
     })
     .await
     .expect("restart must execute replacement at the original installation path");
+}
+
+#[tokio::test]
+async fn version_reads_never_wait_for_github_and_concurrent_checks_are_coalesced() {
+    let server = MockServer::start().await;
+    let fixture = Fixture::new();
+    fixture.mount_release_once(&server, TARGET_VERSION).await;
+    let service = fixture.service(&server);
+    assert!(!service.version().await.unwrap().has_update);
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let (first, second) = tokio::join!(service.update_detail(true), service.update_detail(true));
+    assert!(first.unwrap().has_update);
+    assert!(second.unwrap().has_update);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert!(service.version().await.unwrap().has_update);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn failed_update_checks_back_off_without_hiding_the_warning() {
+    let server = MockServer::start().await;
+    let fixture = Fixture::new();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let service = fixture.service(&server);
+    for _ in 0..3 {
+        assert!(service.update_detail(true).await.unwrap().warning.is_some());
+    }
+    assert!(service.version().await.unwrap().update_warning.is_some());
+}
+
+#[derive(Clone)]
+struct ReleaseCatalog(serde_json::Value);
+impl wiremock::Respond for ReleaseCatalog {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let releases = self.0.as_array().unwrap();
+        if request.url.path().ends_with("/release/channels.json") {
+            let versions = releases
+                .iter()
+                .filter(|r| {
+                    let Some(v) = r["tag_name"]
+                        .as_str()
+                        .and_then(|s| semver::Version::parse(s.trim_start_matches('v')).ok())
+                    else {
+                        return false;
+                    };
+                    r["draft"] != true
+                        && r["prerelease"].as_bool().unwrap_or(false) == !v.pre.is_empty()
+                })
+                .filter_map(|r| r["tag_name"].as_str().map(|s| s.trim_start_matches('v')))
+                .collect::<Vec<_>>();
+            return ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"schema":1,"versions":versions}));
+        }
+        let tag = request.url.path_segments().unwrap().next_back().unwrap();
+        releases
+            .iter()
+            .find(|r| r["tag_name"] == tag && r["draft"] != true)
+            .map_or_else(
+                || ResponseTemplate::new(404),
+                |release| ResponseTemplate::new(200).set_body_json(release),
+            )
+    }
+}
+
+#[tokio::test]
+async fn published_index_has_bounded_lookups_and_rejects_missing_release() {
+    let server = MockServer::start().await;
+    let fixture = Fixture::new();
+    Mock::given(path(
+        "/owner/repository/refs/heads/main/release/channels.json",
+    ))
+    .respond_with(
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"schema":1,"versions":["1.9.9","4.0.0"]})),
+    )
+    .expect(1)
+    .mount(&server)
+    .await;
+    let detail = fixture.service(&server).update_detail(true).await.unwrap();
+    assert!(detail.warning.is_some());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].url.path(),
+        "/repos/owner/repository/releases/tags/v1.9.9"
+    );
+    assert!(!detail.has_update);
 }

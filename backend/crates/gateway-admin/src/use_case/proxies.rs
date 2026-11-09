@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use gateway_core::{account::ProviderAccountId, routing::ProviderKind, runtime::SnapshotControl};
+use gateway_core::{
+    account::{OutboundProxy, ProviderAccountId},
+    routing::ProviderKind,
+    runtime::SnapshotControl,
+};
 use tokio::sync::Semaphore;
 
 use super::{map_store_error, publish_committed};
@@ -14,10 +18,46 @@ use crate::{
     },
     ports::{
         provider::ProviderAdminRegistry,
-        proxy::{ProxyProbe, ProxyStore},
+        proxy::{PluginProxyAccess, ProxyProbe, ProxyStore},
         store::AdminStoreErrorKind,
     },
 };
+
+pub(crate) struct DefaultPluginProxyAccess {
+    pub(crate) store: Arc<dyn ProxyStore>,
+}
+
+#[async_trait]
+impl PluginProxyAccess for DefaultPluginProxyAccess {
+    async fn list(&self, query: ProxyListQuery) -> Result<ProxyPage, AdminError> {
+        list_proxies(self.store.as_ref(), query).await
+    }
+
+    async fn resolve(&self, id: &str) -> Result<OutboundProxy, AdminError> {
+        if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+            return Err(AdminError::invalid("代理 ID 不合法"));
+        }
+        let record = self
+            .store
+            .get(id)
+            .await
+            .map_err(|error| map_store_error(error, "proxy"))?;
+        Ok(record.proxy)
+    }
+}
+
+async fn list_proxies(
+    store: &dyn ProxyStore,
+    query: ProxyListQuery,
+) -> Result<ProxyPage, AdminError> {
+    if query.page == 0 || query.search.len() > 256 || query.search.chars().any(char::is_control) {
+        return Err(AdminError::invalid("代理查询参数不合法"));
+    }
+    store
+        .list(query)
+        .await
+        .map_err(|error| map_store_error(error, "proxy"))
+}
 
 #[async_trait]
 pub trait ProxiesService: Send + Sync {
@@ -165,14 +205,7 @@ impl ProxiesService for DefaultProxiesService {
     }
 
     async fn list(&self, query: ProxyListQuery) -> Result<ProxyPage, AdminError> {
-        if query.page == 0 || query.search.len() > 256 || query.search.chars().any(char::is_control)
-        {
-            return Err(AdminError::invalid("代理查询参数不合法"));
-        }
-        self.store
-            .list(query)
-            .await
-            .map_err(|error| map_store_error(error, "proxy"))
+        list_proxies(self.store.as_ref(), query).await
     }
 
     async fn create(

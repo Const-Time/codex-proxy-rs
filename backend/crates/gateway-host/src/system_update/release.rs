@@ -1,7 +1,8 @@
 //! GitHub Release 发现、缓存、版本比较与下载信任边界。
 
 use std::env;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use gateway_admin::model::system::SystemUpdateDetail;
 use serde::Deserialize;
@@ -62,6 +63,8 @@ struct CachedRelease {
 #[derive(Default)]
 pub(crate) struct ReleaseCache {
     entry: Mutex<Option<CachedRelease>>,
+    fetching: Mutex<()>,
+    failure: Mutex<Option<(String, Instant, OperationError)>>,
 }
 
 impl ReleaseCache {
@@ -80,11 +83,30 @@ impl ReleaseCache {
         validate_repository(repository)?;
         validate_api_base(&config.github_api_base).map_err(conflict)?;
         let key = config.release_cache_key();
-        if !refresh && let Some(detail) = self.cached(&key).await {
+        let _fetching = self.fetching.lock().await;
+        let minimum_age = if refresh {
+            Duration::from_secs(60)
+        } else {
+            CACHE_TTL
+        };
+        if let Some((failed_key, at, error)) = &*self.failure.lock().await
+            && failed_key == &key
+            && at.elapsed() < Duration::from_secs(60)
+        {
+            return Err(error.clone());
+        }
+        if let Some(detail) = self.cached(&key, minimum_age).await {
             return Ok(detail);
         }
-        match fetch_latest(&config.github_api_base, repository, &config.version).await {
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            fetch_latest(&config.github_api_base, repository, &config.version),
+        )
+        .await
+        .unwrap_or_else(|_| Err(upstream("release check exceeded its time budget")));
+        match result {
             Ok(release) => {
+                *self.failure.lock().await = None;
                 let detail = release.as_ref().map_or_else(
                     || super::base_update_detail(config, config.update_support_error(), None),
                     |release| detail_from_release(config, release),
@@ -99,15 +121,31 @@ impl ReleaseCache {
             Err(error) => {
                 // 强制检查失败后清掉旧结果，避免后续版本查询再次显示旧的更新标记。
                 *self.entry.lock().await = None;
+                *self.failure.lock().await = Some((key, Instant::now(), error.clone()));
                 Err(error)
             }
         }
     }
 
-    async fn cached(&self, key: &str) -> Option<SystemUpdateDetail> {
+    pub(crate) async fn local(&self, config: &SystemUpdateConfig) -> SystemUpdateDetail {
+        let key = config.release_cache_key();
+        if let Some(detail) = self.cached(&key, CACHE_TTL).await {
+            return detail;
+        }
+        let warning = self
+            .failure
+            .lock()
+            .await
+            .as_ref()
+            .filter(|(failed_key, _, _)| failed_key == &key)
+            .map(|(_, _, error)| error.to_string());
+        super::base_update_detail(config, config.update_support_error(), warning)
+    }
+
+    async fn cached(&self, key: &str, max_age: Duration) -> Option<SystemUpdateDetail> {
         let entry = self.entry.lock().await;
         let cached = entry.as_ref()?;
-        (cached.key == key && cached.cached_at.elapsed() <= CACHE_TTL).then(|| {
+        (cached.key == key && cached.cached_at.elapsed() <= max_age).then(|| {
             let mut detail = cached.detail.clone();
             detail.cached = true;
             detail
@@ -132,32 +170,50 @@ pub(crate) async fn fetch_latest(
         .build()
         .map_err(|error| upstream(format!("failed to create release client: {error}")))?;
 
-    // 所有发行线先过滤再排序，避免更高大版本或其他实验遮住仍可安装的更新。
-    let mut latest: Option<(semver::Version, GitHubRelease)> = None;
-    let mut page = 1;
-    loop {
-        let releases: Vec<GitHubRelease> = fetch_release_json(
-            &client,
-            &format!("{base}/{repository}/releases?per_page=100&page={page}"),
-        )
-        .await?;
-        let last_page = releases.len() < 100;
-        for release in releases {
-            let Some(version) = eligible_release_version(&release, &current) else {
-                continue;
-            };
-            if latest
-                .as_ref()
-                .is_none_or(|(previous, _)| version.cmp_precedence(previous).is_gt())
-            {
-                latest = Some((version, release));
-            }
-        }
-        if last_page {
-            return Ok(latest.map(|(_, release)| release));
-        }
-        page += 1;
+    let mut index_url =
+        reqwest::Url::parse(api_base).map_err(|_| invalid("invalid release index origin"))?;
+    if index_url.host_str() == Some("api.github.com") {
+        index_url = reqwest::Url::parse("https://raw.githubusercontent.com").expect("static URL");
     }
+    index_url.set_path(&format!(
+        "/{repository}/refs/heads/main/release/channels.json"
+    ));
+    let index: PublishedChannels = fetch_release_json(&client, index_url.as_str()).await?;
+    if index.schema != 1 || index.versions.len() > 1024 {
+        return Err(upstream("invalid published release index"));
+    }
+    let mut latest = current.clone();
+    for raw in index.versions {
+        let version = semver::Version::parse(&raw)
+            .map_err(|_| upstream("invalid version in release index"))?;
+        if update_target_allowed(&current, &version) && version.cmp_precedence(&latest).is_gt() {
+            latest = version;
+        }
+    }
+    let url = format!("{base}/{repository}/releases/tags/v{latest}");
+    let response = client
+        .get(&url)
+        .header(reqwest::header::USER_AGENT, APP_BINARY_NAME)
+        .send()
+        .await
+        .map_err(|_| upstream("failed to read indexed release"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND && latest == current {
+        return Ok(None);
+    }
+    let release: GitHubRelease = decode_release_json(response).await?;
+    if release.tag_name != format!("v{latest}")
+        || eligible_release_version(&release, &current).is_none()
+    {
+        return Err(upstream("published index and release identity differ"));
+    }
+    Ok(Some(release))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishedChannels {
+    schema: u8,
+    versions: Vec<String>,
 }
 
 fn eligible_release_version(
@@ -182,15 +238,30 @@ async fn fetch_release_json<T: serde::de::DeserializeOwned>(
         .send()
         .await
         .map_err(|error| upstream(format!("GitHub release check failed: {error}")))?;
+    decode_release_json(response).await
+}
+
+async fn decode_release_json<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, OperationError> {
     if !response.status().is_success() {
         return Err(upstream(format!(
             "GitHub release check failed with {}",
             response.status()
         )));
     }
-    response
-        .json::<T>()
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
+        .map_err(|_| upstream("failed to read release metadata"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+            return Err(upstream("release metadata exceeds the size limit"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice::<T>(&bytes)
         .map_err(|error| upstream(format!("invalid GitHub release response: {error}")))
 }
 

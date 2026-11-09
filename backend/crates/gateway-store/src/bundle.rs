@@ -194,6 +194,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
     .with_budget(budgets.clone())
     .with_session_affinity(provider_session_affinity.clone());
 
+    let lease_cleanup = provider_leases.cleanup_worker();
     let provider_ports = ProviderStorePorts::new(
         account_store,
         provider_leases,
@@ -222,7 +223,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
             connection: redis_connection,
         }),
     ];
-    let worker_contributions = store_worker_contributions(
+    let mut worker_contributions = store_worker_contributions(
         execution_repository,
         execution_writer,
         client_key_usage_writer,
@@ -231,6 +232,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         budgets,
         Arc::new(postgres::PgUsageRollupRepository::new(pool.clone())),
     )?;
+    worker_contributions.push(crate::workers::lease_cleanup_worker(lease_cleanup)?);
     Ok(StoreBundle {
         plugins: Arc::new(postgres::PgPluginStore::new(pool.clone())),
         turn_state: Arc::new(postgres::PgTurnStateStore::new(pool)),

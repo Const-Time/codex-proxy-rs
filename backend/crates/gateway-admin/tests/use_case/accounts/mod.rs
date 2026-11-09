@@ -1618,6 +1618,7 @@ async fn accounts_batch_update_should_commit_once_and_notify_each_provider() {
         .batch_update(
             &context("batch-update-request"),
             BatchUpdateAccounts {
+                auto_use_quota_credits: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_ids: vec!["acct_openai".to_owned(), "acct_xai".to_owned()],
@@ -2511,6 +2512,7 @@ fn quota_local_usage(account_id: &str, total_tokens: u64) -> AccountUsage {
 pub(super) fn account_record(kind: &str) -> AccountRecord {
     let now = Utc::now();
     AccountRecord {
+        auto_use_quota_credits: false,
         model_access: Default::default(),
         outbound_proxy: None,
         id: "acct_test".to_owned(),

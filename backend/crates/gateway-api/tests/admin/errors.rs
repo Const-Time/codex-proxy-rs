@@ -529,6 +529,7 @@ mod provider {
         };
         AccountPageItem {
             account: AccountRecord {
+                auto_use_quota_credits: false,
                 model_access: Default::default(),
                 id: "acct_error_test".to_owned(),
                 provider_kind: ProviderKind::new(provider).unwrap(),

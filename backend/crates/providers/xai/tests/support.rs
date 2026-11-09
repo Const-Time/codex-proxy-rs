@@ -304,6 +304,19 @@ impl ProviderAccountStore for MemoryProviderAccountStore {
             .collect())
     }
 
+    async fn list_for_provider_accounts(
+        &self,
+        provider: &ProviderKind,
+        ids: &[ProviderAccountId],
+    ) -> Result<Vec<ProviderAccount>, StoreError> {
+        Ok(self
+            .list_for_provider(provider)
+            .await?
+            .into_iter()
+            .filter(|account| ids.contains(account.id()))
+            .collect())
+    }
+
     async fn list_refresh_candidates(
         &self,
         query: ProviderRefreshQuery,
@@ -842,6 +855,20 @@ impl ProviderCooldownPort for MemoryCooldownPort {
         account_id: &'a ProviderAccountId,
     ) -> futures::future::BoxFuture<'a, Result<Option<ProviderCooldown>, ProviderStoreError>> {
         Box::pin(async move { Ok(self.cooldown(account_id)) })
+    }
+
+    fn read_many<'a>(
+        &'a self,
+        accounts: &'a [ProviderAccountId],
+    ) -> futures::future::BoxFuture<'a, Vec<Result<Option<ProviderCooldown>, ProviderStoreError>>>
+    {
+        Box::pin(async move {
+            let mut results = Vec::new();
+            for account in accounts {
+                results.push(self.read(account).await);
+            }
+            results
+        })
     }
 
     fn clear<'a>(

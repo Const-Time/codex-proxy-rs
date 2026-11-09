@@ -533,6 +533,7 @@ fn provider_ports_with_catalog(
 fn account_record(account: &ProviderAccount) -> AccountRecord {
     let now = Utc::now();
     AccountRecord {
+        auto_use_quota_credits: false,
         model_access: Default::default(),
         outbound_proxy: None,
         id: account.id().to_string(),
@@ -741,6 +742,20 @@ impl ProviderCooldownPort for TestCooldown {
         _account_id: &'a ProviderAccountId,
     ) -> BoxFuture<'a, Result<Option<ProviderCooldown>, ProviderStoreError>> {
         Box::pin(async { Ok(None) })
+    }
+
+    fn read_many<'a>(
+        &'a self,
+        accounts: &'a [ProviderAccountId],
+    ) -> futures::future::BoxFuture<'a, Vec<Result<Option<ProviderCooldown>, ProviderStoreError>>>
+    {
+        Box::pin(async move {
+            let mut results = Vec::new();
+            for account in accounts {
+                results.push(self.read(account).await);
+            }
+            results
+        })
     }
 
     fn clear<'a>(

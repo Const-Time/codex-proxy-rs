@@ -84,7 +84,7 @@ export interface AccountModelUsage {
   partialCostCount: number
   unknownCostCount: number
   costs: AccountCurrencyCost[]
-  lastUsedAt: string
+  lastUsedAt: string | null
   lastUsedAtDisplay: string
 }
 
@@ -130,6 +130,7 @@ export interface AccountModelAccess {
 }
 
 export interface Account {
+  autoUseQuotaCredits: boolean
   outboundProxyEndpoint: string | null
   id: string
   name: string
@@ -324,6 +325,7 @@ interface AccountUpdateParam {
 }
 
 interface AccountBatchUpdateParam {
+  autoUseQuotaCredits?: boolean
   outboundProxyUrl?: string
   outboundProxyId?: string
   accountIds: string[]

@@ -1,4 +1,5 @@
 //! Host owns network dispatch and call-scoped bodies for both HTTP namespaces.
+mod proxies;
 mod registry;
 use crate::RpcReply;
 use gateway_core::{
@@ -27,7 +28,12 @@ pub(crate) const MAX_PAYLOAD: usize = 8 * 1024 * 1024;
 pub(crate) fn is_method(method: &str) -> bool {
     matches!(
         method,
-        "host.http.do" | "host.http.do_stream" | "host.http.stream_read" | "host.http.stream_close"
+        "host.proxies.list"
+            | "host.http.proxy"
+            | "host.http.do"
+            | "host.http.do_stream"
+            | "host.http.stream_read"
+            | "host.http.stream_close"
     )
 }
 #[derive(Default)]
@@ -207,6 +213,18 @@ impl HttpScope {
         streaming: bool,
         purpose: adapter::UpstreamPathPurpose,
     ) -> Result<RpcReply, PluginFault> {
+        self.send_via(client, request, streaming, purpose, self.proxy.as_ref())
+            .await
+    }
+
+    pub(crate) async fn send_via(
+        &self,
+        client: &HttpClient,
+        request: HttpRequest,
+        streaming: bool,
+        purpose: adapter::UpstreamPathPurpose,
+        proxy: Option<&gateway_core::account::OutboundProxy>,
+    ) -> Result<RpcReply, PluginFault> {
         if request.body.len() > MAX_PAYLOAD || request.headers.len() > 128 {
             return Err(invalid());
         }
@@ -220,7 +238,7 @@ impl HttpScope {
         let response = client
             .open_scoped(
                 request,
-                self.proxy.as_ref(),
+                proxy,
                 &NetworkPolicy::unrestricted(),
                 timeout,
                 Some(&pool_scope),

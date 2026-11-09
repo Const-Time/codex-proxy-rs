@@ -111,7 +111,7 @@ watch(
       @open-system-update="openSystemUpdate"
     />
     <main :inert="mobileSidebarOpen" class="relative isolate h-dvh min-w-0 flex-1 overflow-hidden">
-      <BaseScrollbar ref="pageScrollbarRef">
+      <BaseScrollbar ref="pageScrollbarRef" wrap-class="bg-cp-bg-layout">
         <div class="flex min-h-full min-w-0 flex-col p-4 min-[961px]:p-6">
           <RouterView v-slot="{ Component }">
             <component :is="Component" class="min-h-0 flex-1" />

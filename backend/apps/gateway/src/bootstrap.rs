@@ -146,6 +146,7 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
                     }))
                     .with_data(admin.services().plugin_data())
                     .with_credentials(admin.services().plugin_credentials())
+                    .with_proxies(admin.services().plugin_proxies())
                     .with_resources(admin.services().plugin_resources())
                     .with_quota(admin.services().plugin_quota())
                     .with_account_probe(core.account_probe())

@@ -738,6 +738,7 @@ impl AccountsService for DefaultAccountsService {
             self.accounts
                 .batch_update_accounts(
                     BatchUpdateAccounts {
+                        auto_use_quota_credits: None,
                         account_ids: vec![account_id.to_string()],
                         enabled: Some(true),
                         concurrency_limit: None,
@@ -807,8 +808,21 @@ impl AccountsService for DefaultAccountsService {
                 Vec<ProviderAccountId>,
             ),
         >::new();
+        let mut credit_refreshes = Vec::new();
         for account_id in &account_ids {
             let (item, provider) = self.provider_for_account(account_id).await?;
+            if command.auto_use_quota_credits.is_some()
+                && (item.account.provider_kind.as_str() != "openai"
+                    || item.account.authentication_kind != "oauth")
+            {
+                return Err(AdminError::invalid("该账号不支持使用额度点数"));
+            }
+            if command.auto_use_quota_credits == Some(true)
+                && !item.account.auto_use_quota_credits
+                && item.account.quota.is_exhausted()
+            {
+                credit_refreshes.push((provider.clone(), account_id.clone()));
+            }
             providers
                 .entry(item.account.provider_kind)
                 .or_insert_with(|| (provider, Vec::new()))
@@ -830,6 +844,22 @@ impl AccountsService for DefaultAccountsService {
             provider.account_facts_changed(provider_ids).await;
         }
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        if !credit_refreshes.is_empty() {
+            tokio::spawn(async move {
+                for (provider, account_id) in credit_refreshes {
+                    if let Err(error) = provider
+                        .quota(ProviderQuotaRequest {
+                            account_id,
+                            refresh: true,
+                            rolling_usage: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(quota_error = ?error.kind(), "credit policy quota observation failed");
+                    }
+                }
+            });
+        }
         Ok(result)
     }
 

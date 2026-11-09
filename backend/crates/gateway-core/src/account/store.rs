@@ -29,6 +29,12 @@ pub trait ProviderAccountStore: Send + Sync {
         provider: &ProviderKind,
     ) -> Result<Vec<ProviderAccount>, StoreError>;
 
+    async fn list_for_provider_accounts(
+        &self,
+        provider: &ProviderKind,
+        account_ids: &[ProviderAccountId],
+    ) -> Result<Vec<ProviderAccount>, StoreError>;
+
     /// 一次有界查询返回账号事实和 revision-fenced 明文 credential。
     async fn list_refresh_candidates(
         &self,

@@ -47,6 +47,7 @@ impl HttpDispatcher {
 }
 
 pub struct PluginEngine {
+    proxies: Option<Arc<dyn gateway_admin::ports::proxy::PluginProxyAccess>>,
     probes: Option<Arc<crate::models::AccountProbes>>,
     credentials: Option<Arc<dyn gateway_admin::ports::plugins::PluginCredentialService>>,
     services: Option<gateway_core::engine::middleware::service::Source>,
@@ -67,6 +68,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(cache: PathBuf, version: semver::Version, store: Arc<dyn PluginStore>) -> Self {
         Self {
+            proxies: None,
             probes: None,
             credentials: None,
             services: None,
@@ -130,6 +132,13 @@ impl PluginEngine {
         data: Arc<dyn gateway_admin::ports::plugins::PluginDataService>,
     ) -> Self {
         self.data = Some(data);
+        self
+    }
+    pub fn with_proxies(
+        mut self,
+        proxies: Arc<dyn gateway_admin::ports::proxy::PluginProxyAccess>,
+    ) -> Self {
+        self.proxies = Some(proxies);
         self
     }
     pub fn with_credentials(
@@ -465,7 +474,11 @@ impl PluginRuntime for PluginEngine {
         let access = PluginAccess::default();
         let failed_access = access.clone();
         let ended_access = access.clone();
-        let outbound = crate::outbound::Registry::new(self.outbound.clone(), access.cancellation());
+        let outbound = crate::outbound::Registry::new(
+            self.outbound.clone(),
+            access.cancellation(),
+            self.proxies.clone(),
+        );
         let services = crate::services::Registry::new(
             gateway_core::engine::middleware::service::Caller::new(
                 record.id.clone(),

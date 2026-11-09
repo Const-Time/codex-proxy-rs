@@ -1,14 +1,33 @@
 <script setup lang="ts">
-import type { AccountQuotaCredits } from '@/api'
+import type { Account } from '@/api'
 import { computed } from 'vue'
+import { batchUpdateAccounts, getAccountDetail } from '@/api'
+import BaseSwitch from '@/components/base/BaseSwitch.vue'
+import { useAsyncAction } from '@/composables/useAsyncAction'
 
 const props = defineProps<{
-  credits: AccountQuotaCredits | null
+  account: Account
 }>()
+
+const emit = defineEmits<{ accountUpdated: [account: Account] }>()
+const saveAction = useAsyncAction()
+async function toggle(enabled: boolean) {
+  const accountId = props.account.id
+  await saveAction.run(async () => {
+    try {
+      await batchUpdateAccounts({ accountIds: [accountId], autoUseQuotaCredits: enabled })
+    }
+    finally {
+      const { account } = await getAccountDetail({ accountId })
+      if (props.account.id === accountId)
+        emit('accountUpdated', account)
+    }
+  })
+}
 
 const integerFormatter = new Intl.NumberFormat('zh-CN')
 const balanceDisplay = computed(() => {
-  const balance = props.credits?.balance?.trim()
+  const balance = props.account.quota.credits?.balance?.trim()
   const decimal = balance?.match(/^(-?)(\d+)(?:\.(\d+))?$/)
   if (!decimal)
     return null
@@ -18,15 +37,15 @@ const balanceDisplay = computed(() => {
   return fraction ? `${grouped}.${fraction}` : grouped
 })
 const value = computed(() => {
-  if (props.credits?.unlimited)
+  if (props.account.quota.credits?.unlimited)
     return '无限'
   if (balanceDisplay.value !== null)
     return balanceDisplay.value
-  if (props.credits && !props.credits.hasCredits)
+  if (props.account.quota.credits && !props.account.quota.credits.hasCredits)
     return '暂无可用点数'
   return '未提供余额'
 })
-const hasBalance = computed(() => !props.credits?.unlimited && balanceDisplay.value !== null)
+const hasBalance = computed(() => !props.account.quota.credits?.unlimited && balanceDisplay.value !== null)
 </script>
 
 <template>
@@ -41,5 +60,16 @@ const hasBalance = computed(() => !props.credits?.unlimited && balanceDisplay.va
       </strong>
       <span v-if="hasBalance" class="shrink-0 text-cp-xs text-cp-text-tertiary">点</span>
     </span>
+    <div class="flex w-full items-center justify-between gap-4 border-t border-cp-border-secondary pt-3 mt-2">
+      <div>
+        <div class="text-cp-sm text-cp-text">
+          自动使用额度点数
+        </div>
+        <p class="m-0 mt-1 text-cp-xs text-cp-text-secondary">
+          套餐额度耗尽后允许使用点数，默认关闭。
+        </p>
+      </div>
+      <BaseSwitch :model-value="account.autoUseQuotaCredits" :disabled="saveAction.loading.value" label="自动使用额度点数" :show-label="false" @update:model-value="toggle" />
+    </div>
   </div>
 </template>
