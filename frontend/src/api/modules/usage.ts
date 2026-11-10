@@ -111,7 +111,12 @@ export interface UsageListRecord {
   userAgent: string | null
 }
 
+export type UsageErrorOrigin = 'proxy' | 'upstream' | 'connection' | 'unknown'
+
 export interface UsageRecord {
+  errorOrigin: UsageErrorOrigin
+  errorCode: string | null
+  errorKind: string | null
   routingGroupNamesSnapshot: string[]
   id: string
   requestId: string
@@ -184,7 +189,7 @@ export interface UsageAttempt {
   transport: string
   sendState: string
   outcome: string
-  downstreamCommitted: boolean
+  downstreamCommitted: boolean | null
   statusCode: number | null
   providerErrorCode: string | null
   failureClass: string | null
@@ -271,6 +276,7 @@ export interface OpsErrorMetadata {
 }
 
 export interface OpsError {
+  errorOrigin: UsageErrorOrigin
   userId: string | null
   userEmail: string | null
   username: string | null

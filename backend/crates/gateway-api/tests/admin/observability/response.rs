@@ -462,7 +462,7 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
                 upstream_transport: Some("http_sse".to_owned()),
                 upstream_send_state: Some("sent".to_owned()),
                 outcome: gateway_admin::model::observability::RequestOutcome::Failed,
-                downstream_committed: false,
+                downstream_committed: Some(false),
                 status_code: Some(429),
                 provider_error_code: Some("rate_limit".to_owned()),
                 failure_kind: Some("rate_limited".to_owned()),
@@ -499,6 +499,10 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
         .await
         .expect("usage detail body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("usage detail JSON");
+    assert_eq!(value["data"]["errorOrigin"], "unknown");
+    assert!(value["data"]["errorCode"].is_null());
+    assert!(value["data"]["errorKind"].is_null());
+    assert_eq!(value["data"]["attempts"][0]["downstreamCommitted"], false);
     assert_eq!(
         serde_json::json!({
             "accountId": value["data"]["accountId"],
@@ -690,6 +694,7 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
             "clientIp": value["data"]["items"][0]["clientIp"],
             "userAgent": value["data"]["items"][0]["userAgent"],
             "providerErrorCode": value["data"]["items"][0]["providerErrorCode"],
+            "errorOrigin": value["data"]["items"][0]["errorOrigin"],
             "upstreamSendState": value["data"]["items"][0]["upstreamSendState"],
             "rawUpstreamError": value["data"]["items"][0]["rawUpstreamError"],
             "continuationUnavailableReason": value["data"]["items"][0]["metadata"]["continuationUnavailableReason"],
@@ -709,6 +714,7 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
             "clientIp": "203.0.113.8",
             "userAgent": "codex-cli/0.144.0",
             "providerErrorCode": "upstream",
+            "errorOrigin": "upstream",
             "upstreamSendState": "sent",
             "rawUpstreamError": "{\"error\":{\"code\":\"upstream\",\"message\":\"raw upstream marker\"}}",
             "continuationUnavailableReason": "reused_connection_lost",
@@ -796,6 +802,7 @@ fn usage_record_with_account(
     use gateway_admin::model::observability::{RequestOutcome, UsageRecord};
 
     UsageRecord {
+        error_evidence: Default::default(),
         id: id.to_owned(),
         client_api_key_ref: "key_detail".to_owned(),
         config_revision: 1,

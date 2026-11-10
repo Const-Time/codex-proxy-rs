@@ -664,9 +664,40 @@ pub struct UsageListRecord {
     pub started_at: DateTime<Utc>,
 }
 
+/// 根据已记录事实推导的错误位置，不表示责任归属
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageErrorOrigin {
+    Proxy,
+    Upstream,
+    Connection,
+    Unknown,
+}
+
+impl UsageErrorOrigin {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Upstream => "upstream",
+            Self::Connection => "connection",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// 从已保存上游响应提取的诊断证据；不保留原始响应或改变执行结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageErrorEvidence {
+    pub has_upstream_error: bool,
+    pub websocket_close_code: Option<u16>,
+    pub continuation_reason: Option<String>,
+    pub connection_exit_reason: Option<String>,
+}
+
 /// 一次完整模型请求的公共观测记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
+    pub error_evidence: UsageErrorEvidence,
     pub id: String,
     pub client_api_key_ref: String,
     pub config_revision: u64,
@@ -769,7 +800,8 @@ pub struct UsageAttempt {
     pub upstream_transport: Option<String>,
     pub upstream_send_state: Option<String>,
     pub outcome: RequestOutcome,
-    pub downstream_committed: bool,
+    /// 未记录尝试交付边界时保持未知，不以 false 代替
+    pub downstream_committed: Option<bool>,
     pub status_code: Option<u16>,
     pub provider_error_code: Option<String>,
     pub failure_kind: Option<String>,

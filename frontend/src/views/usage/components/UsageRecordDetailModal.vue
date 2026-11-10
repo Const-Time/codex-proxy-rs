@@ -13,6 +13,7 @@ import { chartTooltipStyle } from '@/components/charts/tooltip'
 import { useChartPalette } from '@/composables/useChartPalette'
 import { displayValue, fieldLabelClass, fieldValueBaseClass, fieldValueClass } from '../utils/detail'
 import { formatDuration } from '../utils/format'
+import { deliveryStateText, usageDisplayOutcome } from '../utils/opsErrorPresentation'
 import {
   usageAccountText,
   usageBilling,
@@ -31,6 +32,7 @@ import { serviceTierLabel } from '../utils/serviceTier'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
+import UsageResponseDiagnosis from './UsageResponseDiagnosis.vue'
 import UsageStatusCodeBadge from './UsageStatusCodeBadge.vue'
 import UsageTurnStateCell from './UsageTurnStateCell.vue'
 
@@ -62,6 +64,7 @@ const finalAttemptIndex = computed(() => {
   return last?.attemptIndex ?? props.record?.attemptCount
 })
 const overviewItems = computed(() => [
+  { label: '请求结果', value: props.record ? attemptOutcomeText(usageDisplayOutcome(props.record.logicalOutcome, props.record.errorCode, props.record.errorKind)) : '—' },
   { label: '端点', value: props.record?.route, mono: true },
   { label: '客户端传输', value: usageTransportType(props.record?.clientTransport), mono: true },
   { label: '上游传输', value: usageTransportType(props.record?.upstreamTransport), mono: true },
@@ -116,6 +119,7 @@ interface AttemptRow {
   id: string
   attemptIndex: number
   outcome: string
+  delivery: string
   provider: string
   model: string | null
   transport: string
@@ -128,6 +132,7 @@ interface AttemptRow {
 const attemptColumns = defineTableColumns<AttemptRow>([
   { key: 'attemptIndex', label: '序号', kind: 'index' },
   { key: 'outcome', label: '结果', kind: 'status', size: 'sm' },
+  { key: 'delivery', label: '交付状态', kind: 'meta', size: 'md' },
   { key: 'provider', label: '平台', kind: 'meta', size: 'sm' },
   { key: 'model', label: '模型', kind: 'mono', size: 'lg' },
   { key: 'transport', label: '上游传输', kind: 'status', size: 'md' },
@@ -140,7 +145,8 @@ const attemptRows = computed<AttemptRow[]>(() =>
   (props.record?.attempts ?? []).map(attempt => ({
     id: attempt.id,
     attemptIndex: attempt.attemptIndex,
-    outcome: attempt.outcome,
+    outcome: usageDisplayOutcome(attempt.outcome, attempt.providerErrorCode, attempt.failureClass),
+    delivery: deliveryStateText(attempt.downstreamCommitted),
     provider: attempt.provider,
     model: attempt.model,
     transport: attempt.transport,
@@ -297,6 +303,7 @@ const tokenDonutOption = computed<EChartsOption>(() => {
     size="xl"
   >
     <div v-if="record" class="grid min-w-0 gap-3">
+      <UsageResponseDiagnosis :error-origin="record.errorOrigin" :client-status="record.clientStatusCode" :upstream-status="record.upstreamStatusCode" :client-transport="record.clientTransport" :upstream-transport="record.upstreamTransport" :failed="['failed', 'incomplete'].includes(record.logicalOutcome)" />
       <section :class="panelClass">
         <dl
           class="grid min-w-0 grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4 lg:grid-cols-[minmax(0,2fr)_100px_minmax(0,1fr)_180px]"

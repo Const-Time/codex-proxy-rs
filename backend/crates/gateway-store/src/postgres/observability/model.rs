@@ -563,6 +563,7 @@ pub struct UsageListRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
+    pub error_evidence: gateway_admin::model::observability::UsageErrorEvidence,
     pub billing_snapshot_json: Option<serde_json::Value>,
     pub id: String,
     pub client_api_key_ref: String,
@@ -665,7 +666,7 @@ pub struct UsageAttemptObservation {
     pub upstream_transport: Option<String>,
     pub upstream_send_state: Option<String>,
     pub outcome: String,
-    pub downstream_committed: bool,
+    pub downstream_committed: Option<bool>,
     pub status_code: Option<u16>,
     pub provider_error_code: Option<String>,
     pub failure_kind: Option<String>,

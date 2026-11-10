@@ -605,6 +605,7 @@ pub(crate) fn admin_usage_record(
     };
     let billing = restore_billing_snapshot(billing, record.billing_snapshot_json.as_ref());
     Ok(admin_observability::UsageRecord {
+        error_evidence: record.error_evidence,
         id: record.id,
         client_api_key_ref: record.client_api_key_ref,
         config_revision: record.config_revision,
@@ -933,6 +934,11 @@ pub(crate) fn usage_list_record_from_row(
 
 pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<UsageRecord> {
     Ok(UsageRecord {
+        error_evidence: admin_observability::UsageErrorEvidence::from_recorded(
+            get::<Option<String>>(row, "raw_upstream_error")?.as_deref(),
+            get(row, "continuation_unavailable_reason")?,
+            get(row, "upstream_connection_exit_reason")?,
+        ),
         billing_snapshot_json: get(row, "billing_snapshot_json")?,
         id: get(row, "id")?,
         client_api_key_ref: get(row, "client_api_key_ref")?,

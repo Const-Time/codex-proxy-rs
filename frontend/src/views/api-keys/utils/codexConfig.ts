@@ -33,6 +33,7 @@ experimental_bearer_token = ${JSON.stringify(input.apiKey)}
 X-OpenAI-Actor-Authorization = "proxy-managed"
 
 [features]
+api_key_model_discovery = true
 fast_mode = true
 image_generation = true
 goals = true`

@@ -1,3 +1,5 @@
+mod errors;
+
 use std::{
     str::FromStr as _,
     sync::{

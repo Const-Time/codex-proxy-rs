@@ -625,6 +625,19 @@ async fn ops_should_include_incomplete_upstream_errors() {
         })
         .await
         .expect("incomplete request must be available in admin error troubleshooting");
+    let detail = admin_observability_store(&database.pool)
+        .usage_record_detail("req_observe_failed", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.request.error_origin(),
+        admin_observability::UsageErrorOrigin::Upstream
+    );
+    assert!(detail.request.error_evidence.has_upstream_error);
+    assert_eq!(
+        detail.attempts.last().unwrap().downstream_committed,
+        Some(true)
+    );
     database.close().await;
 
     assert_eq!(page.total, 1);
@@ -635,6 +648,10 @@ async fn ops_should_include_incomplete_upstream_errors() {
     assert_eq!(error.upstream_status_code, Some(400));
     assert_eq!(error.client_status_code, None);
     assert_eq!(error.raw_upstream_error.as_deref(), Some(raw_error));
+    assert_eq!(
+        error.error_origin(),
+        admin_observability::UsageErrorOrigin::Upstream
+    );
 }
 
 #[tokio::test]

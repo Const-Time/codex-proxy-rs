@@ -127,6 +127,9 @@ pub struct UsageListRecordView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageRecordView {
+    pub error_origin: &'static str,
+    pub error_code: Option<String>,
+    pub error_kind: Option<String>,
     pub requested_service_tier: Option<String>,
     pub upstream_service_tier: Option<String>,
     pub id: String,
@@ -245,7 +248,7 @@ pub struct UsageAttemptView {
     pub transport: String,
     pub send_state: String,
     pub outcome: String,
-    pub downstream_committed: bool,
+    pub downstream_committed: Option<bool>,
     pub status_code: Option<u16>,
     pub provider_error_code: Option<String>,
     pub failure_class: Option<String>,
@@ -772,6 +775,7 @@ pub struct DiagnosticsView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsErrorView {
+    pub error_origin: &'static str,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub username: Option<String>,

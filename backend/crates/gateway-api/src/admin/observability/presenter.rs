@@ -380,6 +380,9 @@ pub(crate) fn usage_record_view(record: domain::UsageRecord) -> UsageRecordView 
         .or_else(|| record.requested_model_id.clone());
     let metadata = provider_metadata_fields(record.provider_metadata_json.as_deref());
     UsageRecordView {
+        error_origin: record.error_origin().as_str(),
+        error_code: record.provider_error_code.clone(),
+        error_kind: record.error_kind.clone(),
         requested_service_tier: metadata
             .get("requestedServiceTier")
             .and_then(Value::as_str)
@@ -587,6 +590,7 @@ pub(crate) fn ops_error_view(error: domain::OpsError) -> OpsErrorView {
         .clone()
         .or_else(|| error.requested_model_id.clone());
     OpsErrorView {
+        error_origin: error.error_origin().as_str(),
         user_id: error.user_id,
         user_email: error.user_email,
         username: error.username,

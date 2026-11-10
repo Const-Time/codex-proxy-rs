@@ -9,6 +9,7 @@ import { entryRejected, failureClassText } from '../utils/opsErrorPresentation'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
+import UsageResponseDiagnosis from './UsageResponseDiagnosis.vue'
 
 interface DetailField {
   label: string
@@ -127,12 +128,13 @@ function visibleFields(items: DetailField[]) {
   <BaseModal
     v-model="open"
     title="错误明细"
-    :description="record && entryRejected(record) ? '入口拒绝 · 未调用上游' : '上游错误与请求上下文'"
+    :description="record && entryRejected(record) ? '入口拒绝 · 未调用上游' : '错误来源与请求上下文'"
     tone="danger"
     size="xl"
   >
     <template v-if="record">
       <RequestDiagnosticsPanel v-if="!personal && open && record.requestId && record.metadata.component !== 'request_entry'" class="mb-3" :request-id="record.requestId" :metadata="record.metadata" />
+      <UsageResponseDiagnosis class="mb-3" :error-origin="record.errorOrigin" :client-status="record.clientStatusCode" :upstream-status="record.upstreamStatusCode" :client-transport="record.clientTransport" :upstream-transport="record.transport" failed />
       <section :class="panelClass">
         <h3 :class="panelTitleClass">
           错误

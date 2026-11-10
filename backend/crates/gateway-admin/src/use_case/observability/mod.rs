@@ -36,6 +36,8 @@ use crate::{
 
 use super::{map_provider_error, map_store_error};
 
+mod errors;
+
 const HEALTH_TIMELINE_SLOT_MINUTES: i64 = 15;
 const HEALTH_TIMELINE_SLOTS: i64 = 24 * 4;
 const HEALTH_TIMELINE_MIN_SAMPLE_SIZE: u64 = 10;

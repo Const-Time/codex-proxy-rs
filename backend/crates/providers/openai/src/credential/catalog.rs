@@ -1,4 +1,4 @@
-//! Codex 账号 entitlement 的进程内快照，以及套餐级 Redis 模型目录 cache。
+//! Codex 账号 entitlement 的进程内快照，以及账号级 Redis 模型目录 cache。
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt;
@@ -28,41 +28,40 @@ use crate::transport::profile::{CodexWireProfile, CodexWireProfileState};
 use crate::transport::{CodexBackendClient, CodexCatalogModel, CodexRequestContext};
 
 const MAX_RESPONSE_ETAG_BYTES: usize = 256;
-const PLAN_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-const MAX_CATALOG_FETCH_ATTEMPTS: usize = 3;
-const MAX_PLAN_CATALOG_MODELS: usize = 2_048;
+const ACCOUNT_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_ACCOUNT_CATALOG_MODELS: usize = 2_048;
 const MAX_CLIENT_CATALOGS: usize = 32;
 // 保持原先 32 份、每份 1 MiB 的原生正文缓存预算，不把缓存容量变成上游目录合同
 const MAX_CLIENT_CATALOG_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_CONCURRENT_API_CATALOGS: usize = 4;
+const MAX_CONCURRENT_CATALOGS: usize = 4;
 const CLIENT_CATALOG_ERROR_TTL: Duration = Duration::from_secs(5);
 
-/// OpenAI 以套餐划分的模型目录作用域。
+/// OpenAI 按账号、凭据版本与套餐隔离的模型目录作用域。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CodexCatalogScope(ProviderCatalogScope);
 
 impl CodexCatalogScope {
     /// 从账号已验证的套餐事实构造目录作用域。
     pub fn for_account(account: &ProviderAccount) -> Result<Self, CodexCredentialCatalogError> {
-        if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY {
-            return ProviderCatalogScope::new(format!(
-                "account:{}:{}",
-                account.id(),
-                account.revision().get()
-            ))
-            .map(Self)
-            .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData);
-        }
-        let plan = account
-            .plan_type()
-            .map(str::trim)
-            .filter(|plan| !plan.is_empty())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_else(|| "unknown".to_owned());
-        ProviderCatalogScope::new(format!("plan:{plan}"))
-            .map(Self)
-            .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(account.id().as_str());
+        digest.update([0]);
+        digest.update(
+            account
+                .plan_type()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase(),
+        );
+        ProviderCatalogScope::new(format!(
+            "account:{}:{}",
+            hex::encode(digest.finalize()),
+            account.revision().get()
+        ))
+        .map(Self)
+        .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)
     }
 
     /// 返回稳定的 Provider-owned 作用域。
@@ -72,15 +71,15 @@ impl CodexCatalogScope {
     }
 }
 
-/// Redis TTL cache 中一条可重建的套餐模型目录。
+/// Redis TTL cache 中一条可重建的账号模型目录。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CodexPlanCatalog {
+pub struct CodexAccountCatalog {
     scope: CodexCatalogScope,
     observed_at: DateTime<Utc>,
     models: Vec<String>,
 }
 
-impl CodexPlanCatalog {
+impl CodexAccountCatalog {
     #[must_use]
     pub const fn new(
         scope: CodexCatalogScope,
@@ -245,12 +244,12 @@ struct ClientCatalogEntry {
 impl ClientCatalogEntry {
     fn is_fresh(&self) -> bool {
         let Some(value) = self.value.get() else {
-            return self.created_at.elapsed() < PLAN_CATALOG_CACHE_TTL;
+            return self.created_at.elapsed() < ACCOUNT_CATALOG_CACHE_TTL;
         };
         let ttl = if value.result.is_err() {
             CLIENT_CATALOG_ERROR_TTL
         } else {
-            PLAN_CATALOG_CACHE_TTL
+            ACCOUNT_CATALOG_CACHE_TTL
         };
         value.completed_at.elapsed() < ttl
     }
@@ -279,7 +278,7 @@ pub struct CodexCredentialCatalogService {
     profile: CodexWireProfileState,
     http: reqwest::Client,
     base_url: String,
-    plan_catalog_cache: Arc<dyn ProviderCatalogCachePort>,
+    account_catalog_cache: Arc<dyn ProviderCatalogCachePort>,
     cache: Arc<RwLock<CatalogCacheState>>,
     client_catalogs: Arc<Mutex<Vec<ClientCatalogEntry>>>,
     etags: Arc<Mutex<CatalogEtagState>>,
@@ -292,14 +291,14 @@ impl CodexCredentialCatalogService {
         profile: CodexWireProfileState,
         http: reqwest::Client,
         base_url: String,
-        plan_catalog_cache: Arc<dyn ProviderCatalogCachePort>,
+        account_catalog_cache: Arc<dyn ProviderCatalogCachePort>,
     ) -> Self {
         Self {
             repository,
             profile,
             http,
             base_url,
-            plan_catalog_cache,
+            account_catalog_cache,
             cache: Arc::new(RwLock::new(CatalogCacheState::default())),
             client_catalogs: Arc::new(Mutex::new(Vec::new())),
             etags: Arc::new(Mutex::new(CatalogEtagState::default())),
@@ -307,8 +306,8 @@ impl CodexCredentialCatalogService {
         }
     }
 
-    /// 原生客户端目录使用 Key 范围内排序稳定的首个成功账号，不复用套餐级画像。
-    /// 同一账号/凭据版本/客户端版本的并发读取合并；原生正文仅保留在有界进程缓存。
+    /// 合并 Key 范围内各账号的模型目录；同一模型优先保留 OAuth 原生对象。
+    /// 两类账号各限并发 4，共享 15 秒预算；单账号查询合并并复用有界缓存。
     pub async fn client_model_catalog(
         &self,
         scope: &FrozenAccountScope,
@@ -319,94 +318,148 @@ impl CodexCredentialCatalogService {
         accounts
             .retain(|account| scope.allows(account.id()) && eligible_catalog_account(account, now));
         accounts.sort_by(|left, right| left.id().cmp(right.id()));
-        let mut adapted = BTreeMap::new();
-        let (api_accounts, mut accounts): (Vec<_>, Vec<_>) =
-            accounts.into_iter().partition(|account| {
+        let (api, oauth): (Vec<_>, Vec<_>) =
+            accounts.into_iter().enumerate().partition(|(_, account)| {
                 account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY
             });
-        let mut catalogs = stream::iter(api_accounts)
-            .map(|account| async move {
-                let result = self.cached_or_refresh_account_catalog(&account).await;
-                (account, result)
-            })
-            .buffer_unordered(MAX_CONCURRENT_API_CATALOGS);
-        // 所有 API 账号共享等待预算；慢上游不能逐个耗尽超时或阻塞 OAuth 目录。
+        let read = |(index, account): (usize, ProviderAccount)| async move {
+            let result = self
+                .cached_client_account_catalog(&account, client_version)
+                .await;
+            (index, account, result)
+        };
+        let mut catalogs = stream::select(
+            stream::iter(oauth)
+                .map(read)
+                .buffer_unordered(MAX_CONCURRENT_CATALOGS),
+            stream::iter(api)
+                .map(read)
+                .buffer_unordered(MAX_CONCURRENT_CATALOGS),
+        );
         let deadline = Instant::now() + MODEL_CATALOG_TIMEOUT;
-        while let Ok(Some((account, result))) =
-            tokio::time::timeout_at(deadline, catalogs.next()).await
-        {
-            if let Ok(catalog) = result {
-                for id in catalog.models() {
-                    if account.model_access().allows(id) {
-                        let model = gateway_core::routing::UpstreamModelId::new(id.clone())
-                            .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?;
-                        adapted
-                            .entry(id.clone())
-                            .or_insert(ProviderModelDescriptor {
-                                model,
-                                content: gateway_core::routing::ProviderModelContent::Adapted(
-                                    gateway_core::routing::ModelPresentation::new(
-                                        Some(id.clone()),
-                                        None,
-                                    )
-                                    .with_agent_tools(true, false),
-                                ),
-                            });
+        let mut selected = BTreeMap::new();
+        let mut available = false;
+        let mut last_error = CodexCredentialCatalogError::NoEligibleCredential;
+        loop {
+            let (index, account, models) =
+                match tokio::time::timeout_at(deadline, catalogs.next()).await {
+                    Ok(Some((index, account, Ok(models)))) => (index, account, models),
+                    Ok(Some((_, _, Err(error)))) => {
+                        last_error = error;
+                        continue;
                     }
+                    Ok(None) => break,
+                    Err(_) => {
+                        last_error = CodexCredentialCatalogError::Upstream {
+                            detail: "model catalog timed out".to_owned(),
+                        };
+                        break;
+                    }
+                };
+            available = true;
+            let api = account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY;
+            for (position, model) in models.into_iter().enumerate() {
+                if !account.model_access().allows(model.model.as_str())
+                    || !scope.allows_model(account.id(), model.model.as_str())
+                {
+                    continue;
+                }
+                let order = (api, index, position);
+                match selected.entry(model.model.clone()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert((order, model));
+                    }
+                    Entry::Occupied(mut entry) if order < entry.get().0 => {
+                        entry.insert((order, model));
+                    }
+                    Entry::Occupied(_) => {}
                 }
             }
         }
-        drop(catalogs);
-        accounts.retain(|account| {
-            account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_OAUTH
-        });
-        let mut last_error = CodexCredentialCatalogError::NoEligibleCredential;
-        for account in accounts.iter().take(MAX_CATALOG_FETCH_ATTEMPTS) {
-            let profile = self.profile.snapshot();
-            let key = ClientCatalogKey {
-                account_id: account.id().clone(),
-                revision: account.revision(),
-                plan: account.plan_type().map(str::to_owned),
-                upstream_account_id: account.upstream_account_id().map(str::to_owned),
-                client_version: client_version.to_owned(),
-                profile: profile.clone(),
-            };
-            let value = {
-                let mut cache = self
-                    .client_catalogs
-                    .lock()
-                    .map_err(|_| CodexCredentialCatalogError::Cache)?;
-                cache.retain(ClientCatalogEntry::is_fresh);
-                if let Some(entry) = cache.iter().find(|entry| entry.key == key) {
-                    Arc::clone(&entry.value)
-                } else {
-                    // 不驱逐正在读取的目录，避免并发请求绕过缓存容量限制制造额外出站。
-                    if cache.len() >= MAX_CLIENT_CATALOGS {
-                        let Some(index) = cache.iter().position(|entry| entry.value.initialized())
-                        else {
-                            return Err(CodexCredentialCatalogError::Cache);
-                        };
-                        cache.remove(index);
-                    }
-                    let value = Arc::new(OnceCell::new());
-                    cache.push(ClientCatalogEntry {
-                        key,
-                        created_at: Instant::now(),
-                        value: Arc::clone(&value),
-                    });
-                    value
+        if !available {
+            return Err(last_error);
+        }
+        let mut models: Vec<_> = selected.into_values().collect();
+        models.sort_unstable_by_key(|(order, _)| *order);
+        Ok(models.into_iter().map(|(_, model)| model).collect())
+    }
+
+    async fn cached_client_account_catalog(
+        &self,
+        account: &ProviderAccount,
+        client_version: &str,
+    ) -> ClientCatalogResult {
+        let profile = self.profile.snapshot();
+        let key = ClientCatalogKey {
+            account_id: account.id().clone(),
+            revision: account.revision(),
+            plan: account.plan_type().map(str::to_owned),
+            upstream_account_id: account.upstream_account_id().map(str::to_owned),
+            client_version: client_version.to_owned(),
+            profile: profile.clone(),
+        };
+        let value = {
+            let mut cache = self
+                .client_catalogs
+                .lock()
+                .map_err(|_| CodexCredentialCatalogError::Cache)?;
+            cache.retain(ClientCatalogEntry::is_fresh);
+            if let Some(entry) = cache.iter().find(|entry| entry.key == key) {
+                Arc::clone(&entry.value)
+            } else {
+                // 不驱逐正在读取的目录，避免并发请求绕过缓存容量限制制造额外出站。
+                if cache.len() >= MAX_CLIENT_CATALOGS {
+                    let Some(index) = cache.iter().position(|entry| entry.value.initialized())
+                    else {
+                        return Err(CodexCredentialCatalogError::Cache);
+                    };
+                    cache.remove(index);
                 }
-            };
-            let result = value
-                .get_or_init(|| async {
-                    // 冻结画像，确保实际请求与缓存身份一致；不传递客户端 Bearer 给上游。
-                    let client = CodexBackendClient::new(
-                        self.http.clone(),
-                        self.base_url.clone(),
-                        CodexWireProfileState::new(profile),
-                    );
-                    let result = self
-                        .fetch_account_models(&client, account, Some(client_version))
+                let value = Arc::new(OnceCell::new());
+                cache.push(ClientCatalogEntry {
+                    key,
+                    created_at: Instant::now(),
+                    value: Arc::clone(&value),
+                });
+                value
+            }
+        };
+        let result = value
+            .get_or_init(|| async {
+                // 冻结画像，确保实际请求与缓存身份一致；不传递客户端 Bearer 给上游。
+                let client = CodexBackendClient::new(
+                    self.http.clone(),
+                    self.base_url.clone(),
+                    CodexWireProfileState::new(profile),
+                );
+                let result = if account.authentication_kind()
+                    == super::CODEX_AUTHENTICATION_KIND_API_KEY
+                {
+                    self.cached_or_refresh_account_catalog(account)
+                        .await
+                        .and_then(|catalog| {
+                            catalog
+                                .models()
+                                .iter()
+                                .map(|id| {
+                                    Ok(ProviderModelDescriptor {
+                                        model: UpstreamModelId::new(id.clone()).map_err(|_| {
+                                            CodexCredentialCatalogError::InvalidCredentialData
+                                        })?,
+                                        content:
+                                            gateway_core::routing::ProviderModelContent::Adapted(
+                                                gateway_core::routing::ModelPresentation::new(
+                                                    Some(id.clone()),
+                                                    None,
+                                                )
+                                                .with_agent_tools(true, false),
+                                            ),
+                                    })
+                                })
+                                .collect()
+                        })
+                } else {
+                    self.fetch_account_models(&client, account, Some(client_version))
                         .await
                         .map(|fetched| {
                             fetched
@@ -419,58 +472,40 @@ impl CodexCredentialCatalogService {
                                     ),
                                 })
                                 .collect()
-                        });
-                    CachedClientCatalog {
-                        completed_at: Instant::now(),
-                        result,
-                    }
-                })
-                .await;
-            // 完成中的 OnceCell 仍由并发读者持有；移出缓存只影响后续查询，不丢弃本次成功结果
-            let mut cache = self
-                .client_catalogs
-                .lock()
-                .map_err(|_| CodexCredentialCatalogError::Cache)?;
-            if result.native_bytes() > MAX_CLIENT_CATALOG_CACHE_BYTES {
-                cache.retain(|entry| !Arc::ptr_eq(&entry.value, &value));
-            } else {
-                let mut bytes: usize = cache
-                    .iter()
-                    .filter_map(|entry| entry.value.get())
-                    .map(CachedClientCatalog::native_bytes)
-                    .sum();
-                while bytes > MAX_CLIENT_CATALOG_CACHE_BYTES {
-                    let Some(index) = cache.iter().position(|entry| entry.value.initialized())
-                    else {
-                        break;
-                    };
-                    let entry = cache.remove(index);
-                    bytes -= entry
-                        .value
-                        .get()
-                        .map_or(0, CachedClientCatalog::native_bytes);
+                        })
+                };
+                CachedClientCatalog {
+                    completed_at: Instant::now(),
+                    result,
                 }
-            }
-            drop(cache);
-            match &result.result {
-                Ok(models) => {
-                    for model in models {
-                        adapted.remove(model.model.as_str());
-                    }
-                    return Ok(models
-                        .iter()
-                        .cloned()
-                        .chain(adapted.into_values())
-                        .collect());
-                }
-                Err(error) => last_error = error.clone(),
-            }
-        }
-        if adapted.is_empty() {
-            Err(last_error)
+            })
+            .await;
+        // 完成中的 OnceCell 仍由并发读者持有；移出缓存只影响后续查询，不丢弃本次成功结果
+        let mut cache = self
+            .client_catalogs
+            .lock()
+            .map_err(|_| CodexCredentialCatalogError::Cache)?;
+        if result.native_bytes() > MAX_CLIENT_CATALOG_CACHE_BYTES {
+            cache.retain(|entry| !Arc::ptr_eq(&entry.value, &value));
         } else {
-            Ok(adapted.into_values().collect())
+            let mut bytes: usize = cache
+                .iter()
+                .filter_map(|entry| entry.value.get())
+                .map(CachedClientCatalog::native_bytes)
+                .sum();
+            while bytes > MAX_CLIENT_CATALOG_CACHE_BYTES {
+                let Some(index) = cache.iter().position(|entry| entry.value.initialized()) else {
+                    break;
+                };
+                let entry = cache.remove(index);
+                bytes -= entry
+                    .value
+                    .get()
+                    .map_or(0, CachedClientCatalog::native_bytes);
+            }
         }
+        drop(cache);
+        result.result.clone()
     }
 
     #[must_use]
@@ -494,7 +529,7 @@ impl CodexCredentialCatalogService {
             .cloned())
     }
 
-    /// 读取账号当前已验证套餐的模型 entitlement；不触发网络。
+    /// 读取账号当前凭据的模型 entitlement；不触发网络。
     pub fn cached_account_models(
         &self,
         account: &ProviderAccount,
@@ -521,23 +556,23 @@ impl CodexCredentialCatalogService {
             .map(|models| models.iter().any(|candidate| candidate == model)))
     }
 
-    /// 优先读取套餐目录 cache；缺失时才用当前账号所属套餐的有限候选集实时填充。
+    /// 优先读取账号目录 cache；缺失时才用当前账号自身实时填充。
     pub async fn cached_or_refresh_account_catalog(
         &self,
         account: &ProviderAccount,
-    ) -> Result<CodexPlanCatalog, CodexCredentialCatalogError> {
+    ) -> Result<CodexAccountCatalog, CodexCredentialCatalogError> {
         let scope = CodexCatalogScope::for_account(account)?;
-        if let Some(catalog) = self.read_plan_catalog(&scope).await? {
+        if let Some(catalog) = self.read_cached_catalog(&scope).await? {
             return Ok(catalog);
         }
-        self.refresh_account_catalog(account.id()).await
+        self.fetch_and_cache_account_catalog(account).await
     }
 
-    /// 实时刷新指定账号所属套餐的模型集合，并覆盖可重建 Redis cache。
+    /// 实时刷新指定账号本身的模型集合，并覆盖可重建 Redis cache。
     pub async fn refresh_account_catalog(
         &self,
         account_id: &ProviderAccountId,
-    ) -> Result<CodexPlanCatalog, CodexCredentialCatalogError> {
+    ) -> Result<CodexAccountCatalog, CodexCredentialCatalogError> {
         let account = self
             .repository
             .store()
@@ -546,49 +581,31 @@ impl CodexCredentialCatalogService {
             .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?
             .filter(|account| account.provider().as_str() == "openai")
             .ok_or(CodexCredentialCatalogError::NoEligibleCredential)?;
-        let scope = CodexCatalogScope::for_account(&account)?;
-        let mut candidates =
-            match catalog_candidates_by_scope(self.repository.list_for_provider().await?) {
-                Ok(mut groups) => groups.remove(&scope).unwrap_or_default(),
-                // 全部账号都被调度列表过滤时按空候选处理，让下方目标账号补回继续生效。
-                Err(CodexCredentialCatalogError::NoEligibleCredential) => Vec::new(),
-                Err(error) => return Err(error),
-            };
-        // 常规调度列表不含停用账号；管理端按账号查询模型要对停用账号返回真实上游
-        // 结果，这里把不在候选里的目标账号本身补回，仍按优先顺序先试目标账号。
-        if !candidates
-            .iter()
-            .any(|candidate| candidate.id() == account_id)
-        {
-            candidates.push(account.clone());
-        }
-        if candidates.is_empty() {
-            return Err(CodexCredentialCatalogError::NoEligibleCredential);
-        }
-        candidates.sort_by(|left, right| {
-            let left_preferred = left.id() == account_id;
-            let right_preferred = right.id() == account_id;
-            right_preferred
-                .cmp(&left_preferred)
-                .then_with(|| left.id().cmp(right.id()))
-        });
+        self.fetch_and_cache_account_catalog(&account).await
+    }
+
+    async fn fetch_and_cache_account_catalog(
+        &self,
+        account: &ProviderAccount,
+    ) -> Result<CodexAccountCatalog, CodexCredentialCatalogError> {
+        let scope = CodexCatalogScope::for_account(account)?;
         let client = CodexBackendClient::new(
             self.http.clone(),
             self.base_url.clone(),
             self.profile.clone(),
         );
-        let fetched = self.fetch_scope_models(&client, candidates).await?;
-        let catalog = CodexPlanCatalog::new(scope, Utc::now(), model_ids(&fetched.models));
-        self.replace_plan_catalog(&catalog).await?;
+        let fetched = self.fetch_account_models(&client, account, None).await?;
+        let catalog = CodexAccountCatalog::new(scope, Utc::now(), model_ids(&fetched.models));
+        self.replace_account_catalog(&catalog).await?;
         Ok(catalog)
     }
 
-    /// 读取当前账号所属套餐的目录 cache，不触发上游请求。
+    /// 读取当前账号自身的目录 cache，不触发上游请求。
     pub async fn read_account_catalog(
         &self,
         account: &ProviderAccount,
-    ) -> Result<Option<CodexPlanCatalog>, CodexCredentialCatalogError> {
-        self.read_plan_catalog(&CodexCatalogScope::for_account(account)?)
+    ) -> Result<Option<CodexAccountCatalog>, CodexCredentialCatalogError> {
+        self.read_cached_catalog(&CodexCatalogScope::for_account(account)?)
             .await
     }
 
@@ -606,7 +623,8 @@ impl CodexCredentialCatalogService {
     async fn fetch_catalog(&self) -> Result<FetchedCatalog, CodexCredentialCatalogError> {
         let previous = self.cached()?;
         let accounts = self.repository.list_for_provider().await?;
-        let groups = catalog_candidates_by_scope(accounts)?;
+        let mut groups: Vec<_> = catalog_candidates_by_scope(accounts)?.into_iter().collect();
+        groups.sort_by(|(_, left), (_, right)| left.id().cmp(right.id()));
         let client = CodexBackendClient::new(
             self.http.clone(),
             self.base_url.clone(),
@@ -618,15 +636,19 @@ impl CodexCredentialCatalogService {
         let mut etags = Vec::new();
         let mut last_error = None;
         let mut fresh_scopes = 0;
-        for (scope, candidates) in groups {
-            let accounts = candidates
-                .iter()
-                .map(|account| account.id().clone())
-                .collect();
-            let fetched = match self.fetch_scope_models(&client, candidates).await {
+        let client = &client;
+        let mut catalogs = stream::iter(groups)
+            .map(|(scope, account)| async move {
+                let result = self.fetch_account_models(client, &account, None).await;
+                (scope, account, result)
+            })
+            .buffered(MAX_CONCURRENT_CATALOGS);
+        while let Some((scope, account, result)) = catalogs.next().await {
+            let accounts = BTreeSet::from([account.id().clone()]);
+            let fetched = match result {
                 Ok(fetched) => {
                     fresh_scopes += 1;
-                    self.replace_plan_catalog(&CodexPlanCatalog::new(
+                    self.replace_account_catalog(&CodexAccountCatalog::new(
                         scope.clone(),
                         Utc::now(),
                         model_ids(&fetched.models),
@@ -717,47 +739,32 @@ impl CodexCredentialCatalogService {
         })
     }
 
-    async fn fetch_scope_models(
+    async fn replace_account_catalog(
         &self,
-        client: &CodexBackendClient,
-        candidates: Vec<ProviderAccount>,
-    ) -> Result<FetchedAccountModels, CodexCredentialCatalogError> {
-        let mut last_error = None;
-        for account in candidates.into_iter().take(MAX_CATALOG_FETCH_ATTEMPTS) {
-            match self.fetch_account_models(client, &account, None).await {
-                Ok(fetched) => return Ok(fetched),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error.unwrap_or(CodexCredentialCatalogError::NoEligibleCredential))
-    }
-
-    async fn replace_plan_catalog(
-        &self,
-        catalog: &CodexPlanCatalog,
+        catalog: &CodexAccountCatalog,
     ) -> Result<(), CodexCredentialCatalogError> {
-        let key = self.plan_catalog_key(catalog.scope())?;
-        let document = encode_plan_catalog(catalog);
-        self.plan_catalog_cache
-            .replace(&key, &document, PLAN_CATALOG_CACHE_TTL)
+        let key = self.account_catalog_key(catalog.scope())?;
+        let document = encode_account_catalog(catalog);
+        self.account_catalog_cache
+            .replace(&key, &document, ACCOUNT_CATALOG_CACHE_TTL)
             .await
             .map_err(|_| CodexCredentialCatalogError::Cache)
     }
 
-    async fn read_plan_catalog(
+    async fn read_cached_catalog(
         &self,
         scope: &CodexCatalogScope,
-    ) -> Result<Option<CodexPlanCatalog>, CodexCredentialCatalogError> {
-        let key = self.plan_catalog_key(scope)?;
-        self.plan_catalog_cache
+    ) -> Result<Option<CodexAccountCatalog>, CodexCredentialCatalogError> {
+        let key = self.account_catalog_key(scope)?;
+        self.account_catalog_cache
             .read(&key)
             .await
             .map_err(|_| CodexCredentialCatalogError::Cache)?
-            .map(|document| decode_plan_catalog(scope, document))
+            .map(|document| decode_account_catalog(scope, document))
             .transpose()
     }
 
-    fn plan_catalog_key(
+    fn account_catalog_key(
         &self,
         scope: &CodexCatalogScope,
     ) -> Result<ProviderCatalogCacheKey, CodexCredentialCatalogError> {
@@ -870,7 +877,7 @@ impl CodexCredentialCatalogService {
         }
     }
 
-    /// 立即刷新所有套餐目录，但不接管 ETag daemon 已认领的刷新状态。
+    /// 立即刷新所有账号目录，但不接管 ETag daemon 已认领的刷新状态。
     ///
     /// 周期 worker 与 ETag daemon 可以同时请求目录；只有后者可以完成
     /// `inflight` ETag 的状态转换，避免周期刷新错误地确认另一个请求的版本。
@@ -1008,18 +1015,15 @@ fn model_ids(models: &[CodexCatalogModel]) -> Vec<String> {
 
 fn catalog_candidates_by_scope(
     accounts: Vec<ProviderAccount>,
-) -> Result<BTreeMap<CodexCatalogScope, Vec<ProviderAccount>>, CodexCredentialCatalogError> {
+) -> Result<BTreeMap<CodexCatalogScope, ProviderAccount>, CodexCredentialCatalogError> {
     let now = SystemTime::now();
-    let mut groups = BTreeMap::<CodexCatalogScope, Vec<ProviderAccount>>::new();
+    let mut groups = BTreeMap::<CodexCatalogScope, ProviderAccount>::new();
     for account in accounts
         .into_iter()
         .filter(|account| eligible_catalog_account(account, now))
     {
         let scope = CodexCatalogScope::for_account(&account)?;
-        groups.entry(scope).or_default().push(account);
-    }
-    for candidates in groups.values_mut() {
-        candidates.sort_by(|left, right| left.id().cmp(right.id()));
+        groups.insert(scope, account);
     }
     if groups.is_empty() {
         return Err(CodexCredentialCatalogError::NoEligibleCredential);
@@ -1027,7 +1031,7 @@ fn catalog_candidates_by_scope(
     Ok(groups)
 }
 
-fn encode_plan_catalog(catalog: &CodexPlanCatalog) -> OpaqueProviderData {
+fn encode_account_catalog(catalog: &CodexAccountCatalog) -> OpaqueProviderData {
     let mut document = serde_json::Map::new();
     document.insert("version".to_owned(), serde_json::Value::from(1));
     document.insert(
@@ -1052,10 +1056,10 @@ fn encode_plan_catalog(catalog: &CodexPlanCatalog) -> OpaqueProviderData {
     OpaqueProviderData::new(document)
 }
 
-fn decode_plan_catalog(
+fn decode_account_catalog(
     scope: &CodexCatalogScope,
     document: OpaqueProviderData,
-) -> Result<CodexPlanCatalog, CodexCredentialCatalogError> {
+) -> Result<CodexAccountCatalog, CodexCredentialCatalogError> {
     let mut fields = document.into_inner();
     if fields.remove("version").and_then(|value| value.as_u64()) != Some(1) {
         return Err(CodexCredentialCatalogError::Cache);
@@ -1077,7 +1081,7 @@ fn decode_plan_catalog(
     let values = fields
         .remove("models")
         .and_then(|value| value.as_array().cloned())
-        .filter(|models| !models.is_empty() && models.len() <= MAX_PLAN_CATALOG_MODELS)
+        .filter(|models| !models.is_empty() && models.len() <= MAX_ACCOUNT_CATALOG_MODELS)
         .ok_or(CodexCredentialCatalogError::Cache)?;
     if !fields.is_empty() {
         return Err(CodexCredentialCatalogError::Cache);
@@ -1095,7 +1099,7 @@ fn decode_plan_catalog(
         }
         models.push(model.as_str().to_owned());
     }
-    Ok(CodexPlanCatalog::new(scope.clone(), observed_at, models))
+    Ok(CodexAccountCatalog::new(scope.clone(), observed_at, models))
 }
 
 fn same_catalog(

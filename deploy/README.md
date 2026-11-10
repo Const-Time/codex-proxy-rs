@@ -188,6 +188,7 @@ experimental_bearer_token = "<client-api-key>"
 X-OpenAI-Actor-Authorization = "proxy-managed"
 
 [features]
+api_key_model_discovery = true
 fast_mode = true
 image_generation = true
 goals = true
@@ -312,7 +313,7 @@ HTTP Responses、Images 和 Search 在鉴权后缓冲正文。`api.ingress` 默�
 
 PostgreSQL 是账号、Client Key、运行设置、请求记录与审计的权威存储；账号 credential 当前按
 Provider schema 以明文 JSON 保存于 PostgreSQL。Redis 只保存可重建、可过期的协调状态，例如
-会话亲和、lease、cooldown、OAuth pending flow 与套餐模型目录 cache。
+会话亲和、lease、cooldown、OAuth pending flow 与 Provider 模型目录 cache（OpenAI 按账号隔离）。
 
 OpenAI 主动额度重置卡及其消费结果由上游持有，不写入 PostgreSQL/Redis，也不属于本地备份内容；
 管理端只在当前浏览器会话中保留最近一次查询结果。

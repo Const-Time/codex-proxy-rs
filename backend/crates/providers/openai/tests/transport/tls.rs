@@ -26,25 +26,17 @@ fn http_client_hello_should_match_official_native_tls_transport() {
             .enable_all()
             .build()
             .unwrap();
-        let hello = runtime.block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!(
-                "https://localhost:{}/",
-                listener.local_addr().unwrap().port()
-            );
-            let client = provider_openai::transport::build_reqwest_client().unwrap();
-            let (hello, response) = timeout(Duration::from_secs(10), async {
-                tokio::join!(read_client_hello(listener), client.get(url).send())
-            })
-            .await
-            .expect("HTTP ClientHello within timeout");
-            assert!(
-                response.is_err(),
-                "capture endpoint rejects TLS after ClientHello"
-            );
-            hello
+        runtime.block_on(async {
+            let hello =
+                capture_http_hello(provider_openai::transport::build_reqwest_client().unwrap())
+                    .await;
+            #[cfg(target_os = "linux")]
+            let expected = official_http_hello();
+            #[cfg(not(target_os = "linux"))]
+            let expected =
+                capture_http_hello(reqwest::Client::builder().no_proxy().build().unwrap()).await;
+            assert_eq!(hello, expected);
         });
-        assert_eq!(hello, official_http_hello());
         println!("\n{CASE_COMPLETED}");
         return;
     }
@@ -78,6 +70,24 @@ fn http_client_hello_should_match_official_native_tls_transport() {
     );
 }
 
+async fn capture_http_hello(client: reqwest::Client) -> ClientHello {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "https://localhost:{}/",
+        listener.local_addr().unwrap().port()
+    );
+    let (hello, response) = timeout(Duration::from_secs(10), async {
+        tokio::join!(read_client_hello(listener), client.get(url).send())
+    })
+    .await
+    .expect("HTTP ClientHello within timeout");
+    assert!(
+        response.is_err(),
+        "capture endpoint rejects TLS after ClientHello"
+    );
+    hello
+}
+
 #[tokio::test]
 async fn websocket_client_hello_should_match_official_rustls_transport() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -103,6 +113,7 @@ async fn websocket_client_hello_should_match_official_rustls_transport() {
     assert_eq!(normalized, official_websocket_hello());
 }
 
+#[cfg(target_os = "linux")]
 fn official_http_hello() -> ClientHello {
     ClientHello {
         cipher_suites: vec![
@@ -164,16 +175,22 @@ async fn read_client_hello(listener: TcpListener) -> ClientHello {
         assert!(values.insert(kind, take_vector(&mut extensions)).is_none());
     }
 
-    let mut groups = values[&10].clone();
-    let groups = u16_values(take_vector(&mut groups));
-    let mut signatures = values[&13].clone();
-    let signature_algorithms = u16_values(take_vector(&mut signatures));
-    let mut shares = values[&51].clone();
-    let mut shares = take_vector(&mut shares);
+    let u16_list = |kind| {
+        values
+            .get(&kind)
+            .cloned()
+            .map(|mut data| u16_values(take_vector(&mut data)))
+            .unwrap_or_default()
+    };
+    let groups = u16_list(10);
+    let signature_algorithms = u16_list(13);
     let mut key_shares = Vec::new();
-    while shares.has_remaining() {
-        let group = shares.get_u16();
-        key_shares.push((group, take_vector(&mut shares).len()));
+    if let Some(mut data) = values.get(&51).cloned() {
+        let mut shares = take_vector(&mut data);
+        while shares.has_remaining() {
+            let group = shares.get_u16();
+            key_shares.push((group, take_vector(&mut shares).len()));
+        }
     }
     let mut alpn = Vec::new();
     if let Some(protocols) = values.get(&16) {

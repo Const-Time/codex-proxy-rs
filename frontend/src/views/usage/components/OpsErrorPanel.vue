@@ -11,7 +11,7 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import { useOpsErrorsTable } from '../composables/useOpsErrorsTable'
 import { opsErrorColumns } from '../constants'
-import { entryRejected, opsErrorSummary } from '../utils/opsErrorPresentation'
+import { entryRejected, errorOriginText, opsErrorSummary } from '../utils/opsErrorPresentation'
 import { usageUserAgent } from '../utils/records'
 import { usageUserDisplay } from '../utils/user'
 import OpsErrorDetailModal from './OpsErrorDetailModal.vue'
@@ -124,6 +124,7 @@ function upstreamSendStateText(value: string | null | undefined) {
             <div class="flex min-w-0 items-center gap-2">
               <code class="block min-w-0 flex-1 truncate font-mono text-cp-sm font-bold text-cp-error-text">
                 {{ opsErrorSummary(row) }}
+                <span class="ml-2 font-sans text-cp-xs font-medium text-cp-text-secondary">{{ errorOriginText(row.errorOrigin) }}</span>
               </code>
               <span
                 v-if="row.metadata.recoveredAt"

@@ -212,6 +212,9 @@ Responses 编码时仅为缺失的顶层 `store` 补齐 `false`；显式提供�
 启用的 `model_catalog` 插件可向上述模型列表及详情贡献别名，Codex 目录保留真实目标字段，仅替换 `slug`。别名固定到声明的内置 Provider，Responses JSON/SSE/WS 与插件模型调用使用同一别名事实；原账号模型限制、倍率和结算继续生效。目录与设置冲突、目标不可用或插件代次被撤销时拒绝使用，不静默回退到其他 Provider。模型目录查询期间发生撤销也不会返回旧目录。
 
 Codex 模型目录保留完整原生对象，允许超过 1 MiB 的合法目录，客户端目录缓存按 32 MiB 原生正文总预算淘汰。
+目录合并当前 Key 范围内各账号的结果，并应用账号模型规则；同套餐账号不共享模型权限。
+OAuth 与 API Key 账号各限 4 个并发查询，共享 15 秒查询预算，单账号失败不覆盖其他账号的有效结果。
+同名模型优先保留 OAuth 原生对象；缓存按账号、凭据、客户端版本和请求画像隔离。
 Guardian 子代理只有在同一个 Client Key、同一个已选账号内找到已观察到的父响应时，才携带父响应 ID 和原上游路由 Cookie；未知或越权父引用会移除。
 路由 Cookie 遵循来源、路径和到期时间，不作为登录凭据，也不改变账号选择权限。
 上游 WebSocket 每 25 秒发送保活 Ping；心跳不刷新业务等待超时或连接寿命。
@@ -285,7 +288,7 @@ Guardian 子代理只有在同一个 Client Key、同一个已选账号内找到
 | `GET` | `/api/admin/accounts/profile-statistics` | `accountId` | 实时查询 OpenAI/Codex 官方个人资料中的累计活动与使用洞察 |
 | `GET` | `/api/admin/accounts/reset-credits` | `accountId` | 查询 OpenAI 上游主动额度重置卡，不读取本地库存 |
 | `POST` | `/api/admin/accounts/reset-credits` | `{ accountId, creditId?, redeemRequestId }` | 使用 UUIDv4 幂等键消费一张 OpenAI 上游重置卡 |
-| `GET` | `/api/admin/accounts/models` | `accountId` | 优先读取该 Provider + 套餐的模型 cache，缺失时有限实时拉取 |
+| `GET` | `/api/admin/accounts/models` | `accountId` | 优先读取 Provider 自有目录 cache；OpenAI 按账号、凭据版本及套餐隔离，缺失时只查询指定账号 |
 | `POST` | `/api/admin/accounts/models/refresh` | `{ accountId }` | 强制拉取最新模型并覆盖 cache |
 | `GET` | `/api/admin/accounts/connection-test` | `accountId`、`modelId` | 通过 SSE 返回实时连接测试事件，不作为业务 Responses 用量记录 |
 | `POST` | `/api/admin/accounts/oauth/start` | `{ provider, name, accountId?, outboundProxyId?, outboundProxyUrl? }` | 创建 OpenAI 或 xAI OAuth flow；`accountId` 表示重新授权 |
@@ -595,7 +598,7 @@ OAuth start 使用：
   `errorReason` 区分。额度接口的 401/403 也不足以判定 refresh token 永久失效，credential 终态只由
   OAuth refresh 的明确永久错误写入。
 - 正常 Responses 请求会解析上游响应的 rate-limit headers，合并进同一 quota 快照并同步状态。Free、
-  K12 等套餐共用该状态机；套餐只参与账号展示和按套餐隔离的模型目录 cache，不存在 K12 专属额度路径。
+  K12 等套餐共用该状态机；套餐只参与账号展示和账号模型目录 cache 隔离，不存在 K12 专属额度路径。
 - 账号展开区的 Token 结构、模型排行和列表 Token 汇总优先使用账号级周额度窗口，无可统计的周窗口时
   使用月额度窗口；`usage.windowLabelDisplay` 随选中的窗口返回“周额度窗口”或“月额度窗口”。查询边界
   严格为 `[resetAt - windowSeconds, resetAt)`，不是自然周/月或最近 7/30 天；额度刷新若返回了更早的
@@ -938,6 +941,9 @@ OpenAI 新请求会记录 `upstream.location.applied`（选定账号的代理位
 旧记录和其他尚未采集的平台不会通过当前配置补写历史。
 
 错误记录中的“已自动恢复”表示系统关联到了后续成功请求，不会把原来的失败记录改为成功。
+错误记录和用量详情的 `errorOrigin` 根据保存的上游响应、状态码和连接退出事实分类为 `proxy`、`upstream`、`connection` 或 `unknown`；客户端 HTTP 200 和 WebSocket 握手 101 不代表生成成功。
+用量详情同时提供 `errorCode`、`errorKind`；尝试的 `downstreamCommitted` 为 `null` 时表示未记录交付事实，不等同于 `false`。
+页面将带明确错误码或超时证据的未完成请求显示为失败，进程中断仍显示未完成；该展示不修改原始请求结果和计费。
 `upstreamSendState = ambiguous` 表示无法确认该次上游执行结果，不代表后续恢复请求失败；
 恢复关联也不等于逐字节验证过两次请求正文。
 

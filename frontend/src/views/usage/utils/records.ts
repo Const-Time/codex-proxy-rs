@@ -5,6 +5,7 @@ import type {
   UsageBilling,
   UsageCost,
   UsageCostCoverage,
+  UsageErrorOrigin,
   UsageLatencyDetails,
   UsageListRecord,
   UsageRecordDetail,
@@ -19,6 +20,9 @@ export { usageModelDisplay } from './modelDisplay'
 
 // Usage 记录的规范化 view model：组件只消费这个形状。
 export interface UsageViewModel {
+  errorOrigin: UsageErrorOrigin
+  errorCode: string | null
+  errorKind: string | null
   turnState: string | null
   turnStateSource: string | null
   id: string
@@ -91,6 +95,9 @@ export function normalizeUsageRecord(record: UsageRecordDetail): UsageViewModel 
   const metadata = record.metadata ?? {}
 
   return {
+    errorOrigin: record.errorOrigin,
+    errorCode: record.errorCode,
+    errorKind: record.errorKind,
     turnState: typeof metadata.turnState === 'string' ? metadata.turnState : null,
     turnStateSource: typeof metadata.turnStateSource === 'string' ? metadata.turnStateSource : null,
     id: record.id,
