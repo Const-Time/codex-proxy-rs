@@ -1062,3 +1062,36 @@ fn elapsed_quota_reset_does_not_fabricate_recovery() {
         .expect("healthy candidate available");
     assert_eq!(selected.candidate().account.id().as_str(), "acct_healthy");
 }
+
+#[test]
+fn interval_retry_delay_excludes_saturated_unavailable_and_excluded_accounts() {
+    let mut ctx = context(RotationStrategy::Smart);
+    ctx.policy = AccountSelectionPolicy::new(
+        RotationStrategy::Smart,
+        NonZeroU32::new(3).unwrap(),
+        Duration::from_millis(50),
+    );
+    let mut cooling = candidate("acct_cooling", 0, Some(100));
+    cooling.signals.last_started_at = Some(ctx.now - Duration::from_millis(20));
+    assert_eq!(
+        AccountSelector.request_interval_retry_after(&[cooling.clone()], &ctx),
+        Some(Duration::from_millis(30))
+    );
+    ctx.excluded_accounts.insert(cooling.account.id().clone());
+    assert_eq!(
+        AccountSelector.request_interval_retry_after(&[cooling.clone()], &ctx),
+        None
+    );
+    ctx.excluded_accounts.clear();
+    cooling.signals.in_flight = 3;
+    assert_eq!(
+        AccountSelector.request_interval_retry_after(&[cooling.clone()], &ctx),
+        None
+    );
+    cooling.signals.in_flight = 0;
+    cooling.signals.rate_limited_until = Some(ctx.now + Duration::from_secs(10));
+    assert_eq!(
+        AccountSelector.request_interval_retry_after(&[cooling], &ctx),
+        None
+    );
+}

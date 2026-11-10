@@ -677,6 +677,8 @@ fn rebuild_account(current: &ProviderAccount, rebuild: AccountRebuild) -> Provid
 #[derive(Default)]
 pub(crate) struct TestLeaseCoordinator {
     pub(crate) in_flight: AtomicUsize,
+    pub(crate) last_started_at: Mutex<BTreeMap<ProviderAccountId, SystemTime>>,
+    pub(crate) signal_reads: AtomicUsize,
     pub(crate) requests: Mutex<Vec<ProviderSchedulingLeaseRequest>>,
     pub(crate) busy: Mutex<bool>,
     pub(crate) busy_accounts: Mutex<BTreeSet<ProviderAccountId>>,
@@ -691,16 +693,21 @@ impl ProviderLeasePort for TestLeaseCoordinator {
         accounts: &'a [ProviderAccountId],
     ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async move {
+            self.signal_reads.fetch_add(1, Ordering::SeqCst);
             let signals = accounts
                 .iter()
-                .cloned()
                 .map(|account| {
                     (
-                        account,
+                        account.clone(),
                         AccountRuntimeSignals {
                             in_flight: u32::try_from(self.in_flight.load(Ordering::SeqCst))
                                 .unwrap(),
-                            last_started_at: None,
+                            last_started_at: self
+                                .last_started_at
+                                .lock()
+                                .unwrap()
+                                .get(account)
+                                .copied(),
                             quota_reset_at: None,
                             quota_remaining_rank: None,
                             rate_limited_until: None,

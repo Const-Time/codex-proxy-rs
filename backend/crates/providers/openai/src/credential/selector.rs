@@ -45,6 +45,9 @@ const CLOUDFLARE_PATH_BLOCK_THRESHOLD: u32 = 3;
 const SESSION_AFFINITY_TIMEOUT: Duration = Duration::from_millis(500);
 const CYBER_POLICY_TIMEOUT: Duration = Duration::from_millis(100);
 const CYBER_POLICY_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
+// Absorb short interval/lease races, without introducing an unbounded queue.
+const SELECTION_WAIT_LIMIT: Duration = Duration::from_secs(1);
+const MAX_SELECTION_RECHECKS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexAccountFailure {
@@ -373,21 +376,52 @@ impl CodexCredentialSelector {
         cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         model_catalog_eligibility: ModelCatalogEligibility<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
-        for retry in 0..=3 {
+        let wait_deadline = request
+            .attempt
+            .deadline()
+            .cap(SystemTime::now() + SELECTION_WAIT_LIMIT);
+        let mut snapshot_retries = 0;
+        let mut capacity_retries = 0;
+        loop {
             match self
                 .select_snapshot(request, cyber_policy_session_key, model_catalog_eligibility)
                 .await
             {
-                Err(CredentialSelectionError::AccountSnapshotChanged) if retry < 3 => {
+                Err(CredentialSelectionError::AccountSnapshotChanged) if snapshot_retries < 3 => {
+                    snapshot_retries += 1;
                     request.attempt.trace().record(
                         "account.snapshot_conflict",
-                        serde_json::json!({"retryCount": retry + 1, "maxRetries": 3}),
+                        serde_json::json!({"retryCount": snapshot_retries, "maxRetries": 3}),
                     );
+                }
+                Err(
+                    error @ CredentialSelectionError::CapacityUnavailable {
+                        retry_after: Some(delay),
+                    },
+                ) if capacity_retries < MAX_SELECTION_RECHECKS => {
+                    let delay = delay.max(Duration::from_millis(1));
+                    if request.attempt.cancellation().is_cancelled()
+                        || wait_deadline.remaining().is_some_and(|left| delay >= left)
+                    {
+                        return Err(error);
+                    }
+                    capacity_retries += 1;
+                    request.attempt.trace().record(
+                        "account.selection_wait",
+                        serde_json::json!({"retryCount": capacity_retries, "delayMs": delay.as_millis()}),
+                    );
+                    let wake = gateway_core::lifecycle::Deadline::from(SystemTime::now() + delay);
+                    tokio::select! {
+                        biased;
+                        () = request.attempt.cancellation().cancelled() => return Err(error),
+                        () = wait_deadline.wait() => return Err(error),
+                        () = wake.wait() => {}
+                    }
+                    // Reload facts and lease signals; never reuse a pre-wait snapshot.
                 }
                 result => return result,
             }
         }
-        Err(CredentialSelectionError::AccountSnapshotChanged)
     }
 
     async fn select_snapshot(
@@ -689,7 +723,10 @@ impl CodexCredentialSelector {
                     .is_some();
                 return if eligible_capacity || shortest_retry.is_some() {
                     Err(CredentialSelectionError::CapacityUnavailable {
-                        retry_after: shortest_retry,
+                        retry_after: minimum_duration(
+                            shortest_retry,
+                            AccountSelector.request_interval_retry_after(&candidates, &context),
+                        ),
                     })
                 } else if quota_exhausted {
                     Err(CredentialSelectionError::QuotaExhausted)

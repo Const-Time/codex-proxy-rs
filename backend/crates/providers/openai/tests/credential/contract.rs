@@ -1027,7 +1027,7 @@ fn selector_returns_capacity_error_when_every_redis_lease_is_busy() {
     create_account(&store, "acct_primary", "at-primary");
     let leases = Arc::new(TestLeaseCoordinator::default());
     *leases.busy.lock().expect("lease busy lock") = true;
-    let selector = selector(&store, leases);
+    let selector = selector(&store, leases.clone());
     let attempt = attempt(BTreeSet::new());
     let error =
         block_on(
@@ -1046,6 +1046,11 @@ fn selector_returns_capacity_error_when_every_redis_lease_is_busy() {
             retry_after: Some(_)
         }
     ));
+    assert_eq!(
+        leases.requests.lock().unwrap().len(),
+        4,
+        "initial acquisition plus at most three bounded rechecks"
+    );
 }
 
 #[test]
@@ -2030,4 +2035,175 @@ async fn selector_respects_quota_usage_limits_and_restores_after_setting_change(
     let selected = selector.select(&request).await.unwrap();
     assert_eq!(selected.account_id().as_str(), "acct_first");
     assert!(!store.account("acct_first").unwrap().quota().is_exhausted());
+}
+
+fn interval_attempt(deadline: SystemTime, cancel: CancellationToken) -> AttemptContext {
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_interval").unwrap(),
+            ClientApiKeyId::new("key_codex_contract").unwrap(),
+        ),
+        NonZeroU32::new(1).unwrap(),
+        deadline,
+        AccountSelectionPolicy::new(
+            RotationStrategy::Smart,
+            NonZeroU32::new(10).unwrap(),
+            Duration::from_millis(200),
+        ),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        None,
+        cancel,
+    )
+}
+
+#[tokio::test]
+async fn selector_waits_for_interval_and_reloads_before_acquiring() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let started = SystemTime::now();
+    leases
+        .last_started_at
+        .lock()
+        .unwrap()
+        .insert(ProviderAccountId::new("acct_primary").unwrap(), started);
+    let selector = selector(&store, leases.clone());
+    let attempt = interval_attempt(started + Duration::from_secs(5), CancellationToken::new());
+    let lease = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap(),
+            attempt: &attempt,
+            session_affinity_key: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(lease.account_id().as_str(), "acct_primary");
+    assert!(started.elapsed().unwrap() >= Duration::from_millis(200));
+    assert!(
+        leases
+            .signal_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 2
+    );
+    assert_eq!(leases.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn selector_interval_wait_is_cancelled_without_consuming_a_lease() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    leases.last_started_at.lock().unwrap().insert(
+        ProviderAccountId::new("acct_primary").unwrap(),
+        SystemTime::now(),
+    );
+    let selector = selector(&store, leases.clone());
+    let cancellation = CancellationToken::new();
+    let attempt = interval_attempt(
+        SystemTime::now() + Duration::from_secs(5),
+        cancellation.clone(),
+    );
+    let cancel = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cancellation.cancel();
+    };
+    let url = Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+    let request = SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &url,
+        attempt: &attempt,
+        session_affinity_key: None,
+    };
+    let (result, ()) = tokio::join!(selector.select(&request), cancel);
+    assert!(matches!(
+        result,
+        Err(CredentialSelectionError::CapacityUnavailable { .. })
+    ));
+    assert!(leases.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        leases
+            .signal_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn selector_does_not_wait_beyond_request_deadline_or_bypass_interval() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    leases.last_started_at.lock().unwrap().insert(
+        ProviderAccountId::new("acct_primary").unwrap(),
+        SystemTime::now(),
+    );
+    let selector = selector(&store, leases.clone());
+    let attempt = interval_attempt(
+        SystemTime::now() + Duration::from_millis(20),
+        CancellationToken::new(),
+    );
+    let error = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap(),
+            attempt: &attempt,
+            session_affinity_key: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CredentialSelectionError::CapacityUnavailable {
+            retry_after: Some(_)
+        }
+    ));
+    assert!(leases.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        leases
+            .signal_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn selector_revalidates_account_health_after_interval_wait() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    leases.last_started_at.lock().unwrap().insert(
+        ProviderAccountId::new("acct_primary").unwrap(),
+        SystemTime::now(),
+    );
+    let selector = selector(&store, leases.clone());
+    let attempt = interval_attempt(
+        SystemTime::now() + Duration::from_secs(5),
+        CancellationToken::new(),
+    );
+    let expire = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let account = store.account("acct_primary").unwrap();
+        persist_credential_state(&store, &account, CredentialState::Expired);
+    };
+    let url = Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+    let request = SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &url,
+        attempt: &attempt,
+        session_affinity_key: None,
+    };
+    let (result, ()) = tokio::join!(selector.select(&request), expire);
+    assert!(matches!(
+        result,
+        Err(CredentialSelectionError::NoEligibleCredential)
+    ));
+    assert!(leases.requests.lock().unwrap().is_empty());
+    assert!(
+        leases
+            .signal_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 2
+    );
 }

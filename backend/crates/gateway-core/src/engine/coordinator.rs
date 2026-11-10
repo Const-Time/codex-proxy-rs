@@ -2353,9 +2353,7 @@ where
             || self.continuation_attempt != ContinuationAttempt::Native
             || !matches!(
                 error.kind(),
-                ProviderErrorKind::NoEligibleAccount
-                    | ProviderErrorKind::AccountCapacityUnavailable
-                    | ProviderErrorKind::QuotaExhausted
+                ProviderErrorKind::NoEligibleAccount | ProviderErrorKind::QuotaExhausted
             )
         {
             return false;

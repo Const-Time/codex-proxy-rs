@@ -6683,3 +6683,63 @@ fn retry_after_above_the_configured_limit_rotates_without_waiting() {
         }
     }
 }
+
+#[test]
+fn busy_native_continuation_preserves_capacity_error_without_excluding_its_owner() {
+    let Operation::Generate(generate) = generate_operation() else {
+        panic!("generate operation");
+    };
+    let operation = Operation::Generate(generate.with_provider_session_state(
+        ProviderSessionState::new("openai", Map::new()).expect("provider session state"),
+    ));
+    let policy = AccountSelectionPolicy::new(
+        RotationStrategy::RoundRobin,
+        NonZeroU32::new(2).expect("account concurrency"),
+        Duration::from_millis(50),
+    );
+    let route_plan = plan_with_policy(&operation, policy);
+    let (coordinator, store, provider) = coordinator(vec![
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::AccountCapacityUnavailable,
+            UpstreamSendState::NotSent,
+        )),
+        Script::Stream {
+            account_id: "acct_two",
+            items: complete_stream(None),
+        },
+    ]);
+    let original = ProviderAccountId::new("acct_one").expect("account");
+    let continuation = NativeContinuationPin::new(
+        PreviousResponseId::new("previous-response"),
+        PreviousResponseId::new("upstream-response"),
+        ClientApiKeyId::new("key_client_1").expect("client key"),
+        ProviderKind::new("openai").expect("provider"),
+        original.clone(),
+    );
+
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        Some(ContinuationBinding::Pinned(continuation)),
+        CancellationToken::new(),
+    ))
+    .expect("start execution");
+    let error = block_on(session.collect_uncommitted())
+        .expect_err("temporary capacity must remain a capacity error");
+    let EngineError::Provider(error) = error else {
+        panic!("expected capacity error")
+    };
+    assert_eq!(error.kind(), ProviderErrorKind::AccountCapacityUnavailable);
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 1, "must not replay onto an empty pool");
+    assert_eq!(
+        contexts[0].continuation_attempt(),
+        ContinuationAttempt::Native
+    );
+    assert!(!contexts[0].excluded_accounts().contains(&original));
+    let state = store.state.lock().unwrap();
+    assert!(state.attempts.is_empty(), "no upstream request was sent");
+    assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Failed);
+}

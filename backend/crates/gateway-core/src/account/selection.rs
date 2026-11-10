@@ -501,6 +501,31 @@ impl AccountSelector {
             policy_choice: true,
         })
     }
+    /// Earliest interval expiry among otherwise selectable accounts. This does
+    /// not make excluded, unavailable or saturated accounts eligible.
+    #[must_use]
+    pub fn request_interval_retry_after(
+        &self,
+        candidates: &[AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> Option<Duration> {
+        candidates
+            .iter()
+            .filter(|candidate| {
+                self.scheduling_blocker(candidate, context)
+                    == Some(AccountSchedulingBlocker::RequestInterval)
+            })
+            .filter_map(|candidate| {
+                candidate
+                    .signals
+                    .last_started_at?
+                    .checked_add(context.policy.request_interval())?
+                    .duration_since(context.now)
+                    .ok()
+            })
+            .min()
+    }
+
     /// 汇总与本次调度约束一致的并发容量，供请求级观测使用。
     #[must_use]
     pub fn capacity_snapshot(
