@@ -711,3 +711,29 @@ fn optional_bool(
         })
         .transpose()
 }
+
+/// Evaluate only active account-wide subscription windows, independently of credits.
+pub(crate) fn usage_limit_reached(
+    snapshot: &CodexAccountQuotaSnapshot,
+    limits: gateway_core::account::AccountQuotaUsageLimits,
+    now: SystemTime,
+) -> bool {
+    snapshot.windows().iter().any(|window| {
+        if !window.is_account_wide()
+            || quota_window_ttl(window, snapshot.observed_at(), now).is_none()
+        {
+            return false;
+        }
+        let threshold = match window.kind() {
+            CodexQuotaWindowKind::ShortTerm => limits.short_term_percent(),
+            CodexQuotaWindowKind::Weekly => limits.weekly_percent(),
+            _ => return false,
+        };
+        // 100 is the default: upstream quota/credits policy remains authoritative.
+        threshold < 100
+            && (window.limit_reached()
+                || window
+                    .used_percent()
+                    .is_some_and(|used| used.is_finite() && used >= f64::from(threshold)))
+    })
+}

@@ -130,6 +130,7 @@ export interface AccountModelAccess {
 }
 
 export interface Account {
+  quotaUsageLimits: { shortTermPercent: number, weeklyPercent: number }
   autoUseQuotaCredits: boolean
   outboundProxyEndpoint: string | null
   id: string
@@ -325,6 +326,7 @@ interface AccountUpdateParam {
 }
 
 interface AccountBatchUpdateParam {
+  quotaUsageLimits?: { shortTermPercent: number, weeklyPercent: number }
   autoUseQuotaCredits?: boolean
   outboundProxyUrl?: string
   outboundProxyId?: string

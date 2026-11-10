@@ -83,6 +83,7 @@ pub enum AccountGroupFilter {
 /// 账号公共存储投影；Provider 专属字段不进入此结构。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
+    pub quota_usage_limits: gateway_core::account::AccountQuotaUsageLimits,
     pub auto_use_quota_credits: bool,
     pub id: String,
     pub provider_kind: ProviderKind,
@@ -240,6 +241,7 @@ pub struct AccountUpdateResult {
 /// 仅修改显式字段的批量账号设置命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchUpdateAccounts {
+    pub quota_usage_limits: Option<gateway_core::account::AccountQuotaUsageLimits>,
     pub auto_use_quota_credits: Option<bool>,
     pub account_ids: Vec<String>,
     pub enabled: Option<bool>,

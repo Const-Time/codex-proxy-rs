@@ -50,7 +50,7 @@ async fn model_access_migration_preserves_existing_accounts_and_defaults_to_unre
         .await
         .expect("upgrade to 20");
     let after: serde_json::Value = sqlx::query_scalar(
-        "select to_jsonb(a) - 'model_access_json' - 'reset_credit_automation_json' - 'reset_credit_next_run_at' - 'auto_use_quota_credits' from provider_accounts a where id='acct_upgrade'",
+        "select to_jsonb(a) - 'model_access_json' - 'reset_credit_automation_json' - 'reset_credit_next_run_at' - 'auto_use_quota_credits' - 'quota_short_term_percent' - 'quota_weekly_percent' from provider_accounts a where id='acct_upgrade'",
     )
     .fetch_one(&db.pool)
     .await

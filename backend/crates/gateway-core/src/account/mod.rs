@@ -4,6 +4,8 @@ mod error;
 mod fast_mode;
 pub use fast_mode::FastMode;
 mod model;
+mod quota_usage_limits;
+pub use quota_usage_limits::AccountQuotaUsageLimits;
 mod model_access;
 pub use model_access::{
     AccountModelAccess, AccountModelAccessMode, InvalidAccountModelAccess,

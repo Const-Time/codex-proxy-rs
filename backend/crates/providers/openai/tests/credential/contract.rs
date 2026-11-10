@@ -1988,3 +1988,46 @@ fn selector_rejects_quota_exhaustion_observed_after_selection() {
     assert_eq!(store.credential_loads(), 1);
     assert!(leases.requests.lock().expect("lease requests").is_empty());
 }
+
+#[tokio::test]
+async fn selector_respects_quota_usage_limits_and_restores_after_setting_change() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let now = SystemTime::now();
+    let reset = (now + Duration::from_secs(3600))
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (id, used) in [("acct_first", 90), ("acct_second", 40)] {
+        let account = store.account(id).unwrap();
+        store.compare_and_swap_quota(QuotaObservation {
+            plan_type: None, account_id: account.id().clone(), expected_revision: account.revision(),
+            observed_at: now, state: QuotaState::allowed(now),
+            quota: OpaqueProviderData::new(json!({"rate_limit":{"allowed":true,"primary_window":{"used_percent":used,"limit_window_seconds":18000,"reset_at":reset}}}).as_object().unwrap().clone()),
+        }).await.unwrap();
+        store.set_quota_usage_limits(id, 90, 100);
+    }
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let request_url = Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+    let context = attempt(BTreeSet::new());
+    let request = SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &request_url,
+        attempt: &context,
+        session_affinity_key: None,
+    };
+    let selected = selector.select(&request).await.unwrap();
+    assert_eq!(selected.account_id().as_str(), "acct_second");
+    drop(selected);
+    store.set_quota_usage_limits("acct_second", 40, 100);
+    assert!(matches!(
+        selector.select(&request).await,
+        Err(CredentialSelectionError::QuotaUsageLimitReached)
+    ));
+    // Settings are checked per selection, even with an already hydrated quota cache.
+    store.set_quota_usage_limits("acct_first", 91, 100);
+    let selected = selector.select(&request).await.unwrap();
+    assert_eq!(selected.account_id().as_str(), "acct_first");
+    assert!(!store.account("acct_first").unwrap().quota().is_exhausted());
+}

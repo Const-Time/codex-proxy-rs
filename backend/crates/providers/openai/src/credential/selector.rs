@@ -483,7 +483,7 @@ impl CodexCredentialSelector {
             }
             eligible.push(account);
         }
-        let accounts = eligible;
+        let mut accounts = eligible;
         // Bounded reason counts expose preselection failures without leaking
         // identities or credentials from accounts outside the frozen scope.
         request.attempt.trace().record(
@@ -496,6 +496,18 @@ impl CodexCredentialSelector {
         );
         if !diagnostic {
             self.quota.prepare_scheduling(&accounts).await;
+            let before = accounts.len();
+            accounts.retain(|account| !self.quota.usage_limit_reached(account));
+            let capped = before - accounts.len();
+            if capped > 0 {
+                request.attempt.trace().record(
+                    "account.quota_usage_limit",
+                    serde_json::json!({"excludedCount": capped}),
+                );
+                if accounts.is_empty() {
+                    return Err(CredentialSelectionError::QuotaUsageLimitReached);
+                }
+            }
         }
         let rate_limits = if diagnostic {
             Default::default()
@@ -1634,6 +1646,8 @@ pub enum CredentialSelectionError {
     AccountSnapshotChanged,
     #[error("all eligible accounts have exhausted quota")]
     QuotaExhausted,
+    #[error("all eligible accounts reached configured quota usage limits")]
+    QuotaUsageLimitReached,
     #[error("Codex account capacity is unavailable")]
     CapacityUnavailable { retry_after: Option<Duration> },
     #[error("Codex account data is invalid")]

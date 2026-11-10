@@ -677,6 +677,7 @@ pub struct ProviderAccount {
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
     auto_use_quota_credits: bool,
+    quota_usage_limits: super::AccountQuotaUsageLimits,
     model_access: super::AccountModelAccess,
     credential_state: CredentialState,
     quota: QuotaState,
@@ -689,6 +690,15 @@ pub struct ProviderAccount {
 }
 
 impl ProviderAccount {
+    #[must_use]
+    pub const fn with_quota_usage_limits(mut self, limits: super::AccountQuotaUsageLimits) -> Self {
+        self.quota_usage_limits = limits;
+        self
+    }
+    #[must_use]
+    pub const fn quota_usage_limits(&self) -> super::AccountQuotaUsageLimits {
+        self.quota_usage_limits
+    }
     #[must_use]
     pub const fn with_auto_use_quota_credits(mut self, enabled: bool) -> Self {
         self.auto_use_quota_credits = enabled;
@@ -725,6 +735,7 @@ impl ProviderAccount {
             concurrency_limit: None,
             weight: AccountWeight::DEFAULT,
             auto_use_quota_credits: false,
+            quota_usage_limits: super::AccountQuotaUsageLimits::UNLIMITED,
             model_access: super::AccountModelAccess::all(),
             credential_state: CredentialState::Unknown,
             quota: QuotaState::unknown(),

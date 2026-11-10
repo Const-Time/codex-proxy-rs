@@ -533,6 +533,7 @@ fn provider_ports_with_catalog(
 fn account_record(account: &ProviderAccount) -> AccountRecord {
     let now = Utc::now();
     AccountRecord {
+        quota_usage_limits: Default::default(),
         auto_use_quota_credits: false,
         model_access: Default::default(),
         outbound_proxy: None,

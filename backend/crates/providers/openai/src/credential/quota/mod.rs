@@ -254,12 +254,13 @@ struct CodexQuotaRefreshAttempt {
     wall_at: SystemTime,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CodexQuotaSchedulingEntry {
     version: u64,
     revision: CredentialRevision,
     expires_at: Instant,
     signals: Option<AccountQuotaSignals>,
+    snapshot: Option<Arc<CodexAccountQuotaSnapshot>>,
 }
 
 #[derive(Clone)]
@@ -339,6 +340,7 @@ impl CodexQuotaSchedulingProjection {
             snapshot.credential_revision(),
             remaining_ttl,
             scheduling_signals_from_snapshot(snapshot),
+            Some(Arc::new(snapshot.clone())),
         );
         true
     }
@@ -361,6 +363,7 @@ impl CodexQuotaSchedulingProjection {
             target.account.id().clone(),
             target.account.revision(),
             ttl,
+            None,
             None,
         );
     }
@@ -391,6 +394,7 @@ impl CodexQuotaSchedulingProjection {
             snapshot.credential_revision(),
             remaining_ttl,
             scheduling_signals_from_snapshot(snapshot),
+            Some(Arc::new(snapshot.clone())),
         );
         true
     }
@@ -401,12 +405,13 @@ impl CodexQuotaSchedulingProjection {
         revision: CredentialRevision,
         ttl: Duration,
         signals: Option<AccountQuotaSignals>,
+        snapshot: Option<Arc<CodexAccountQuotaSnapshot>>,
     ) {
         let mut state = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        insert_projection_entry(&mut state, account_id, revision, ttl, signals);
+        insert_projection_entry(&mut state, account_id, revision, ttl, signals, snapshot);
     }
 
     fn signals(&self, account: &ProviderAccount) -> Option<AccountQuotaSignals> {
@@ -539,6 +544,7 @@ fn insert_projection_entry(
     revision: CredentialRevision,
     ttl: Duration,
     signals: Option<AccountQuotaSignals>,
+    snapshot: Option<Arc<CodexAccountQuotaSnapshot>>,
 ) {
     state.next_version = state.next_version.saturating_add(1);
     state.entries.insert(
@@ -548,6 +554,7 @@ fn insert_projection_entry(
             revision,
             expires_at: Instant::now() + ttl,
             signals,
+            snapshot,
         },
     );
 }
@@ -756,6 +763,33 @@ impl CodexCredentialQuotaService {
     #[must_use]
     pub fn scheduling_signals(&self, account: &ProviderAccount) -> Option<AccountQuotaSignals> {
         self.scheduling.signals(account)
+    }
+
+    /// Local policy only; never writes an upstream exhausted quota state.
+    #[must_use]
+    pub fn usage_limit_reached(&self, account: &ProviderAccount) -> bool {
+        if account.authentication_kind() != super::CODEX_AUTHENTICATION_KIND_OAUTH {
+            return false;
+        }
+        let state = self
+            .scheduling
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .entries
+            .get(account.id())
+            .filter(|entry| {
+                entry.revision == account.revision() && Instant::now() < entry.expires_at
+            })
+            .and_then(|entry| entry.snapshot.as_ref())
+            .is_some_and(|snapshot| {
+                snapshot::usage_limit_reached(
+                    snapshot,
+                    account.quota_usage_limits(),
+                    SystemTime::now(),
+                )
+            })
     }
 
     pub(crate) fn invalidate_scheduling(&self, account_ids: &[ProviderAccountId]) {

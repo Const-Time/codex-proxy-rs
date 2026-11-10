@@ -6,6 +6,7 @@ pub(crate) fn admin_account_record(
     summary: ProviderAccountSummary,
 ) -> AdminStoreResult<AccountRecord> {
     Ok(AccountRecord {
+        quota_usage_limits: summary.quota_usage_limits,
         auto_use_quota_credits: summary.auto_use_quota_credits,
         outbound_proxy: summary.outbound_proxy,
         id: summary.id,

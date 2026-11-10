@@ -78,6 +78,7 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
     }
     let (quota, refresh_token_expires_at) = account_quota_view(quota, rate_limited_until, now);
     AccountView {
+        quota_usage_limits: account.quota_usage_limits,
         auto_use_quota_credits: account.auto_use_quota_credits,
         id: account.id.clone(),
         name: account.name,

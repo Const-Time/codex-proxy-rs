@@ -119,7 +119,7 @@ pub(crate) async fn load_admin_account_page(
          select outbound_proxy_request_context(a.outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = a.outbound_proxy_id), 0) as proxy_ws_capacity, a.outbound_proxy_url, a.id, a.provider_kind, a.name, a.email, a.upstream_user_id,
                 a.upstream_account_id, a.plan_type, a.authentication_kind,
                 a.credential_revision, a.has_refresh_token, a.access_token_expires_at,
-                a.next_refresh_at, a.enabled, a.auto_use_quota_credits, a.concurrency_limit, a.weight, a.model_access_json,
+                a.next_refresh_at, a.enabled, a.auto_use_quota_credits,a.quota_short_term_percent,a.quota_weekly_percent, a.concurrency_limit, a.weight, a.model_access_json,
                 a.credential_state, a.quota_access_state, a.quota_evidence,
                 a.quota_access_observed_at, a.quota_reset_at, a.last_error_reason,
                 a.last_error_message, a.credential_observed_at, a.created_at, a.updated_at,

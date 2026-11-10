@@ -10,6 +10,7 @@ import AccountPlanBadge from '../AccountPlanBadge.vue'
 import AccountProfileModal from '../AccountProfileModal/index.vue'
 import AccountQuotaPanelEntry from './Entry.vue'
 import AccountResetCredits from './ResetCredits.vue'
+import UsageCap from './UsageCap.vue'
 
 const props = defineProps<{
   account: AccountRow
@@ -93,6 +94,7 @@ const profileOpen = shallowRef(false)
         额度待观测
       </p>
     </div>
+    <UsageCap v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'" :account="account" @account-updated="emit('accountUpdated', $event)" />
   </section>
 
   <AccountProfileModal

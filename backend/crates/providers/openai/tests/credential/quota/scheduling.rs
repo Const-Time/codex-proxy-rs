@@ -276,3 +276,102 @@ async fn reset_window_should_not_clear_confirmed_exhaustion() {
         QuotaAccessState::Exhausted
     );
 }
+
+#[tokio::test]
+async fn quota_usage_limits_are_independent_and_expired_windows_stop_blocking() {
+    use gateway_core::account::AccountQuotaUsageLimits as Limits;
+    let store = Arc::new(MemoryAccountStore::default());
+    let now = SystemTime::now();
+    let account = persist_snapshot(&store, "acct_caps", now, json!({
+        "allowed": true,
+        "primary_window": {"used_percent": 90, "limit_window_seconds": 18000, "reset_at": timestamp(now + Duration::from_secs(600))},
+        "secondary_window": {"used_percent": 75, "limit_window_seconds": 604800, "reset_at": timestamp(now + Duration::from_secs(3600))}
+    })).await;
+    let service = quota_service(&store);
+    service
+        .prepare_scheduling(std::slice::from_ref(&account))
+        .await;
+    for (short, weekly, reached) in [
+        (100, 100, false),
+        (91, 76, false),
+        (90, 100, true),
+        (100, 75, true),
+        (89, 74, true),
+    ] {
+        let configured = account
+            .clone()
+            .with_quota_usage_limits(Limits::new(short, weekly).unwrap());
+        assert_eq!(service.usage_limit_reached(&configured), reached);
+        assert_eq!(
+            configured.quota(),
+            account.quota(),
+            "local policy cannot overwrite upstream facts"
+        );
+    }
+    // A weekly window may be primary on some plans; use its duration, not its role.
+    let expired = persist_snapshot(&store, "acct_cap_expired", now, json!({
+        "allowed": true,
+        "primary_window": {"used_percent": 95, "limit_window_seconds": 604800, "reset_at": timestamp(now - Duration::from_secs(1))}
+    })).await.with_quota_usage_limits(Limits::new(100,80).unwrap());
+    service
+        .prepare_scheduling(std::slice::from_ref(&expired))
+        .await;
+    assert!(!service.usage_limit_reached(&expired));
+    let weekly = persist_snapshot(&store, "acct_cap_weekly", now, json!({
+        "allowed": true,
+        "primary_window": {"used_percent": 85, "limit_window_seconds": 604800, "reset_at": timestamp(now + Duration::from_secs(600))}
+    })).await.with_quota_usage_limits(Limits::new(100,80).unwrap()).with_auto_use_quota_credits(true);
+    service
+        .prepare_scheduling(std::slice::from_ref(&weekly))
+        .await;
+    assert!(
+        service.usage_limit_reached(&weekly),
+        "credits cannot bypass an explicit cap"
+    );
+}
+
+#[tokio::test]
+async fn quota_usage_limits_ignore_named_buckets_and_unknown_or_stale_usage() {
+    use gateway_core::account::AccountQuotaUsageLimits as Limits;
+    let store = Arc::new(MemoryAccountStore::default());
+    let now = SystemTime::now();
+    for (id, observed, raw) in [
+        (
+            "acct_cap_named",
+            now,
+            json!({"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":timestamp(now+Duration::from_secs(600))}},"additional_rate_limits":[{"limit_name":"spark","metered_feature":"spark","rate_limit":{"primary_window":{"used_percent":99,"limit_window_seconds":18000,"reset_at":timestamp(now+Duration::from_secs(600))}}}]}),
+        ),
+        (
+            "acct_cap_unknown",
+            now,
+            json!({"rate_limit":{"primary_window":{"limit_window_seconds":18000,"reset_at":timestamp(now+Duration::from_secs(600))}}}),
+        ),
+        (
+            "acct_cap_stale",
+            now - Duration::from_secs(3600),
+            json!({"rate_limit":{"primary_window":{"used_percent":99,"limit_window_seconds":18000}}}),
+        ),
+    ] {
+        create_account(&store, id).await;
+        let account = store
+            .account(id)
+            .unwrap()
+            .with_quota_usage_limits(Limits::new(80, 80).unwrap());
+        store
+            .compare_and_swap_quota(QuotaObservation {
+                plan_type: None,
+                account_id: account.id().clone(),
+                expected_revision: account.revision(),
+                quota: OpaqueProviderData::new(raw.as_object().unwrap().clone()),
+                observed_at: observed,
+                state: QuotaState::allowed(observed),
+            })
+            .await
+            .unwrap();
+        let service = quota_service(&store);
+        service
+            .prepare_scheduling(std::slice::from_ref(&account))
+            .await;
+        assert!(!service.usage_limit_reached(&account), "{id}");
+    }
+}

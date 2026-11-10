@@ -738,6 +738,7 @@ impl AccountsService for DefaultAccountsService {
             self.accounts
                 .batch_update_accounts(
                     BatchUpdateAccounts {
+                        quota_usage_limits: None,
                         auto_use_quota_credits: None,
                         account_ids: vec![account_id.to_string()],
                         enabled: Some(true),
@@ -811,6 +812,14 @@ impl AccountsService for DefaultAccountsService {
         let mut credit_refreshes = Vec::new();
         for account_id in &account_ids {
             let (item, provider) = self.provider_for_account(account_id).await?;
+            if command.quota_usage_limits.is_some()
+                && (item.account.provider_kind.as_str() != "openai"
+                    || item.account.authentication_kind != "oauth")
+            {
+                return Err(AdminError::invalid(
+                    "仅 OpenAI OAuth 账号支持额度使用率上限",
+                ));
+            }
             if command.auto_use_quota_credits.is_some()
                 && (item.account.provider_kind.as_str() != "openai"
                     || item.account.authentication_kind != "oauth")

@@ -124,6 +124,16 @@ impl MemoryAccountStore {
         .expect("seed API account");
     }
 
+    pub(crate) fn set_quota_usage_limits(&self, id: &str, short: u8, weekly: u8) {
+        let mut accounts = self.accounts.lock().expect("accounts lock");
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).unwrap())
+            .expect("account");
+        stored.account = stored.account.clone().with_quota_usage_limits(
+            gateway_core::account::AccountQuotaUsageLimits::new(short, weekly).unwrap(),
+        );
+    }
+
     pub(crate) fn set_quota_credits(&self, id: &str, enabled: bool) {
         let id = ProviderAccountId::new(id).unwrap();
         let mut accounts = self.accounts.lock().unwrap();
@@ -659,6 +669,7 @@ fn rebuild_account(current: &ProviderAccount, rebuild: AccountRebuild) -> Provid
         rebuild.last_error_message,
     )
     .with_auto_use_quota_credits(current.auto_use_quota_credits())
+    .with_quota_usage_limits(current.quota_usage_limits())
     .with_scheduling(current.concurrency_limit(), current.weight())
     .with_refresh_schedule(rebuild.has_refresh_token, rebuild.next_refresh_at)
 }

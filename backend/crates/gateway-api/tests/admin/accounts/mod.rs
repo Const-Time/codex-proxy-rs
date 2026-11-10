@@ -858,3 +858,28 @@ mod import_settings {
         }
     }
 }
+
+#[test]
+fn quota_usage_limits_wire_bounds_and_omission() {
+    use gateway_api::admin::accounts::BatchUpdateAccountsRequest;
+    for limits in [
+        serde_json::json!({"shortTermPercent":90,"weeklyPercent":80}),
+        serde_json::json!({"shortTermPercent":100,"weeklyPercent":100}),
+    ] {
+        let request: BatchUpdateAccountsRequest = serde_json::from_value(
+            serde_json::json!({"accountIds":["acct_test"],"quotaUsageLimits":limits}),
+        )
+        .unwrap();
+        request.validate().unwrap();
+        assert!(request.auto_use_quota_credits.is_none());
+    }
+    for invalid in [
+        serde_json::json!(0),
+        serde_json::json!(101),
+        serde_json::json!(-1),
+        serde_json::json!(90.5),
+        serde_json::json!("90"),
+    ] {
+        assert!(serde_json::from_value::<BatchUpdateAccountsRequest>(serde_json::json!({"accountIds":["acct_test"],"quotaUsageLimits":{"shortTermPercent":invalid,"weeklyPercent":90}})).is_err());
+    }
+}
