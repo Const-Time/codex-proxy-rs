@@ -41,6 +41,10 @@ async function loadOption(
   errors[kind] = ''
   try {
     target.value = await fetch()
+    if (kind === 'accounts' && filters.value.accountId && !target.value.some(row => row.value === filters.value.accountId))
+      filters.value.accountId = ''
+    if (kind === 'users' && filters.value.userId && !target.value.some(row => row.value === filters.value.userId))
+      filters.value.userId = ''
   }
   catch (reason) {
     errors[kind] = `${label}选项加载失败：${errorMessage(reason, '请重试')}`
@@ -62,8 +66,9 @@ async function load() {
     catalogs.push(
       loadOption('accounts', '账号', accounts, () => getUsageCatalogOptions('accounts', false).then(rows => rows.map(row => ({ label: row.name, value: row.id })))),
       loadOption('users', '邮箱 / 用户名', users, () => getUsers().then((rows) => {
-        usernames.value = rows.map(row => ({ label: row.username ? `${row.username} · ${row.email}` : `${row.email}（未设用户名）`, value: row.id }))
-        return rows.map(row => ({ label: row.email, value: row.id }))
+        const enabled = rows.filter(row => row.enabled)
+        usernames.value = enabled.map(row => ({ label: row.username ? `${row.username} · ${row.email}` : `${row.email}（未设用户名）`, value: row.id }))
+        return enabled.map(row => ({ label: row.email, value: row.id }))
       })),
     )
   }

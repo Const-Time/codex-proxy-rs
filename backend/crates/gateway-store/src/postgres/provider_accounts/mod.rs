@@ -62,6 +62,7 @@ use super::{
 mod admin_adapter;
 mod admin_queries;
 mod core_adapter;
+mod deletion;
 mod mapping;
 mod quota_forecast;
 mod repository;

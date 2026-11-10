@@ -10,6 +10,7 @@ import {
   refreshAccount,
   refreshAccountQuota,
 } from '@/api'
+import { ApiError } from '@/api/error'
 import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useDownload } from '@/composables/useDownload'
@@ -84,7 +85,13 @@ export function useAccountMutations(options: {
         await loadAccounts()
         toast.success('账号已删除')
       },
-      { errorText: '删除失败' },
+      {
+        errorText: false,
+        onError: (error) => {
+          void loadAccounts().catch(() => undefined)
+          toast.error(deletionErrorMessage(error))
+        },
+      },
     )
   }
 
@@ -115,8 +122,8 @@ export function useAccountMutations(options: {
           void loadAccounts().catch(() => undefined)
           toast.error(
             deletedCount > 0
-              ? `已删除 ${deletedCount} 个账号，其余未删除：${errorMessage(error, '操作失败')}`
-              : errorMessage(error, '批量删除失败'),
+              ? `已确认删除 ${deletedCount} 个账号。${deletionErrorMessage(error)}`
+              : deletionErrorMessage(error),
           )
         },
       },
@@ -237,6 +244,12 @@ export function useAccountMutations(options: {
     const result = await deleteAccounts(payload)
     if (!result)
       throw new Error(`不支持的 Provider：${account.provider}`)
+  }
+
+  function deletionErrorMessage(error: unknown) {
+    if (error instanceof ApiError && ['timeout', 'network', 'cancelled'].includes(error.kind))
+      return '删除结果暂未确认，请刷新列表核对后再操作。'
+    return errorMessage(error, '删除失败')
   }
 
   function accountDeletionGroups(accounts: AccountRow[]) {

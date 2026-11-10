@@ -2520,6 +2520,7 @@ async fn lightweight_cards_match_full_summary_scopes_and_empty_results() {
     db.close().await;
 }
 
+mod account_deletion;
 mod rollup;
 
 #[tokio::test]

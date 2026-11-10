@@ -696,12 +696,19 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
     ) -> StoreResult<Revision> {
         command.scope.validate()?;
         validate_admin_account_ids(&command.account_ids)?;
+        deletion::detach_history(&self.pool, &command.scope, &command.account_ids).await?;
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|_| postgres_unavailable("begin provider account admin deletion"))?;
         let result = async {
+            // The global revision lock is also used by budget admission. Never
+            // hold it for a long cascade if an active request races the cleanup.
+            sqlx::raw_sql("set local lock_timeout = '1s'; set local statement_timeout = '3s';")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| postgres_unavailable("bound terminal account deletion"))?;
             let revision = bump_config_revision_in_transaction(&mut transaction).await?;
             delete_provider_accounts_in_transaction(
                 &mut transaction,

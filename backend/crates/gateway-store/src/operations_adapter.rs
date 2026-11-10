@@ -28,7 +28,7 @@ impl UserAuthStore {
                         select 1 from user_account_groups ug where ug.user_id = u.id and ug.account_group_id = g.id)))
                 order by g.name, g.id",
             UsageCatalogKind::Accounts => "select id, coalesce(nullif(email, ''), nullif(name, ''), id) as name
-                from provider_accounts where $1::text is null order by name, id",
+                from provider_accounts where $1::text is null and enabled order by name, id",
         };
         let rows = sqlx::query(sql)
             .bind(owner)

@@ -1343,6 +1343,16 @@ async fn usage_catalog_is_minimal_and_respects_current_grants() {
     let json = serde_json::to_value(accounts).unwrap();
     assert_eq!(json[0].as_object().unwrap().len(), 2);
     assert!(!json.to_string().contains("must-not-leak"));
+    sqlx::query("update provider_accounts set enabled = false where id = 'acct_catalog'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        auth.usage_catalog_options(Kind::Accounts, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         auth.usage_catalog_options(Kind::Accounts, Some("catalog-user"))
             .await

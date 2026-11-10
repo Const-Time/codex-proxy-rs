@@ -5,7 +5,7 @@ import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 
-function filters(personal: boolean, api: Record<string, unknown>) {
+function filters(personal: boolean, api: Record<string, unknown>, selected = { accountId: '', userId: '' }) {
   const source = readFileSync(new URL('../src/views/usage/components/UsageRecordFiltersBar.vue', import.meta.url), 'utf8').split('<script setup lang="ts">')[1]!.split('</script>')[0]!
   const modules: Record<string, unknown> = {
     'vue': {
@@ -19,20 +19,40 @@ function filters(personal: boolean, api: Record<string, unknown>) {
     '@/api/modules/users': api,
     '@/utils/async': { errorMessage: String },
   }
-  const context = { exports: {}, defineModel: () => ({ value: {} }), require: (name: string) => {
+  const context = { exports: {}, defineModel: () => ({ value: selected }), require: (name: string) => {
     assert(name in modules, `unexpected import: ${name}`)
     return modules[name]
   } }
-  runInNewContext(ts.transpileModule(`${source}\nexport { load, pending, groups, accounts, keys, error }`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context)
+  runInNewContext(ts.transpileModule(`${source}\nexport { load, pending, groups, accounts, keys, users, usernames, error }`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context)
   return context.exports as {
     load: () => Promise<void>
     pending: Record<string, boolean>
     groups: { value: { value: string }[] }
     accounts: { value: { value: string }[] }
     keys: { value: { value: string }[] }
+    users: { value: { value: string }[] }
+    usernames: { value: { value: string }[] }
     error: { value: string }
   }
 }
+
+test('usage filters hide disabled users in both selectors and clear unavailable selections', async () => {
+  const selected = { accountId: 'disabled-account', userId: 'disabled-user' }
+  const view = filters(false, {
+    getUsageKeyOptions: async () => [],
+    getUsageCatalogOptions: async () => [{ id: 'enabled-account', name: 'Enabled' }],
+    getUsers: async () => [
+      { id: 'enabled-user', enabled: true, email: 'enabled@example.test', username: 'active' },
+      { id: 'disabled-user', enabled: false, email: 'disabled@example.test', username: 'inactive' },
+    ],
+  }, selected)
+  await view.load()
+  assert.equal(view.users.value.length, 1)
+  assert.equal(view.users.value[0]?.value, 'enabled-user')
+  assert.equal(view.usernames.value.length, 1)
+  assert.equal(view.usernames.value[0]?.value, 'enabled-user')
+  assert.deepEqual(selected, { accountId: '', userId: '' })
+})
 
 test('usage catalogs publish independently and retry failures without full account queries', async () => {
   let releaseKeys: (value: unknown[]) => void = () => {}
