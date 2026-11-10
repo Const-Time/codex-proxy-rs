@@ -5,7 +5,7 @@ import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 
-function filters(personal: boolean, api: Record<string, unknown>, selected = { accountId: '', userId: '' }) {
+function filters(personal: boolean, api: Record<string, unknown>, selected = { accountId: '', userId: '', clientApiKeyId: '' }) {
   const source = readFileSync(new URL('../src/views/usage/components/UsageRecordFiltersBar.vue', import.meta.url), 'utf8').split('<script setup lang="ts">')[1]!.split('</script>')[0]!
   const modules: Record<string, unknown> = {
     'vue': {
@@ -37,7 +37,7 @@ function filters(personal: boolean, api: Record<string, unknown>, selected = { a
 }
 
 test('usage filters hide disabled users in both selectors and clear unavailable selections', async () => {
-  const selected = { accountId: 'disabled-account', userId: 'disabled-user' }
+  const selected = { accountId: 'disabled-account', userId: 'disabled-user', clientApiKeyId: 'disabled-key' }
   const view = filters(false, {
     getUsageKeyOptions: async () => [],
     getUsageCatalogOptions: async () => [{ id: 'enabled-account', name: 'Enabled' }],
@@ -51,7 +51,7 @@ test('usage filters hide disabled users in both selectors and clear unavailable 
   assert.equal(view.users.value[0]?.value, 'enabled-user')
   assert.equal(view.usernames.value.length, 1)
   assert.equal(view.usernames.value[0]?.value, 'enabled-user')
-  assert.deepEqual(selected, { accountId: '', userId: '' })
+  assert.deepEqual(selected, { accountId: '', userId: '', clientApiKeyId: '' })
 })
 
 test('usage catalogs publish independently and retry failures without full account queries', async () => {

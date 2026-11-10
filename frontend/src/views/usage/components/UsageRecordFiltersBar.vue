@@ -41,6 +41,8 @@ async function loadOption(
   errors[kind] = ''
   try {
     target.value = await fetch()
+    if (kind === 'keys' && filters.value.clientApiKeyId && !target.value.some(row => row.value === filters.value.clientApiKeyId))
+      filters.value.clientApiKeyId = ''
     if (kind === 'accounts' && filters.value.accountId && !target.value.some(row => row.value === filters.value.accountId))
       filters.value.accountId = ''
     if (kind === 'users' && filters.value.userId && !target.value.some(row => row.value === filters.value.userId))

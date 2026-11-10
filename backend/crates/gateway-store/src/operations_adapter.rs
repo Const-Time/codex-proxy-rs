@@ -121,12 +121,17 @@ impl UserAuthStore {
         &self,
         owner: Option<&str>,
     ) -> AdminStoreResult<Vec<UsageKeyOption>> {
-        let rows = sqlx::query("with refs as (
-            select id, owner_user_id as user_id from client_api_keys where $1::text is null or owner_user_id = $1
-            union select client_api_key_ref, user_id from model_requests where $1::text is null or user_id = $1)
-            select r.id, r.user_id, coalesce(k.name, r.id) as name from refs r left join client_api_keys k on k.id = r.id
-            where r.id is not null order by name, r.id")
-            .bind(owner).fetch_all(&self.security.pool).await.map_err(error)?;
+        let rows = sqlx::query(
+            "select k.id, k.owner_user_id as user_id, k.name
+            from client_api_keys k join users u on u.id = k.owner_user_id
+            where k.enabled and u.enabled and u.deleted_at is null
+              and ($1::text is null or k.owner_user_id = $1)
+            order by k.name, k.id",
+        )
+        .bind(owner)
+        .fetch_all(&self.security.pool)
+        .await
+        .map_err(error)?;
         Ok(rows
             .into_iter()
             .map(|row| UsageKeyOption {

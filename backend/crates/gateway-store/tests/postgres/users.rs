@@ -1361,3 +1361,99 @@ async fn usage_catalog_is_minimal_and_respects_current_grants() {
     );
     db.close().await;
 }
+
+#[tokio::test]
+async fn usage_keys_require_enabled_keys_and_enabled_owners_without_reviving_history() {
+    let Some(db) = TestDatabase::create("usage_enabled_keys").await else {
+        return;
+    };
+    let Some(auth) = auth_store(&db).await else {
+        db.close().await;
+        return;
+    };
+    seed_group(&db).await;
+    auth.create_password_hash_if_absent("admin", "hash")
+        .await
+        .unwrap();
+    for user in ["alice", "bob"] {
+        auth.create_user(
+            user,
+            gateway_admin::model::users::UserIdentity::new(&format!("{user}@example.test"), user),
+            "hash",
+            &[GROUP.into()],
+            RateLimits::unlimited(),
+            &context("admin"),
+        )
+        .await
+        .unwrap();
+    }
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    for (id, owner) in [
+        ("alice-active", "alice"),
+        ("alice-disabled", "alice"),
+        ("bob-active", "bob"),
+    ] {
+        keys.create_client_key(key(id), &context(owner))
+            .await
+            .unwrap();
+    }
+    // Historical references must never repopulate unavailable filter choices.
+    sqlx::query("insert into model_requests(id, client_api_key_ref, user_id, config_revision, protocol, operation, endpoint, client_transport, routing_scope, started_at, deadline_at)
+        select 'usage-history-'||id, id, owner_user_id, 1, 'openai', 'responses', '/v1/responses', 'http_sse', 'all', now(), now()+interval '1 hour' from client_api_keys")
+        .execute(&db.pool).await.unwrap();
+    sqlx::query("update client_api_keys set enabled=false where id='alice-disabled'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    auth.set_user_enabled("bob", false, &context("admin"))
+        .await
+        .unwrap();
+    for owner in [None, Some("alice")] {
+        let choices = auth.usage_key_options(owner).await.unwrap();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].id, "alice-active");
+        assert_eq!(choices[0].user_id.as_deref(), Some("alice"));
+        assert_eq!(
+            serde_json::to_value(&choices[0])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+    assert!(
+        auth.usage_key_options(Some("bob"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        auth.usage_key_options(Some("unknown"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    auth.set_user_enabled("bob", true, &context("admin"))
+        .await
+        .unwrap();
+    assert_eq!(auth.usage_key_options(None).await.unwrap().len(), 2);
+    sqlx::query("delete from client_api_keys where id='alice-active'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        auth.usage_key_options(Some("alice"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select count(*) from model_requests")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        3
+    );
+    db.close().await;
+}
