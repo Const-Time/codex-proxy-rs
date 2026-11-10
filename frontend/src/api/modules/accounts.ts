@@ -503,7 +503,6 @@ export function deleteAccounts(data: AccountDeleteParams) {
     url: '/api/admin/accounts/delete',
     method: 'POST',
     data,
-    timeout: 120_000,
   })
 }
 

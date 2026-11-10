@@ -138,7 +138,7 @@ async fn request_fact_groups_reject_partial_writes_and_accept_complete_observati
 }
 
 #[tokio::test]
-async fn account_snapshots_are_required_before_live_foreign_keys_can_be_cleared() {
+async fn account_snapshots_remain_required_and_survive_account_deletion() {
     let Some(db) = TestDatabase::create("account_fact_refs").await else {
         return;
     };
@@ -165,11 +165,17 @@ async fn account_snapshots_are_required_before_live_foreign_keys_can_be_cleared(
     sqlx::query("delete from provider_accounts where id = 'acct_integrity'")
         .execute(&db.pool)
         .await
-        .expect("delete live account through narrowed FK index");
+        .expect("delete account without rewriting historical facts");
     let refs: (Option<String>, String) = sqlx::query_as(
         "select provider_account_id, provider_account_ref from model_requests where id = 'req_integrity'",
     ).fetch_one(&db.pool).await.expect("read retained snapshot");
-    assert_eq!(refs, (None, "acct_integrity".to_owned()));
+    assert_eq!(
+        refs,
+        (
+            Some("acct_integrity".to_owned()),
+            "acct_integrity".to_owned()
+        )
+    );
     db.close().await;
 }
 

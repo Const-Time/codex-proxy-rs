@@ -398,7 +398,7 @@ async fn terminal_failure_should_accept_exactly_one_client_status_backfill() {
 }
 
 #[tokio::test]
-async fn core_adapter_should_persist_calculated_cost_exactly() {
+async fn core_adapter_should_persist_calculated_cost_after_account_deletion() {
     let Some(database) = TestDatabase::create("execution_calculated_cost").await else {
         return;
     };
@@ -406,14 +406,29 @@ async fn core_adapter_should_persist_calculated_cost_exactly() {
         .await
         .expect("seed model request");
     sqlx::query(
+        "insert into provider_accounts (id, provider_kind, name, authentication_kind,
+           provider_credentials_json, has_refresh_token, credential_observed_at, created_at, updated_at)
+         values ('acct_xai', 'xai', 'Historical account', 'oauth', '{}', false, now(), now(), now())",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
         "update model_requests
-         set provider_kind = 'xai', provider_account_ref = 'acct_xai',
+         set provider_kind = 'xai', provider_account_id = 'acct_xai', provider_account_ref = 'acct_xai',
+             provider_account_name_snapshot = 'Historical account',
              upstream_model_id = 'grok-4.5', upstream_transport = 'http_sse', attempt_count = 1
          where id = 'req_calculated_cost'",
     )
     .execute(&database.pool)
     .await
     .expect("seed model request attempt");
+    // The request is in flight when configuration is removed. Its eventual
+    // usage/cost finalization must still succeed against the recorded identity.
+    sqlx::query("delete from provider_accounts where id = 'acct_xai'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
     let repository = PgExecutionStore::new(database.pool.clone());
 
     let mut finalization = successful_core_finalization("req_calculated_cost");
@@ -461,6 +476,10 @@ async fn core_adapter_should_persist_calculated_cost_exactly() {
         .usage_record_detail("req_calculated_cost", None)
         .await
         .expect("request detail");
+    assert_eq!(
+        detail.request.provider_account_ref.as_deref(),
+        Some("acct_xai")
+    );
     assert_eq!(
         detail.request.upstream_model_id.as_deref(),
         Some("grok-4.5")
