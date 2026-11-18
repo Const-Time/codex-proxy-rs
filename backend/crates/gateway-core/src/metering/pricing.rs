@@ -76,6 +76,8 @@ impl ModelPriceOverride {
                     | "long_standard"
                     | "long_fast"
                     | "long_flex"
+                    | "ultrafast"
+                    | "long_ultrafast"
                     | "image"
             )
         }) {

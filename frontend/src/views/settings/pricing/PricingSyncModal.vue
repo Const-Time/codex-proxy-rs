@@ -43,7 +43,7 @@ const changes = computed(() => {
   <BaseModal :model-value="!!preview" title="确认同步来源价目" description="Sub2API / LiteLLM · USD / 1M Tokens" size="lg" :dismissible="!saving" @update:model-value="!$event && $emit('close')">
     <div class="grid gap-4">
       <p class="m-0 text-cp text-cp-text-secondary">
-        {{ changes.length }} 个模型的来源价格将变化。人工单价和倍率保留；未覆盖的档位会采用新的来源价格。Sub2API / LiteLLM 是社区价目，不代表订阅实际扣费。
+        {{ changes.length }} 个模型的来源价格将变化。人工单价和倍率保留；OpenAI Fast / Ultrafast 始终按对应标准价的 2 倍 / 6 倍计费，不采用下方的远程速度优惠价。Sub2API / LiteLLM 是社区价目，不代表订阅实际扣费。
       </p>
       <div class="max-h-80 overflow-auto rounded-cp bg-cp-fill-quaternary p-4">
         <div v-for="item in changes" :key="item.id" class="grid gap-2 py-3 text-cp-sm">

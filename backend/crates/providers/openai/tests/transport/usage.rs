@@ -41,6 +41,8 @@ fn astra_billing_should_preserve_components_across_tiers_and_context_boundary() 
         (Some("fast"), 272_000, ["20", "2", "25", "100"], 200),
         (Some("fast"), 272_001, ["40", "4", "50", "150"], 200),
         (Some("priority"), 272_001, ["40", "4", "50", "150"], 200),
+        (Some("ultrafast"), 272_000, ["60", "6", "75", "300"], 600),
+        (Some("ultrafast"), 272_001, ["120", "12", "150", "450"], 600),
     ] {
         let breakdown =
             openai_billing_breakdown("gpt-6-astra", billing_usage(input, 5, 20, 10), tier)
@@ -236,12 +238,12 @@ fn billing_breakdown_should_fail_closed_for_unpublished_prices() {
                 .is_none(),
             openai_billing_breakdown("gpt-4o", billing_usage(1, 1, 0, 0), Some("flex")).is_none(),
         ),
-        (true, true, true, true)
+        (false, false, true, true)
     );
 }
 
 #[test]
-fn billing_breakdown_should_use_official_gpt_4o_fast_prices() {
+fn billing_breakdown_should_use_fixed_fast_policy_even_for_legacy_models() {
     let breakdown = openai_billing_breakdown("gpt-4o", billing_usage(1, 1, 1, 0), Some("priority"))
         .expect("gpt-4o fast pricing");
 
@@ -253,7 +255,7 @@ fn billing_breakdown_should_use_official_gpt_4o_fast_prices() {
             breakdown.total_amount().amount().scaled(),
             breakdown.multiplier_percent(),
         ),
-        (21_250_000_000, 170_000_000_000, 112_500, 191_250, 170,)
+        (25_000_000_000, 200_000_000_000, 112_500, 225_000, 200,)
     );
 }
 
@@ -358,10 +360,9 @@ fn billing_should_not_inherit_prices_for_unknown_models_or_tiers() {
     for (model, input, tier) in [
         ("gpt-5.6-cyber", 272_001, None),
         ("gpt-5.5-cyber", 272_001, None),
-        ("gpt-5.6-cyber", 1, Some("fast")),
         ("gpt-5.1-codex-mini", 1, Some("flex")),
         ("gpt-6-astra", 1, Some("auto")),
-        ("gpt-6-astra", 1, Some("ultrafast")),
+        ("gpt-6-astra", 1, Some("future-tier")),
     ] {
         assert!(
             openai_billing_breakdown(model, billing_usage(input, 1, 0, 0), tier).is_none(),
@@ -767,6 +768,88 @@ use provider_openai::transport::openai_billing_breakdown_with_override;
 use serde_json::json;
 
 #[test]
+fn fixed_speed_prices_ignore_remote_promotions_and_follow_frozen_standard_overrides() {
+    // Old installations have no Ultrafast band; new syncs can bring a 3x promotion.
+    for has_remote_ultrafast in [false, true] {
+        let mut pricing: ModelPriceOverride = serde_json::from_value(json!({
+            "multiplierBps": 15000,
+            "multiplierScope": {"components": ["output"]},
+            "bands": {
+                "standard": {"input":"2", "output":"10", "cacheRead":"0.1", "cacheWrite":"2.5"},
+                "long_standard": {"input":"4", "output":"15", "cacheRead":"0.2", "cacheWrite":"5"},
+                "fast": {"input":"99", "output":"99", "cacheRead":"99", "cacheWrite":"99"}
+            }
+        }))
+        .unwrap();
+        if has_remote_ultrafast {
+            pricing.bands.insert(
+                "ultrafast".into(),
+                serde_json::from_value(json!({
+                    "input":"6", "output":"30", "cacheRead":"0.3", "cacheWrite":"7.5"
+                }))
+                .unwrap(),
+            );
+        }
+        pricing.validate().unwrap();
+        for input in [272_000, 272_001] {
+            let usage = billing_usage(input, 140, 119_300, 20);
+            let standard =
+                openai_billing_breakdown_with_override("gpt-6.2-sol", usage, None, Some(&pricing))
+                    .unwrap();
+            for (tier, multiple) in [("priority", 2), ("fast", 2), ("ultrafast", 6)] {
+                let billed = openai_billing_breakdown_with_override(
+                    "gpt-6.2-sol",
+                    usage,
+                    Some(tier),
+                    Some(&pricing),
+                )
+                .unwrap();
+                assert_eq!(billed.service_tier(), Some(tier));
+                assert_eq!(
+                    billed.total_amount().amount().scaled(),
+                    standard.total_amount().amount().scaled() * multiple
+                );
+                for (selected, base) in [
+                    (billed.input_amount(), standard.input_amount()),
+                    (billed.output_amount(), standard.output_amount()),
+                    (billed.cache_read_amount(), standard.cache_read_amount()),
+                    (billed.cache_write_amount(), standard.cache_write_amount()),
+                ] {
+                    assert_eq!(
+                        selected.amount().scaled(),
+                        base.amount().scaled() * multiple
+                    );
+                }
+                assert_eq!(
+                    billed.multiplier_percent(),
+                    u32::try_from(multiple * 100).unwrap()
+                );
+            }
+        }
+    }
+    let zero: ModelPriceOverride = serde_json::from_value(json!({"multiplierBps":10000,"bands":{
+        "standard":{"input":"0","output":"0","cacheRead":"0","cacheWrite":"0"}
+    }}))
+    .unwrap();
+    let billed = openai_billing_breakdown_with_override(
+        "gpt-6.2-sol",
+        billing_usage(100, 5, 20, 10),
+        Some("ultrafast"),
+        Some(&zero),
+    )
+    .unwrap();
+    assert_eq!(billed.total_amount().amount().scaled(), 0);
+    assert!(
+        openai_billing_breakdown(
+            "unpriced-model",
+            billing_usage(100, 1, 0, 0),
+            Some("ultrafast")
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn custom_price_has_exact_cache_and_multiplier_math() {
     let custom: ModelPriceOverride = serde_json::from_value(json!({"multiplierBps":12500,"bands":{
         "standard":{"input":"2","output":"10","cacheRead":"0","cacheWrite":"3"}
@@ -819,7 +902,7 @@ fn a_custom_long_priority_band_requires_a_known_long_standard_comparison() {
 fn multiplier_only_preserves_builtin_tiers_and_unknown_models_remain_unknown() {
     let custom: ModelPriceOverride =
         serde_json::from_value(json!({"multiplierBps":20000,"bands":{}})).unwrap();
-    for tier in [None, Some("priority"), Some("flex")] {
+    for tier in [None, Some("priority"), Some("flex"), Some("ultrafast")] {
         for input in [100, 272_001] {
             let usage = billing_usage(input, 10, 20, 5);
             let original = openai_billing_breakdown("gpt-6-astra", usage, tier).unwrap();

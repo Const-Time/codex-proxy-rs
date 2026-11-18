@@ -1,7 +1,9 @@
 /** Preserve request intent separately from the actual upstream response. */
 export function serviceTierLabel(tier: string | null | undefined): string {
   switch (tier) {
+    case 'fast':
     case 'priority': return 'Fast'
+    case 'ultrafast': return 'Ultrafast'
     case 'default':
     case 'standard': return 'Standard'
     case 'auto': return 'Auto（未确认）'

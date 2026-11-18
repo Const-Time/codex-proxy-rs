@@ -185,6 +185,13 @@ async fn fast_http_wire_and_pricing_follow_the_outbound_tier_preserving_response
         (FastMode::Enabled, None, "priority", None, 40000),
         (FastMode::Disabled, Some("priority"), "default", None, 20000),
         (FastMode::Default, Some("priority"), "priority", None, 40000),
+        (
+            FastMode::Default,
+            Some("ultrafast"),
+            "ultrafast",
+            Some("default"),
+            120000,
+        ),
         (FastMode::Enabled, None, "priority", Some("default"), 40000),
         (
             FastMode::Disabled,

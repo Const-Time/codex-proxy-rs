@@ -4,9 +4,11 @@ import { scopeIncludes } from '../../../utils/multiplierScope.ts'
 export const bands: { value: PriceBand, label: string }[] = [
   { value: 'standard', label: '标准' },
   { value: 'fast', label: 'Priority / Fast' },
+  { value: 'ultrafast', label: 'Ultrafast' },
   { value: 'flex', label: 'Flex' },
   { value: 'long_standard', label: '长上下文 · 标准' },
   { value: 'long_fast', label: '长上下文 · Priority' },
+  { value: 'long_ultrafast', label: '长上下文 · Ultrafast' },
   { value: 'long_flex', label: '长上下文 · Flex' },
   { value: 'image', label: '图像 Token' },
 ]
@@ -24,12 +26,42 @@ export interface PricingRow {
   custom?: ModelPricing
   effective: ModelPricing
 }
+export function fixedSpeedMultiplier(provider: string, band: PriceBand): number | undefined {
+  if (provider !== 'openai')
+    return undefined
+  if (band === 'fast' || band === 'long_fast')
+    return 2
+  if (band === 'ultrafast' || band === 'long_ultrafast')
+    return 6
+  return undefined
+}
+// Display projection of the OpenAI billing policy. Stored source prices remain
+// intact; only Standard prices determine our fixed speed premiums.
+export function billingBands(provider: string, source: ModelPricing['bands']): ModelPricing['bands'] {
+  const result = { ...source }
+  if (provider !== 'openai' || source.image)
+    return result
+  for (const band of ['fast', 'ultrafast', 'long_fast', 'long_ultrafast'] as const) {
+    const standard = source[band.startsWith('long_') ? 'long_standard' : 'standard']
+    delete result[band]
+    if (standard) {
+      const bps = fixedSpeedMultiplier(provider, band)! * 10_000
+      result[band] = {
+        input: effectivePrice(standard.input, bps),
+        output: effectivePrice(standard.output, bps),
+        cacheRead: effectivePrice(standard.cacheRead, bps),
+        cacheWrite: effectivePrice(standard.cacheWrite, bps),
+      }
+    }
+  }
+  return result
+}
 export function pricingRows(catalog: PricingCatalog, provider: string): PricingRow[] {
   const defaults = catalog.defaults[provider] ?? {}
   const synced = catalog.synced[provider] ?? {}
   const custom = catalog.overrides[provider] ?? {}
   return [...new Set([...Object.keys(defaults), ...Object.keys(synced), ...Object.keys(custom)])].sort().map((model) => {
-    const base: ModelPricing = { multiplierBps: 10_000, bands: { ...defaults[model]?.bands, ...synced[model]?.bands } }
+    const base: ModelPricing = { multiplierBps: 10_000, bands: billingBands(provider, { ...defaults[model]?.bands, ...synced[model]?.bands }) }
     const override = custom[model]
     return {
       model,
@@ -37,7 +69,7 @@ export function pricingRows(catalog: PricingCatalog, provider: string): PricingR
       base,
       custom: override,
       source: override ? 'custom' : synced[model] ? 'synced' : 'builtin',
-      effective: { multiplierBps: override?.multiplierBps ?? 10_000, multiplierScope: override?.multiplierScope ?? 'all', bands: { ...base.bands, ...override?.bands } },
+      effective: { multiplierBps: override?.multiplierBps ?? 10_000, multiplierScope: override?.multiplierScope ?? 'all', bands: billingBands(provider, { ...base.bands, ...override?.bands }) },
     }
   })
 }
@@ -56,7 +88,7 @@ export function multiplierText(bps: number) {
   return `${bps / 10_000}×`
 }
 export function effectivePrice(value: string | undefined, bps = 10_000, scope?: MultiplierScope, component?: CostComponent): string {
-  if (value === undefined || !validPrice(value))
+  if (value === undefined || !/^\d{1,7}(?:\.\d{1,4})?$/.test(value) || Number(value) > 6_000_000)
     return '未配置'
   if (component && !scopeIncludes(scope, component))
     bps = 10_000

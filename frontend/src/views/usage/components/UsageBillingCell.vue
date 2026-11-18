@@ -86,7 +86,7 @@ function itemValueClass(tone?: string, accent?: boolean) {
         </div>
       </div>
       <p class="max-w-64 text-cp-xs leading-relaxed text-cp-text-tertiary">
-        新请求按最终发给上游的档位估算费用，响应回显不改变计价档位；历史费用不重算。分组倍率仅作用于选中的费用项，未选项保持原价，规则在请求准入时固定。请求 Fast 不代表上游实际加速。
+        新请求按最终发给上游的档位估算费用，响应回显不改变计价档位；历史费用不重算。OpenAI Fast 按对应标准 Token 价的 2 倍、Ultrafast 按 6 倍计费，再应用模型与分组倍率；工具调用费不随速度倍增。请求速度档位不代表上游实际加速。
       </p>
     </UsageDetailPopover>
   </div>

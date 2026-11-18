@@ -202,6 +202,7 @@ impl ModelPricing {
         // whose entire supported context is covered by the short-context price.
         let uses_long_rates = long_context && self.long_standard.is_configured();
         let rates = match (tier, uses_long_rates) {
+            (PricingTier::Ultrafast, _) => return None,
             (PricingTier::Standard, false) => self.standard,
             (PricingTier::Flex, false) => self.flex,
             (PricingTier::Fast, false) => self.fast,
@@ -218,6 +219,7 @@ enum PricingTier {
     Standard,
     Flex,
     Fast,
+    Ultrafast,
 }
 
 #[derive(Clone, Copy)]
@@ -643,10 +645,30 @@ fn effective_rates(
     tier: PricingTier,
     long_context: bool,
 ) -> Option<TokenRates> {
+    // Local billing policy: speed premiums follow the frozen Standard band,
+    // including manual Standard prices. Remote promotional speed prices and
+    // old per-speed overrides cannot silently change the agreed 2x/6x policy.
+    let speed_multiplier = match tier {
+        PricingTier::Fast => Some(2),
+        PricingTier::Ultrafast => Some(6),
+        _ => None,
+    };
+    if let Some(multiplier) = speed_multiplier {
+        let mut rates = effective_rates(default, custom, PricingTier::Standard, long_context)?;
+        rates.input_ticks = rates.input_ticks.checked_mul(multiplier)?;
+        rates.output_ticks = rates.output_ticks.checked_mul(multiplier)?;
+        rates.cache_read_ticks = rates.cache_read_ticks.checked_mul(multiplier)?;
+        rates.cache_write_ticks = match rates.cache_write_ticks {
+            Some(ticks) => Some(ticks.checked_mul(multiplier)?),
+            None => None,
+        };
+        return Some(rates);
+    }
     let long_band = match tier {
         PricingTier::Standard => "long_standard",
         PricingTier::Fast => "long_fast",
         PricingTier::Flex => "long_flex",
+        PricingTier::Ultrafast => "long_ultrafast",
     };
     let uses_long = long_context
         && (default.is_none()
@@ -659,6 +681,8 @@ fn effective_rates(
         (PricingTier::Standard, true) => "long_standard",
         (PricingTier::Fast, true) => "long_fast",
         (PricingTier::Flex, true) => "long_flex",
+        (PricingTier::Ultrafast, false) => "ultrafast",
+        (PricingTier::Ultrafast, true) => "long_ultrafast",
     };
     if let Some(rates) = custom.and_then(|p| p.bands.get(band)) {
         return Some(TokenRates {
@@ -930,6 +954,7 @@ fn pricing_tier(service_tier: Option<&str>) -> Option<PricingTier> {
         None | Some("default" | "standard") => Some(PricingTier::Standard),
         Some("flex") => Some(PricingTier::Flex),
         Some("fast" | "priority") => Some(PricingTier::Fast),
+        Some("ultrafast") => Some(PricingTier::Ultrafast),
         Some(_) => None,
     }
 }

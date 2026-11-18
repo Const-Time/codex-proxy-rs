@@ -190,8 +190,12 @@ fn model_price(provider: &str, model: &Value) -> Option<ModelPriceOverride> {
         return None;
     }
     let mut bands = BTreeMap::from([("standard".to_owned(), rates(model, "")?)]);
-    for (band, suffix) in [("fast", "_priority"), ("flex", "_flex")] {
-        if (provider != "xai" || band != "flex")
+    for (band, suffix) in [
+        ("fast", "_priority"),
+        ("flex", "_flex"),
+        ("ultrafast", "_ultrafast"),
+    ] {
+        if (provider != "xai" || band == "fast")
             && let Some(rate) = rates(model, suffix)
         {
             bands.insert(band.to_owned(), rate);
@@ -201,8 +205,9 @@ fn model_price(provider: &str, model: &Value) -> Option<ModelPriceOverride> {
         ("long_standard", ""),
         ("long_fast", "_priority"),
         ("long_flex", "_flex"),
+        ("long_ultrafast", "_ultrafast"),
     ] {
-        if (provider != "xai" || band != "long_flex")
+        if (provider != "xai" || band != "long_flex" && band != "long_ultrafast")
             && let Some(rate) = rates(model, &format!("_above_{threshold}{service}"))
         {
             bands.insert(band.to_owned(), rate);

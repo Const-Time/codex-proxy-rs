@@ -180,6 +180,7 @@ pub(crate) fn format_token_price(cost: &domain::CurrencyCost) -> String {
 pub(crate) fn format_service_tier(service_tier: Option<&str>) -> String {
     match service_tier {
         Some("priority" | "fast") => "Fast".to_owned(),
+        Some("ultrafast") => "Ultrafast".to_owned(),
         Some("flex") => "Flex".to_owned(),
         Some("default" | "standard") | None => "Standard".to_owned(),
         Some(other) => capitalize_first(other),

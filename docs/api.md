@@ -963,9 +963,13 @@ Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`
 OpenAI Responses 的 `serviceTier` 与本地费用估算统一采用 Provider 最终发给上游的请求
 `service_tier`，响应回显不覆盖或回填该值。例如发送 `priority`、响应返回 `default` 或 `auto` 时，
 仍按 Priority 价格估算并显示 `Fast`。未发送档位时，`serviceTier` 保持缺失，费用按标准档估算。
-计费展示把 `priority`/`fast` 映射为 `Fast`，`flex` 映射为 `Flex`，缺失或 `default`/`standard`
-映射为 `Standard`。各档位与长上下文区间使用已登记价格；请求 `auto`、未知档位或缺少对应价格时
-不估算，不用固定倍数兜底。系统模型定价倍率、分组分项倍率在档位选价后沿现有冻结规则应用。
+计费展示把 `priority`/`fast` 映射为 `Fast`，`ultrafast` 映射为 `Ultrafast`，`flex` 映射为 `Flex`，缺失或 `default`/`standard`
+映射为 `Standard`。OpenAI 文本费用采用本地速度计费规则：Fast 固定为对应 Standard Token 单价的 2 倍，Ultrafast 固定为 6 倍；
+输入、输出、缓存读取和缓存写入均适用，长上下文使用对应的长上下文 Standard 单价。远程促销价格及旧速度档单独覆盖不改变此规则；
+人工 Standard 单价仍有效。同步保留远程原始 `fast`、`ultrafast`、`long_fast`、`long_ultrafast` 档供来源记录，
+管理界面显示实际执行的派生单价，速度档通过修改对应 Standard 档调整。工具调用费不随速度倍增。
+Flex 保留独立档位；请求 `auto`、未知档位或缺少对应 Standard 价格时不估算。此规则仅决定本地收费，不授予模型速度权限。
+系统模型定价倍率、分组分项倍率在档位选价后沿现有冻结规则应用。
 上游返回档位独立保留为诊断事实，原始响应不改写。这里的 Fast 表示发送档位，不证明上游实际加速，
 本地费用估算不能替代官方账单。新口径仅作用于新请求，不回填历史档位或重算已存储费用。
 

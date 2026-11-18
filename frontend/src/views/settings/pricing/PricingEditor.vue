@@ -13,7 +13,7 @@ import BaseSelect from '@/components/base/BaseSelect.vue'
 import MultiplierScopeSelect from '@/components/MultiplierScopeSelect.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import { validScope } from '@/utils/multiplierScope'
-import { bands, parseMultiplier, validPrice } from './model'
+import { bands, billingBands, fixedSpeedMultiplier, parseMultiplier, validPrice } from './model'
 import PricingRateFields from './PricingRateFields.vue'
 
 const props = defineProps<{ row?: PricingRow, provider: string, saving: boolean }>()
@@ -27,8 +27,11 @@ const selectedBand = ref<PriceBand>('standard')
 const validation = ref('')
 const helpOpen = shallowRef(false)
 const helpId = useId()
-const base = computed(() => props.row?.base.bands[selectedBand.value])
-const current = computed(() => draft.value[selectedBand.value])
+const speedMultiplier = computed(() => fixedSpeedMultiplier(props.provider, selectedBand.value))
+const base = computed(() => speedMultiplier.value
+  ? billingBands(props.provider, { ...props.row?.base.bands, ...draft.value })[selectedBand.value]
+  : props.row?.base.bands[selectedBand.value])
+const current = computed(() => speedMultiplier.value ? undefined : draft.value[selectedBand.value])
 const bps = computed(() => parseMultiplier(multiplier.value))
 const sourceOptions = computed(() => [
   { label: '来源价', value: 'inherit', disabled: selectedBand.value === 'standard' && !props.row?.base.bands.standard },
@@ -41,7 +44,7 @@ const priceMode = computed({
 const bandOptions = computed(() => bands
   .filter(band => props.row?.base.bands.image
     ? ['standard', 'image'].includes(band.value)
-    : props.provider !== 'xai' || !['flex', 'long_flex', 'image'].includes(band.value))
+    : props.provider !== 'xai' || !['flex', 'long_flex', 'ultrafast', 'long_ultrafast', 'image'].includes(band.value))
   .map(band => ({ ...band, label: band.value === 'standard' && props.row?.base.bands.image ? '文本 Token' : band.label })))
 
 watch(open, (value) => {
@@ -51,6 +54,10 @@ watch(open, (value) => {
   multiplier.value = String((props.row?.custom?.multiplierBps ?? 10_000) / 10_000)
   scope.value = JSON.parse(JSON.stringify(props.row?.custom?.multiplierScope ?? 'all'))
   draft.value = JSON.parse(JSON.stringify(props.row?.custom?.bands ?? {}))
+  if (props.provider === 'openai') {
+    for (const band of ['fast', 'ultrafast', 'long_fast', 'long_ultrafast'] as const)
+      delete draft.value[band]
+  }
   selectedBand.value = props.row?.effective.bands.image ? 'image' : 'standard'
   if (!props.row)
     toggleBand(true)
@@ -120,14 +127,15 @@ function submit() {
       <section aria-label="档位价格">
         <div class="mb-5 flex flex-wrap items-center justify-between gap-3">
           <BaseSelect :model-value="selectedBand" :options="bandOptions" aria-label="价格档位" class="min-w-0 flex-1 sm:max-w-56" :disabled="saving" @update:model-value="selectedBand = $event as PriceBand" />
-          <BaseSegmented v-model="priceMode" label="单价来源" :options="sourceOptions" :disabled="saving" />
+          <span v-if="speedMultiplier" class="text-cp-sm text-cp-text-secondary">标准价 × {{ speedMultiplier }}</span>
+          <BaseSegmented v-else v-model="priceMode" label="单价来源" :options="sourceOptions" :disabled="saving" />
         </div>
         <PricingRateFields v-if="current || base" class="rounded-cp-lg bg-cp-fill-quaternary p-4" :base="base" :custom="current" :multiplier-bps="bps" :multiplier-scope="scope" :disabled="saving" @change="updatePrice" />
         <div v-else class="grid justify-items-center gap-3 py-6 text-cp-sm text-cp-text-tertiary">
           <p class="m-0">
-            此档位暂无来源价格
+            {{ speedMultiplier ? '请先配置对应上下文的标准档单价' : '此档位暂无来源价格' }}
           </p>
-          <BaseButton size="sm" :disabled="saving" @click="toggleBand(true)">
+          <BaseButton v-if="!speedMultiplier" size="sm" :disabled="saving" @click="toggleBand(true)">
             填写单价
           </BaseButton>
         </div>
@@ -147,6 +155,9 @@ function submit() {
         <div :id="helpId" class="grid w-72 gap-2 p-3 text-cp-xs leading-relaxed text-cp-text-secondary">
           <p class="m-0">
             模型 ID 使用实际发送给上游的名称，不是客户端别名。
+          </p>
+          <p v-if="provider === 'openai'" class="m-0">
+            Fast 固定按对应标准价的 2 倍、Ultrafast 按 6 倍计费，覆盖输入、输出和缓存；远程优惠价不改变此规则。修改标准档可调整这两个档位，之后再应用模型与分组倍率。
           </p>
           <p class="m-0">
             自定义档位需填写四项单价，0 表示免费；单价上限 1000000，倍率范围 0～100，最多四位小数。

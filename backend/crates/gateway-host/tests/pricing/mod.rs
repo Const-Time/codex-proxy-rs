@@ -179,7 +179,7 @@ fn community_extended_prices_preserve_supported_bands() {
     assert_eq!(String::from(sol.bands["standard"].cache_write), "2.5");
     assert_eq!(String::from(sol.bands["long_standard"].input), "4");
     assert_eq!(String::from(sol.bands["fast"].output), "20");
-    assert_eq!(sol.bands.len(), 6);
+    assert_eq!(sol.bands.len(), 8);
 }
 
 #[test]
@@ -190,4 +190,32 @@ fn known_extra_dimensions_do_not_relax_unknown_context_validation() {
     assert!(decode(item.clone()).is_ok());
     item["cache_creation_input_token_cost_above_12hr_above_999k_tokens"] = json!(5e-6);
     assert!(decode(item).is_err());
+}
+
+#[test]
+fn ultrafast_source_bands_preserve_promotion_and_long_context_without_rewriting_standard() {
+    let mut item = model();
+    for (field, short, long) in [
+        ("input_cost_per_token", 6e-6, 12e-6),
+        ("output_cost_per_token", 30e-6, 45e-6),
+        ("cache_read_input_token_cost", 0.3e-6, 0.6e-6),
+        ("cache_creation_input_token_cost", 7.5e-6, 15e-6),
+    ] {
+        item[format!("{field}_ultrafast")] = json!(short);
+        item[format!("{field}_above_272k_tokens_ultrafast")] = json!(long);
+    }
+    let parsed = decode(item.clone()).unwrap();
+    let price = &parsed.prices["openai"]["new-model"];
+    price.validate().unwrap();
+    assert_eq!(String::from(price.bands["standard"].input), "2");
+    assert_eq!(String::from(price.bands["ultrafast"].input), "6");
+    assert_eq!(String::from(price.bands["long_ultrafast"].output), "45");
+    item.as_object_mut()
+        .unwrap()
+        .remove("cache_creation_input_token_cost_ultrafast");
+    assert!(
+        !decode(item).unwrap().prices["openai"]["new-model"]
+            .bands
+            .contains_key("ultrafast")
+    );
 }

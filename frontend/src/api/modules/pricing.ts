@@ -4,7 +4,7 @@ import request from '../request'
 export type CostComponent = 'input' | 'output' | 'cacheRead' | 'cacheWrite'
 export type MultiplierScope = 'all' | { components: CostComponent[] }
 
-export type PriceBand = 'standard' | 'fast' | 'flex' | 'long_standard' | 'long_fast' | 'long_flex' | 'image'
+export type PriceBand = 'standard' | 'fast' | 'ultrafast' | 'flex' | 'long_standard' | 'long_fast' | 'long_ultrafast' | 'long_flex' | 'image'
 
 export interface TokenPrices {
   input: string
