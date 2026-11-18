@@ -41,10 +41,10 @@ async fn real_core_openai_and_sdk_adapter_preserve_scope_observed_tier_and_singl
         assert_eq!(row.usage.input_tokens, Some(10));
         assert_eq!(row.usage.output_tokens, Some(2));
         assert_eq!(row.service_tier.as_deref(), Some("priority"));
-        assert_eq!(row.cost.total().unwrap().amount().scaled(), 570_000);
+        assert_eq!(row.cost.total().unwrap().amount().scaled(), 420_000);
         assert_eq!(
             f.core.charges.lock().unwrap()[index].amount_usd.scaled(),
-            570_000
+            420_000
         );
         assert_eq!(
             f.core.charges.lock().unwrap()[index].request_id,
@@ -84,10 +84,10 @@ async fn real_core_adapter_tail_fault_keeps_native_metering_and_never_replays_se
         assert_eq!(rows[0].outcome, ExecutionOutcome::Failed);
         assert_eq!(rows[0].send_state, UpstreamSendState::Sent);
         assert_eq!(rows[0].attempt_count, 1);
-        assert_eq!(rows[0].cost.total().unwrap().amount().scaled(), 570_000);
+        assert_eq!(rows[0].cost.total().unwrap().amount().scaled(), 420_000);
         assert_eq!(
             f.core.charges.lock().unwrap()[0].amount_usd.scaled(),
-            570_000
+            420_000
         );
         assert_eq!(f.server.requests.lock().unwrap().len(), 1);
     }

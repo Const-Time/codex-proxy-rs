@@ -331,7 +331,12 @@ async fn real_core_websocket_adapters_reuse_original_connection_without_idle_acc
                     .lock()
                     .unwrap()
                     .iter()
-                    .all(|c| c.amount_usd.scaled() == 570_000)
+                    .all(|c| c.amount_usd.scaled()
+                        == if provider == "openai" {
+                            420_000
+                        } else {
+                            570_000
+                        })
             );
             assert!(
                 f.core

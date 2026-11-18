@@ -82,7 +82,9 @@ fn snapshot(
         )
         .unwrap(),
     ));
-    // Distinct fast/standard rates and a local multiplier prove the original pricing owner is used.
+    // The original pricing owner applies the local 1.5x multiplier. OpenAI Fast
+    // derives 2x Standard (420_000 ticks); xAI keeps its explicit Fast rate
+    // (570_000 ticks). The legacy OpenAI Fast override must not win.
     let price: ModelPriceOverride = serde_json::from_value(json!({"multiplierBps":15000,"bands":{
         "standard":{"input":"1","output":"2","cacheRead":"0","cacheWrite":"0"},
         "fast":{"input":"3","output":"4","cacheRead":"0","cacheWrite":"0"}

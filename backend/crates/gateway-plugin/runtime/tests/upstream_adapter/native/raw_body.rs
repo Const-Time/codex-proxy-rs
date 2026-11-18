@@ -38,10 +38,10 @@ async fn raw_body_tail_failure_preserves_native_cost_and_invalid_streams_never_r
             assert_eq!(rows[0].send_state, UpstreamSendState::Sent);
             if mode == "tail-fault" {
                 assert_eq!(rows[0].usage.input_tokens, Some(10));
-                assert_eq!(rows[0].cost.total().unwrap().amount().scaled(), 570_000);
+                assert_eq!(rows[0].cost.total().unwrap().amount().scaled(), 420_000);
                 assert_eq!(
                     f.core.charges.lock().unwrap()[0].amount_usd.scaled(),
-                    570_000
+                    420_000
                 );
             }
         }

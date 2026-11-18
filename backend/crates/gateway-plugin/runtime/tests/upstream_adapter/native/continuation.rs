@@ -65,7 +65,12 @@ async fn real_core_native_adapter_continuation_roundtrips_through_original_redis
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|charge| charge.amount_usd.scaled() == 570_000)
+                .all(|charge| charge.amount_usd.scaled()
+                    == if provider == "openai" {
+                        420_000
+                    } else {
+                        570_000
+                    })
         );
         f.close().await;
     }
