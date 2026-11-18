@@ -251,6 +251,7 @@ async fn proxy_location_inherits_cached_manual_and_passthrough_policies() {
 
 fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
     UpdateAccount {
+        dispatch_hours: None,
         model_access: Default::default(),
         account_id: account_id.to_owned(),
         enabled: true,
@@ -904,6 +905,7 @@ async fn legacy_urls_join_one_catalog_entry_and_invalid_batch_rolls_back() {
         admin
             .batch_update_accounts(
                 BatchUpdateAccounts {
+                    dispatch_hours: None,
                     quota_usage_limits: None,
                     auto_use_quota_credits: None,
                     model_access: Default::default(),

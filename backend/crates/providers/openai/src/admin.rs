@@ -606,6 +606,25 @@ impl ProviderAdmin for OpenAiAdminProvider {
         )))
     }
 
+    fn quota_history_parser(
+        &self,
+    ) -> Option<gateway_admin::model::quota_history::QuotaHistoryParser> {
+        Some(|document, key| {
+            let headers = document
+                .expose_to_provider()
+                .expose_to_provider()
+                .get("rateLimitHeaders")?;
+            let headers: Vec<(String, String)> = serde::Deserialize::deserialize(headers).ok()?;
+            let parsed = gateway_protocol::openai::events::parse_rate_limit_headers(&headers)?;
+            let window = crate::credential::observed_quota_window(&parsed, key)?;
+            Some(gateway_admin::model::quota_history::QuotaReading {
+                plan_type: parsed.plan_type,
+                used_percent: window.used_percent()?,
+                reset_at: window.reset_at(),
+            })
+        })
+    }
+
     fn quota_forecast_observation(
         &self,
         document: &ProviderDocument,
@@ -846,10 +865,18 @@ impl ProviderAdmin for OpenAiAdminProvider {
                 .await
                 .map_err(map_catalog_error)?
         } else {
-            self.catalog
-                .cached_or_refresh_account_catalog(&account)
+            let Some(catalog) = self
+                .catalog
+                .read_account_catalog(&account)
                 .await
                 .map_err(map_catalog_error)?
+            else {
+                return Ok(ProviderModels {
+                    models: Vec::new(),
+                    observed_at: None,
+                });
+            };
+            catalog
         };
         let models = catalog
             .models()

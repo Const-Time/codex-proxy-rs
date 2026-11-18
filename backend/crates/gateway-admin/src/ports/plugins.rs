@@ -351,6 +351,11 @@ pub trait PluginDataService: Send + Sync {
     async fn keys(&self, query: PluginKeyQuery) -> Result<PluginKeyPage>;
     async fn key(&self, id: &str) -> Result<PluginKeyFacts>;
     async fn accounts(&self, query: PluginAccountQuery) -> Result<PluginAccountPage>;
+    async fn quota_history(
+        &self,
+        id: &str,
+        query: crate::model::quota_history::QuotaHistoryQuery,
+    ) -> Result<crate::model::quota_history::QuotaHistoryPage>;
     async fn quota(&self, id: &str) -> Result<crate::model::provider_credentials::ProviderQuota>;
     /// Explicit refresh uses the native account pipeline and retains its original graph permit.
     async fn refresh_quota(

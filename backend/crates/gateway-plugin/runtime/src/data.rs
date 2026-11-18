@@ -79,6 +79,48 @@ pub(crate) async fn call(
                 next_cursor: value.next_cursor,
             })
         }
+        data::QUOTA_HISTORY => {
+            use gateway_admin::model::{
+                observability::TimeRange,
+                quota_history::{QuotaHistoryPoint, QuotaHistoryQuery},
+            };
+            let wire: data::QuotaHistoryQuery =
+                serde_json::from_slice(payload).map_err(|_| invalid())?;
+            let time = |ms| chrono::DateTime::from_timestamp_millis(ms).ok_or_else(invalid);
+            let query = QuotaHistoryQuery {
+                window_key: wire.window_key,
+                range: TimeRange::new(time(wire.start_ms)?, time(wire.end_ms)?)
+                    .map_err(|_| invalid())?,
+                cursor: wire
+                    .cursor
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|_| invalid())?,
+            };
+            query.validate().map_err(|_| invalid())?;
+            let page = service
+                .quota_history(&wire.account_id, query)
+                .await
+                .map_err(error)?;
+            let sample = |p: QuotaHistoryPoint| data::QuotaHistorySample {
+                observed_at_ms: p.observed_at.timestamp_millis(),
+                used_percent: p.reading.used_percent,
+                reset_at_ms: p.reading.reset_at.map(|at| at.timestamp_millis()),
+                plan_type: p.reading.plan_type,
+            };
+            serde_json::to_vec(&data::QuotaHistoryPage {
+                schema_version: 1,
+                samples: page.samples.into_iter().map(sample).collect(),
+                baseline: page.baseline.map(sample),
+                next_cursor: page
+                    .next_cursor
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|_| invalid())?,
+            })
+        }
         data::QUOTA_GET => {
             let query: data::QuotaFactsQuery =
                 serde_json::from_slice(payload).map_err(|_| invalid())?;

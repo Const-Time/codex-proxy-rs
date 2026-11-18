@@ -129,7 +129,14 @@ export interface AccountModelAccess {
   models: string[]
 }
 
+export interface AccountDispatchHours {
+  enabled: boolean
+  timeZone: string
+  windows: { start: string, end: string }[]
+}
+
 export interface Account {
+  dispatchHours: AccountDispatchHours
   quotaUsageLimits: { shortTermPercent: number, weeklyPercent: number }
   autoUseQuotaCredits: boolean
   outboundProxyEndpoint: string | null
@@ -315,6 +322,7 @@ interface AccountResetCreditConsumeParam extends AccountIdParam {
 }
 
 interface AccountUpdateParam {
+  dispatchHours?: AccountDispatchHours
   outboundProxyUrl?: string
   outboundProxyId?: string
   accountId: string
@@ -326,6 +334,7 @@ interface AccountUpdateParam {
 }
 
 interface AccountBatchUpdateParam {
+  dispatchHours?: AccountDispatchHours
   quotaUsageLimits?: { shortTermPercent: number, weeklyPercent: number }
   autoUseQuotaCredits?: boolean
   outboundProxyUrl?: string

@@ -45,7 +45,7 @@ v7 保留分段帧与会话信用，新增阶段独立预算、协作式挂起/�
 | Provider 亲和查询 | `host.affinity.lookup`；只读既有记录，必须绑定存活的原生模型父请求及其冻结账号范围 |
 | 主动服务调用 | 管理及已有授权 service 层保留原操作者；HTTP、WebSocket、注册、认证、命令、观察及 request/attempt、routing/scheduling/retry/upstream/maintenance 使用原上下文和实例 revision 调用设置服务 |
 | 私有状态 | `host.state.get/put/delete`，实例和命名空间隔离，版本比较交换、schema 和配额校验 |
-| 只读事实 | management、maintenance 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`；不含密钥或凭据 |
+| 只读事实 | management、maintenance 阶段的 `host.data.keys.get`、`host.data.accounts.list`、`host.data.quota.get`、`host.data.quota.history`；不含密钥或凭据 |
 | 页面推理 | 本人管理员会话显式选择自己的 Key，复用正常 Responses 的权限、路由、预算、倍率和结算 |
 | 原生模型 RPC | management 调用的本人 Key 列表、模型目录与普通/流式推理；HME1 事件批次、调用范围内的读取/关闭与原 Core 结算 |
 | 分组资源 | `host.groups.ensure` 幂等创建实例自有分组，`host.groups.change_members` 增量修改成员；使用真实管理请求或维护任务的插件审计身份 |
@@ -53,7 +53,7 @@ v7 保留分段帧与会话信用，新增阶段独立预算、协作式挂起/�
 | 共享额度 | 本地扩展 `host.cpr.shared_budgets.v1.*`：显式用户＋分组查询、整组基础限额 CAS 更新、选定订阅幂等重置 |
 | 外部认证 | frontend_authentication v1；单一入口认证器，宿主将外部 principal 映射到现有 Key，沿用正常权限及共享计费 |
 | 模型路由 | model_router v1 的 routing 阶段；按冻结 Key/分组选择公开模型及授权 Provider，最终能力与账号范围由 Core 校验 |
-| 账号调度 | scheduler v1 的 scheduling 阶段；首个匹配插件只从宿主合格候选选择账号，租约及资格检查保留在 Core/Provider |
+| 账号调度 | scheduler v4 的 scheduling 阶段；首个匹配插件只从宿主合格候选选择账号，租约及资格检查保留在 Core/Provider |
 | 重试策略 | retry_policy v1 的 retry 阶段；可停止或继续宿主允许的恢复路径，整条策略链共享两秒等待预算 |
 | 模型目录 | model_catalog v1；注册内置 Provider 的模型别名，继承真实目标的能力、账号范围和定价 |
 | 维护任务 | maintenance v1 的 `plugin.reconcile`，Core 已发布配置与已发布实例驱动，Host 监督周期、重试和关闭 |
@@ -300,7 +300,7 @@ Core 再次校验目标 Provider、模型能力、原请求输出上限与私有
 
 ## 插件读取宿主事实
 
-可信插件的管理请求可通过 SDK `key_facts`、`account_facts`、`quota_facts` 查询现有数据。这些接口属于管理员安装的全局管理能力，不受页面所选 Key 限定；普通用户没有管理入口，也不会获得这些回调权限。页面选 Key 仍只用于本人模型推理，不能授权账户管理。
+可信插件的管理请求可通过 SDK `key_facts`、`account_facts`、`quota_facts`、`quota_history` 查询现有数据。这些接口属于管理员安装的全局管理能力，不受页面所选 Key 限定；普通用户没有管理入口，也不会获得这些回调权限。页面选 Key 仍只用于本人模型推理，不能授权账户管理。
 
 Key 查询只返回 ID、启用状态和显式分组绑定；账户查询只返回 ID、Provider、名称、邮箱、分组、启用状态及更新时间。账户列表按 ID 升序分页，`limit` 为 1～100，可按 `openai` / `xai` 筛选，继续查询时传入上一页 `next_cursor`；末页为 `null`。空分组表示没有显式绑定，不代表全账户权限。
 
@@ -483,9 +483,11 @@ Core 已提供宿主签发的父请求上下文，request/attempt 协议桥传�
 
 ## 账号调度
 
-声明 `scheduler` v1、`scheduling` 阶段的制品可在管理页配置账号调度绑定：顺序、全部请求或指定 Key/分组，以及故障时拒绝或使用宿主调度。绑定保存为实例字段 `accountScheduler`，不混入插件配置；迁移 `0036_plugin_account_scheduler.sql` 随完整备份恢复。顺序较小者优先，同序号按实例 ID 排序，只调用首个匹配的实例；未匹配、明确 Delegate 或显式故障委托均使用宿主选号，明确 Reject 会终止请求。
+声明 `scheduler` v4、`scheduling` 阶段的制品可在管理页配置账号调度绑定：顺序、全部请求或指定 Key/分组，以及故障时拒绝或使用宿主调度。绑定保存为实例字段 `accountScheduler`，不混入插件配置；迁移 `0036_plugin_account_scheduler.sql` 随完整备份恢复。顺序较小者优先，同序号按实例 ID 排序，只调用首个匹配的实例；未匹配、明确 Delegate 或显式故障委托均使用宿主选号，明确 Reject 会终止请求。
 
-`policy.schedule_account` 仅接收宿主合格候选的账号 ID、权重、并发、额度重置/排序及健康指标，没有凭据、请求正文和二进制载荷。Pick 必须位于该次候选集合；Key 的账号/模型权限、Provider、原生续接硬绑定、时间资格及实际账号租约仍由宿主检查。插件故障和明确拒绝不会当作账号不足换 Provider，软亲和绑定也不能覆盖显式 Pick。
+`policy.schedule_account` 接收宿主合格候选的账号 ID、权重、并发、额度重置/排序及健康指标，以及 `available`、`session_bound` 和 `role`；没有凭据、请求正文和二进制载荷。临时容量受限的账号以 `available=false` 出现，Pick 必须选择该次候选中的可用账号；Key 的账号/模型权限、Provider、原生续接硬绑定、时间资格及实际账号租约仍由宿主检查。插件故障和明确拒绝不会当作账号不足换 Provider，软亲和绑定也不能覆盖显式 Pick。
+
+`delegate_filtered` 可用 `exclude_account_ids` 排除部分当前候选，再交由宿主原生调度；范围外和重复 ID 会被拒绝，全部排除不会绕过固定账号约束。scheduler v1 制品需升级到 v4；未声明 scheduler 的管理或维护插件不受影响。
 
 调度 RPC 有独立的两秒上限，且不超过请求剩余期限；普通请求没有总期限也不会无限等待插件。调度阶段允许实例私有状态、通用外部 HTTP 和绑定父执行的原生模型回调，拒绝管理事实、资源创建及额度修改。子调用使用原 Key 权限、独立费用和全部插件祖先排除。已成功咨询的进程代次在 RPC 返回后继续关联原请求取消链，停用、换代或进程退出会结束执行，并结算此前已经观察到的费用。路由和调度共用请求撤销源，Core 已结算但尚未交付的缓冲 JSON 同样受它保护；正常结算不会撤销成功输出。升级准备失败保留旧代次及旧绑定。
 

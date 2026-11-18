@@ -489,3 +489,31 @@ async fn scheduling_rpc_has_a_local_timeout_on_an_unbounded_core_request() {
     );
     fixture.manager.shutdown().await;
 }
+
+#[tokio::test]
+async fn scheduler_v4_filtered_delegate_only_narrows_native_candidates() {
+    for mode in ["filtered", "filtered-foreign", "filtered-duplicate"] {
+        let fixture =
+            Fixture::with_accounts(&["acct_allowed", "acct_alternative", "acct_fallback"]).await;
+        install(
+            &fixture,
+            mode,
+            0,
+            PluginExecutionScope::All {},
+            PluginPolicyFailurePolicy::Reject,
+        )
+        .await;
+        let result = fixture.call(json!({"key":"key_alice"})).await;
+        if mode == "filtered" {
+            assert!(result.get("error").is_none(), "{result}");
+            assert_eq!(
+                fixture.core.selected.lock().unwrap()[0].as_str(),
+                "acct_alternative"
+            );
+        } else {
+            assert!(result.get("error").is_some(), "{result}");
+            assert!(fixture.core.selected.lock().unwrap().is_empty());
+        }
+        fixture.manager.shutdown().await;
+    }
+}

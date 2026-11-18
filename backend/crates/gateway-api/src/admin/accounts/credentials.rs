@@ -211,6 +211,7 @@ impl CompleteAccountAuthorizationRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateAccountRequest {
+    pub dispatch_hours: Option<gateway_core::account::AccountDispatchHours>,
     pub outbound_proxy_id: Option<String>,
     pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
     pub account_id: String,
@@ -234,6 +235,7 @@ impl UpdateAccountRequest {
     pub(super) fn into_command(self) -> Result<UpdateAccount, WireValidationError> {
         self.validate()?;
         Ok(UpdateAccount {
+            dispatch_hours: self.dispatch_hours,
             outbound_proxy: super::wire::proxy_selection(
                 self.outbound_proxy_id,
                 self.outbound_proxy_url,

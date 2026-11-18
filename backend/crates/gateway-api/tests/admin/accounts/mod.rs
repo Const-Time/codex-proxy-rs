@@ -883,3 +883,14 @@ fn quota_usage_limits_wire_bounds_and_omission() {
         assert!(serde_json::from_value::<BatchUpdateAccountsRequest>(serde_json::json!({"accountIds":["acct_test"],"quotaUsageLimits":{"shortTermPercent":invalid,"weeklyPercent":90}})).is_err());
     }
 }
+
+#[test]
+fn dispatch_hours_can_be_updated_alone_and_reject_empty_enabled_windows() {
+    use gateway_api::admin::accounts::BatchUpdateAccountsRequest;
+    let hours = serde_json::json!({"enabled":true,"timeZone":"Asia/Shanghai","windows":[{"start":"22:00","end":"02:00"}]});
+    let mut value = serde_json::json!({"accountIds":["acct_test"],"dispatchHours":hours});
+    let request: BatchUpdateAccountsRequest = serde_json::from_value(value.clone()).unwrap();
+    request.validate().unwrap();
+    value["dispatchHours"]["windows"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<BatchUpdateAccountsRequest>(value).is_err());
+}

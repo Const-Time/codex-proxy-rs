@@ -1169,6 +1169,9 @@ impl PluginHandler for Worker {
                         let nested=worker_models::handle(&call.host,&json!({"mode":"unary"})).await;
                         assert!(nested.get("error").is_none(),"{nested}"); json!({"decision":"delegate"})
                     },
+                    "filtered"=>json!({"decision":"delegate_filtered","exclude_account_ids":[head.candidates[0].account_id]}),
+                    "filtered-foreign"=>json!({"decision":"delegate_filtered","exclude_account_ids":["acct_forbidden"]}),
+                    "filtered-duplicate"=>json!({"decision":"delegate_filtered","exclude_account_ids":[head.candidates[0].account_id,head.candidates[0].account_id]}),
                     "pick-last"=>json!({"decision":"pick","account_id":head.candidates.last().unwrap().account_id}),
                     _=>json!({"decision":"delegate"}),
                 };
@@ -1471,7 +1474,8 @@ impl PluginHandler for Worker {
                     let key=call.host.key_facts(ClientKeyFactsQuery{client_key_id:"key_test".into()}).await?;
                     let accounts=call.host.account_facts(AccountFactsQuery{provider_id:Some("openai".into()),cursor:None,limit:1}).await?;
                     let quota=call.host.quota_facts(QuotaFactsQuery{account_id:"acct_test".into()}).await?;
-                    json!({"key":key,"accounts":accounts,"quota":quota})
+                    let history=call.host.quota_history(QuotaHistoryQuery{account_id:"acct_test".into(),window_key:"weekly".into(),start_ms:1767225600000,end_ms:1767229200000,cursor:None}).await?;
+                    json!({"key":key,"accounts":accounts,"quota":quota,"history":history})
                 } else if input["operation"]=="host-log" {
                     match call.host.call("host.log",input["params"].clone(),if input["binary"]==true {vec![1]}else{vec![]}).await {
                         Ok(reply)=>reply.result,

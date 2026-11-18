@@ -475,7 +475,7 @@ fn pack_archive(
     }
     if scheduling {
         contributes["scheduler"] =
-            json!({"id":"local.fixture.scheduling","version":1,"stages":["scheduling"]});
+            json!({"id":"local.fixture.scheduling","version":4,"stages":["scheduling"]});
     }
     if retry {
         contributes["retry_policy"] =

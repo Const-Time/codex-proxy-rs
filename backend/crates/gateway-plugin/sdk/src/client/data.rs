@@ -63,11 +63,22 @@ impl HostClient {
         payload_call(self, data::ACCOUNTS_LIST, query).await
     }
 
-    /// 读取已有额度观测，不触发上游刷新，也不返回宿主预测结果
+    /// 按账号、窗口与时间区间读取已保留的额度观测，不访问上游
     ///
     /// # Errors
     ///
-    /// 账号不存在或宿主读取失败时返回错误
+    /// 账号不存在、查询无效或宿主读取失败时返回错误
+    pub async fn quota_history(
+        &self,
+        query: data::QuotaHistoryQuery,
+    ) -> Result<data::QuotaHistoryPage, PluginFault> {
+        payload_call(self, data::QUOTA_HISTORY, query).await
+    }
+
+    /// Read current quota facts without refreshing upstream.
+    ///
+    /// # Errors
+    /// Returns an error when the host cannot read the account facts.
     pub async fn quota_facts(
         &self,
         query: data::QuotaFactsQuery,

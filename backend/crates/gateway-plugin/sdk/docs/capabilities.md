@@ -74,6 +74,7 @@ Provider 固定为宿主内置的 OpenAI 与 xAI。当前宿主开放以下 11 �
 | --- | --- | --- |
 | `call.host.account_facts(query)` | `host.data.accounts.list` | `AccountFactsQuery`：可选 `provider_id`、`cursor`，必填 `limit`（1～200）；按账号 ID 升序，`next_cursor=null` 表示本页已结束 |
 | `call.host.quota_facts(query)` | `host.data.quota.get` | `QuotaFactsQuery { account_id }`：读取 Provider 现有观测，不访问上游刷新 |
+| `call.host.quota_history(query)` | `host.data.quota.history` | `QuotaHistoryQuery { account_id, window_key, start_ms, end_ms, cursor }`：读取已有请求观测的指定额度窗口，不访问上游 |
 | `call.host.key_facts(query)` | `host.data.keys.get` | `ClientKeyFactsQuery { client_key_id }`：读取当前 Key 的启用状态及显式分组 ID，不返回密钥 |
 
 类型在 `call::data`。控制参数为 `{}`，查询和结果使用二进制 JSON；结果固定 `schema_version=1`。
@@ -460,6 +461,11 @@ middleware 的 `next` 最多调用一次，重试与额外模型执行通过独�
 ### 路由、调度与观察
 
 `policy.route_model` 和 `policy.schedule_account` 只提出决定，宿主随后复核 Key 规则、模型能力、账号资格和租约。
+
+`scheduler` 使用 v4。候选包含 `available`、`session_bound` 和 `role`（`ordinary`、`preferred`、`follow_only`、`pinned`）。临时容量不足的合资格账号可以出现在候选中，但 `pick` 只允许选择 `available=true` 的账号，宿主取租约前仍复核资格。`delegate_filtered` 携带 `exclude_account_ids`，由宿主在剩余候选中使用原生调度；只能排除当前候选，不接受重复或范围外 ID，也不能绕过固定账号。旧版 scheduler 制品需要按 v4 重新编译；未声明 scheduler 的管理、维护插件不受此次能力版本升级影响。
+
+`quota_history` 的时间范围是 UTC 毫秒半开区间，最长 366 天；`window_key` 沿用当前额度窗口的稳定键。结果按请求完成时间倒序返回，包含 `samples`、可选的起点前同桶 `baseline` 和 `next_cursor`。空页仍可能需要续读；续页必须保持账号、窗口和时间范围不变，并原样传回游标。基线最多回看一个查询区间，缺失表示没有保留观测，不表示额度为零。宿主不向插件返回原始 Provider 文档，不用当前额度补齐历史空缺，也不跨重置时间合并读数。该接口沿用管理事实读取权限，调度阶段不能调用。
+
 `observer` v1 通过 `methods::OBSERVE` 接收 `call::observation::Event`，固定绑定 `observation/observe`。
 每条绑定以 `event` 选择 `request_completed` 或 `websocket_response`，可分别配置请求范围；同一实例每种事件至多一条绑定，两类绑定使用相同 `order`。
 事件选择只决定是否投递，不裁剪字段

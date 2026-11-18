@@ -1,5 +1,7 @@
 //! Provider 账号领域、持久化端口与同一 target 内的账号选择。
 
+mod dispatch_hours;
+pub use dispatch_hours::AccountDispatchHours;
 mod error;
 mod fast_mode;
 pub use fast_mode::FastMode;
@@ -12,7 +14,9 @@ pub use model_access::{
     MAX_ACCOUNT_ACCESS_MODELS,
 };
 mod proxy;
-pub use proxy::{InvalidOutboundProxy, OutboundProxy, ProxyRequestContext, RequestLocation};
+pub use proxy::{
+    InvalidOutboundProxy, OutboundProxy, ProxyEndpoint, ProxyRequestContext, RequestLocation,
+};
 pub mod scope;
 mod selection;
 mod store;
@@ -21,4 +25,4 @@ pub use error::CredentialError;
 pub use model::*;
 pub use selection::*;
 pub(crate) use selection::{SMART_SCORE_TOLERANCE, smart_score};
-pub use store::ProviderAccountStore;
+pub use store::{AccountCatalogObservation, ProviderAccountStore, StoredAccountCatalog};

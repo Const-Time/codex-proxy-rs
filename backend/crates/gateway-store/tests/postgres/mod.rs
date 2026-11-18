@@ -264,6 +264,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "plugin_managed_keys",
             "plugin_private_state",
             "plugin_state_schemas",
+            "provider_account_model_catalogs",
             "provider_accounts",
             "runtime_settings",
             "subscription_group_cycles",

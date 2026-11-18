@@ -83,6 +83,7 @@ pub enum AccountGroupFilter {
 /// 账号公共存储投影；Provider 专属字段不进入此结构。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
+    pub dispatch_hours: gateway_core::account::AccountDispatchHours,
     pub quota_usage_limits: gateway_core::account::AccountQuotaUsageLimits,
     pub auto_use_quota_credits: bool,
     pub id: String,
@@ -222,6 +223,7 @@ pub struct AccountSummary {
 /// 账号可编辑事实的一次性替换命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAccount {
+    pub dispatch_hours: Option<gateway_core::account::AccountDispatchHours>,
     pub account_id: String,
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
@@ -241,6 +243,7 @@ pub struct AccountUpdateResult {
 /// 仅修改显式字段的批量账号设置命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchUpdateAccounts {
+    pub dispatch_hours: Option<gateway_core::account::AccountDispatchHours>,
     pub quota_usage_limits: Option<gateway_core::account::AccountQuotaUsageLimits>,
     pub auto_use_quota_credits: Option<bool>,
     pub account_ids: Vec<String>,

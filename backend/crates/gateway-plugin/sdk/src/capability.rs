@@ -29,8 +29,8 @@ impl Capability {
             Self::Middleware => &[3, 4, 5, 6],
             Self::Management => &[1, 2],
             Self::ModelCatalog => &[1, 2],
+            Self::Scheduler => &[4],
             Self::FrontendAuthentication
-            | Self::Scheduler
             | Self::ModelRouter
             | Self::RetryPolicy
             | Self::Observer

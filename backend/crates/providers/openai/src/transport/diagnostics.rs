@@ -128,6 +128,7 @@ pub struct CodexUpstreamFailure {
     /// 官方 `usage_limit_reached` 错误体携带的窗口重置时间（Unix 秒）。
     pub(crate) usage_limit_resets_at: Option<i64>,
     pub(crate) retry_after_seconds: Option<u64>,
+    pub(crate) no_more_retry: bool,
     pub(crate) request_id: Option<String>,
     pub(crate) set_cookie_headers: Vec<String>,
     pub(crate) rate_limit_headers: Vec<(String, String)>,
@@ -173,6 +174,7 @@ impl CodexUpstreamFailure {
                 .then_some(fields.resets_at)
                 .flatten(),
             retry_after_seconds,
+            no_more_retry: gateway_protocol::openai::events::upstream_no_more_retry_from_body(body),
             request_id: diagnostics.request_id.clone(),
             set_cookie_headers: set_cookie_headers.to_vec(),
             rate_limit_headers: rate_limit_headers.to_vec(),
@@ -217,6 +219,7 @@ impl CodexUpstreamFailure {
             identity_error_code: diagnostics.identity_error_code.clone(),
             usage_limit_resets_at: None,
             retry_after_seconds: failure.retry_after_seconds,
+            no_more_retry: failure.no_more_retry,
             request_id: diagnostics.request_id.clone(),
             set_cookie_headers: set_cookie_headers.to_vec(),
             rate_limit_headers: rate_limit_headers.to_vec(),
@@ -539,6 +542,14 @@ fn classify_upstream_failure(
     }
     if status == Some(StatusCode::TOO_MANY_REQUESTS) {
         return CodexFailureCategory::RateLimited;
+    }
+    // 流内 `error` 帧通常不带 HTTP 状态码；结构化 `invalid_request_error` 与
+    // HTTP 400 是同一个上游拒绝，不能因缺少状态码而归为上游不可用
+    if matches!(source, UpstreamFailureSource::SseFailure)
+        && status.is_none()
+        && error_type == "invalid_request_error"
+    {
+        return CodexFailureCategory::InvalidRequest;
     }
     match status.map(|status| status.as_u16()) {
         Some(status) => match status {

@@ -19,6 +19,8 @@ use super::pump::WebSocketConnectionObservation;
 /// Responses WebSocket 交互错误。
 #[derive(Debug, Error)]
 pub enum CodexWebSocketExchangeError {
+    #[error("WebSocket request exceeds the advertised message size limit")]
+    MessageTooLarge,
     /// opening request 无法构造。
     #[error("invalid websocket request: {0}")]
     InvalidRequest(#[from] tungstenite::http::Error),
@@ -233,6 +235,11 @@ impl fmt::Display for CodexWebSocketUpstreamError {
 }
 
 impl CodexWebSocketExchangeError {
+    pub(crate) fn proxy_dial_failed(&self) -> bool {
+        matches!(self.diagnostic_cause(), Self::Connect(tokio_tungstenite::tungstenite::Error::Io(error))
+            if error.get_ref().is_some_and(|cause| cause.is::<ProxyDialFailure>()))
+    }
+
     /// 仅供诊断展示穿透发送状态与连接快照包装；重试分类仍使用 classified。
     pub(crate) fn diagnostic_cause(&self) -> &Self {
         match self {
@@ -436,3 +443,7 @@ pub(super) fn safe_proxy_error(error: tungstenite::Error) -> tungstenite::Error 
     };
     egress_error(code)
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("proxy TCP endpoint is unreachable")]
+pub(crate) struct ProxyDialFailure;

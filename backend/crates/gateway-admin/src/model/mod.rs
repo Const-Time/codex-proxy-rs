@@ -15,6 +15,7 @@ pub mod pricing;
 pub mod provider_credentials;
 pub mod proxies;
 pub mod quota_forecast_sampling;
+pub mod quota_history;
 pub mod settings;
 pub mod system;
 pub mod turn_state;

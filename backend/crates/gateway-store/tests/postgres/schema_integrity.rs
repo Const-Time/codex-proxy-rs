@@ -50,7 +50,7 @@ async fn model_access_migration_preserves_existing_accounts_and_defaults_to_unre
         .await
         .expect("upgrade to 20");
     let after: serde_json::Value = sqlx::query_scalar(
-        "select to_jsonb(a) - 'model_access_json' - 'reset_credit_automation_json' - 'reset_credit_next_run_at' - 'auto_use_quota_credits' - 'quota_short_term_percent' - 'quota_weekly_percent' from provider_accounts a where id='acct_upgrade'",
+        "select to_jsonb(a) - 'model_access_json' - 'reset_credit_automation_json' - 'reset_credit_next_run_at' - 'auto_use_quota_credits' - 'quota_short_term_percent' - 'quota_weekly_percent' - 'dispatch_hours' from provider_accounts a where id='acct_upgrade'",
     )
     .fetch_one(&db.pool)
     .await
@@ -58,6 +58,15 @@ async fn model_access_migration_preserves_existing_accounts_and_defaults_to_unre
     assert_eq!(
         before, after,
         "migration must not alter existing account facts"
+    );
+    let hours: sqlx::types::Json<gateway_core::account::AccountDispatchHours> =
+        sqlx::query_scalar("select dispatch_hours from provider_accounts where id='acct_upgrade'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        hours.0,
+        gateway_core::account::AccountDispatchHours::default()
     );
     let credits_enabled: bool = sqlx::query_scalar(
         "select auto_use_quota_credits from provider_accounts where id='acct_upgrade'",

@@ -160,6 +160,7 @@ impl ProviderAttemptOutcome {
 /// 一旦设置，Provider 在本 attempt 内不得换号或切换 target。
 #[derive(Debug, Clone, Default)]
 pub struct AccountAttemptContext {
+    excluded_proxy_endpoints: Vec<crate::account::ProxyEndpoint>,
     excluded_accounts: BTreeSet<ProviderAccountId>,
     required_account: Option<ProviderAccountId>,
     state_owner: Option<ProviderAccountStateOwner>,
@@ -176,6 +177,7 @@ impl AccountAttemptContext {
         state_owner: Option<ProviderAccountStateOwner>,
     ) -> Self {
         Self {
+            excluded_proxy_endpoints: Vec::new(),
             excluded_accounts,
             required_account,
             state_owner,
@@ -195,6 +197,7 @@ impl AccountAttemptContext {
         state_owner: Option<ProviderAccountStateOwner>,
     ) -> Self {
         Self {
+            excluded_proxy_endpoints: Vec::new(),
             excluded_accounts,
             required_account: Some(required_account),
             state_owner,
@@ -583,6 +586,15 @@ impl AttemptContext {
     #[must_use]
     pub const fn account_selection_policy(&self) -> AccountSelectionPolicy {
         self.account_selection_policy
+    }
+
+    #[must_use]
+    pub fn excludes_proxy(&self, proxy: Option<&crate::account::OutboundProxy>) -> bool {
+        proxy.is_some_and(|p| {
+            self.account
+                .excluded_proxy_endpoints
+                .contains(&p.dial_endpoint())
+        })
     }
 
     #[must_use]

@@ -296,6 +296,7 @@ where
             routing_attempts: 0,
             candidate_index,
             excluded_accounts: BTreeSet::new(),
+            excluded_proxy_endpoints: Vec::new(),
             credential_recovery_attempted_accounts: BTreeSet::new(),
             recovery_account: None,
             pending_retry: None,
@@ -430,6 +431,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     routing_attempts: u32,
     candidate_index: usize,
     excluded_accounts: BTreeSet<crate::account::ProviderAccountId>,
+    excluded_proxy_endpoints: Vec<crate::account::ProxyEndpoint>,
     credential_recovery_attempted_accounts: BTreeSet<crate::account::ProviderAccountId>,
     /// 凭据恢复后的一次性同账号钉选；只约束紧随其后的 replay attempt，
     /// attempt 建立时即被消费，后续可重试错误仍可换号消耗剩余重试预算。
@@ -1286,7 +1288,7 @@ where
                     ),
                 }
             };
-            let account_context = match &self.account_selection {
+            let mut account_context = match &self.account_selection {
                 AccountSelection::Diagnostic(account) => AccountAttemptContext::diagnostic(
                     self.excluded_accounts.clone(),
                     account.clone(),
@@ -1303,6 +1305,9 @@ where
                 self.credential_recovery_attempted_accounts
                     .contains(account)
             }));
+            account_context
+                .excluded_proxy_endpoints
+                .clone_from(&self.excluded_proxy_endpoints);
             let context = AttemptContext::new(
                 RequestAttemptContext::new(
                     self.request_id.clone(),
@@ -1887,9 +1892,11 @@ where
         let retry_after_exceeds_limit = error
             .retry_after()
             .is_some_and(|delay| delay > self.plan.max_retry_after());
+        let same_account_retry_blocked = error.same_account_retry_blocked();
         let transport_recovery = match error.pre_delivery_retry() {
             Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { transport })
-                if !self.connection_budget.exhausted()
+                if !same_account_retry_blocked
+                    && !self.connection_budget.exhausted()
                     && !self.replay_barrier_reached
                     && !self.delivery_pending
                     && attempt_send_state == UpstreamSendState::NotSent
@@ -1906,7 +1913,8 @@ where
             Some(crate::error::PreDeliveryRetry::SameAccountTransportRetry {
                 retry_index,
                 delay,
-            }) if !retry_after_exceeds_limit
+            }) if !same_account_retry_blocked
+                && !retry_after_exceeds_limit
                 && !self.connection_budget.exhausted()
                 && !self.replay_barrier_reached
                 && !self.delivery_pending
@@ -1915,7 +1923,8 @@ where
                 Some((AttemptTransport::Retry(retry_index), delay))
             }
             Some(crate::error::PreDeliveryRetry::SameAccountTransportFallback)
-                if !retry_after_exceeds_limit
+                if !same_account_retry_blocked
+                    && !retry_after_exceeds_limit
                     && !self.connection_budget.exhausted()
                     && !self.replay_barrier_reached
                     && !self.delivery_pending
@@ -1942,7 +1951,7 @@ where
                 max_retries,
                 initial_delay,
                 max_delay,
-            }) if ordinary_retry && !retry_after_exceeds_limit => {
+            }) if !same_account_retry_blocked && ordinary_retry && !retry_after_exceeds_limit => {
                 let retries = self
                     .transient_retry_counts
                     .entry(current.metadata.provider_account_id().clone())
@@ -1961,7 +1970,8 @@ where
             }
             _ => None,
         };
-        let same_account_retry = error.retries_same_account()
+        let same_account_retry = !same_account_retry_blocked
+            && error.retries_same_account()
             && provider_proved_replay_safe
             && !self.replay_barrier_reached
             && !self.delivery_pending
@@ -1984,6 +1994,7 @@ where
             "ordinaryRetry": ordinary_retry, "transportRecovery": transport_recovery.is_some(),
             "transientRetry": transient_retry.is_some(),
             "retryAfterExceeded": retry_after_exceeds_limit,
+            "sameAccountRetryBlocked": same_account_retry_blocked,
             "maxRetryAfterSeconds": self.plan.max_retry_after().as_secs(),
             "connectionRetry": connection_retry_requested,
             "connectionRetries": self.connection_retries,
@@ -2221,6 +2232,11 @@ where
                     transport_recovery: true,
                 });
             } else if !continuation_retry {
+                if let Some(endpoint) = error.unreachable_proxy()
+                    && !self.excluded_proxy_endpoints.contains(endpoint)
+                {
+                    self.excluded_proxy_endpoints.push(endpoint.clone());
+                }
                 self.excluded_accounts
                     .insert(current.metadata.provider_account_id().clone());
             }

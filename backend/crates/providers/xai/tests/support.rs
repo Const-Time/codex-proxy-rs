@@ -202,6 +202,9 @@ struct StoredAccount {
 
 #[derive(Default)]
 pub struct MemoryProviderAccountStore {
+    catalogs: Mutex<
+        BTreeMap<ProviderAccountId, (gateway_core::account::AccountCatalogObservation, Vec<u8>)>,
+    >,
     accounts: Mutex<BTreeMap<ProviderAccountId, StoredAccount>>,
     quota_reads: AtomicUsize,
     fail_provider_listing: AtomicBool,
@@ -259,6 +262,58 @@ impl MemoryProviderAccountStore {
 
 #[async_trait]
 impl ProviderAccountStore for MemoryProviderAccountStore {
+    async fn load_account_catalogs(
+        &self,
+        provider: &ProviderKind,
+    ) -> Result<Vec<gateway_core::account::StoredAccountCatalog>, StoreError> {
+        let accounts = self.accounts.lock().unwrap();
+        Ok(self
+            .catalogs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|(o, _)| {
+                accounts.get(&o.account_id).is_some_and(|s| {
+                    s.account.provider() == provider
+                        && s.account.enabled()
+                        && s.account.revision() == o.revision
+                        && s.account.plan_type() == o.plan.as_deref()
+                })
+            })
+            .map(|(o, d)| gateway_core::account::StoredAccountCatalog {
+                accounts: vec![o.clone()],
+                document: d.clone().into(),
+            })
+            .collect())
+    }
+    async fn save_account_catalog(
+        &self,
+        observation: &gateway_core::account::AccountCatalogObservation,
+        document: &[u8],
+    ) -> Result<bool, StoreError> {
+        let accounts = self.accounts.lock().unwrap();
+        if !accounts.get(&observation.account_id).is_some_and(|s| {
+            s.account.revision() == observation.revision
+                && s.account.plan_type() == observation.plan.as_deref()
+        }) {
+            return Ok(false);
+        }
+        let mut catalogs = self.catalogs.lock().unwrap();
+        if catalogs
+            .get(&observation.account_id)
+            .is_some_and(|(old, _)| {
+                old.revision == observation.revision && old.observed_at > observation.observed_at
+            })
+        {
+            return Ok(false);
+        }
+        catalogs.insert(
+            observation.account_id.clone(),
+            (observation.clone(), document.to_vec()),
+        );
+        Ok(true)
+    }
+
     async fn create_account(&self, account: NewProviderAccount) -> Result<(), StoreError> {
         let mut accounts = lock(&self.accounts);
         if accounts.contains_key(account.account.id()) {

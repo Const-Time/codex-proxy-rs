@@ -121,6 +121,7 @@ pub(crate) fn parse_error_reason(value: Option<String>) -> StoreResult<Option<Ac
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAccountSummary {
+    pub dispatch_hours: gateway_core::account::AccountDispatchHours,
     pub quota_usage_limits: gateway_core::account::AccountQuotaUsageLimits,
     pub auto_use_quota_credits: bool,
     pub outbound_proxy: Option<gateway_core::account::OutboundProxy>,
@@ -336,6 +337,7 @@ impl fmt::Debug for RotateProviderAccount {
 
 #[derive(Debug, Clone)]
 pub struct BatchUpdateProviderAccountsAdmin {
+    pub dispatch_hours: Option<gateway_core::account::AccountDispatchHours>,
     pub quota_usage_limits: Option<gateway_core::account::AccountQuotaUsageLimits>,
     pub auto_use_quota_credits: Option<bool>,
     pub outbound_proxy: Option<gateway_admin::model::proxies::AccountProxySelection>,
@@ -408,7 +410,7 @@ impl ProviderAccountStateUpdate {
 
 pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, dispatch_hours, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -416,7 +418,7 @@ pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_request_context(o
 
 pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, dispatch_hours, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -426,7 +428,7 @@ pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_request_co
 
 pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, dispatch_hours, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -500,6 +502,7 @@ pub(crate) fn core_account_from_summary(
     .with_scheduling(summary.concurrency_limit, summary.weight)
     .with_model_access(summary.model_access)
     .with_auto_use_quota_credits(summary.auto_use_quota_credits)
+    .with_dispatch_hours(summary.dispatch_hours)
     .with_quota_usage_limits(summary.quota_usage_limits)
     .with_outbound_proxy(summary.outbound_proxy)
     .with_refresh_schedule(
@@ -566,6 +569,11 @@ pub(crate) fn account_summary_from_row(
     let proxy_ws_capacity = u32::try_from(get::<i64>(&row, "proxy_ws_capacity")?)
         .map_err(|_| invalid("invalid proxy capacity"))?;
     Ok(ProviderAccountSummary {
+        dispatch_hours: get::<sqlx::types::Json<gateway_core::account::AccountDispatchHours>>(
+            &row,
+            "dispatch_hours",
+        )?
+        .0,
         quota_usage_limits: gateway_core::account::AccountQuotaUsageLimits::new(
             u8::try_from(get::<i16>(&row, "quota_short_term_percent")?)
                 .map_err(|_| invalid("invalid quota cap"))?,

@@ -292,6 +292,9 @@ impl PgAdminAccountStore {
         if let Some(settings) = &settings {
             changed_fields
                 .extend(["enabled", "concurrency_limit", "weight", "groups"].map(str::to_owned));
+            if settings.dispatch_hours.is_some() {
+                changed_fields.push("dispatch_hours".to_owned());
+            }
             if settings.model_access.is_some() {
                 changed_fields.push("model_access".to_owned());
             }
@@ -406,7 +409,7 @@ impl AccountStore for PgAdminAccountStore {
         super::super::plugins::lock_plugin_resource(&mut tx, &scope).await?;
         // The native summary decoder owns these fields. This projection never
         // selects credential or quota documents and uses stable IDs, not offsets.
-        let rows = sqlx::query("select outbound_proxy_request_context(a.outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = a.outbound_proxy_id), 0) as proxy_ws_capacity, a.outbound_proxy_url, a.id,a.provider_kind,a.name,a.email,a.upstream_user_id,a.upstream_account_id,a.plan_type,a.authentication_kind,a.credential_revision,a.has_refresh_token,a.access_token_expires_at,a.next_refresh_at,a.enabled,a.auto_use_quota_credits,a.quota_short_term_percent,a.quota_weekly_percent,a.concurrency_limit,a.weight,a.model_access_json,a.credential_state,a.quota_access_state,a.quota_evidence,a.quota_access_observed_at,a.quota_reset_at,a.last_error_reason,a.last_error_message,a.credential_observed_at,a.created_at,a.updated_at from provider_accounts a where ($1::text is null or a.provider_kind=$1) and ($2::text is null or a.id>$2) and ($3::text is null or a.id=$3) order by a.id limit $4")
+        let rows = sqlx::query("select outbound_proxy_request_context(a.outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = a.outbound_proxy_id), 0) as proxy_ws_capacity, a.outbound_proxy_url, a.id,a.provider_kind,a.name,a.email,a.upstream_user_id,a.upstream_account_id,a.plan_type,a.authentication_kind,a.credential_revision,a.has_refresh_token,a.access_token_expires_at,a.next_refresh_at,a.enabled,a.auto_use_quota_credits,a.dispatch_hours,a.quota_short_term_percent,a.quota_weekly_percent,a.concurrency_limit,a.weight,a.model_access_json,a.credential_state,a.quota_access_state,a.quota_evidence,a.quota_access_observed_at,a.quota_reset_at,a.last_error_reason,a.last_error_message,a.credential_observed_at,a.created_at,a.updated_at from provider_accounts a where ($1::text is null or a.provider_kind=$1) and ($2::text is null or a.id>$2) and ($3::text is null or a.id=$3) order by a.id limit $4")
             .bind(query.provider.as_ref().map(ProviderKind::as_str)).bind(query.cursor.as_ref().map(CoreProviderAccountId::as_str)).bind(query.account_id.as_ref().map(CoreProviderAccountId::as_str)).bind(i64::from(query.limit.get())+1)
             .fetch_all(&mut *tx).await.map_err(|_| failure())?;
         let more = rows.len() > usize::from(query.limit.get());
@@ -512,6 +515,25 @@ impl AccountStore for PgAdminAccountStore {
             accounts,
             next_cursor,
         })
+    }
+    async fn quota_documents(
+        &self,
+        account: &gateway_core::account::ProviderAccountId,
+        provider: &gateway_core::routing::ProviderKind,
+        created_at: chrono::DateTime<chrono::Utc>,
+        range: gateway_admin::model::observability::TimeRange,
+        before: Option<&gateway_admin::model::quota_history::QuotaHistoryCursor>,
+    ) -> AdminStoreResult<gateway_admin::model::quota_history::QuotaDocumentPage> {
+        super::quota_history::documents(
+            &self.pool,
+            &self.query_budget,
+            account,
+            provider,
+            created_at,
+            range,
+            before,
+        )
+        .await
     }
     async fn load_quota_forecast_history(
         &self,
@@ -909,6 +931,9 @@ impl AccountStore for PgAdminAccountStore {
             "weight".to_owned(),
             "groups".to_owned(),
         ];
+        if command.dispatch_hours.is_some() {
+            changed_fields.push("dispatch_hours".to_owned());
+        }
         if command.model_access.is_some() {
             changed_fields.push("model_access".to_owned());
         }
@@ -918,6 +943,7 @@ impl AccountStore for PgAdminAccountStore {
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
+                dispatch_hours: command.dispatch_hours,
                 quota_usage_limits: None,
                 auto_use_quota_credits: None,
                 account_ids: vec![command.account_id.clone()],
@@ -1004,6 +1030,7 @@ impl AccountStore for PgAdminAccountStore {
         };
         let mut changed_fields = Vec::new();
         for (changed, field) in [
+            (command.dispatch_hours.is_some(), "dispatch_hours"),
             (command.quota_usage_limits.is_some(), "quota_usage_limits"),
             (
                 command.auto_use_quota_credits.is_some(),
@@ -1027,6 +1054,7 @@ impl AccountStore for PgAdminAccountStore {
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
+                dispatch_hours: command.dispatch_hours,
                 quota_usage_limits: command.quota_usage_limits,
                 auto_use_quota_credits: command.auto_use_quota_credits,
                 account_ids: command.account_ids,

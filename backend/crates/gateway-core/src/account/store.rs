@@ -12,9 +12,37 @@ use super::{
     QuotaObservationTouch, QuotaWriteOutcome,
 };
 
+/// 一个账号最后成功的目录观测；正文由 Provider 解释，归属不能按相同正文合并
+#[derive(Clone)]
+pub struct AccountCatalogObservation {
+    pub account_id: ProviderAccountId,
+    pub revision: CredentialRevision,
+    pub plan: Option<String>,
+    pub etag: Option<String>,
+    pub observed_at: std::time::SystemTime,
+}
+
+/// 批量恢复时每份不同的正文只传输、解析一次
+pub struct StoredAccountCatalog {
+    pub accounts: Vec<AccountCatalogObservation>,
+    pub document: bytes::Bytes,
+}
+
 /// `provider_accounts` 的数据库中立端口。
 #[async_trait]
 pub trait ProviderAccountStore: Send + Sync {
+    async fn load_account_catalogs(
+        &self,
+        provider: &ProviderKind,
+    ) -> Result<Vec<StoredAccountCatalog>, StoreError>;
+
+    /// 账号删除或凭据已变化时返回 false，不发布迟到的观测
+    async fn save_account_catalog(
+        &self,
+        observation: &AccountCatalogObservation,
+        document: &[u8],
+    ) -> Result<bool, StoreError>;
+
     async fn create_account(&self, account: NewProviderAccount) -> Result<(), StoreError>;
 
     async fn get_account(

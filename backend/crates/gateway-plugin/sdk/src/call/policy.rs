@@ -72,11 +72,23 @@ pub enum ModelRouteDecision {
     Reject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountScheduleRole {
+    Ordinary,
+    Preferred,
+    FollowOnly,
+    Pinned,
+}
+
 /// 候选账号的即时调度指标；凭据和账号资料通过宿主账号接口读取
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountScheduleCandidate {
     pub account_id: String,
+    pub available: bool,
+    pub session_bound: bool,
+    pub role: AccountScheduleRole,
     pub weight: u16,
     pub in_flight: u32,
     pub maximum_concurrency: u32,
@@ -110,5 +122,6 @@ pub struct AccountScheduleRequest {
 pub enum AccountScheduleDecision {
     Pick { account_id: String },
     Delegate,
+    DelegateFiltered { exclude_account_ids: Vec<String> },
     Reject,
 }

@@ -1615,6 +1615,7 @@ fn provider_ports_with_leases(
 fn account_record(account: &ProviderAccount) -> AccountRecord {
     let now = Utc::now();
     AccountRecord {
+        dispatch_hours: Default::default(),
         quota_usage_limits: Default::default(),
         auto_use_quota_credits: false,
         model_access: Default::default(),
@@ -2431,5 +2432,52 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
     assert_eq!(
         admin.reset_credits(account.id()).await.unwrap_err().kind(),
         ProviderAdminErrorKind::Unsupported
+    );
+}
+
+#[tokio::test]
+async fn quota_history_interprets_only_observed_windows_with_stable_keys() {
+    let config = valid_config();
+    let bundle = provider_openai::initialize(config.config.clone(), provider_ports())
+        .await
+        .unwrap();
+    let provider = bundle.admin_provider();
+    let history = provider.quota_history_parser().unwrap();
+    let document = ProviderDocument::new(OpaqueProviderData::new(
+        json!({"rateLimitHeaders":[
+            ["x-codex-primary-used-percent","4"],["x-codex-primary-window-minutes","300"],
+            ["x-codex-primary-reset-at","1789218647"]
+        ]})
+        .as_object()
+        .unwrap()
+        .clone(),
+    ));
+    let short = history(&document, "codex:18000s").unwrap();
+    assert_eq!(short.used_percent, 4.0);
+    assert_eq!(short.reset_at.unwrap().timestamp(), 1789218647);
+    assert!(history(&document, "codex:604800s").is_none());
+    let named = ProviderDocument::new(OpaqueProviderData::new(
+        json!({"rateLimitHeaders":[
+            ["x-codex-primary-used-percent","23"],["x-codex-primary-window-minutes","1"],
+            ["x-feature-primary-used-percent","23"],["x-feature-primary-window-minutes","1"],
+            ["x-feature-secondary-used-percent","56"],["x-feature-secondary-window-minutes","1"]
+        ]})
+        .as_object()
+        .unwrap()
+        .clone(),
+    ));
+    assert!(history(&named, "codex:60s").is_none());
+    assert!(history(&named, "feature:60s").is_none());
+    assert_eq!(
+        history(&named, "feature:60s:primary_window")
+            .unwrap()
+            .used_percent,
+        23.0
+    );
+    assert_eq!(
+        history(&named, "feature:60s:secondary_window")
+            .unwrap()
+            .used_percent,
+        56.0
     );
 }

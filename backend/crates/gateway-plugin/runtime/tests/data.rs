@@ -18,6 +18,36 @@ struct Facts {
 }
 #[async_trait]
 impl PluginDataService for Facts {
+    async fn quota_history(
+        &self,
+        id: &str,
+        query: gateway_admin::model::quota_history::QuotaHistoryQuery,
+    ) -> Result<
+        gateway_admin::model::quota_history::QuotaHistoryPage,
+        gateway_admin::model::AdminError,
+    > {
+        use gateway_admin::model::quota_history::*;
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(id, "acct_test");
+        assert_eq!(query.window_key, "weekly");
+        assert!(query.cursor.is_none());
+        Ok(QuotaHistoryPage {
+            samples: vec![QuotaHistoryPoint {
+                observed_at: query.range.start,
+                reading: QuotaReading {
+                    plan_type: Some("pro".into()),
+                    used_percent: 42.0,
+                    reset_at: None,
+                },
+            }],
+            baseline: None,
+            next_cursor: Some(QuotaHistoryCursor {
+                completed_at: query.range.start,
+                id: "req_history".into(),
+            }),
+        })
+    }
+
     async fn refresh_quota(
         &self,
         _: PluginMutationScope,
@@ -138,8 +168,31 @@ async fn facts_cross_real_process_sdk_without_credentials_refresh_or_error_detai
             .unwrap()
             .contains("not-in-facts")
     );
-    assert_eq!(facts.reads.load(Ordering::SeqCst), 3);
+    assert_eq!(facts.reads.load(Ordering::SeqCst), 4);
+    assert_eq!(value["history"]["samples"][0]["used_percent"], 42.0);
+    assert_eq!(
+        value["history"]["samples"][0]["observed_at_ms"],
+        1767225600000_i64
+    );
+    assert!(
+        value["history"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .contains("req_history")
+    );
     for (method, params, payload, code) in [
+        (
+            "host.data.quota.history",
+            json!({}),
+            json!({"account_id":"acct_test","window_key":"weekly","start_ms":1767225600000_i64,"end_ms":1767229200000_i64,"cursor":"{\"completed_at\":\"2027-01-01T00:00:00Z\",\"id\":\"outside\"}"}),
+            "invalid_input",
+        ),
+        (
+            "host.data.quota.history",
+            json!({}),
+            json!({"account_id":"acct_test","window_key":"weekly","start_ms":5,"end_ms":4,"cursor":null}),
+            "invalid_input",
+        ),
         (
             "host.data.keys.get",
             json!({"unknown":true}),
@@ -174,7 +227,7 @@ async fn facts_cross_real_process_sdk_without_credentials_refresh_or_error_detai
         let value: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(value["error"]["code"], code, "{value}");
     }
-    assert_eq!(facts.reads.load(Ordering::SeqCst), 3);
+    assert_eq!(facts.reads.load(Ordering::SeqCst), 4);
     let mut req = request("facts-raw");
     req.body=serde_json::to_vec(&json!({"operation":"facts-raw","method":"host.data.keys.get","params":{},"payload":{"client_key_id":"missing"}})).unwrap();
     let reply = manager.handle(&installed.id, 1, req).await.unwrap();

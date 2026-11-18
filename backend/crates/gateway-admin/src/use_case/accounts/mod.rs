@@ -738,6 +738,7 @@ impl AccountsService for DefaultAccountsService {
             self.accounts
                 .batch_update_accounts(
                     BatchUpdateAccounts {
+                        dispatch_hours: None,
                         quota_usage_limits: None,
                         auto_use_quota_credits: None,
                         account_ids: vec![account_id.to_string()],

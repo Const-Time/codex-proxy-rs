@@ -220,10 +220,10 @@ fn unsupported(manifest: &Manifest) -> Vec<String> {
             Capability::Middleware => !matches!(decl.version, 4 | 5),
             Capability::UpstreamAdapter => decl.version != 4,
             Capability::Management => !matches!(decl.version, 1 | 2),
+            Capability::Scheduler => decl.version != 4,
             Capability::FrontendAuthentication
             | Capability::ModelCatalog
             | Capability::ModelRouter
-            | Capability::Scheduler
             | Capability::RetryPolicy
             | Capability::Maintenance
             | Capability::Observer
@@ -382,7 +382,7 @@ impl PluginRuntime for PluginEngine {
             if manifest
                 .contributes
                 .get(&Capability::Scheduler)
-                .is_none_or(|d| d.version != 1 || !d.stages.contains(&Stage::Scheduling))
+                .is_none_or(|d| d.version != 4 || !d.stages.contains(&Stage::Scheduling))
             {
                 return Err(AdminError::invalid("此制品未提供账号调度能力"));
             }

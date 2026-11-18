@@ -273,11 +273,16 @@ impl DaemonTask for OpenAiCatalogEtagTask {
         Box::pin(async move {
             let mut backoff = WORKER_INITIAL_BACKOFF;
             loop {
-                tokio::select! {
+                let force = tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
-                    () = self.catalog.wait_for_etag_refresh() => {},
+                    force = self.catalog.wait_for_etag_refresh() => force,
                 };
-                if let Err(error) = self.catalog.refresh().await {
+                let refreshed = if force {
+                    self.catalog.refresh().await
+                } else {
+                    self.catalog.refresh_catalogs().await
+                };
+                if let Err(error) = refreshed {
                     tracing::warn!(
                         error = %error,
                         "OpenAI model catalog ETag refresh failed"

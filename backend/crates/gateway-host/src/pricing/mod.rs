@@ -25,7 +25,7 @@ impl PricingSource for LiteLlmPricing {
     async fn fetch(&self) -> Result<PricingSyncPreview, AdminError> {
         tokio::time::timeout(Duration::from_secs(30), self.fetch_verified())
             .await
-            .map_err(|_| source_error())?
+            .map_err(|_| stage_error("下载超时"))?
     }
 }
 
@@ -39,13 +39,13 @@ impl LiteLlmPricing {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .build()
-            .map_err(|_| source_error())?;
+            .map_err(|_| stage_error("无法创建下载客户端"))?;
         let hash_bytes = download(&client, HASH_URL, 1024).await?;
         let hash = std::str::from_utf8(&hash_bytes)
             .map_err(|_| source_error())?
             .trim();
         if !valid_hash(hash) {
-            return Err(source_error());
+            return Err(stage_error("摘要文件格式无效"));
         }
         if let Some(preview) = cached.as_ref().filter(|p| p.source_hash == hash) {
             return Ok(preview.clone());
@@ -66,9 +66,9 @@ async fn download(
         .get(url)
         .send()
         .await
-        .map_err(|_| source_error())?
+        .map_err(|_| stage_error("下载失败，请检查服务器的网络及出口代理"))?
         .error_for_status()
-        .map_err(|_| source_error())?;
+        .map_err(|_| stage_error("下载服务器返回错误状态"))?;
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| source_error())? {
         if chunk.len() > limit.saturating_sub(body.len()) {
@@ -80,9 +80,11 @@ async fn download(
 }
 
 fn source_error() -> AdminError {
-    AdminError::bad_gateway(
-        "远程 LiteLLM 价目下载、格式或 SHA-256 校验失败；保留现有价格，稍后重试",
-    )
+    stage_error("价目格式无效")
+}
+
+fn stage_error(reason: &str) -> AdminError {
+    AdminError::bad_gateway(format!("远程 LiteLLM 价目{reason}；保留现有价格"))
 }
 
 fn valid_hash(hash: &str) -> bool {
@@ -98,7 +100,7 @@ pub fn decode_verified_catalog(
     expected_hash: &str,
 ) -> Result<PricingSyncPreview, AdminError> {
     if !valid_hash(expected_hash) || hex::encode(Sha256::digest(body)) != expected_hash {
-        return Err(source_error());
+        return Err(stage_error("SHA-256 校验失败，请稍后重试"));
     }
     decode_catalog(body)
 }
@@ -136,7 +138,7 @@ pub fn decode_catalog(body: &[u8]) -> Result<PricingSyncPreview, AdminError> {
         }
     }
     if result.prices.is_empty() {
-        return Err(source_error());
+        return Err(stage_error("中没有可同步的完整文本价格档位"));
     }
     Ok(result)
 }
@@ -158,6 +160,14 @@ fn model_price(provider: &str, model: &Value) -> Option<ModelPriceOverride> {
         "272k_tokens"
     };
     for key in fields.keys() {
+        // 缓存保留时长和 ultrafast/batch 是独立计费维度，不覆盖普通文本档位。
+        // 只识别已知的额外维度；陌生上下文阈值仍须拒绝，不能套用短上下文价。
+        if key
+            .strip_prefix("cache_creation_input_token_cost_above_12hr")
+            .is_some_and(|suffix| known_extra_suffix(suffix, threshold))
+        {
+            continue;
+        }
         if key.contains("cost")
             && (key.contains("audio") || key.contains("reasoning") || key.contains("image"))
         {
@@ -165,7 +175,7 @@ fn model_price(provider: &str, model: &Value) -> Option<ModelPriceOverride> {
         }
         if key.contains("cost")
             && let Some((_, suffix)) = key.split_once("_above_")
-            && !["", "_priority", "_flex", "_batches"]
+            && !["", "_priority", "_flex", "_batches", "_ultrafast"]
                 .iter()
                 .any(|service| suffix == format!("{threshold}{service}"))
         {
@@ -203,6 +213,12 @@ fn model_price(provider: &str, model: &Value) -> Option<ModelPriceOverride> {
         multiplier_scope: Default::default(),
         bands,
     })
+}
+
+fn known_extra_suffix(suffix: &str, threshold: &str) -> bool {
+    ["", "_priority", "_flex", "_batches", "_ultrafast"]
+        .iter()
+        .any(|service| suffix == *service || suffix == format!("_above_{threshold}{service}"))
 }
 
 fn rates(model: &Value, suffix: &str) -> Option<TokenPriceOverride> {

@@ -355,7 +355,7 @@ impl Provider for Core {
             },
         })
         .collect::<Vec<_>>();
-        let selection = AccountSelectionContext {
+        let mut selection = AccountSelectionContext {
             policy: context.account_selection_policy(),
             now,
             excluded_accounts: context.excluded_accounts().clone(),
@@ -370,8 +370,11 @@ impl Provider for Core {
                 request.candidate().provider(),
                 request.candidate().upstream_model().map(|m| m.as_str()),
                 &candidates,
-                &selection,
-                context.required_account(),
+                &mut selection,
+                gateway_core::engine::account_scheduling::AccountScheduleOwnership {
+                    pinned_account: context.required_account(),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|e| e.into_provider_error())?
@@ -655,6 +658,17 @@ pub struct KeyData {
 }
 #[async_trait]
 impl gateway_admin::ports::plugins::PluginDataService for KeyData {
+    async fn quota_history(
+        &self,
+        _: &str,
+        _: gateway_admin::model::quota_history::QuotaHistoryQuery,
+    ) -> Result<
+        gateway_admin::model::quota_history::QuotaHistoryPage,
+        gateway_admin::model::AdminError,
+    > {
+        Ok(Default::default())
+    }
+
     async fn refresh_quota(
         &self,
         _: gateway_admin::model::plugins::PluginMutationScope,

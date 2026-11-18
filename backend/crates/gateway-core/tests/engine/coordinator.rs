@@ -4368,6 +4368,95 @@ fn interrupted_early_finalization_resumes_the_same_write_and_keeps_the_original_
 }
 
 #[test]
+fn no_more_retry_skips_same_account_wait_even_when_retry_after_is_short() {
+    let advised = Duration::from_secs(30);
+    let proxy = gateway_core::account::OutboundProxy::parse("http://one:secret@proxy.invalid:8080")
+        .unwrap();
+    let same_endpoint =
+        gateway_core::account::OutboundProxy::parse("socks5h://two:secret@proxy.invalid:8080")
+            .unwrap();
+    let other_endpoint =
+        gateway_core::account::OutboundProxy::parse("http://proxy.invalid:8081").unwrap();
+    for (rejection, rotates, excludes_proxy) in [
+        (
+            transient_rejection()
+                .with_same_account_retry_blocked()
+                .with_retry_after(advised),
+            true,
+            false,
+        ),
+        (
+            ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::NotSent)
+                .with_unreachable_proxy(proxy.dial_endpoint()),
+            true,
+            true,
+        ),
+    ] {
+        let operation = generate_operation();
+        let route_plan = retry_after_plan(&operation, 240);
+        let mut scripts = vec![Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(rejection)],
+        }];
+        if rotates {
+            scripts.push(Script::Stream {
+                account_id: "acct_second",
+                items: complete_stream(None),
+            });
+        }
+        let (coordinator, _, provider) = coordinator(scripts);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        let trace = session.trace().clone();
+        let mut collection = Box::pin(session.collect_uncommitted());
+        let polled = block_on(async { futures::poll!(&mut collection) });
+        let trace = trace.snapshot().unwrap();
+        let retry = trace["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["stage"] == "retry.prepared")
+            .unwrap();
+        assert_eq!(retry["data"]["sameAccountRetryBlocked"], true);
+        assert_eq!(retry["data"]["transientRetry"], false);
+        assert_eq!(retry["data"]["retryAfterExceeded"], false);
+        if rotates {
+            assert!(matches!(polled, std::task::Poll::Ready(Ok(_))));
+            drop(collection);
+            let contexts = provider.contexts.lock().unwrap();
+            assert_eq!(contexts.len(), 2);
+            assert!(!contexts[0].excludes_proxy(Some(&proxy)));
+            assert_eq!(
+                contexts[1].excludes_proxy(Some(&same_endpoint)),
+                excludes_proxy
+            );
+            assert!(!contexts[1].excludes_proxy(Some(&other_endpoint)));
+            assert!(!contexts[1].excludes_proxy(None));
+            assert_eq!(contexts[1].required_account(), None);
+            assert!(
+                contexts[1]
+                    .excluded_accounts()
+                    .contains(&ProviderAccountId::new("acct_first").unwrap())
+            );
+        } else {
+            assert!(matches!(
+                polled,
+                std::task::Poll::Ready(Err(EngineError::Provider(error)))
+                    if error.retry_after() == Some(advised)
+            ));
+            assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[test]
 fn cancellation_before_or_during_preparation_records_a_zero_attempt_terminal_request() {
     block_on(async {
         for before_start in [true, false] {

@@ -194,6 +194,11 @@ pub trait ProviderAdmin: Send + Sync {
         command: PrepareCredentialRefresh,
     ) -> Result<PreparedCredentialRotation, ProviderAdminError>;
 
+    /// Interpret historical documents without refreshing upstream or borrowing current facts.
+    fn quota_history_parser(&self) -> Option<crate::model::quota_history::QuotaHistoryParser> {
+        None
+    }
+
     fn quota_forecast_observation(
         &self,
         _document: &crate::model::provider_credentials::ProviderDocument,

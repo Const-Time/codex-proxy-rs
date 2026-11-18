@@ -1,3 +1,5 @@
+mod model_catalogs;
+mod quota_history;
 mod reset_credit_automation;
 use std::{
     collections::BTreeMap,
@@ -1275,6 +1277,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
     let result = store
         .update_account(
             UpdateAccount {
+                dispatch_hours: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_id: "acct_terminal_mutation".to_owned(),
@@ -1355,6 +1358,7 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
         request_id: "proxy-edit".to_owned(),
     };
     let command = UpdateAccount {
+        dispatch_hours: None,
         account_id: "acct_proxy".to_owned(),
         enabled: true,
         concurrency_limit: None,
@@ -1569,6 +1573,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     let result = store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                dispatch_hours: None,
                 quota_usage_limits: None,
                 auto_use_quota_credits: None,
                 model_access: Default::default(),
@@ -1608,6 +1613,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                dispatch_hours: None,
                 quota_usage_limits: None,
                 auto_use_quota_credits: None,
                 model_access: Default::default(),
@@ -2319,6 +2325,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
 
     let revision = repository
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
+            dispatch_hours: None,
             quota_usage_limits: None,
             auto_use_quota_credits: None,
             model_access: Default::default(),
@@ -2388,6 +2395,7 @@ async fn credential_rotation_and_settings_share_one_transaction() {
     .await
     .expect("seed group");
     let settings = UpdateAccount {
+        dispatch_hours: None,
         account_id: ACCOUNT_ID.to_owned(),
         enabled: false,
         concurrency_limit: Some(AccountConcurrencyLimit::new(3).unwrap()),
@@ -3111,6 +3119,7 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
     admin_account_store(&database.pool)
         .update_account(
             UpdateAccount {
+                dispatch_hours: None,
                 model_access: Default::default(),
                 account_id: id.as_str().to_owned(),
                 enabled: true,
@@ -3271,6 +3280,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     .expect("policy");
     let store = admin_account_store(&database.pool);
     let command = BatchUpdateAccounts {
+        dispatch_hours: None,
         quota_usage_limits: None,
         auto_use_quota_credits: None,
         account_ids: vec![input.id.clone()],
@@ -3321,6 +3331,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                dispatch_hours: None,
                 quota_usage_limits: None,
                 auto_use_quota_credits: None,
                 model_access: Some(AccountModelAccess::all()),
@@ -3395,6 +3406,7 @@ async fn quota_credit_policy_is_opt_in_and_fences_late_observations() {
         request_id: "credits".into(),
     };
     let mut command = BatchUpdateAccounts {
+        dispatch_hours: None,
         quota_usage_limits: None,
         auto_use_quota_credits: Some(true),
         account_ids: vec![id.to_string()],
@@ -3492,7 +3504,9 @@ async fn quota_usage_limits_persist_without_changing_upstream_quota() {
         actor: MutationActor::System,
         request_id: "quota_caps".into(),
     };
+    let hours: gateway_core::account::AccountDispatchHours = serde_json::from_value(serde_json::json!({"enabled":true,"timeZone":"UTC","windows":[{"start":"21:00","end":"03:00"}]})).unwrap();
     let command = BatchUpdateAccounts {
+        dispatch_hours: Some(hours.clone()),
         quota_usage_limits: Some(Limits::new(90, 80).unwrap()),
         auto_use_quota_credits: None,
         account_ids: vec![id.to_string()],
@@ -3508,12 +3522,14 @@ async fn quota_usage_limits_persist_without_changing_upstream_quota() {
         .await
         .unwrap();
     let updated = repo.get_account(&id).await.unwrap().unwrap();
+    assert_eq!(updated.dispatch_hours(), &hours);
     assert_eq!(updated.quota_usage_limits(), Limits::new(90, 80).unwrap());
     assert_eq!(updated.quota(), initial.quota());
     assert_eq!(updated.revision(), initial.revision());
     admin
         .batch_update_accounts(
             BatchUpdateAccounts {
+                dispatch_hours: None,
                 quota_usage_limits: None,
                 enabled: Some(false),
                 ..command.clone()
@@ -3527,12 +3543,21 @@ async fn quota_usage_limits_persist_without_changing_upstream_quota() {
             .await
             .unwrap()
             .unwrap()
+            .dispatch_hours(),
+        &hours
+    );
+    assert_eq!(
+        repo.get_account(&id)
+            .await
+            .unwrap()
+            .unwrap()
             .quota_usage_limits(),
         Limits::new(90, 80).unwrap()
     );
     admin
         .batch_update_accounts(
             BatchUpdateAccounts {
+                dispatch_hours: None,
                 quota_usage_limits: Some(Limits::default()),
                 ..command
             },

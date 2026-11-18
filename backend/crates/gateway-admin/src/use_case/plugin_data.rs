@@ -82,6 +82,50 @@ impl PluginDataService for DefaultPluginDataService {
             .await
             .map_err(|e| map_store_error(e, "plugin account facts"))
     }
+    async fn quota_history(
+        &self,
+        id: &str,
+        query: crate::model::quota_history::QuotaHistoryQuery,
+    ) -> Result<crate::model::quota_history::QuotaHistoryPage, AdminError> {
+        use crate::model::{observability::TimeRange, quota_history::QuotaHistoryPage};
+        let id = ProviderAccountId::new(id).map_err(|_| AdminError::invalid("账号 ID 无效"))?;
+        query
+            .validate()
+            .map_err(|_| AdminError::invalid("额度历史查询无效"))?;
+        let account = self
+            .accounts
+            .load_account(id.as_str(), Default::default())
+            .await
+            .map_err(|e| map_store_error(e, "plugin quota history account"))?
+            .ok_or_else(|| AdminError::not_found("账号不存在"))?
+            .account;
+        let provider = self
+            .providers
+            .require(&account.provider_kind)
+            .map_err(|e| map_provider_error(e, "plugin quota history provider"))?;
+        let Some(parse) = provider.quota_history_parser() else {
+            return Ok(QuotaHistoryPage::default());
+        };
+        let start = query.scan_start().max(account.created_at);
+        if start >= query.range.end {
+            return Ok(QuotaHistoryPage::default());
+        }
+        let page = self
+            .accounts
+            .quota_documents(
+                &id,
+                &account.provider_kind,
+                account.created_at,
+                TimeRange {
+                    start,
+                    end: query.range.end,
+                },
+                query.cursor.as_ref(),
+            )
+            .await
+            .map_err(|e| map_store_error(e, "plugin quota history"))?;
+        Ok(QuotaHistoryPage::from_documents(page, &query, parse))
+    }
     async fn quota(&self, id: &str) -> Result<ProviderQuota, AdminError> {
         let id = ProviderAccountId::new(id).map_err(|_| AdminError::invalid("账号 ID 无效"))?;
         let account = self

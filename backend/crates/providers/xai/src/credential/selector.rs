@@ -198,6 +198,10 @@ impl GrokAccountSessionSelector {
         if let Some(required) = request.required_account() {
             candidates.retain(|candidate| candidate.account.id() == required);
         }
+        if !diagnostic && let Some(attempt) = request.attempt_context() {
+            candidates
+                .retain(|candidate| !attempt.excludes_proxy(candidate.account.outbound_proxy()));
+        }
 
         let affinity_account = request.affinity().and_then(|affinity| {
             candidates
@@ -219,9 +223,10 @@ impl GrokAccountSessionSelector {
         let mut capacity_denied = false;
         let mut retry_after = None;
         loop {
+            context.now = SystemTime::now();
             let capacity = AccountSelector.capacity_snapshot(&candidates, &context);
             let selection = if let Some(attempt) = request.attempt_context() {
-                match attempt.select_account(&self.provider_kind, Some(request.upstream_model().as_str()), &candidates, &context, request.required_account()).await {
+                match attempt.select_account(&self.provider_kind, Some(request.upstream_model().as_str()), &candidates, &mut context, gateway_core::engine::account_scheduling::AccountScheduleOwnership { pinned_account: request.required_account(), ..Default::default() }).await {
                     Ok(selection) => selection,
                     Err(gateway_core::engine::account_scheduling::AccountPolicyError::StaleCandidate) => { context.now = SystemTime::now(); continue; }
                     Err(error) => return Err(GrokSessionSelectorError::Policy(error)),
@@ -272,6 +277,10 @@ impl GrokAccountSessionSelector {
                 .load(&selected_id, selected_revision)
                 .await
                 .map_err(|_| GrokSessionSelectorError::InvalidSession)?;
+            if !loaded.account.dispatch_hours().allows_at(SystemTime::now()) {
+                candidates.retain(|candidate| candidate.account.id() != &selected_id);
+                continue;
+            }
             if !diagnostic
                 && loaded
                     .refresh_token_expires_at

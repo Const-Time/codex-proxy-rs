@@ -443,6 +443,7 @@ impl CallbackHandler for Callbacks {
                 gateway_plugin_sdk::call::data::ACCOUNTS_LIST
                     | gateway_plugin_sdk::call::data::KEYS_GET
                     | gateway_plugin_sdk::call::data::QUOTA_GET
+                    | gateway_plugin_sdk::call::data::QUOTA_HISTORY
             ) {
                 let data = data.ok_or_else(|| {
                     PluginFault::new(ErrorCode::Unsupported, "plugin facts are not configured")

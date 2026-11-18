@@ -920,7 +920,7 @@ impl Provider for Effects {
                 signals: candidate.signals,
             });
         }
-        let selection = AccountSelectionContext {
+        let mut selection = AccountSelectionContext {
             policy: context.account_selection_policy(),
             now: SystemTime::now(),
             excluded_accounts: context.excluded_accounts().clone(),
@@ -938,8 +938,11 @@ impl Provider for Effects {
                 request.candidate().provider(),
                 request.candidate().upstream_model().map(|m| m.as_str()),
                 &candidates,
-                &selection,
-                context.required_account(),
+                &mut selection,
+                gateway_core::engine::account_scheduling::AccountScheduleOwnership {
+                    pinned_account: context.required_account(),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|e| e.into_provider_error())?

@@ -566,6 +566,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     settings.outbound_proxy.as_ref(),
                 )
                 .await?;
+                set_dispatch_hours(&mut transaction, ids, settings.dispatch_hours.as_ref()).await?;
                 replace_account_group_assignments_in_transaction(
                     &mut transaction,
                     ids,
@@ -613,6 +614,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 command.outbound_proxy.as_ref(),
             )
             .await?;
+            set_dispatch_hours(&mut transaction, &command.account_ids, command.dispatch_hours.as_ref()).await?;
             if let Some(limits) = command.quota_usage_limits {
                 sqlx::query("update provider_accounts set quota_short_term_percent = $2, quota_weekly_percent = $3 where id = any($1)")
                     .bind(&command.account_ids).bind(i16::from(limits.short_term_percent())).bind(i16::from(limits.weekly_percent()))
@@ -948,6 +950,22 @@ pub(crate) async fn rotate_provider_account_in_transaction(
     Revision::new(to_u64(next)?)
 }
 
+async fn set_dispatch_hours(
+    transaction: &mut Transaction<'_, Postgres>,
+    ids: &[String],
+    hours: Option<&gateway_core::account::AccountDispatchHours>,
+) -> StoreResult<()> {
+    if let Some(hours) = hours {
+        sqlx::query("update provider_accounts set dispatch_hours = $2 where id = any($1)")
+            .bind(ids)
+            .bind(sqlx::types::Json(hours))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|_| postgres_unavailable("set account dispatch hours"))?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     account_ids: &[String],
@@ -1117,7 +1135,7 @@ impl PgProviderAccountRepository {
         let rows = sqlx::query(
             "select outbound_proxy_request_context(outbound_proxy_id) as request_context, coalesce((select max_websocket_connections from outbound_proxies where id = outbound_proxy_id), 0) as proxy_ws_capacity, outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
-                    access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
+                    access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, dispatch_hours, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
                     quota_observed_at, last_error_reason, last_error_message, created_at, updated_at

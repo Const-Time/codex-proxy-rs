@@ -49,6 +49,7 @@ pub use oauth::{
 pub use profile_statistics::{
     CodexCredentialProfileService, CodexProfileAvatarError, CodexProfileStatisticsError,
 };
+pub(crate) use quota::observed_quota_window;
 pub use quota::{
     CodexAccountQuotaSnapshot, CodexCredentialQuotaError, CodexCredentialQuotaService,
     CodexQuotaFact, CodexQuotaRefreshPolicy, CodexQuotaSyncSummary, CodexQuotaWindow,

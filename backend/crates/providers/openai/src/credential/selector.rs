@@ -625,6 +625,16 @@ impl CodexCredentialSelector {
             .prepare_cyber_policy_scope(cyber_policy_session_key)
             .await;
         let mut excluded = request.attempt.excluded_accounts().clone();
+        if !diagnostic {
+            for candidate in &candidates {
+                if request
+                    .attempt
+                    .excludes_proxy(candidate.account.outbound_proxy())
+                {
+                    excluded.insert(candidate.account.id().clone());
+                }
+            }
+        }
         if let Some(state) = cyber_policy_scope
             .as_ref()
             .and_then(|scope| scope.state.as_ref())
@@ -651,7 +661,7 @@ impl CodexCredentialSelector {
         } else {
             affinity.bound_account().cloned()
         };
-        let base_excluded = excluded.clone();
+        let mut base_excluded = excluded.clone();
         let mut shortest_retry = None;
         let policy = request.attempt.account_selection_policy();
 
@@ -659,7 +669,7 @@ impl CodexCredentialSelector {
             let preferred = pinned_account
                 .clone()
                 .or_else(|| affinity.preferred_account().cloned());
-            let context = AccountSelectionContext {
+            let mut context = AccountSelectionContext {
                 policy,
                 now: SystemTime::now(),
                 excluded_accounts: excluded.clone(),
@@ -673,7 +683,6 @@ impl CodexCredentialSelector {
                 },
                 account_scope: request.attempt.account_scope().cloned(),
             };
-            let capacity = AccountSelector.capacity_snapshot(&candidates, &context);
             let selection = match request
                 .attempt
                 .select_account(
@@ -683,8 +692,12 @@ impl CodexCredentialSelector {
                         ModelCatalogEligibility::Endpoint(model) => model,
                     },
                     &candidates,
-                    &context,
-                    pinned_account.as_ref(),
+                    &mut context,
+                    gateway_core::engine::account_scheduling::AccountScheduleOwnership {
+                        bound_account: affinity.bound_account().filter(|_| !affinity.inherited),
+                        follow_only: false,
+                        pinned_account: pinned_account.as_ref(),
+                    },
                 )
                 .await
             {
@@ -694,6 +707,10 @@ impl CodexCredentialSelector {
                 ) => return Err(CredentialSelectionError::AccountSnapshotChanged),
                 Err(error) => return Err(CredentialSelectionError::Policy(error)),
             };
+            // Policy exclusions persist across lease rechecks, unlike contention exclusions.
+            base_excluded.extend(context.excluded_accounts.difference(&excluded).cloned());
+            excluded = context.excluded_accounts.clone();
+            let capacity = AccountSelector.capacity_snapshot(&candidates, &context);
             request
                 .attempt
                 .trace()
@@ -763,6 +780,10 @@ impl CodexCredentialSelector {
             // Only observation timestamps may advance without invalidating selection.
             // Revalidate all other facts before reserving capacity or request intervals.
             let (account, runtime) = self.repository.reload_selected_credential(&account).await?;
+            if !account.dispatch_hours().allows_at(SystemTime::now()) {
+                excluded.insert(account.id().clone());
+                continue;
+            }
             let allows_account_state_mutation = !diagnostic || account.enabled();
             match self
                 .leases
@@ -785,6 +806,10 @@ impl CodexCredentialSelector {
                     excluded.insert(account.id().clone());
                 }
                 ProviderLeaseAcquisition::Acquired(guard) => {
+                    if !account.dispatch_hours().allows_at(SystemTime::now()) {
+                        excluded.insert(account.id().clone());
+                        continue;
+                    }
                     let initial_affinity_claim = if !diagnostic
                         && observed_affinity_account.is_none()
                         && let Some(key) = request.session_affinity_key

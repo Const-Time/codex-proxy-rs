@@ -470,7 +470,15 @@ impl AccountSelector {
     ) -> Vec<&'a AccountCandidate> {
         candidates
             .iter()
-            .filter(|candidate| self.scheduling_blocker(candidate, context).is_none())
+            .filter(|candidate| {
+                matches!(
+                    self.scheduling_blocker(candidate, context),
+                    None | Some(
+                        AccountSchedulingBlocker::ConcurrencyLimit
+                            | AccountSchedulingBlocker::RequestInterval
+                    )
+                )
+            })
             .collect()
     }
     pub(crate) fn select_policy_candidate<'a>(
@@ -671,6 +679,9 @@ impl AccountSelector {
             .is_some_and(|scope| !scope.allows(candidate.account.id()))
         {
             return Some(AccountSchedulingBlocker::OutsideClientScope);
+        }
+        if !candidate.account.dispatch_hours().allows_at(context.now) {
+            return Some(AccountSchedulingBlocker::LocalAvailability);
         }
         if !context.eligibility.bypasses_local_eligibility() {
             let status = candidate

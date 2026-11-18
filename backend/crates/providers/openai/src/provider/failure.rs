@@ -476,7 +476,7 @@ pub(super) fn apply_websocket_recovery_policy(
     failure: &mut MappedProviderFailure,
     context: WebSocketRecoveryContext<'_>,
 ) {
-    if failure.error.retry_is_prohibited() {
+    if failure.error.retry_is_prohibited() || failure.error.same_account_retry_blocked() {
         return;
     }
     // 明确账号拒绝走已有换号路径，容量拒绝走请求内退避；两者都不消耗 WS 传输预算。
@@ -881,6 +881,12 @@ pub(super) fn map_client_error(
                 websocket_error_kind(&error),
                 websocket_send_state(&error),
             ));
+            if matches!(
+                error.classified(),
+                CodexWebSocketExchangeError::MessageTooLarge
+            ) {
+                failure.error = failure.error.with_retry_prohibited();
+            }
             if let Some(close_code) = close_code {
                 failure.error =
                     failure
@@ -1033,6 +1039,7 @@ fn websocket_diagnostic(error: &CodexWebSocketExchangeError) -> ProviderDiagnost
         CodexWebSocketExchangeError::SharedConnectFailed => ("connect", "shared_connect_failed"),
         CodexWebSocketExchangeError::OriginCircuitOpen => ("connect", "origin_circuit_open"),
         CodexWebSocketExchangeError::OriginHalfOpenBusy => ("connect", "origin_half_open_busy"),
+        CodexWebSocketExchangeError::MessageTooLarge => ("prepare", "websocket_message_too_large"),
         CodexWebSocketExchangeError::InvalidRequest(_) => ("prepare", "invalid_request"),
         CodexWebSocketExchangeError::SendTimeout { .. } => ("send", "send_timeout"),
         CodexWebSocketExchangeError::ReceiveIdleTimeout { .. } => {
@@ -1097,6 +1104,10 @@ fn websocket_diagnostic_message(error: &CodexWebSocketExchangeError) -> Provider
     }
 
     ProviderDiagnostic::new(match error.diagnostic_cause() {
+        CodexWebSocketExchangeError::MessageTooLarge => {
+            "OpenAI WebSocket message exceeds the advertised limit before send".to_owned()
+        }
+
         CodexWebSocketExchangeError::InvalidRequest(_) => {
             "OpenAI WebSocket request could not be constructed".to_owned()
         }
@@ -1187,6 +1198,16 @@ pub(super) fn websocket_client_visible_error(
 ) -> Option<ClientVisibleUpstreamError> {
     if matches!(
         error.classified(),
+        CodexWebSocketExchangeError::MessageTooLarge
+    ) {
+        return Some(ClientVisibleUpstreamError::new(
+            "The WebSocket request exceeds the server's message size limit.",
+            Some("websocket_message_too_large".to_owned()),
+            Some("invalid_request_error".to_owned()),
+        ));
+    }
+    if matches!(
+        error.classified(),
         CodexWebSocketExchangeError::ConnectionLimitReached
     ) {
         return Some(ClientVisibleUpstreamError::new(
@@ -1250,7 +1271,9 @@ pub(super) fn map_upstream_failure(
     let mut error = provider_error(error_kind, send_state);
     if matches!(
         category,
-        CodexFailureCategory::FlexUnavailable | CodexFailureCategory::TurnRateLimited
+        CodexFailureCategory::FlexUnavailable
+            | CodexFailureCategory::TurnRateLimited
+            | CodexFailureCategory::InvalidRequest
     ) {
         error = error.with_retry_prohibited();
     }
@@ -1326,6 +1349,9 @@ pub(super) fn map_upstream_failure(
         ))
         .with_classification("upstream", "upstream_rejected"),
     );
+    if failure.no_more_retry {
+        error = error.with_same_account_retry_blocked();
+    }
     MappedProviderFailure {
         error,
         websocket_transport_retryable: false,
@@ -1444,6 +1470,7 @@ pub(super) fn websocket_send_state(error: &CodexWebSocketExchangeError) -> Upstr
         | CodexWebSocketExchangeError::OriginCircuitOpen
         | CodexWebSocketExchangeError::OriginHalfOpenBusy
         | CodexWebSocketExchangeError::SharedConnectFailed
+        | CodexWebSocketExchangeError::MessageTooLarge
         | CodexWebSocketExchangeError::ContinuationUnavailable { .. } => UpstreamSendState::NotSent,
         CodexWebSocketExchangeError::Upstream(_)
         | CodexWebSocketExchangeError::ConnectionLimitReached
@@ -1466,6 +1493,7 @@ pub(super) fn websocket_send_state(error: &CodexWebSocketExchangeError) -> Upstr
 
 pub(super) fn websocket_error_kind(error: &CodexWebSocketExchangeError) -> ProviderErrorKind {
     match error.classified() {
+        CodexWebSocketExchangeError::MessageTooLarge => ProviderErrorKind::MessageTooBig,
         CodexWebSocketExchangeError::InvalidRequest(_)
         | CodexWebSocketExchangeError::InvalidSse(_)
         | CodexWebSocketExchangeError::UnexpectedBinaryEvent => ProviderErrorKind::Protocol,
@@ -1534,4 +1562,49 @@ fn transient_http_connect(error: &reqwest::Error) -> bool {
         source = cause.source();
     }
     true
+}
+
+pub(super) fn proxy_dial_failed(error: &CodexClientError) -> bool {
+    match error {
+        CodexClientError::WebSocket(error) => error.proxy_dial_failed(),
+        CodexClientError::Http(error) | CodexClientError::HttpJson(error) => {
+            error.is_connect() && http_proxy_dial_failed(error)
+        }
+        _ => false,
+    }
+}
+
+fn http_proxy_dial_failed(error: &reqwest::Error) -> bool {
+    use hyper_util::client::legacy::connect::{HttpConnector, proxy::SocksV5};
+    use std::error::Error;
+    use tower_service::Service;
+
+    type TcpError = <HttpConnector as Service<hyper::Uri>>::Error;
+    type SocksError = <SocksV5<HttpConnector> as Service<hyper::Uri>>::Error;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let dial =
+            cause
+                .downcast_ref::<TcpError>()
+                .or_else(|| match cause.downcast_ref::<SocksError>() {
+                    Some(SocksError::Inner(dial)) => Some(dial),
+                    _ => None,
+                });
+        if let Some(dial) = dial {
+            return dial
+                .source()
+                .and_then(|inner| inner.downcast_ref::<std::io::Error>())
+                .is_some_and(|io| {
+                    matches!(
+                        io.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::NetworkUnreachable
+                            | std::io::ErrorKind::HostUnreachable
+                    )
+                });
+        }
+        source = cause.source();
+    }
+    false
 }

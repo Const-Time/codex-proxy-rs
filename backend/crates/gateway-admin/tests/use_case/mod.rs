@@ -442,6 +442,20 @@ impl AccountGroupStore for UnavailableAccountGroupStore {
 
 #[async_trait]
 impl AccountStore for UnavailableStore {
+    async fn quota_documents(
+        &self,
+        _account: &gateway_core::account::ProviderAccountId,
+        _provider: &gateway_core::routing::ProviderKind,
+        _created_at: chrono::DateTime<chrono::Utc>,
+        _range: gateway_admin::model::observability::TimeRange,
+        _before: Option<&gateway_admin::model::quota_history::QuotaHistoryCursor>,
+    ) -> AdminStoreResult<gateway_admin::model::quota_history::QuotaDocumentPage> {
+        Ok(gateway_admin::model::quota_history::QuotaDocumentPage {
+            documents: vec![],
+            next_cursor: None,
+        })
+    }
+
     async fn list_accounts(
         &self,
         _: AccountListQuery,

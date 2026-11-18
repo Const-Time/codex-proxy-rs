@@ -45,6 +45,9 @@ fn route_and_scheduler_decisions_are_explicit_and_strict() {
         model: Some("gpt-5".into()),
         candidates: vec![AccountScheduleCandidate {
             account_id: "acct_candidate".into(),
+            available: true,
+            session_bound: false,
+            role: gateway_plugin_sdk::call::policy::AccountScheduleRole::Ordinary,
             weight: 10,
             in_flight: 1,
             maximum_concurrency: 4,
@@ -59,6 +62,27 @@ fn route_and_scheduler_decisions_are_explicit_and_strict() {
         serde_json::from_value::<AccountScheduleRequest>(serde_json::to_value(&schedule).unwrap())
             .unwrap(),
         schedule
+    );
+    for required in ["available", "session_bound", "role"] {
+        let mut wire = serde_json::to_value(&schedule).unwrap();
+        wire["candidates"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(required);
+        assert!(serde_json::from_value::<AccountScheduleRequest>(wire).is_err());
+    }
+    assert_eq!(
+        gateway_plugin_sdk::Capability::Scheduler.contract_versions(),
+        &[4]
+    );
+    assert_eq!(
+        serde_json::from_value::<AccountScheduleDecision>(json!({
+            "decision":"delegate_filtered", "exclude_account_ids":["acct_candidate"]
+        }))
+        .unwrap(),
+        AccountScheduleDecision::DelegateFiltered {
+            exclude_account_ids: vec!["acct_candidate".into()]
+        }
     );
     assert_eq!(
         serde_json::to_value(AccountScheduleDecision::Pick {

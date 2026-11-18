@@ -191,7 +191,7 @@ async fn partial_refresh_retains_only_the_failed_scopes_previous_entitlements() 
     plan_response(&server, "acct_pro", 503, &[]).await;
     plan_response(&server, "acct_team", 200, &["team-new"]).await;
     assert!(
-        service.refresh_catalogs().await.is_err(),
+        service.refresh().await.is_err(),
         "partial refresh must not report complete success"
     );
     assert_eq!(
@@ -221,7 +221,7 @@ async fn partial_refresh_retains_only_the_failed_scopes_previous_entitlements() 
     server.reset().await;
     plan_response(&server, "acct_pro", 200, &["pro-new"]).await;
     plan_response(&server, "acct_team", 200, &["team-new"]).await;
-    service.refresh_catalogs().await.unwrap();
+    service.refresh().await.unwrap();
     assert_eq!(
         service.observed_model_support(&pro, "pro-only").unwrap(),
         Some(false)
@@ -271,7 +271,7 @@ async fn partial_etag_refresh_retries_until_every_scope_recovers() {
     server.reset().await;
     plan_response(&server, "acct_pro", 503, &[]).await;
     plan_response(&server, "acct_team", 503, &[]).await;
-    assert!(service.refresh_catalogs().await.is_err());
+    assert!(service.refresh().await.is_err());
     assert_eq!(service.catalog_generation(), generation);
     assert_eq!(
         service.observed_model_support(&pro, "pro-model").unwrap(),
@@ -294,7 +294,7 @@ async fn retained_scope_uses_current_membership_and_cannot_survive_invalidation(
     server.reset().await;
     plan_response(&server, "acct_replacement", 503, &[]).await;
     plan_response(&server, "acct_team", 200, &["team-model"]).await;
-    assert!(service.refresh_catalogs().await.is_err());
+    assert!(service.refresh().await.is_err());
     assert!(
         !service
             .cached()
@@ -418,7 +418,7 @@ async fn selector_keeps_unobserved_oauth_available_but_rejects_explicit_model_de
     plan_response(&server, "acct_pro", 200, &["different-model"]).await;
     plan_response(&server, "acct_team", 200, &["gpt-5.4"]).await;
     assert!(
-        catalog.refresh_catalogs().await.is_err(),
+        catalog.refresh().await.is_err(),
         "API scope is still unavailable"
     );
     assert!(matches!(
@@ -471,25 +471,25 @@ async fn client_catalog_is_account_and_version_scoped_and_keeps_original_objects
         .unwrap(),
     );
     let server = MockServer::start().await;
-    for (account, version, text) in [
+    for (account, _version, text) in [
         ("acct_client_a", "0.154.0", "a-original"),
         ("acct_client_b", "0.154.0", "b-original"),
-        ("acct_client_a", "0.155.0", "a-new-client"),
     ] {
         Mock::given(method("GET")).and(path("/codex/models"))
             .and(header("authorization", format!("Bearer access-{account}")))
             .and(header("chatgpt-account-id", format!("chatgpt-{account}")))
-            .and(query_param("client_version", version))
+            .and(query_param("client_version", "0.144.0"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"models":[{
                 "slug":"gpt-native", "display_name":"Native", "base_instructions":text,
                 "future_field":{"null":null,"list":[1,true]}, "model_messages":{"new_template":text}
             }]}))).expect(1).mount(&server).await;
     }
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     for (accounts, version, text) in [
         (vec![second.clone(), first.clone()], "0.154.0", "a-original"),
         (vec![second.clone()], "0.154.0", "b-original"),
-        (vec![first.clone()], "0.155.0", "a-new-client"),
+        (vec![first.clone()], "0.155.0", "a-original"),
         (vec![first], "0.154.0", "a-original"),
     ] {
         let models = service
@@ -538,10 +538,11 @@ async fn client_catalog_coalesces_reads_and_invalidates_on_etag_expiry_and_expli
                 .set_body_raw(OFFICIAL_FIXTURE, "application/json")
                 .set_delay(std::time::Duration::from_millis(20)),
         )
-        .expect(4)
+        .expect(1)
         .mount(&server)
         .await;
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     let (first, second) = tokio::join!(
         service.client_model_catalog(&scope, "0.154.0"),
         service.client_model_catalog(&scope, "0.154.0")
@@ -592,7 +593,7 @@ async fn client_catalog_unions_more_than_three_peers_without_leaking_outside_key
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "models": [{"slug":format!("model-{index}"), "display_name":format!("Model {index}")}]
             })))
-            .expect(if index < 5 { 1 } else { 0 })
+            .expect(1)
             .mount(&server).await;
         if index < 5 {
             accounts.push(account);
@@ -600,6 +601,7 @@ async fn client_catalog_unions_more_than_three_peers_without_leaking_outside_key
     }
     accounts.reverse();
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     let models = service
         .client_model_catalog(&client_scope(&accounts), "0.154.0")
         .await
@@ -637,6 +639,7 @@ async fn client_catalog_cache_does_not_survive_credential_rotation() {
             .await;
     }
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     let first = service
         .client_model_catalog(&scope, "0.154.0")
         .await
@@ -646,6 +649,14 @@ async fn client_catalog_cache_does_not_survive_credential_rotation() {
         .rotate_refreshed_oauth_secret(&account, secret("rotated-access"), None, None)
         .await
         .expect("rotate");
+    assert!(
+        service
+            .client_model_catalog(&scope, "0.154.0")
+            .await
+            .is_err(),
+        "rotated credential must not borrow old evidence"
+    );
+    service.refresh().await.unwrap();
     let second = service
         .client_model_catalog(&scope, "0.154.0")
         .await
@@ -668,6 +679,7 @@ async fn failed_client_catalog_never_falls_back_to_an_out_of_scope_account_or_ca
         .mount(&server)
         .await;
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     let scope = client_scope(&[allowed]);
     for _ in 0..2 {
         assert!(
@@ -677,7 +689,7 @@ async fn failed_client_catalog_never_falls_back_to_an_out_of_scope_account_or_ca
                 .is_err()
         );
     }
-    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
     server.verify().await;
 }
 
@@ -697,13 +709,13 @@ async fn raw_instructions_only_change_advances_catalog_generation() {
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
     service.synchronize().await.expect("initial");
     let generation = service.catalog_generation();
-    service.refresh_catalogs().await.expect("refresh");
+    service.refresh().await.expect("refresh");
     assert!(service.catalog_generation() > generation);
     server.verify().await;
 }
 
 #[tokio::test]
-async fn client_catalog_evicts_old_entries_after_32_distinct_versions() {
+async fn client_versions_share_one_global_profile_catalog() {
     let store = Arc::new(MemoryAccountStore::default());
     let account = seed_account(&store, "acct_client_bounded").await;
     let scope = client_scope(&[account]);
@@ -711,10 +723,11 @@ async fn client_catalog_evicts_old_entries_after_32_distinct_versions() {
     Mock::given(method("GET"))
         .and(path("/codex/models"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(OFFICIAL_FIXTURE, "application/json"))
-        .expect(34)
+        .expect(1)
         .mount(&server)
         .await;
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     for patch in 0..33 {
         service
             .client_model_catalog(&scope, &format!("0.154.{patch}"))
@@ -733,7 +746,7 @@ async fn client_catalog_evicts_old_entries_after_32_distinct_versions() {
 }
 
 #[tokio::test]
-async fn client_catalog_retries_after_short_failure_cache_expires() {
+async fn client_catalog_recovers_only_after_background_refresh() {
     let store = Arc::new(MemoryAccountStore::default());
     let account = seed_account(&store, "acct_client_retry").await;
     let scope = client_scope(&[account]);
@@ -745,6 +758,7 @@ async fn client_catalog_retries_after_short_failure_cache_expires() {
         .mount_as_scoped(&server)
         .await;
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     assert!(
         service
             .client_model_catalog(&scope, "0.154.0")
@@ -764,6 +778,7 @@ async fn client_catalog_retries_after_short_failure_cache_expires() {
             .await
             .is_err()
     );
+    service.refresh().await.unwrap();
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(6)).await;
     tokio::time::resume();
@@ -919,7 +934,7 @@ async fn service_tier_changes_should_replace_cached_metadata_and_advance_generat
     );
     assert_eq!(service.catalog_generation().get(), generation);
 
-    let refreshed = service.refresh_catalogs().await.expect("updated catalog");
+    let refreshed = service.refresh().await.expect("updated catalog");
     assert!(refreshed.models()[0].metadata().service_tiers().is_empty());
     assert_eq!(service.catalog_generation().get(), generation + 1);
     assert_eq!(
@@ -953,6 +968,7 @@ async fn failed_oauth_catalog_does_not_hide_healthy_peers_or_borrow_their_models
             .await;
     }
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let _ = service.synchronize().await;
     let models = service
         .client_model_catalog(&client_scope(&[failed.clone(), healthy]), "0.154.0")
         .await
@@ -1092,17 +1108,14 @@ async fn account_entitlements_keep_the_discovering_account_across_plans() {
         service
             .cached()
             .expect("cache read after invalidation")
-            .is_none()
+            .is_some()
     );
-    assert_eq!(
-        service.catalog_generation().get(),
-        synchronized_generation + 1
-    );
+    assert_eq!(service.catalog_generation().get(), synchronized_generation);
     assert_eq!(
         service
             .observed_model_support(&k12, "gpt-5.6-sol")
             .expect("support fact after invalidation"),
-        None
+        Some(true)
     );
     server.verify().await;
 }
@@ -1194,7 +1207,7 @@ async fn catalog_account_membership_changes_advance_generation_without_model_cha
     let initial = service.synchronize().await.unwrap();
     let generation = service.catalog_generation();
     let second = seed_account(&store, "acct_source_b").await;
-    let refreshed = service.refresh_catalogs().await.unwrap();
+    let refreshed = service.refresh().await.unwrap();
     assert_eq!(initial.models(), refreshed.models());
     assert!(service.catalog_generation() > generation);
     assert_eq!(
@@ -1208,42 +1221,30 @@ async fn catalog_account_membership_changes_advance_generation_without_model_cha
 }
 
 #[tokio::test]
-async fn client_catalog_byte_budget_evicts_completed_entries_without_rejecting_large_catalogs() {
+async fn large_native_catalog_is_shared_across_client_versions() {
     let store = Arc::new(MemoryAccountStore::default());
     let account = seed_account(&store, "acct_catalog_bytes").await;
     let scope = client_scope(&[account]);
     let server = MockServer::start().await;
-    for (version, bytes, calls) in [
-        ("small", 1024, 1),
-        ("large", 17 * 1024 * 1024, 2),
-        ("other", 17 * 1024 * 1024, 1),
-        ("oversized", 33 * 1024 * 1024, 2),
-    ] {
-        Mock::given(method("GET")).and(path("/codex/models"))
-            .and(query_param("client_version", version))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"models":[{
-                "slug":"gpt-large", "display_name":"Large", "base_instructions":"x".repeat(bytes)
-            }]}))).expect(calls).mount(&server).await;
-    }
+    Mock::given(method("GET")).and(path("/codex/models"))
+        .and(query_param("client_version", "0.144.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"models":[{
+            "slug":"gpt-large", "display_name":"Large", "base_instructions":"x".repeat(33 * 1024 * 1024)
+        }]}))).expect(1).mount(&server).await;
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
-    for version in [
-        "large",
-        "other",
-        "other",
-        "large",
-        "small",
-        "oversized",
-        "oversized",
-        "small",
-    ] {
-        let models = service
-            .client_model_catalog(&scope, version)
-            .await
-            .expect("large catalog delivered");
+    service.synchronize().await.unwrap();
+    for version in ["0.154.0", "0.155.0", "0.999.0"] {
+        let models = service.client_model_catalog(&scope, version).await.unwrap();
         assert_eq!(models.len(), 1);
+        let gateway_core::routing::ProviderModelContent::Native(document) = &models[0].content
+        else {
+            panic!("native catalog");
+        };
+        assert!(document.body().len() > 33 * 1024 * 1024);
     }
     server.verify().await;
 }
+
 #[tokio::test]
 async fn api_key_catalogs_are_isolated_and_join_oauth_without_claiming_native_metadata() {
     use provider_openai::credential::ApiKeyTransport;
@@ -1444,6 +1445,7 @@ async fn api_key_catalog_does_not_replace_native_metadata_for_shared_models() {
         .mount(&upstream)
         .await;
     service.invalidate().expect("invalidate");
+    service.refresh().await.unwrap();
     let after = service.synchronize().await.expect("mixed directory");
     assert_eq!(
         after.models(),
@@ -1518,6 +1520,8 @@ async fn slow_api_key_catalogs_share_a_deadline_and_preserve_healthy_catalogs() 
         )
         .await;
     accounts.push(store.account("acct_fast").expect("fast API account"));
+    let service = service_with_catalog_cache(&store, upstream.uri(), catalog_cache());
+    service.synchronize().await.unwrap();
     for index in 0..6 {
         let id = format!("acct_slow_{index}");
         store
@@ -1529,7 +1533,6 @@ async fn slow_api_key_catalogs_share_a_deadline_and_preserve_healthy_catalogs() 
             .await;
         accounts.push(store.account(&id).expect("slow API account"));
     }
-    let service = service_with_catalog_cache(&store, upstream.uri(), catalog_cache());
     let scope = client_scope(&accounts);
     let slow_id = ProviderAccountId::new("acct_slow_0").expect("account ID");
     let (client, refresh) = tokio::time::timeout(Duration::from_secs(17), async {
@@ -1552,4 +1555,105 @@ async fn slow_api_key_catalogs_share_a_deadline_and_preserve_healthy_catalogs() 
         refresh,
         Err(CodexCredentialCatalogError::Upstream { .. })
     ));
+}
+
+#[tokio::test]
+async fn catalog_restore_is_network_free_and_fenced_by_current_credential() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account = seed_account(&store, "acct_restore").await;
+    let scope = client_scope(std::slice::from_ref(&account));
+    let server = MockServer::start().await;
+    plan_response(&server, "acct_restore", 200, &["gpt-observed"]).await;
+    let initial = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    initial.synchronize().await.unwrap();
+    server.reset().await;
+    let restarted = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    let catalog = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        restarted.client_model_catalog(&scope, "client-version-is-not-global-profile"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(catalog[0].model.as_str(), "gpt-observed");
+    assert_eq!(
+        restarted
+            .observed_model_support(&account, "not-listed")
+            .unwrap(),
+        Some(false)
+    );
+    restarted.invalidate().unwrap();
+    assert_eq!(
+        restarted
+            .observed_model_support(&account, "not-listed")
+            .unwrap(),
+        Some(false),
+        "unchanged accounts retain explicit exclusions during refresh"
+    );
+    restarted.refresh_catalogs().await.unwrap();
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "fresh restored scopes need no fetch"
+    );
+    store
+        .repository()
+        .rotate_refreshed_oauth_secret(&account, secret("new-token"), None, None)
+        .await
+        .unwrap();
+    let rotated = store.account("acct_restore").unwrap();
+    assert_eq!(
+        restarted
+            .observed_model_support(&rotated, "gpt-observed")
+            .unwrap(),
+        None
+    );
+    let restarted = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    assert!(
+        restarted
+            .client_model_catalog(&scope, "anything")
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_cold_catalog_is_unobserved_until_an_explicit_or_background_refresh() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account = seed_account(&store, "acct_cold").await;
+    let server = MockServer::start().await;
+    plan_response(&server, "acct_cold", 200, &["gpt-observed"]).await;
+    let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
+    assert!(matches!(
+        service.restored_snapshot().await,
+        Err(CodexCredentialCatalogError::NoEligibleCredential)
+    ));
+    assert!(service.cached().unwrap().is_none());
+    assert!(
+        service
+            .read_account_catalog(&account)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        service
+            .observed_model_support(&account, "gpt-observed")
+            .unwrap(),
+        None
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    service.refresh_account_catalog(account.id()).await.unwrap();
+    assert_eq!(
+        service
+            .observed_model_support(&account, "gpt-observed")
+            .unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        service
+            .observed_model_support(&account, "gpt-denied")
+            .unwrap(),
+        Some(false)
+    );
 }

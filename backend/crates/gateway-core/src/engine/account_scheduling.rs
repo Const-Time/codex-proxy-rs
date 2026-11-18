@@ -11,9 +11,26 @@ use crate::{
 use futures::{FutureExt, future::BoxFuture, pin_mut, select_biased};
 use std::{sync::Arc, time::SystemTime};
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AccountScheduleOwnership<'a> {
+    pub bound_account: Option<&'a ProviderAccountId>,
+    pub follow_only: bool,
+    pub pinned_account: Option<&'a ProviderAccountId>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountScheduleRole {
+    Ordinary,
+    Preferred,
+    FollowOnly,
+    Pinned,
+}
+
 #[derive(Debug, Clone)]
 pub struct AccountScheduleCandidate {
     pub account_id: ProviderAccountId,
+    pub available: bool,
+    pub session_bound: bool,
+    pub role: AccountScheduleRole,
     pub weight: u16,
     pub in_flight: u32,
     pub maximum_concurrency: u32,
@@ -80,6 +97,7 @@ impl AccountScheduleInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountScheduleDecision {
     Delegate,
+    DelegateFiltered(Vec<ProviderAccountId>),
     Reject,
     Pick(ProviderAccountId),
 }
@@ -144,8 +162,8 @@ impl AttemptContext {
         provider: &ProviderKind,
         model: Option<&str>,
         candidates: &'a [AccountCandidate],
-        context: &AccountSelectionContext,
-        required: Option<&ProviderAccountId>,
+        context: &mut AccountSelectionContext,
+        ownership: AccountScheduleOwnership<'_>,
     ) -> Result<Option<AccountSelection<'a>>, AccountPolicyError> {
         let Some(scheduler) = self
             .request
@@ -162,7 +180,9 @@ impl AttemptContext {
         let mut constrained = context.clone();
         for candidate in candidates {
             if candidate.account.provider() != provider
-                || required.is_some_and(|required| required != candidate.account.id())
+                || ownership
+                    .pinned_account
+                    .is_some_and(|required| required != candidate.account.id())
                 || model.is_some_and(|model| {
                     constrained
                         .account_scope
@@ -179,6 +199,15 @@ impl AttemptContext {
         if eligible.is_empty() {
             return Ok(None);
         }
+        let available: std::collections::BTreeSet<_> = eligible
+            .iter()
+            .filter(|c| {
+                AccountSelector
+                    .scheduling_blocker(c, &constrained)
+                    .is_none()
+            })
+            .map(|c| c.account.id().clone())
+            .collect();
         let input = AccountScheduleInput {
             parent: parent.clone().with_revocation(self.cancellation().clone()),
             attempt_index: self.attempt_index(),
@@ -189,6 +218,20 @@ impl AttemptContext {
                 .iter()
                 .map(|candidate| AccountScheduleCandidate {
                     account_id: candidate.account.id().clone(),
+                    available: available.contains(candidate.account.id()),
+                    session_bound: ownership.bound_account == Some(candidate.account.id()),
+                    role: if ownership.pinned_account == Some(candidate.account.id()) {
+                        AccountScheduleRole::Pinned
+                    } else if ownership.bound_account == Some(candidate.account.id())
+                        && ownership.follow_only
+                    {
+                        AccountScheduleRole::FollowOnly
+                    } else if constrained.preferred_account.as_ref() == Some(candidate.account.id())
+                    {
+                        AccountScheduleRole::Preferred
+                    } else {
+                        AccountScheduleRole::Ordinary
+                    },
                     weight: candidate.account.weight().get(),
                     in_flight: candidate.signals.in_flight,
                     maximum_concurrency: candidate
@@ -219,17 +262,41 @@ impl AttemptContext {
             return Err(AccountPolicyError::Cancelled);
         }
         constrained.now = SystemTime::now();
+        context.now = constrained.now;
         match result.decision {
             AccountScheduleDecision::Reject => Err(AccountPolicyError::Rejected),
-            AccountScheduleDecision::Delegate => AccountSelector
-                .select(candidates, &constrained)
-                .map(Some)
-                .ok_or(AccountPolicyError::StaleCandidate),
-            AccountScheduleDecision::Pick(account) => {
-                if !eligible
-                    .iter()
-                    .any(|candidate| candidate.account.id() == &account)
+            AccountScheduleDecision::Delegate => {
+                let selection = AccountSelector.select(candidates, &constrained);
+                if selection.is_none() && !available.is_empty() {
+                    return Err(AccountPolicyError::StaleCandidate);
+                }
+                Ok(selection)
+            }
+            AccountScheduleDecision::DelegateFiltered(excluded) => {
+                let unique: std::collections::BTreeSet<_> = excluded.iter().collect();
+                if unique.len() != excluded.len()
+                    || excluded
+                        .iter()
+                        .any(|id| !eligible.iter().any(|c| c.account.id() == id))
                 {
+                    return Err(AccountPolicyError::Fault);
+                }
+                constrained
+                    .excluded_accounts
+                    .extend(excluded.iter().cloned());
+                context.excluded_accounts.extend(excluded);
+                let selection = AccountSelector.select(candidates, &constrained);
+                if selection.is_none()
+                    && available
+                        .iter()
+                        .any(|id| !constrained.excluded_accounts.contains(id))
+                {
+                    return Err(AccountPolicyError::StaleCandidate);
+                }
+                Ok(selection)
+            }
+            AccountScheduleDecision::Pick(account) => {
+                if !available.contains(&account) {
                     return Err(AccountPolicyError::Fault);
                 }
                 AccountSelector

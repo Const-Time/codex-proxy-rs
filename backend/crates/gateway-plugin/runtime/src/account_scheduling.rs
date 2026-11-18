@@ -35,7 +35,7 @@ pub(crate) async fn invoke(
     services: Arc<crate::services::Registry>,
     input: AccountScheduleInput,
 ) -> Result<AccountScheduleDecision, AccountSchedulingFault> {
-    if session.capability_version(Capability::Scheduler) != Some(1)
+    if session.capability_version(Capability::Scheduler) != Some(4)
         || !session.capability_supports_stage(Capability::Scheduler, Stage::Scheduling)
     {
         return Err(AccountSchedulingFault);
@@ -91,6 +91,22 @@ pub(crate) async fn invoke(
             .iter()
             .map(|c| WireCandidate {
                 account_id: c.account_id.as_str().into(),
+                available: c.available,
+                session_bound: c.session_bound,
+                role: match c.role {
+                    AccountScheduleRole::Ordinary => {
+                        gateway_plugin_sdk::call::policy::AccountScheduleRole::Ordinary
+                    }
+                    AccountScheduleRole::Preferred => {
+                        gateway_plugin_sdk::call::policy::AccountScheduleRole::Preferred
+                    }
+                    AccountScheduleRole::FollowOnly => {
+                        gateway_plugin_sdk::call::policy::AccountScheduleRole::FollowOnly
+                    }
+                    AccountScheduleRole::Pinned => {
+                        gateway_plugin_sdk::call::policy::AccountScheduleRole::Pinned
+                    }
+                },
                 weight: c.weight,
                 in_flight: c.in_flight,
                 maximum_concurrency: c.maximum_concurrency,
@@ -118,11 +134,16 @@ pub(crate) async fn invoke(
     // Serde internally tagged unit variants accept extra fields despite
     // deny_unknown_fields. Enforce the wire shape before decoding the decision.
     let valid_shape = reply.result.as_object().is_some_and(|fields| {
-        let pick = fields.get("decision").and_then(serde_json::Value::as_str) == Some("pick");
-        fields.len() == (if pick { 2 } else { 1 })
+        let member = match fields.get("decision").and_then(serde_json::Value::as_str) {
+            Some("pick") => Some("account_id"),
+            Some("delegate_filtered") => Some("exclude_account_ids"),
+            Some("delegate" | "reject") => None,
+            _ => return false,
+        };
+        fields.len() == if member.is_some() { 2 } else { 1 }
             && fields
                 .keys()
-                .all(|key| key == "decision" || (pick && key == "account_id"))
+                .all(|key| key == "decision" || member == Some(key.as_str()))
     });
     if !valid_shape {
         session.invalid_response(Stage::Scheduling);
@@ -134,11 +155,33 @@ pub(crate) async fn invoke(
     match decision {
         WireDecision::Delegate => Ok(AccountScheduleDecision::Delegate),
         WireDecision::Reject => Ok(AccountScheduleDecision::Reject),
+        WireDecision::DelegateFiltered {
+            exclude_account_ids,
+        } => {
+            let unique: std::collections::BTreeSet<_> = exclude_account_ids.iter().collect();
+            if unique.len() != exclude_account_ids.len()
+                || exclude_account_ids.iter().any(|id| {
+                    !input
+                        .candidates()
+                        .iter()
+                        .any(|c| c.account_id.as_str() == id)
+                })
+            {
+                session.invalid_response(Stage::Scheduling);
+                return Err(AccountSchedulingFault);
+            }
+            let excluded = exclude_account_ids
+                .into_iter()
+                .map(ProviderAccountId::new)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| AccountSchedulingFault)?;
+            Ok(AccountScheduleDecision::DelegateFiltered(excluded))
+        }
         WireDecision::Pick { account_id } => {
             if !input
                 .candidates()
                 .iter()
-                .any(|c| c.account_id.as_str() == account_id)
+                .any(|c| c.account_id.as_str() == account_id && c.available)
             {
                 session.invalid_response(Stage::Scheduling);
                 return Err(AccountSchedulingFault);

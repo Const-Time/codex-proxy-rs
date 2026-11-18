@@ -79,6 +79,18 @@ impl OutboundProxy {
     }
 
     #[must_use]
+    pub fn dial_endpoint(&self) -> ProxyEndpoint {
+        ProxyEndpoint::new(
+            self.0
+                .host_str()
+                .expect("validated proxy host")
+                .to_ascii_lowercase(),
+            self.0
+                .port_or_known_default()
+                .expect("validated proxy port"),
+        )
+    }
+
     pub fn expose_url(&self) -> &str {
         self.0.as_str()
     }
@@ -122,5 +134,22 @@ impl OutboundProxy {
 impl fmt::Debug for OutboundProxy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("OutboundProxy(<redacted>)")
+    }
+}
+
+/// Request-local unreachable proxy endpoint; excludes credentials and never persists.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProxyEndpoint {
+    host: String,
+    port: u16,
+}
+impl ProxyEndpoint {
+    pub(crate) fn new(host: String, port: u16) -> Self {
+        Self { host, port }
+    }
+}
+impl std::fmt::Debug for ProxyEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProxyEndpoint(<redacted>)")
     }
 }

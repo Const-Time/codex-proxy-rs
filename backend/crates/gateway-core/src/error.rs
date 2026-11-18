@@ -442,6 +442,8 @@ pub struct ProviderError {
     failure_observation: Option<Box<ProviderErrorFailureObservation>>,
     replay_safe: bool,
     retry_prohibited: bool,
+    same_account_retry_blocked: bool,
+    unreachable_proxy: Option<Box<crate::account::ProxyEndpoint>>,
     pre_delivery_retry: Option<Box<PreDeliveryRetry>>,
     credential_recovery_required: bool,
     retry_same_account: bool,
@@ -483,6 +485,8 @@ impl ProviderError {
             failure_observation: None,
             replay_safe: false,
             retry_prohibited: false,
+            same_account_retry_blocked: false,
+            unreachable_proxy: None,
             pre_delivery_retry: None,
             credential_recovery_required: false,
             retry_same_account: false,
@@ -591,6 +595,30 @@ impl ProviderError {
     #[must_use]
     pub const fn retry_is_prohibited(&self) -> bool {
         self.retry_prohibited
+    }
+
+    /// 上游明确拒绝继续重试本账号；仍由 Core 按原策略决定换号或返回。
+    #[must_use]
+    pub const fn with_same_account_retry_blocked(mut self) -> Self {
+        self.same_account_retry_blocked = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_unreachable_proxy(mut self, endpoint: crate::account::ProxyEndpoint) -> Self {
+        self.unreachable_proxy = Some(Box::new(endpoint));
+        self.same_account_retry_blocked = true;
+        self
+    }
+
+    #[must_use]
+    pub fn unreachable_proxy(&self) -> Option<&crate::account::ProxyEndpoint> {
+        self.unreachable_proxy.as_deref()
+    }
+
+    #[must_use]
+    pub const fn same_account_retry_blocked(&self) -> bool {
+        self.same_account_retry_blocked
     }
 
     /// 原地标记 Provider 已证明本次失败可从已交付的状态检查点安全恢复。
@@ -904,6 +932,8 @@ impl Clone for ProviderError {
             failure_observation: self.failure_observation.clone(),
             replay_safe: self.replay_safe,
             retry_prohibited: self.retry_prohibited,
+            same_account_retry_blocked: self.same_account_retry_blocked,
+            unreachable_proxy: self.unreachable_proxy.clone(),
             pre_delivery_retry: self.pre_delivery_retry.clone(),
             credential_recovery_required: self.credential_recovery_required,
             retry_same_account: self.retry_same_account,
@@ -934,6 +964,10 @@ impl fmt::Debug for ProviderError {
             )
             .field("retry_after", &self.retry_after)
             .field("retry_prohibited", &self.retry_prohibited)
+            .field(
+                "same_account_retry_blocked",
+                &self.same_account_retry_blocked,
+            )
             .field("continuation_failure", &self.continuation_failure)
             .field(
                 "continuation_recovery_disposition",

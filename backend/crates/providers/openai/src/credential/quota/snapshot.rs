@@ -346,21 +346,7 @@ pub(crate) fn parse_account_quota_snapshot(
 ) -> Result<CodexAccountQuotaSnapshot, CodexCredentialQuotaError> {
     let object = canonical_quota_object(usage)?;
     let fact = parse_codex_quota_object(&object)?;
-    let mut windows = Vec::new();
-    for limit in canonical_rate_limits(&object)? {
-        parse_rate_limit_windows(
-            &limit.source,
-            limit.account_wide,
-            limit.limit_name.as_deref(),
-            limit.rate_limit,
-            &mut windows,
-        )?;
-    }
-    windows.sort_by(|left, right| {
-        quota_source_order(left.source())
-            .cmp(&quota_source_order(right.source()))
-            .then_with(|| left.key.cmp(&right.key))
-    });
+    let windows = quota_windows(&object)?;
     let quota = authoritative_quota_state(&object, &windows, observed_at)?;
     let credits_usable = has_usable_credits(&object);
     let recovery = object
@@ -736,4 +722,25 @@ pub(crate) fn usage_limit_reached(
                     .used_percent()
                     .is_some_and(|used| used.is_finite() && used >= f64::from(threshold)))
     })
+}
+
+pub(super) fn quota_windows(
+    object: &Map<String, Value>,
+) -> Result<Vec<CodexQuotaWindow>, CodexCredentialQuotaError> {
+    let mut windows = Vec::new();
+    for limit in canonical_rate_limits(object)? {
+        parse_rate_limit_windows(
+            &limit.source,
+            limit.account_wide,
+            limit.limit_name.as_deref(),
+            limit.rate_limit,
+            &mut windows,
+        )?;
+    }
+    windows.sort_by(|left, right| {
+        quota_source_order(left.source())
+            .cmp(&quota_source_order(right.source()))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    Ok(windows)
 }

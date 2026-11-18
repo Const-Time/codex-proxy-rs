@@ -238,7 +238,24 @@ impl gateway_core::engine::account_scheduling::AccountScheduler for SchedulingPo
                     "foreign" => AccountScheduleDecision::Pick(
                         ProviderAccountId::new("acct_foreign").unwrap(),
                     ),
-                    "pick" | "hard" => AccountScheduleDecision::Pick(
+                    "filtered" => AccountScheduleDecision::DelegateFiltered(vec![
+                        ProviderAccountId::new("acct_start").unwrap(),
+                    ]),
+                    "filtered_all" => AccountScheduleDecision::DelegateFiltered(vec![
+                        ProviderAccountId::new("acct_start").unwrap(),
+                        ProviderAccountId::new("acct_second").unwrap(),
+                    ]),
+                    "filtered_foreign" => AccountScheduleDecision::DelegateFiltered(vec![
+                        ProviderAccountId::new("acct_foreign").unwrap(),
+                    ]),
+                    "filtered_duplicate" => AccountScheduleDecision::DelegateFiltered(vec![
+                            ProviderAccountId::new(
+                                "acct_start"
+                            )
+                            .unwrap();
+                            2
+                        ]),
+                    "pick" | "hard" | "busy_pick" => AccountScheduleDecision::Pick(
                         ProviderAccountId::new("acct_second").unwrap(),
                     ),
                     _ => AccountScheduleDecision::Delegate,
@@ -297,7 +314,7 @@ impl Provider for SchedulingProvider {
                     None,
                 ),
                 signals: AccountRuntimeSignals {
-                    in_flight: u32::from(self.mode == "busy"),
+                    in_flight: u32::from(matches!(self.mode, "busy" | "busy_pick")),
                     last_started_at: None,
                     quota_reset_at: None,
                     quota_remaining_rank: Some(7500),
@@ -308,7 +325,7 @@ impl Provider for SchedulingProvider {
             })
             .collect::<Vec<_>>();
         let required = (self.mode == "hard").then(|| ProviderAccountId::new("acct_start").unwrap());
-        let selection_context = AccountSelectionContext {
+        let mut selection_context = AccountSelectionContext {
             policy: context.account_selection_policy(),
             now: if self.mode == "stale" {
                 now - Duration::from_secs(2)
@@ -327,8 +344,11 @@ impl Provider for SchedulingProvider {
                 request.candidate().provider(),
                 request.candidate().upstream_model().map(|m| m.as_str()),
                 &candidates,
-                &selection_context,
-                required.as_ref(),
+                &mut selection_context,
+                gateway_core::engine::account_scheduling::AccountScheduleOwnership {
+                    pinned_account: required.as_ref(),
+                    ..Default::default()
+                },
             )
             .await;
         self.outcomes.lock().unwrap().push(
@@ -398,7 +418,7 @@ impl Provider for SchedulingFallback {
         _: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
         assert!(
-            matches!(self.0, "busy" | "stale"),
+            matches!(self.0, "busy" | "stale" | "filtered_all"),
             "a policy rejection/fault must not delegate to another Provider: {}",
             self.0
         );
@@ -492,7 +512,19 @@ fn account_scheduling_projects_core_scope_preserves_hard_pins_and_rechecks_expir
             account_scheduling::AccountPolicyError, execution::PreparedExecutionRequest,
         };
         for mode in [
-            "pick", "delegate", "foreign", "hard", "stale", "reject", "fault", "busy",
+            "pick",
+            "delegate",
+            "foreign",
+            "hard",
+            "stale",
+            "reject",
+            "fault",
+            "busy",
+            "busy_pick",
+            "filtered",
+            "filtered_all",
+            "filtered_foreign",
+            "filtered_duplicate",
         ] {
             let (service, admissions, budget, policy, outcomes) = scheduling_fixture(mode);
             let r = request(&service, ClientTransport::HttpJson);
@@ -511,7 +543,7 @@ fn account_scheduling_projects_core_scope_preserves_hard_pins_and_rechecks_expir
                 )
                 .await
                 .unwrap();
-            if matches!(mode, "pick" | "delegate") {
+            if matches!(mode, "pick" | "delegate" | "filtered") {
                 consume_charged_prefix(started.session.as_mut()).await;
             } else {
                 assert!(started.session.next_event().await.is_err(), "{mode}");
@@ -519,9 +551,7 @@ fn account_scheduling_projects_core_scope_preserves_hard_pins_and_rechecks_expir
             started.session.detach_finalize().await;
             assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
             let observed = policy.observed.lock().unwrap();
-            if mode == "busy" {
-                assert!(observed.is_empty());
-            } else {
+            {
                 assert_eq!(
                     observed.len(),
                     1,
@@ -544,23 +574,38 @@ fn account_scheduling_projects_core_scope_preserves_hard_pins_and_rechecks_expir
                         vec!["acct_start", "acct_second"]
                     }
                 );
+                use gateway_core::engine::account_scheduling::AccountScheduleRole;
+                assert_eq!(
+                    input.candidates()[0].role,
+                    if mode == "hard" {
+                        AccountScheduleRole::Pinned
+                    } else {
+                        AccountScheduleRole::Preferred
+                    }
+                );
+                assert!(!input.candidates()[0].session_bound);
+                assert_eq!(
+                    input.candidates()[0].available,
+                    !matches!(mode, "busy" | "busy_pick")
+                );
                 assert_eq!(input.candidates()[0].maximum_concurrency, 1);
                 assert_eq!(input.candidates()[0].quota_remaining_rank, Some(7500));
                 assert_eq!(input.candidates()[0].failure_rate_basis_points, Some(300));
             }
             let outcomes = outcomes.lock().unwrap();
             let expected = match mode {
-                "foreign" | "hard" | "fault" => Err(AccountPolicyError::Fault),
+                "foreign" | "hard" | "fault" | "busy_pick" | "filtered_foreign"
+                | "filtered_duplicate" => Err(AccountPolicyError::Fault),
                 "reject" => Err(AccountPolicyError::Rejected),
                 "stale" => Err(AccountPolicyError::StaleCandidate),
-                "pick" => Ok("acct_second".to_owned()),
+                "pick" | "filtered" => Ok("acct_second".to_owned()),
                 "delegate" => Ok("acct_start".to_owned()),
                 _ => Ok("none".to_owned()),
             };
             assert_eq!(&outcomes[..], &[expected], "{mode}");
             assert_eq!(
                 budget.charges.lock().unwrap()[0].amount_usd,
-                if matches!(mode, "pick" | "delegate") {
+                if matches!(mode, "pick" | "delegate" | "filtered") {
                     known_charge()
                 } else {
                     Decimal::ZERO

@@ -121,6 +121,14 @@ pub trait AccountStore:
             "not configured",
         ))
     }
+    async fn quota_documents(
+        &self,
+        account: &gateway_core::account::ProviderAccountId,
+        provider: &gateway_core::routing::ProviderKind,
+        created_at: chrono::DateTime<chrono::Utc>,
+        range: crate::model::observability::TimeRange,
+        before: Option<&crate::model::quota_history::QuotaHistoryCursor>,
+    ) -> AdminStoreResult<crate::model::quota_history::QuotaDocumentPage>;
     async fn load_quota_forecast_history(
         &self,
         _window: &crate::model::accounts::AccountUsageWindowQuery,

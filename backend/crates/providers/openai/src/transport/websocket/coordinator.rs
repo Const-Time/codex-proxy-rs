@@ -91,6 +91,17 @@ impl PoolBinding {
 }
 
 impl PreparedWebSocket {
+    pub(crate) fn max_message_bytes(&self) -> Option<usize> {
+        self.connection.metadata.max_message_bytes
+    }
+
+    pub(crate) async fn discard(self) {
+        let (lease, _, _) = self.binding.into_parts();
+        let websocket = self.connection.websocket;
+        let observation = websocket.observation().with_exit_reason("request_not_sent");
+        discard_after_send(websocket, lease, observation).await;
+    }
+
     pub(crate) fn pool_decision(&self) -> Option<WebSocketPoolDecision> {
         self.binding.decision()
     }

@@ -1,5 +1,5 @@
 import type { Ref } from 'vue'
-import type { AccountModelAccess, ApiKeyConfiguration, getAccounts } from '@/api'
+import type { AccountDispatchHours, AccountModelAccess, ApiKeyConfiguration, getAccounts } from '@/api'
 
 import { computed, ref, shallowRef, watch } from 'vue'
 import { getAccountDetail, updateAccount, updateAccountApiKey } from '@/api'
@@ -22,6 +22,7 @@ export function useAccountEditor(options: {
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
+  const dispatchHours = ref<AccountDispatchHours>({ enabled: false, timeZone: 'Asia/Shanghai', windows: [] })
   const modelAccess = ref<AccountModelAccess | undefined>()
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
@@ -69,6 +70,7 @@ export function useAccountEditor(options: {
     schedulingEnabled.value = account.enabled
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
     weight.value = String(account.weight)
+    dispatchHours.value = { ...account.dispatchHours, windows: account.dispatchHours.windows.map(window => ({ ...window })) }
     modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
     selectedGroupIds.value = account.groups.map(group => group.id)
     apiKey.value = emptyApiKeyAccountForm()
@@ -93,6 +95,10 @@ export function useAccountEditor(options: {
         return
       }
     }
+    if ((dispatchHours.value.enabled && !dispatchHours.value.windows.length) || dispatchHours.value.windows.some(window => !window.start || !window.end || window.start === window.end)) {
+      toast.warning('请设置有效的调度时段，开始和结束时间不能相同')
+      return
+    }
     const modelError = accountModelAccessError(modelAccess.value)
     if (modelError) {
       toast.warning(modelError)
@@ -115,6 +121,7 @@ export function useAccountEditor(options: {
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
         weight: scheduling.values.weight,
+        dispatchHours: dispatchHours.value,
         modelAccess: modelAccess.value,
         groupIds: [...new Set(selectedGroupIds.value)],
       }
@@ -161,6 +168,7 @@ export function useAccountEditor(options: {
     schedulingEnabled,
     concurrencyLimit,
     weight,
+    dispatchHours,
     modelAccess,
     proxyMode,
     proxyId,

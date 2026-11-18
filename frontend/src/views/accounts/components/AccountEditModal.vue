@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
 import type { ApiKeyAccountForm } from '../utils/upstreamApiKey'
-import type { AccountGroupRef, AccountModelAccess } from '@/api'
+import type { AccountDispatchHours, AccountGroupRef, AccountModelAccess } from '@/api'
 
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import AccountApiKeyFields from './AccountApiKeyFields.vue'
+import AccountDispatchHoursField from './AccountDispatchHoursField.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
 import AccountPlanBadge from './AccountPlanBadge.vue'
 import AccountSettingsFields from './AccountSettingsFields.vue'
@@ -28,6 +29,7 @@ const open = defineModel<boolean>({ required: true })
 const apiKey = defineModel<ApiKeyAccountForm>('apiKey', { required: true })
 const enabled = defineModel<boolean>('enabled', { required: true })
 const concurrencyLimit = defineModel<string>('concurrencyLimit', { required: true })
+const dispatchHours = defineModel<AccountDispatchHours>('dispatchHours', { required: true })
 const modelAccess = defineModel<AccountModelAccess | undefined>('modelAccess', { required: true })
 const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
@@ -74,6 +76,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         <AccountApiKeyFields v-else v-model="apiKey" editing :disabled="saving" />
       </section>
 
+      <AccountDispatchHoursField v-model="dispatchHours" :disabled="saving" />
       <AccountSettingsFields
         v-model:enabled="enabled"
         v-model:concurrency-limit="concurrencyLimit"

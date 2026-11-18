@@ -89,6 +89,7 @@ pub enum PreviousResponseUnavailableReason {
     LatestResponseMismatch,
     ReusedConnectionLost,
     UpstreamRejected,
+    PayloadTooLarge,
 }
 
 impl PreviousResponseUnavailableReason {
@@ -100,6 +101,7 @@ impl PreviousResponseUnavailableReason {
             Self::ConnectionBusy => "connection_busy",
             Self::LatestResponseMismatch => "latest_response_mismatch",
             Self::ReusedConnectionLost => "reused_connection_lost",
+            Self::PayloadTooLarge => "transport_payload_too_large",
             Self::UpstreamRejected => "upstream_rejected",
         }
     }

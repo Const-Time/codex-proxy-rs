@@ -634,6 +634,20 @@ impl FakeAccountStore {
 
 #[async_trait]
 impl AccountStore for FakeAccountStore {
+    async fn quota_documents(
+        &self,
+        _account: &gateway_core::account::ProviderAccountId,
+        _provider: &gateway_core::routing::ProviderKind,
+        _created_at: chrono::DateTime<chrono::Utc>,
+        _range: gateway_admin::model::observability::TimeRange,
+        _before: Option<&gateway_admin::model::quota_history::QuotaHistoryCursor>,
+    ) -> AdminStoreResult<gateway_admin::model::quota_history::QuotaDocumentPage> {
+        Ok(gateway_admin::model::quota_history::QuotaDocumentPage {
+            documents: vec![],
+            next_cursor: None,
+        })
+    }
+
     async fn reset_account_subscriptions(
         &self,
         account_id: &str,
@@ -1537,6 +1551,7 @@ async fn accounts_update_should_commit_then_release_disabled_account_and_publish
         .update(
             &context("update-request"),
             UpdateAccount {
+                dispatch_hours: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_id: "acct_test".to_owned(),
@@ -1575,6 +1590,7 @@ async fn accounts_update_should_not_notify_provider_when_store_commit_fails() {
         .update(
             &context("update-failure"),
             UpdateAccount {
+                dispatch_hours: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_id: "acct_test".to_owned(),
@@ -1618,6 +1634,7 @@ async fn accounts_batch_update_should_commit_once_and_notify_each_provider() {
         .batch_update(
             &context("batch-update-request"),
             BatchUpdateAccounts {
+                dispatch_hours: None,
                 quota_usage_limits: None,
                 auto_use_quota_credits: None,
                 model_access: Default::default(),
@@ -2513,6 +2530,7 @@ fn quota_local_usage(account_id: &str, total_tokens: u64) -> AccountUsage {
 pub(super) fn account_record(kind: &str) -> AccountRecord {
     let now = Utc::now();
     AccountRecord {
+        dispatch_hours: Default::default(),
         quota_usage_limits: Default::default(),
         auto_use_quota_credits: false,
         model_access: Default::default(),

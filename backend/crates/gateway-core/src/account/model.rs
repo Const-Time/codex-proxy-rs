@@ -677,6 +677,7 @@ pub struct ProviderAccount {
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
     auto_use_quota_credits: bool,
+    dispatch_hours: super::AccountDispatchHours,
     quota_usage_limits: super::AccountQuotaUsageLimits,
     model_access: super::AccountModelAccess,
     credential_state: CredentialState,
@@ -690,6 +691,16 @@ pub struct ProviderAccount {
 }
 
 impl ProviderAccount {
+    #[must_use]
+    pub fn with_dispatch_hours(mut self, hours: super::AccountDispatchHours) -> Self {
+        self.dispatch_hours = hours;
+        self
+    }
+    #[must_use]
+    pub const fn dispatch_hours(&self) -> &super::AccountDispatchHours {
+        &self.dispatch_hours
+    }
+
     #[must_use]
     pub const fn with_quota_usage_limits(mut self, limits: super::AccountQuotaUsageLimits) -> Self {
         self.quota_usage_limits = limits;
@@ -735,6 +746,7 @@ impl ProviderAccount {
             concurrency_limit: None,
             weight: AccountWeight::DEFAULT,
             auto_use_quota_credits: false,
+            dispatch_hours: super::AccountDispatchHours::DISABLED,
             quota_usage_limits: super::AccountQuotaUsageLimits::UNLIMITED,
             model_access: super::AccountModelAccess::all(),
             credential_state: CredentialState::Unknown,

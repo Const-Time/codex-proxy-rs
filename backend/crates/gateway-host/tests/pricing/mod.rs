@@ -159,3 +159,35 @@ fn xai_context_threshold_is_not_openai_context_threshold() {
     assert!(bands.contains_key("long_standard"));
     assert!(!bands.contains_key("flex"));
 }
+
+#[test]
+fn community_extended_prices_preserve_supported_bands() {
+    // Snapshot of the configured community source: extra retention/service fields
+    // must not discard complete standard/priority/flex text prices.
+    let body = include_bytes!("fixtures/community-text-prices.json");
+    let preview = decode_verified_catalog(body, &hex::encode(Sha256::digest(body))).unwrap();
+    assert_eq!(preview.prices["openai"].len(), 5);
+    for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+        assert!(
+            preview.prices["openai"][model]
+                .bands
+                .contains_key("standard")
+        );
+    }
+    let sol = &preview.prices["openai"]["gpt-6.1-sol"];
+    assert_eq!(String::from(sol.bands["standard"].input), "2");
+    assert_eq!(String::from(sol.bands["standard"].cache_write), "2.5");
+    assert_eq!(String::from(sol.bands["long_standard"].input), "4");
+    assert_eq!(String::from(sol.bands["fast"].output), "20");
+    assert_eq!(sol.bands.len(), 6);
+}
+
+#[test]
+fn known_extra_dimensions_do_not_relax_unknown_context_validation() {
+    let mut item = model();
+    item["cache_creation_input_token_cost_above_12hr"] = json!(5e-6);
+    item["input_cost_per_token_above_272k_tokens_ultrafast"] = json!(24e-6);
+    assert!(decode(item.clone()).is_ok());
+    item["cache_creation_input_token_cost_above_12hr_above_999k_tokens"] = json!(5e-6);
+    assert!(decode(item).is_err());
+}

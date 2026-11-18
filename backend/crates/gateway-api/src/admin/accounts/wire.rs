@@ -61,6 +61,7 @@ pub struct ListQuery {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BatchUpdateAccountsRequest {
+    pub dispatch_hours: Option<gateway_core::account::AccountDispatchHours>,
     pub quota_usage_limits: Option<gateway_core::account::AccountQuotaUsageLimits>,
     pub auto_use_quota_credits: Option<bool>,
     pub outbound_proxy_id: Option<String>,
@@ -119,7 +120,8 @@ impl BatchUpdateAccountsRequest {
             .map(parse_concurrency_limit)
             .transpose()?;
         self.weight.map(parse_account_weight).transpose()?;
-        if self.quota_usage_limits.is_none()
+        if self.dispatch_hours.is_none()
+            && self.quota_usage_limits.is_none()
             && self.auto_use_quota_credits.is_none()
             && self.enabled.is_none()
             && self.concurrency_limit.is_none()
@@ -137,6 +139,7 @@ impl BatchUpdateAccountsRequest {
     pub(super) fn into_command(self) -> Result<BatchUpdateAccounts, WireValidationError> {
         self.validate()?;
         Ok(BatchUpdateAccounts {
+            dispatch_hours: self.dispatch_hours,
             quota_usage_limits: self.quota_usage_limits,
             auto_use_quota_credits: self.auto_use_quota_credits,
             outbound_proxy: proxy_selection(self.outbound_proxy_id, self.outbound_proxy_url)?,
@@ -272,6 +275,7 @@ pub struct AccountSummaryView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountView {
+    pub dispatch_hours: gateway_core::account::AccountDispatchHours,
     pub quota_usage_limits: gateway_core::account::AccountQuotaUsageLimits,
     pub auto_use_quota_credits: bool,
     pub outbound_proxy_endpoint: Option<String>,

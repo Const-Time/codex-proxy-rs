@@ -1613,6 +1613,17 @@ fn access_token_is_current(account: &ProviderAccount, now: SystemTime) -> bool {
         .is_none_or(|expires_at| expires_at > now)
 }
 
+pub(crate) fn observed_quota_window(
+    parsed: &ParsedRateLimits,
+    key: &str,
+) -> Option<CodexQuotaWindow> {
+    let (quota, _) = merge_passive_quota(Map::new(), std::slice::from_ref(parsed));
+    snapshot::quota_windows(&quota)
+        .ok()?
+        .into_iter()
+        .find(|window| window.key() == key)
+}
+
 fn merge_passive_quota(
     mut quota: Map<String, Value>,
     observations: &[ParsedRateLimits],

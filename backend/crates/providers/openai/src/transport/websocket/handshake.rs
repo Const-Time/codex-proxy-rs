@@ -148,6 +148,11 @@ pub(super) fn websocket_connection_metadata(
     connection: &CodexWebSocketConnection,
 ) -> CodexWebSocketConnectionMetadata {
     CodexWebSocketConnectionMetadata {
+        max_message_bytes: response
+            .headers()
+            .get("x-codex-websocket-max-message-bytes")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok()),
         routing_affinity: crate::transport::routing_affinity::ChatGptRoutingAffinity::from_response(
             &connection.endpoint,
             response.headers(),
@@ -329,7 +334,13 @@ async fn proxy_stream(
     port: u16,
     tls_proxy: bool,
 ) -> Result<MaybeTlsStream<tokio::net::TcpStream>, tungstenite::Error> {
-    let tcp = connect_tcp(host, port).await?;
+    let tcp = connect_tcp(host, port).await.map_err(|error| {
+        let kind = match error {
+            tungstenite::Error::Io(ref io) => io.kind(),
+            _ => std::io::ErrorKind::Other,
+        };
+        tungstenite::Error::Io(std::io::Error::new(kind, super::error::ProxyDialFailure))
+    })?;
     if !tls_proxy {
         return Ok(MaybeTlsStream::Plain(tcp));
     }
