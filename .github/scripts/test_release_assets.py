@@ -17,7 +17,7 @@ spec.loader.exec_module(assets)
 class ReleaseAssetsTest(unittest.TestCase):
     def test_packaging_requires_only_its_own_platform(self):
         script = Path(__file__).with_name("package-release.py").resolve()
-        for operating_system in ["linux", "darwin"]:
+        for operating_system, flat in [("linux", False), ("darwin", False), ("darwin", True)]:
             with tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 def write(name, content):
@@ -28,7 +28,7 @@ class ReleaseAssetsTest(unittest.TestCase):
                 write("deploy/compose.yaml", "image: ${CPR_IMAGE:-ghcr.io/test/repo:latest}\n")
                 write("dist/frontend/index.html", "<title>Fixture</title>")
                 write("backend/apps/shared-budget-plugin/plugin.json", json.dumps({"publisher":"local","name":"budget","version":"1.0.0"}))
-                base = f"dist/binaries/codex-proxy-rs-{operating_system}-arm64"
+                base = "dist/binaries" if flat else f"dist/binaries/codex-proxy-rs-{operating_system}-arm64"
                 write(base + "/codex-proxy-rs", "fixture-binary")
                 write(base + "/cpr-plugin", "fixture-cli")
                 write(base + "/plugins/local.budget-1.0.0-fixture-target.tar.gz", "fixture-plugin")
@@ -40,6 +40,12 @@ class ReleaseAssetsTest(unittest.TestCase):
                 self.assertEqual(len(entries), 4)
                 for name, digest in entries.items():
                     self.assertEqual(assets.hashlib.sha256((root / "dist/release" / name).read_bytes()).hexdigest(), digest)
+                if flat:
+                    other = dict(platform, arch="amd64", target="other-target")
+                    environment["PLATFORM_MATRIX"] = json.dumps({"include": [platform, other]})
+                    result = subprocess.run([sys.executable, str(script)], cwd=root, env=environment, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Missing binary artifact", result.stderr)
 
     def test_both_completion_orders_preserve_all_platforms(self):
         linux = "a" * 64 + "  linux.tar.gz\n" + "b" * 64 + "  compose.yaml\n"

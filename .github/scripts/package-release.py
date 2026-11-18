@@ -40,6 +40,12 @@ for platform in platforms:
     platform_name = f"{platform['os']}-{platform['arch']}"
     artifact_name = f"{APP_NAME}-{platform_name}"
     binary_src = binary_artifacts_dir / artifact_name / platform["binary"]
+    # download-artifact v8 extracts a single matching artifact directly into
+    # path, but creates per-artifact directories when multiple artifacts match.
+    # Only accept the flat layout for a single platform to avoid mislabelling
+    # one architecture's binary as another architecture.
+    if len(platforms) == 1 and not binary_src.is_file():
+        binary_src = binary_artifacts_dir / platform["binary"]
     if not binary_src.is_file():
         raise SystemExit(f"Missing binary artifact: {binary_src}")
 
