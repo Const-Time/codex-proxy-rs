@@ -357,6 +357,7 @@ All endpoints require admin authentication and redact proxy credentials from res
 | `POST` | `/api/admin/proxies/create` | `{ name, proxyUrl, locationPolicy? }` | `201 { record, configRevision }` |
 | `POST` | `/api/admin/proxies/update` | `{ id, revision, name, proxyUrl?, locationPolicy? }` | `{ record, configRevision }` |
 | `POST` | `/api/admin/proxies/test` | `{ id, revision }` | 最新代理记录 / Proxy record with test result |
+| `POST` | `/api/admin/proxies/egress-test` | `{ proxyId? }` | 测试已保存代理，省略 ID 时测试直连。仅返回本次结果 |
 | `POST` | `/api/admin/proxies/quality-test` | `{ id, revision }` | 分项质量报告（当前结果，不写入历史） |
 | `POST` | `/api/admin/proxies/delete` | `{ id, revision }` | `{ configRevision }` |
 
@@ -892,13 +893,15 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 | --- | --- | --- |
 | `GET` | `/api/admin/dashboard/summary` | Dashboard 汇总；支持 `kind`、`startTime`、`endTime` |
 | `GET` | `/api/admin/dashboard/trend` | Dashboard 趋势；`kind=usage|latency|errors` |
-| `GET` | `/api/admin/usage/records` | 请求记录分页列表 |
+| `GET` | `/api/admin/usage/records` | 请求记录分页列表，含 `logicalOutcome`；`includeFailures=true` 同时返回失败、取消和未完成的终态，管理员可叠加 `accountSearch` |
 | `GET` | `/api/admin/usage/records/detail` | 按 `id` 查询请求详情 |
 | `GET` | `/api/admin/usage/records/summary` | 当前筛选条件的轻量卡片汇总（不计算分位数与 attempt 统计） |
 | `GET` | `/api/admin/usage/catalog-options` | 筛选目录；`kind=groups/accounts`、可选 `personal`，只返回 `{id,name}[]` |
 | `GET` | `/api/admin/usage/insights/overview` | 用量、成本与成功率洞察 |
 | `GET` | `/api/admin/usage/insights/diagnostics` | 按维度聚合诊断 |
-| `GET` | `/api/admin/operations/errors` | 运维错误分页列表 |
+| `GET` | `/api/admin/operations/errors` | 运维错误分页列表；管理员可叠加 `accountSearch` 和 `errorOrigin` |
+
+`accountSearch` 匹配请求或运维事件保存的账号名称、邮箱中的字面片段，区分大小写。`errorOrigin` 可选 `upstream`、`proxy`、`connection`、`unknown`。
 
 `/api/admin/usage/insights/overview` 可选 `card=health|performance|cost`，不传时保留完整响应。
 指定卡片只返回 `granularity` 和对应的 `health`、`performance` 或 `cost` 对象。

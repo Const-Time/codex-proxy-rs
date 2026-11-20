@@ -10,6 +10,8 @@ pub(crate) fn store_range(
 
 pub(crate) fn store_usage_filter(filter: admin_observability::UsageFilter) -> UsageRecordFilter {
     UsageRecordFilter {
+        include_failures: filter.include_failures,
+        account_search: filter.account_search,
         user_id: filter.user_id,
         group_id: filter.group_id,
         client_transport: filter.client_transport,
@@ -50,6 +52,8 @@ pub(crate) fn store_ops_error_filter(
     filter: admin_observability::OpsErrorFilter,
 ) -> OpsErrorFilter {
     OpsErrorFilter {
+        account_search: filter.account_search,
+        error_origin: filter.error_origin,
         user_id: filter.user_id,
         group_id: filter.group_id,
         client_transport: filter.client_transport,
@@ -504,6 +508,7 @@ pub(crate) fn admin_usage_list_record(
     };
     let billing = restore_billing_snapshot(billing, record.billing_snapshot_json.as_ref());
     Ok(admin_observability::UsageListRecord {
+        outcome: admin_request_outcome(&record.outcome)?,
         requested_service_tier: record.requested_service_tier,
         upstream_service_tier: record.upstream_service_tier,
         turn_state: record.turn_state,
@@ -869,6 +874,7 @@ pub(crate) fn usage_list_record_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<UsageListRecord> {
     Ok(UsageListRecord {
+        outcome: get(row, "outcome")?,
         requested_service_tier: get(row, "requested_service_tier")?,
         upstream_service_tier: get(row, "upstream_service_tier")?,
         turn_state: get(row, "turn_state")?,

@@ -1,18 +1,21 @@
 <script setup lang="ts">
 import type { AccountModelAccess } from '@/api'
 
-import { RefreshCw, Search } from '@lucide/vue'
-import { computed, ref, watch } from 'vue'
+import { ListX, RefreshCw, Search } from '@lucide/vue'
+import { computed, nextTick, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { getAccountModels, refreshAccountModels } from '@/api'
+import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BasePopover from '@/components/base/BasePopover.vue'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import { useRequestState } from '@/composables/useRequestState'
 import { accountModelAccessError, accountModelIdError } from '../utils/modelAccess'
+import AccountModelOption from './AccountModelOption.vue'
 
 const props = withDefaults(defineProps<{
   accountId?: string
@@ -25,6 +28,9 @@ const search = ref('')
 const inputError = ref('')
 const request = useRequestState()
 const { loading, error } = request
+const cleanupOpen = shallowRef(false)
+const cleanupSelected = ref<string[]>([])
+const refreshButton = useTemplateRef<InstanceType<typeof BaseIconButton>>('refreshButton')
 const modes = computed(() => [
   ...(props.allowPreserve ? [{ value: 'preserve', label: '保留' }] : []),
   { value: 'all', label: '不限制' },
@@ -52,6 +58,35 @@ const models = computed(() => {
   }
   const query = search.value.trim().toLowerCase()
   return [...entries.values()].filter(item => `${item.id} ${item.label}`.toLowerCase().includes(query))
+})
+
+const cleanupCandidates = computed(() => {
+  if (mode.value !== 'allowlist' || loading.value || error.value || !catalog.value.length)
+    return []
+  const observed = new Set(catalog.value.map(item => item.id))
+  return model.value?.models.filter(id => !observed.has(id)) ?? []
+})
+const cleanupCount = computed(() => cleanupSelected.value.filter(id => cleanupCandidates.value.includes(id)).length)
+const cleanupWouldEmpty = computed(() => cleanupCount.value >= (model.value?.models.length ?? 0))
+
+async function removeMissingModels() {
+  const current = model.value
+  if (!current || props.disabled || cleanupCount.value === 0 || cleanupWouldEmpty.value)
+    return
+  const remove = new Set(cleanupSelected.value.filter(id => cleanupCandidates.value.includes(id)))
+  model.value = { ...current, models: current.models.filter(id => !remove.has(id)) }
+  cleanupOpen.value = false
+  await nextTick()
+  refreshButton.value?.$el.focus()
+}
+
+watch(cleanupOpen, (open) => {
+  if (!open)
+    cleanupSelected.value = []
+})
+watch(cleanupCandidates, (candidates) => {
+  if (!candidates.length)
+    cleanupOpen.value = false
 })
 
 function select(id: string, selected: boolean) {
@@ -115,7 +150,34 @@ watch(search, () => {
   <div class="grid gap-3">
     <BaseFormItem label="模型限制">
       <template v-if="restricted && accountId" #extra>
-        <BaseIconButton label="刷新模型" size="sm" :loading="loading" :disabled="disabled" @click="load(true)">
+        <BasePopover v-if="mode === 'allowlist'" v-model="cleanupOpen" :disabled="disabled || !cleanupCandidates.length">
+          <template #trigger>
+            <BaseIconButton label="清理目录外模型" size="sm" :disabled="disabled || !cleanupCandidates.length" :aria-expanded="cleanupOpen">
+              <ListX class="size-3.5" />
+            </BaseIconButton>
+          </template>
+          <div class="grid w-80 max-w-[calc(100vw-2rem)] gap-3 p-3" role="group" aria-label="清理目录外模型">
+            <div class="text-cp-sm font-bold">
+              选择要从白名单移除的模型
+            </div>
+            <BaseScrollbar max-height="min(14rem, 35dvh)">
+              <div class="grid gap-2 p-1">
+                <BaseCheckbox v-for="id in cleanupCandidates" :key="id" :label="id" show-label :model-value="cleanupSelected.includes(id)" @update:model-value="value => cleanupSelected = value ? [...cleanupSelected, id] : cleanupSelected.filter(item => item !== id)">
+                  <template #label>
+                    <span class="wrap-anywhere font-mono">{{ id }}</span>
+                  </template>
+                </BaseCheckbox>
+              </div>
+            </BaseScrollbar>
+            <p v-if="cleanupWouldEmpty" class="m-0 text-cp-xs text-cp-error-text" role="status">
+              白名单至少保留一个模型
+            </p>
+            <BaseButton size="sm" variant="destructive" class="justify-self-end" :disabled="!cleanupCount || cleanupWouldEmpty" @click="removeMissingModels">
+              {{ cleanupCount ? `移除 ${cleanupCount} 项` : '移除' }}
+            </BaseButton>
+          </div>
+        </BasePopover>
+        <BaseIconButton ref="refreshButton" label="刷新模型" size="sm" :loading="loading" :disabled="disabled" @click="load(true)">
           <template #loading>
             <RefreshCw class="size-3.5 animate-spin motion-reduce:animate-none" />
           </template>
@@ -135,22 +197,15 @@ watch(search, () => {
       </p>
       <BaseScrollbar v-if="models.length" max-height="15rem" class="min-w-0 -m-1">
         <div class="grid grid-cols-2 gap-2 p-1 sm:grid-cols-3" role="group" aria-label="选择模型" :aria-busy="loading || undefined">
-          <BaseCheckbox
+          <AccountModelOption
             v-for="item in models"
+            :id="item.id"
             :key="item.id"
-            class="min-h-11 min-w-0 rounded-cp px-3 py-2.5 transition-colors duration-150 motion-reduce:transition-none"
-            :class="model?.models.includes(item.id) ? 'bg-cp-primary-container text-cp-primary-on-container' : 'bg-cp-fill-quaternary text-cp-text-secondary hover:bg-cp-fill-tertiary hover:text-cp-text'"
+            :unavailable="Boolean(item.unavailable && accountId)"
             :model-value="model?.models.includes(item.id) ?? false"
-            :label="item.id"
-            :title="item.unavailable && accountId ? `${item.id}（当前目录未返回）` : item.id"
-            show-label
             :disabled="disabled"
             @update:model-value="select(item.id, $event)"
-          >
-            <template #label>
-              <span class="block truncate">{{ item.id }}</span>
-            </template>
-          </BaseCheckbox>
+          />
         </div>
       </BaseScrollbar>
       <p v-else-if="loading" class="m-0 py-4 text-center text-cp-sm text-cp-text-tertiary" role="status">

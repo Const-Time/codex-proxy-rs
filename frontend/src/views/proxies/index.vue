@@ -9,11 +9,13 @@ import BaseCard from '@/components/base/BaseCard.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import { toast } from '@/components/base/BaseToast'
+import RowActionMenu from '@/components/RowActionMenu.vue'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { usePagedQuery } from '@/composables/usePagedQuery'
 import { errorMessage } from '@/utils/async'
@@ -219,12 +221,20 @@ onMounted(() => void query.execute())
             </template>
             <template #actions="{ row }">
               <div class="flex items-center gap-1">
-                <BaseIconButton size="sm" label="测试代理" :loading="testingIds.has(row.id)" :disabled="testingIds.has(row.id)" @click="checkProxy(row)">
-                  <Wifi class="size-3.5 text-cp-link" />
-                </BaseIconButton>
-                <BaseIconButton size="sm" label="代理质量检测" :disabled="testingIds.has(row.id)" @click="qualityProxy = row; showQuality = true">
-                  <Activity class="size-3.5 text-cp-link" />
-                </BaseIconButton>
+                <RowActionMenu v-slot="{ select }" label="更多代理操作" :loading="testingIds.has(row.id)">
+                  <BaseMenuItem role="menuitem" tabindex="-1" @click="select(() => checkProxy(row))">
+                    <template #icon>
+                      <Wifi class="size-3.5 text-cp-link" />
+                    </template>
+                    测试代理
+                  </BaseMenuItem>
+                  <BaseMenuItem role="menuitem" tabindex="-1" @click="select(() => { qualityProxy = row; showQuality = true })">
+                    <template #icon>
+                      <Activity class="size-3.5 text-cp-link" />
+                    </template>
+                    代理质量检测
+                  </BaseMenuItem>
+                </RowActionMenu>
                 <BaseIconButton size="sm" label="编辑代理" :disabled="testingIds.has(row.id)" @click="openForm(row)">
                   <Pencil class="size-3.5 text-cp-link" />
                 </BaseIconButton>
@@ -255,6 +265,6 @@ onMounted(() => void query.execute())
       </p>
     </BaseConfirmModal>
     <ProxyQualityModal v-model="showQuality" :proxy="qualityProxy" @tested="query.execute({ silent: true })" />
-    <ProxyAccountsModal v-model="showAccounts" :proxy="inspected" @removed="query.execute({ silent: true })" />
+    <ProxyAccountsModal v-model="showAccounts" :proxy="inspected" @changed="query.execute({ silent: true })" />
   </div>
 </template>

@@ -94,6 +94,7 @@ pub trait ProxiesService: Send + Sync {
         revision: Revision,
         context: &MutationContext,
     ) -> Result<ProxyQualityReport, AdminError>;
+    async fn test_egress(&self, id: Option<&str>) -> Result<ProxyTestResult, AdminError>;
     async fn test(
         &self,
         id: &str,
@@ -282,6 +283,29 @@ impl ProxiesService for DefaultProxiesService {
             .map_err(|error| map_store_error(error, "proxy"))?;
         publish_committed(self.snapshot.as_ref(), stored.config_revision).await?;
         Ok(report)
+    }
+
+    async fn test_egress(&self, id: Option<&str>) -> Result<ProxyTestResult, AdminError> {
+        let _permit = self.test_slots.try_acquire().map_err(|_| {
+            AdminError::new(AdminErrorKind::RateLimited, "代理测试繁忙，请稍后重试")
+        })?;
+        let record = if let Some(id) = id {
+            if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+                return Err(AdminError::invalid("代理 ID 不合法"));
+            }
+            Some(
+                self.store
+                    .get(id)
+                    .await
+                    .map_err(|error| map_store_error(error, "proxy"))?,
+            )
+        } else {
+            None
+        };
+        self.probe
+            .test_egress(record.as_ref().map(|record| &record.proxy))
+            .await
+            .ok_or_else(|| AdminError::invalid("当前部署未提供直连出口测试"))
     }
 
     async fn test(

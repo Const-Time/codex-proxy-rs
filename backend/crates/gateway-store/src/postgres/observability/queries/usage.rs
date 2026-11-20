@@ -7,6 +7,23 @@ const MODEL_DIAGNOSTIC_DIMENSION_SQL: &str =
     "coalesce(mr.upstream_model_id, mr.requested_model_id)";
 const KEY_MODEL_DIAGNOSTIC_DIMENSION_SQL: &str = "json_build_array(mr.client_api_key_ref, coalesce(mr.upstream_model_id, mr.requested_model_id))::text";
 
+pub(super) fn push_account_snapshot_search(
+    query: &mut QueryBuilder<Postgres>,
+    alias: &str,
+    value: &str,
+) {
+    query
+        .push(format!(
+            " and (strpos({alias}.provider_account_name_snapshot, "
+        ))
+        .push_bind(value.to_owned())
+        .push(format!(
+            ") > 0 or strpos({alias}.provider_account_email_snapshot, "
+        ))
+        .push_bind(value.to_owned())
+        .push(") > 0)");
+}
+
 pub(crate) fn push_usage_filter(
     query: &mut QueryBuilder<Postgres>,
     filter: &UsageRecordFilter,
@@ -43,6 +60,9 @@ pub(crate) fn push_usage_filter(
     if let Some(value) = &filter.provider_account_ref {
         query.push(format!(" and {alias}.provider_account_ref = "));
         query.push_bind(value.clone());
+    }
+    if let Some(value) = &filter.account_search {
+        push_account_snapshot_search(query, alias, value);
     }
     if let Some(value) = &filter.operation {
         query.push(format!(" and {alias}.operation = "));
@@ -138,7 +158,7 @@ pub(crate) fn literal_prefix_pattern(value: &str) -> String {
 }
 
 pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
-    "select mr.id, mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
+    "select mr.id, mr.outcome, mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
             mr.provider_observation_json ->> 'requestedServiceTier' as requested_service_tier,
             mr.provider_observation_json ->> 'upstreamServiceTier' as upstream_service_tier,
             mr.provider_observation_json ->> 'turnState' as turn_state,
@@ -191,6 +211,20 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             mr.subagent_kind, mr.compact, mr.image_generation_requested,
             mr.image_generation_succeeded, mr.started_at, mr.deadline_at, mr.completed_at
      from model_requests mr";
+
+fn push_request_list_filter(statement: &mut QueryBuilder<Postgres>, filter: &UsageRecordFilter) {
+    if filter.include_failures {
+        statement.push(" and ((");
+        statement.push(crate::postgres::usage_facts::completed_usage_fact_predicate("mr"));
+        statement.push(") or (
+            mr.completed_at is not null and mr.outcome in ('failed', 'cancelled', 'incomplete')
+            and (mr.provider_kind is distinct from 'openai' or mr.request_kind is distinct from 'prewarm')
+        ))");
+    } else {
+        push_completed_usage_fact_filter(statement, "mr");
+    }
+    push_usage_filter(statement, filter, "mr");
+}
 
 pub(crate) async fn list_usage_records(
     mut connection: ObservabilityConnection,
@@ -267,8 +301,7 @@ async fn list_usage_record_items_at<'e, E: sqlx::Executor<'e, Database = Postgre
     statement.push_bind(page.range.start);
     statement.push(" and mr.started_at < ");
     statement.push_bind(page.range.end);
-    push_completed_usage_fact_filter(&mut statement, "mr");
-    push_usage_filter(&mut statement, &query.filter, "mr");
+    push_request_list_filter(&mut statement, &query.filter);
     statement.push(if ascending {
         " order by mr.started_at, mr.id limit "
     } else {
@@ -370,8 +403,7 @@ async fn usage_time_page(
     statement.push_bind(query.range.start);
     statement.push(" and mr.started_at < ");
     statement.push_bind(query.range.end);
-    push_completed_usage_fact_filter(&mut statement, "mr");
-    push_usage_filter(&mut statement, &query.filter, "mr");
+    push_request_list_filter(&mut statement, &query.filter);
     statement.push(" group by bucket_start order by bucket_start desc");
     let rows = statement
         .build()
@@ -392,8 +424,7 @@ pub(crate) async fn count_usage_records<'e, E: sqlx::Executor<'e, Database = Pos
     statement.push_bind(range.start);
     statement.push(" and mr.started_at < ");
     statement.push_bind(range.end);
-    push_completed_usage_fact_filter(&mut statement, "mr");
-    push_usage_filter(&mut statement, filter, "mr");
+    push_request_list_filter(&mut statement, filter);
     let total = statement
         .build_query_scalar::<i64>()
         .fetch_one(pool)

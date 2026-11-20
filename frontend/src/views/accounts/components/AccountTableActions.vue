@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
-import { KeyRound, MoreHorizontal, Pencil, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
+import { KeyRound, Pencil, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
 
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
-import BasePopover from '@/components/base/BasePopover.vue'
+import RowActionMenu from '@/components/RowActionMenu.vue'
 
 defineProps<{
   account: AccountRow
@@ -45,57 +45,50 @@ const emit = defineEmits<{
       <Trash2 class="size-3.5 text-cp-error" />
     </BaseIconButton>
 
-    <BasePopover placement="bottom-end">
-      <template #trigger="{ open }">
-        <BaseIconButton variant="ghost" size="sm" label="更多操作" :pressed="open">
-          <MoreHorizontal class="size-4" />
-        </BaseIconButton>
-      </template>
-
-      <template #default="{ close }">
-        <div class="w-40 p-1.5">
-          <BaseMenuItem
-            :loading="testing"
-            :disabled="testing"
-            @click.stop="(close(), emit('test', account))"
-          >
-            <template #icon>
-              <Wifi class="size-3.5 text-cp-text-quaternary" />
-            </template>
-            测试连接
-          </BaseMenuItem>
-          <BaseMenuItem
-            v-if="account.authenticationKind === 'oauth'"
-            :loading="refreshing"
-            :disabled="refreshing"
-            @click.stop="(close(), emit('refresh', account.id))"
-          >
-            <template #loading>
-              <RefreshCw class="size-3.5 animate-spin text-cp-text-quaternary motion-reduce:animate-none" />
-            </template>
-            <template #icon>
-              <RefreshCw class="size-3.5 text-cp-text-quaternary" />
-            </template>
-            刷新令牌
-          </BaseMenuItem>
-          <BaseMenuItem v-if="account.authenticationKind === 'oauth'" @click.stop="(close(), emit('reauthorize', account))">
-            <template #icon>
-              <KeyRound class="size-3.5 text-cp-text-quaternary" />
-            </template>
-            重新授权
-          </BaseMenuItem>
-          <BaseMenuItem
-            :loading="recovering"
-            :disabled="recovering"
-            @click.stop="(close(), emit('recover', account.id))"
-          >
-            <template #icon>
-              <RotateCcw class="size-3.5 text-cp-text-quaternary" />
-            </template>
-            恢复状态
-          </BaseMenuItem>
-        </div>
-      </template>
-    </BasePopover>
+    <RowActionMenu v-slot="{ select }" label="更多账号操作">
+      <BaseMenuItem
+        role="menuitem" tabindex="-1"
+        :loading="testing"
+        :disabled="testing"
+        @click.stop="select(() => emit('test', account))"
+      >
+        <template #icon>
+          <Wifi class="size-3.5 text-cp-text-quaternary" />
+        </template>
+        测试连接
+      </BaseMenuItem>
+      <BaseMenuItem
+        v-if="account.authenticationKind === 'oauth'" role="menuitem"
+        tabindex="-1"
+        :loading="refreshing"
+        :disabled="refreshing"
+        @click.stop="select(() => emit('refresh', account.id))"
+      >
+        <template #loading>
+          <RefreshCw class="size-3.5 animate-spin text-cp-text-quaternary motion-reduce:animate-none" />
+        </template>
+        <template #icon>
+          <RefreshCw class="size-3.5 text-cp-text-quaternary" />
+        </template>
+        刷新令牌
+      </BaseMenuItem>
+      <BaseMenuItem v-if="account.authenticationKind === 'oauth'" role="menuitem" tabindex="-1" @click.stop="select(() => emit('reauthorize', account))">
+        <template #icon>
+          <KeyRound class="size-3.5 text-cp-text-quaternary" />
+        </template>
+        重新授权
+      </BaseMenuItem>
+      <BaseMenuItem
+        role="menuitem" tabindex="-1"
+        :loading="recovering"
+        :disabled="recovering"
+        @click.stop="select(() => emit('recover', account.id))"
+      >
+        <template #icon>
+          <RotateCcw class="size-3.5 text-cp-text-quaternary" />
+        </template>
+        恢复状态
+      </BaseMenuItem>
+    </RowActionMenu>
   </div>
 </template>

@@ -278,6 +278,7 @@ pub struct AccountView {
     pub dispatch_hours: gateway_core::account::AccountDispatchHours,
     pub quota_usage_limits: gateway_core::account::AccountQuotaUsageLimits,
     pub auto_use_quota_credits: bool,
+    pub outbound_proxy_id: Option<String>,
     pub outbound_proxy_endpoint: Option<String>,
     pub id: String,
     pub name: String,

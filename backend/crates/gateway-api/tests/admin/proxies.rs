@@ -181,6 +181,19 @@ impl ProxyProbe for SuccessfulProbe {
         }
     }
 
+    async fn test_egress(&self, proxy: Option<&OutboundProxy>) -> Option<ProxyTestResult> {
+        if let Some(proxy) = proxy {
+            return Some(self.test(proxy).await);
+        }
+        Some(ProxyTestResult {
+            location: None,
+            success: true,
+            latency_ms: 8,
+            exit_ip: Some("203.0.113.1".parse().unwrap()),
+            message: "Connected".to_owned(),
+        })
+    }
+
     async fn test(&self, proxy: &OutboundProxy) -> ProxyTestResult {
         assert_eq!(
             proxy.expose_url(),
@@ -325,6 +338,47 @@ async fn proxy_routes_save_reload_test_rename_and_delete_without_exposing_creden
     assert_eq!(status, StatusCode::OK);
     let (_, listed) = request(&fixture, "/api/admin/proxies", None, true).await;
     assert_eq!(listed["data"]["page"]["total"], 0);
+}
+
+#[tokio::test]
+async fn proxy_egress_test_supports_direct_and_saved_routes_without_mutating_them() {
+    const PATH: &str = "/api/admin/proxies/egress-test";
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    assert_eq!(
+        request(&fixture, PATH, Some(json!({})), false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(
+            &fixture,
+            PATH,
+            Some(json!({"proxyUrl":"http://example.invalid"})),
+            true
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    let (status, direct) = request(&fixture, PATH, Some(json!({})), true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(direct["data"]["exitIp"], "203.0.113.1");
+
+    let (status, _) = request(
+        &fixture,
+        "/api/admin/proxies/create",
+        Some(json!({"name":"Office", "proxyUrl":"http://test-user:private-password@proxy.example:8080"})),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, before) = request(&fixture, "/api/admin/proxies", None, true).await;
+    let (status, saved) =
+        request(&fixture, PATH, Some(json!({"proxyId":"proxy_test"})), true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["data"]["exitIp"], "203.0.113.2");
+    let (_, after) = request(&fixture, "/api/admin/proxies", None, true).await;
+    assert_eq!(before["data"], after["data"]);
 }
 
 #[tokio::test]

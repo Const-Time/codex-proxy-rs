@@ -108,6 +108,15 @@ export function deleteProxy(data: { id: string, revision: number }) {
   })
 }
 
+export function testProxyEgress(data: { proxyId?: string }) {
+  return request<OutboundProxyTest>({
+    url: '/api/admin/proxies/egress-test',
+    method: 'POST',
+    data,
+    timeout: 25000,
+  })
+}
+
 export function testProxy(data: { id: string, revision: number }) {
   return request<OutboundProxyRecord>({
     url: '/api/admin/proxies/test',

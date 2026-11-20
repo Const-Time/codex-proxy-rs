@@ -5,11 +5,13 @@ import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 
-function load<T>(path: string, overrides: Record<string, unknown>) {
+function load<T>(path: string, overrides: Record<string, unknown>, globals: Record<string, unknown> = {}) {
   const disposals: Array<() => void> = []
   const errors: unknown[] = []
   const modules: Record<string, unknown> = {
     'vue': {
+      ref: (value: unknown) => ({ value }),
+      onBeforeUnmount: (dispose: () => void) => disposals.push(dispose),
       shallowRef: (value: unknown) => ({ value }),
       computed: (read: () => unknown) => ({ get value() { return read() } }),
       onMounted: () => {},
@@ -22,7 +24,7 @@ function load<T>(path: string, overrides: Record<string, unknown>) {
     '@/utils/date': { formatDateTime: String },
     ...overrides,
   }
-  const context = { exports: {}, AbortController, document: { hidden: false }, require: (name: string) => {
+  const context = { ...globals, exports: {}, AbortController, document: { hidden: false }, require: (name: string) => {
     assert(name in modules, `unexpected import: ${name}`)
     return modules[name]
   } }
@@ -86,7 +88,7 @@ test('superseded usage requests and component disposal abort network work withou
   const fixture = load<{ useUsageRecordsTable: typeof import('../src/views/usage/composables/useUsageRecordsTable.ts').useUsageRecordsTable }>('../src/views/usage/composables/useUsageRecordsTable.ts', {
     '@/api': { getUsageRecords: pending, getUsageRecordSummary: pending, getUsageRecordInsightCard: pending, getUsageRecordInsightsDiagnostics: pending },
   })
-  const view = fixture.module.useUsageRecordsTable({ timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
+  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, accountSearch: { value: '' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
   const first = view.loadUsageRecords()
   assert.equal(signals.length, 6)
   const second = view.loadUsageRecords()
@@ -108,7 +110,7 @@ test('slow or failed diagnostics do not delay or discard successful usage panels
       getUsageRecordInsightsDiagnostics: () => new Promise((_resolve, reject) => { rejectDiagnostics = reject }),
     },
   })
-  const view = fixture.module.useUsageRecordsTable({ timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
+  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, accountSearch: { value: '' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
   const request = view.loadUsageRecords()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(view.summary.value.totalRequests, '42')
@@ -172,7 +174,7 @@ test('usage cards cache selected metrics independently and never share another f
     },
   })
   const filters = { value: { userId: 'first' } }
-  const view = fixture.module.useUsageRecordsTable({ timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {}, recordFilters: filters })
+  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, accountSearch: { value: '' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {}, recordFilters: filters })
   await view.loadUsageRecords()
   assert.deepEqual(calls.map(c => c.card), ['health', 'cost', 'performance'])
   assert.equal(calls[2]?.metric, 'total')
@@ -190,4 +192,58 @@ test('usage cards cache selected metrics independently and never share another f
   await view.refreshUsageRecords()
   assert.equal(calls.length, 10)
   fixture.dispose()
+})
+
+test('a superseded account connection test cannot close the current stream', async () => {
+  const connections: FakeEventSource[] = []
+  class FakeEventSource {
+    onmessage: ((event: { data: string }) => void) | null = null
+    onerror: (() => void) | null = null
+    closed = false
+    readonly url: string
+    constructor(url: string) {
+      this.url = url
+      connections.push(this)
+    }
+
+    close() {
+      this.closed = true
+    }
+  }
+  const requestState = load<{ useRequestState: typeof import('../src/composables/useRequestState.ts').useRequestState }>('../src/composables/useRequestState.ts', {})
+  const fixture = load<{ useAccountConnectionTest: typeof import('../src/views/accounts/composables/useAccountConnectionTest.ts').useAccountConnectionTest }>('../src/views/accounts/composables/useAccountConnectionTest.ts', {
+    '@lucide/vue': { CheckCircle2: {}, Clock3: {}, Wifi: {}, XCircle: {} },
+    'es-toolkit': { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
+    '@/api': { getAccountModels: async () => ({ models: [{ id: 'test-model', label: 'Test model' }] }) },
+    '@/api/constants': { API_BASE_URL: '' },
+    '@/composables/useRequestState': requestState.module,
+    '@/utils/date': { formatDateTime: String, formatTime: String },
+  }, { EventSource: FakeEventSource, URLSearchParams })
+  const view = fixture.module.useAccountConnectionTest({ reload: async () => {} })
+  type Account = NonNullable<typeof view.testingAccount.value>
+
+  view.openConnectionTest({ id: 'old-account' } as Account)
+  await new Promise(resolve => setImmediate(resolve))
+  view.handleTestConnection()
+  const old = connections[0]!
+  const staleMessage = old.onmessage!
+  const staleError = old.onerror!
+
+  view.openConnectionTest({ id: 'current-account' } as Account)
+  await new Promise(resolve => setImmediate(resolve))
+  view.handleTestConnection()
+  const current = connections[1]!
+  assert.equal(old.closed, true)
+  assert.match(current.url, /accountId=current-account/)
+  staleMessage({ data: JSON.stringify({ type: 'test_complete', success: true }) })
+  staleError()
+  assert.equal(current.closed, false)
+  assert.equal(view.connectionTestStatus.value, 'running')
+
+  current.onmessage!({ data: JSON.stringify({ type: 'test_complete', success: true }) })
+  assert.equal(current.closed, true)
+  assert.equal(view.connectionTestStatus.value, 'success')
+  assert.equal(view.testingConnectionId.value, undefined)
+  fixture.dispose()
+  requestState.dispose()
 })

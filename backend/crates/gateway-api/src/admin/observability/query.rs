@@ -27,6 +27,9 @@ impl DashboardQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageQuery {
+    #[serde(default)]
+    pub include_failures: bool,
+    pub account_search: Option<String>,
     pub card: Option<String>,
     pub metric: Option<String>,
     #[serde(default)]
@@ -136,6 +139,8 @@ impl DiagnosticsQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpsQuery {
+    pub account_search: Option<String>,
+    pub error_origin: Option<String>,
     #[serde(default)]
     pub personal: bool,
     pub user_id: Option<String>,
@@ -353,6 +358,8 @@ pub(crate) fn usage_filter(query: &UsageQuery) -> Result<domain::UsageFilter, Wi
         })
     });
     Ok(domain::UsageFilter {
+        include_failures: false,
+        account_search: None,
         user_id: filter_text(query.user_id.clone(), "userId")?,
         group_id: filter_text(query.group_id.clone(), "groupId")?,
         client_transport: client_transport(query.client_transport.clone())?,
@@ -379,7 +386,11 @@ pub(crate) fn usage_command(query: &UsageQuery) -> Result<domain::UsageQuery, Wi
         DomainPageSize::new(page_size).map_err(|_| WireValidationError::new("pageSize"))?;
     Ok(domain::UsageQuery {
         range: usage_range(query.start_time.as_deref(), query.end_time.as_deref())?,
-        filter: usage_filter(query)?,
+        filter: domain::UsageFilter {
+            include_failures: query.include_failures,
+            account_search: filter_text(query.account_search.clone(), "accountSearch")?,
+            ..usage_filter(query)?
+        },
         current_page,
         page_size: page_size_value,
     })
@@ -398,6 +409,15 @@ pub(crate) fn ops_command(query: &OpsQuery) -> Result<domain::OpsErrorQuery, Wir
     Ok(domain::OpsErrorQuery {
         range: usage_range(query.start_time.as_deref(), query.end_time.as_deref())?,
         filter: domain::OpsErrorFilter {
+            account_search: filter_text(query.account_search.clone(), "accountSearch")?,
+            error_origin: match query.error_origin.as_deref() {
+                None => None,
+                Some("proxy") => Some(domain::UsageErrorOrigin::Proxy),
+                Some("upstream") => Some(domain::UsageErrorOrigin::Upstream),
+                Some("connection") => Some(domain::UsageErrorOrigin::Connection),
+                Some("unknown") => Some(domain::UsageErrorOrigin::Unknown),
+                Some(_) => return Err(WireValidationError::new("errorOrigin")),
+            },
             user_id: filter_text(query.user_id.clone(), "userId")?,
             group_id: filter_text(query.group_id.clone(), "groupId")?,
             client_transport: client_transport(query.client_transport.clone())?,

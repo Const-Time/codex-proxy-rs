@@ -39,7 +39,12 @@ const emit = defineEmits<{
 }>()
 const slots = useSlots()
 const mobile = useMediaQuery('(max-width: 639px)')
-const { visibleColumns: computedColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(() => props.columns, props.tableId ?? 'transient')
+const { visibleColumns: computedColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(
+  () => mobile.value && props.horizontalOnMobile
+    ? props.columns.map(column => column.mobileSize ? { ...column, size: column.mobileSize } : column)
+    : props.columns,
+  props.tableId ?? 'transient',
+)
 const mobileColumns = computed(() => {
   const columns = [...computedColumns.value]
   if (props.mobileActionsFirst) {
@@ -231,7 +236,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
       </div>
     </div>
     <div v-loading="loading" class="cp-data-table-body relative flex min-h-0 max-w-full flex-1 overflow-hidden">
-      <div v-if="mobile && hasRows" class="w-full min-w-0">
+      <div v-if="mobile && !horizontalOnMobile && hasRows" class="w-full min-w-0">
         <div v-if="computedColumns.some(column => column.sortable || column.kind === 'selection')" class="mb-3 flex flex-wrap items-center gap-3">
           <div v-for="column in computedColumns.filter(column => column.kind === 'selection')" :key="column.key" class="flex items-center gap-2">
             <slot :name="`header-${column.key}`" :column="column" />
@@ -280,11 +285,11 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
         v-else-if="hasRows || showHeaderWhenEmpty"
         ref="scrollbar"
         class="min-h-0 flex-1"
-        :class="
+        :class="[
           density === 'compact'
             ? '[--cp-scrollbar-track-inset-block-start:2.25rem]'
-            : '[--cp-scrollbar-track-inset-block-start:2.75rem]'
-        "
+            : '[--cp-scrollbar-track-inset-block-start:2.75rem]',
+        ]"
         :always-visible="scrollbarAlwaysVisible"
         horizontal
         @scroll="handleTableScroll"

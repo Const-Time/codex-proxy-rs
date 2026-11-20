@@ -31,6 +31,9 @@ export interface BaseTableColumn<Row extends TableRow = TableRow> {
   hideable?: boolean
   defaultHidden?: boolean
   mobileFullWidth?: boolean
+  mobileSize?: TableColumnSize
+  sticky?: TableColumnSticky
+  fill?: boolean
 }
 
 export interface BaseTableSort {
@@ -41,6 +44,7 @@ export interface BaseTableSort {
 export interface BaseTableProps<Row extends TableRow> {
   tableId?: string
   mobileActionsFirst?: boolean
+  horizontalOnMobile?: boolean
   columns: BaseTableColumn<Row>[]
   rows: Row[]
   rowKey?: string | ((row: Row, index: number) => string | number)
@@ -183,7 +187,7 @@ export function resolveColumns<Row extends TableRow>(
       truncate: recipe.truncate,
       contentClass: recipe.contentClass,
       paddingClass: recipe.paddingClass,
-      sticky: recipe.sticky,
+      sticky: column.sticky ?? recipe.sticky,
     }
   })
 
@@ -218,6 +222,11 @@ export function columnStyle<Row extends TableRow>(
   column: ResolvedTableColumn<Row>,
   columns: ResolvedTableColumn<Row>[],
 ) {
+  if (columns.some(column => column.fill)) {
+    return column.fill
+      ? { minWidth: `${column.basisWidth}px` }
+      : { width: `${column.basisWidth}px`, minWidth: `${column.basisWidth}px` }
+  }
   const tableWidth = minimumTableWidth(columns)
   const widthPercent = tableWidth > 0 ? (column.basisWidth / tableWidth) * 100 : 0
 

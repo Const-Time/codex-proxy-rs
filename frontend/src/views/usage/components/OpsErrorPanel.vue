@@ -3,7 +3,7 @@ import type { Ref } from 'vue'
 import type { UsageTimeRangeParams } from '../composables/useUsageTimeRange'
 import type { OpsError } from '@/api'
 
-import { Eye, RefreshCw } from '@lucide/vue'
+import { Eye } from '@lucide/vue'
 import { computed, inject, shallowRef, toRef } from 'vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
@@ -11,16 +11,19 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import { useOpsErrorsTable } from '../composables/useOpsErrorsTable'
 import { opsErrorColumns } from '../constants'
-import { entryRejected, errorOriginText, opsErrorSummary } from '../utils/opsErrorPresentation'
+import { entryRejected } from '../utils/opsErrorPresentation'
 import { usageUserAgent } from '../utils/records'
 import { usageUserDisplay } from '../utils/user'
 import OpsErrorDetailModal from './OpsErrorDetailModal.vue'
 import UsageClientIpCell from './UsageClientIpCell.vue'
+import UsageErrorCell from './UsageErrorCell.vue'
+import UsageRecordTimeCell from './UsageRecordTimeCell.vue'
 
 const props = defineProps<{
   timeRangeParams: UsageTimeRangeParams
   recordFilters?: Record<string, string | undefined>
   provider?: string
+  errorOrigin?: OpsError['errorOrigin']
 }>()
 
 const {
@@ -31,11 +34,11 @@ const {
   handlePageChange,
   handlePageSizeChange,
   refresh,
-} = useOpsErrorsTable(toRef(props, 'timeRangeParams'), computed(() => ({ ...props.recordFilters, provider: props.provider || undefined })))
+} = useOpsErrorsTable(toRef(props, 'timeRangeParams'), computed(() => ({ ...props.recordFilters, provider: props.provider || undefined, errorOrigin: props.errorOrigin })))
 
 const selectedRecord = shallowRef<OpsError | null>(null)
 const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
-const columns = computed(() => personal?.value ? opsErrorColumns.filter(column => !['userEmail', 'accountId'].includes(column.key)) : opsErrorColumns)
+const columns = computed(() => personal?.value ? opsErrorColumns.filter(column => !['userEmail', 'accountId', 'upstreamSendState'].includes(column.key)) : opsErrorColumns)
 const detailOpen = shallowRef(false)
 
 const upstreamSendStateLabels: Record<string, string> = {
@@ -82,24 +85,19 @@ function upstreamSendStateText(value: string | null | undefined) {
       <BaseTable
         class="min-h-0 flex-1"
         :columns="columns"
+        :table-id="personal ? 'personal-usage-errors' : 'usage-errors'"
+        :row-key="row => `${row.kind}:${row.id}`"
+        density="compact"
+        horizontal-on-mobile
         :rows="records"
         :loading="loading"
         empty-text="当前时段没有错误"
       >
+        <template v-if="$slots.toolbar" #toolbar>
+          <slot name="toolbar" />
+        </template>
         <template #toolbar-actions>
-          <BaseIconButton
-            variant="ghost"
-            size="md"
-            label="刷新错误明细"
-            :loading="refreshing"
-            :disabled="loading || refreshing"
-            @click="refresh"
-          >
-            <template #loading>
-              <RefreshCw class="size-4.5 animate-spin motion-reduce:animate-none" />
-            </template>
-            <RefreshCw class="size-4.5" />
-          </BaseIconButton>
+          <slot name="toolbar-actions" :loading="loading" :refreshing="refreshing" :refresh="refresh" />
         </template>
         <template #userEmail="{ row }">
           <div class="grid min-w-0 gap-1">
@@ -120,26 +118,10 @@ function upstreamSendStateText(value: string | null | undefined) {
           />
         </template>
         <template #message="{ row }">
-          <div class="min-w-0 py-0.5" :title="row.message || opsErrorSummary(row)">
-            <div class="flex min-w-0 items-center gap-2">
-              <code class="block min-w-0 flex-1 truncate font-mono text-cp-sm font-bold text-cp-error-text">
-                {{ opsErrorSummary(row) }}
-                <span class="ml-2 font-sans text-cp-xs font-medium text-cp-text-secondary">{{ errorOriginText(row.errorOrigin) }}</span>
-              </code>
-              <span
-                v-if="row.metadata.recoveredAt"
-                class="inline-flex h-5 shrink-0 items-center rounded-full bg-cp-success-container px-2 text-cp-xs leading-none font-heavy text-cp-success-on-container"
-              >
-                已自动恢复
-              </span>
-            </div>
-            <p
-              v-if="row.message"
-              class="mt-1 mb-0 line-clamp-1 text-cp-xs leading-[1.45] font-emphasis text-cp-text-secondary"
-            >
-              {{ row.message }}
-            </p>
-          </div>
+          <UsageErrorCell :record="row" :personal="Boolean(personal)" />
+        </template>
+        <template #createdAtDisplay="{ row }">
+          <UsageRecordTimeCell :display="row.createdAtDisplay" :datetime="row.createdAt" />
         </template>
         <template #upstreamSendState="{ row }">
           <span

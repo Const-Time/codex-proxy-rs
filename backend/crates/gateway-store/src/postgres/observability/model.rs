@@ -59,6 +59,8 @@ pub(crate) fn observability_page_offset(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageRecordFilter {
+    pub include_failures: bool,
+    pub account_search: Option<String>,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
     pub client_transport: Option<String>,
@@ -130,6 +132,8 @@ pub struct UsageRecordQuery {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpsErrorFilter {
+    pub account_search: Option<String>,
+    pub error_origin: Option<admin_observability::UsageErrorOrigin>,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
     pub client_transport: Option<String>,
@@ -504,6 +508,7 @@ pub struct DashboardObservation {
 /// 使用记录列表所需的窄投影；完整执行、路由和客户端详情按 ID 单独读取。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub outcome: String,
     pub requested_service_tier: Option<String>,
     pub upstream_service_tier: Option<String>,
     pub turn_state: Option<String>,

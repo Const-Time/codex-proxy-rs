@@ -1258,6 +1258,8 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
         .list_usage_records(admin_observability::UsageQuery {
             range,
             filter: admin_observability::UsageFilter {
+                include_failures: false,
+                account_search: None,
                 user_id: None,
                 group_id: Some("grp_history".into()),
                 client_transport: Some("http_sse".into()),
@@ -2130,6 +2132,83 @@ async fn personal_usage_is_scoped_for_lists_details_totals_and_trends() {
         .await
         .unwrap();
     assert_eq!(forged.total, 0);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn usage_and_ops_search_historical_accounts_and_filter_error_origin_across_pages() {
+    use gateway_admin::model::observability::UsageErrorOrigin::{
+        Connection, Proxy, Unknown, Upstream,
+    };
+
+    let Some(db) = TestDatabase::create("account_search_origin").await else {
+        return;
+    };
+    let now = Utc::now();
+    seed_observability_facts(&db.pool, now).await.unwrap();
+    sqlx::query("update model_requests set provider_account_name_snapshot = null, provider_account_email_snapshot = 'archive%_@example.invalid', upstream_status_code = 200, provider_error_code = null, error_kind = 'transport', raw_upstream_error = '{\"error\":{\"type\":\"capacity\"}}' where id = 'req_observe_failed'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("update ops_events set provider_account_name_snapshot = 'archive%_ agent', provider_account_email_snapshot = null, status_code = null, provider_error_code = null, failure_kind = 'concurrency_queue_timeout', raw_upstream_error = 'legacy non-JSON error' where id = 'ops_observe_retry'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let range =
+        ObservabilityRange::new(now - TimeDelta::hours(1), now + TimeDelta::hours(1)).unwrap();
+    let repo = observability_repository(&db.pool);
+    let page_size = ObservabilityPageSize::new(1).unwrap();
+    let usage = repo
+        .list_usage_records(UsageRecordQuery {
+            range,
+            filter: UsageRecordFilter {
+                include_failures: true,
+                account_search: Some("archive%_".into()),
+                ..Default::default()
+            },
+            current_page: 1,
+            page_size,
+        })
+        .await
+        .unwrap();
+    assert_eq!(usage.total, 1);
+    assert_eq!(usage.items[0].id, "req_observe_failed");
+    assert_eq!(usage.items[0].outcome, "failed");
+
+    for (origin, current_page, expected_id, expected_total) in [
+        (None, 1, Some("req_observe_failed"), 2),
+        (None, 2, Some("ops_observe_retry"), 2),
+        (Some(Upstream), 1, Some("req_observe_failed"), 1),
+        (Some(Upstream), 2, None, 1),
+        (Some(Proxy), 1, Some("ops_observe_retry"), 1),
+        (Some(Connection), 1, None, 0),
+        (Some(Unknown), 1, None, 0),
+    ] {
+        let response = repo
+            .list_ops_errors(OpsErrorQuery {
+                range,
+                filter: OpsErrorFilter {
+                    account_search: Some("archive%_".into()),
+                    error_origin: origin,
+                    ..Default::default()
+                },
+                current_page,
+                page_size,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            response.total, expected_total,
+            "{origin:?}, page {current_page}"
+        );
+        assert_eq!(
+            response
+                .items
+                .first()
+                .map(|record| record.event_id.as_str()),
+            expected_id
+        );
+    }
     db.close().await;
 }
 

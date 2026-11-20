@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import type { UsageRecordFilters } from '@/api'
-import { Eye } from '@lucide/vue'
-import { computed, provide, ref, shallowRef, watch } from 'vue'
+import type { UsageErrorOrigin, UsageRecordFilters } from '@/api'
+import { Eye, Search } from '@lucide/vue'
+import { computed, nextTick, provide, ref, shallowRef, useTemplateRef, watch } from 'vue'
 
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
+import BaseInput from '@/components/base/BaseInput.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import ProviderFilterSegmented from '@/components/ProviderFilterSegmented.vue'
 import OpsErrorPanel from './components/OpsErrorPanel.vue'
@@ -22,17 +24,48 @@ import { useUsageRecordDetail } from './composables/useUsageRecordDetail'
 import { useUsageRecordsTable } from './composables/useUsageRecordsTable'
 import { useUsageTimeRange } from './composables/useUsageTimeRange'
 import { usageRecordColumns } from './constants'
+import { errorOriginText } from './utils/opsErrorPresentation'
 
 const props = defineProps<{ personal?: boolean }>()
 provide('personalUsage', computed(() => Boolean(props.personal)))
-const visibleColumns = computed(() => props.personal ? usageRecordColumns.filter(column => !['userEmail', 'accountEmail', 'upstreamTransport', 'turnState'].includes(column.key)) : usageRecordColumns)
+const recordView = shallowRef('success')
+const tableModeControl = useTemplateRef<InstanceType<typeof BaseSegmented>>('tableModeControl')
+
+async function setRecordView(view: string) {
+  const group = tableModeControl.value?.$el
+  const shouldRestoreFocus = group?.contains(document.activeElement)
+  recordView.value = view
+  if (shouldRestoreFocus) {
+    await nextTick()
+    tableModeControl.value?.$el.querySelector('[aria-checked="true"]')?.focus()
+  }
+}
+const visibleColumns = computed(() => {
+  const columns = props.personal
+    ? usageRecordColumns.filter(column => !['userEmail', 'accountEmail', 'upstreamTransport', 'turnState'].includes(column.key))
+    : usageRecordColumns
+  return recordView.value === 'all'
+    ? [{ key: 'logicalOutcome', label: '结果', kind: 'status' as const, size: 'sm' as const }, ...columns]
+    : columns
+})
 
 const recordFilters = ref<UsageRecordFilters>({ clientApiKeyId: '', groupId: '', accountId: '', userId: '', model: '', clientTransport: '' })
 const recordFilterParams = computed(() => Object.fromEntries(Object.entries(recordFilters.value).map(([key, value]) => [key, value.trim() || undefined])))
-const recordView = shallowRef('success')
 const recordViewOptions = [
-  { label: '成功记录', value: 'success' },
-  { label: '错误排查', value: 'errors' },
+  { label: '成功', value: 'success' },
+  { label: '错误', value: 'errors' },
+  { label: '全部', value: 'all' },
+]
+const accountSearch = shallowRef('')
+const errorOrigin = shallowRef<UsageErrorOrigin | ''>('')
+const errorFilters = computed(() => ({
+  ...recordFilterParams.value,
+  accountSearch: props.personal ? undefined : accountSearch.value.trim() || undefined,
+}))
+const errorOrigins: UsageErrorOrigin[] = ['upstream', 'proxy', 'connection', 'unknown']
+const errorOriginOptions = [
+  { label: '全部来源', value: '' },
+  ...errorOrigins.map(value => ({ label: errorOriginText(value), value })),
 ]
 const { timeRange, timeRangeParams, refreshTimeRangeEnd, customDates, setCustomRange }
   = useUsageTimeRange()
@@ -61,6 +94,8 @@ const {
   timeRangeParams,
   refreshTimeRangeEnd,
   recordFilters: recordFilterParams,
+  recordView,
+  accountSearch,
   personal: props.personal,
 })
 
@@ -107,25 +142,15 @@ watch([timeRange, customDates], () => {
       class="mt-5 flex flex-col"
     >
       <template #header>
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 class="m-0 text-xl leading-[1.15] font-heavy text-cp-text">
-              请求明细
-            </h2>
-            <p
-              class="mt-1.75 mb-0 text-cp leading-[1.15] font-emphasis text-cp-text-secondary"
-            >
-              成功请求与失败请求明细
-            </p>
-          </div>
-          <BaseSegmented v-model="recordView" label="请求明细类型" :options="recordViewOptions" class="w-52" />
-        </div>
+        <h2 class="m-0 text-xl leading-[1.15] font-heavy text-cp-text">
+          请求明细
+        </h2>
       </template>
 
       <template #body>
-        <UsageRecordFiltersBar v-model="recordFilters" class="mb-4" />
+        <UsageRecordFiltersBar v-model="recordFilters" class="mb-2" />
         <div
-          v-show="recordView === 'success'"
+          v-if="recordView !== 'errors'"
           class="flex min-h-130 min-w-0 flex-1 flex-col"
         >
           <div class="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -133,12 +158,20 @@ watch([timeRange, customDates], () => {
               class="min-h-0 flex-1"
               :columns="visibleColumns"
               :rows="records"
+              :all="recordView === 'all'"
               :loading="loading"
-              empty-text="暂无使用记录"
+              empty-text="没有匹配的请求记录"
             >
+              <template v-if="!personal" #toolbar>
+                <BaseInput v-model="accountSearch" clearable class="w-full lg:max-w-64" aria-label="按历史账号搜索" placeholder="账号名称或邮箱">
+                  <template #prefix>
+                    <Search class="size-4" aria-hidden="true" />
+                  </template>
+                </BaseInput>
+              </template>
               <template #toolbar-actions>
+                <BaseSegmented ref="tableModeControl" :model-value="recordView" label="请求明细类型" :options="recordViewOptions" class="w-34 shrink-0 [&>button]:px-1.5" @update:model-value="setRecordView" />
                 <UsageFilters
-
                   :loading="loading"
                   :refreshing="refreshingList"
                   @refresh="refreshUsageRecords"
@@ -166,9 +199,26 @@ watch([timeRange, customDates], () => {
           </div>
         </div>
 
-        <div v-if="recordView === 'errors'" class="min-h-130 min-w-0 flex-1">
-          <OpsErrorPanel :time-range-params="timeRangeParams" :record-filters="recordFilterParams" :provider="providerQuery" />
-        </div>
+        <OpsErrorPanel
+          v-else
+          :time-range-params="timeRangeParams"
+          :record-filters="errorFilters"
+          :provider="providerQuery"
+          :error-origin="personal ? undefined : errorOrigin || undefined"
+        >
+          <template v-if="!personal" #toolbar>
+            <BaseInput v-model="accountSearch" clearable class="w-full lg:max-w-64" aria-label="按历史账号搜索" placeholder="账号名称或邮箱">
+              <template #prefix>
+                <Search class="size-4" aria-hidden="true" />
+              </template>
+            </BaseInput>
+          </template>
+          <template #toolbar-actions="{ loading: errorsLoading, refreshing, refresh }">
+            <BaseSelect v-if="!personal" v-model="errorOrigin" :options="errorOriginOptions" aria-label="错误来源" class="w-30" />
+            <BaseSegmented ref="tableModeControl" :model-value="recordView" label="请求明细类型" :options="recordViewOptions" class="w-34 shrink-0 [&>button]:px-1.5" @update:model-value="setRecordView" />
+            <UsageFilters :loading="errorsLoading" :refreshing="refreshing" label="刷新错误明细" @refresh="refresh" />
+          </template>
+        </OpsErrorPanel>
       </template>
     </BaseCard>
 

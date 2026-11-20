@@ -16,8 +16,8 @@ test('stream diagnostics distinguish handshake, delivery and logical outcome', (
   assert.equal(usageDisplayOutcome('incomplete', null, 'process_interrupted'), 'incomplete')
   assert.equal(usageDisplayOutcome('incomplete', null, null), 'incomplete')
   assert.equal(usageDisplayOutcome('succeeded', null, null), 'succeeded')
-  assert.equal(errorOriginText(undefined), '来源未确定')
-  assert.equal(errorOriginText('proxy'), '代理内部处理')
+  assert.equal(errorOriginText(undefined), '来源未知')
+  assert.equal(errorOriginText('proxy'), '代理处理')
 })
 
 test('generated Codex configuration enables discovery while preserving authentication and transport choices', () => {

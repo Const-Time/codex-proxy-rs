@@ -1,6 +1,8 @@
 //! Ops 错误查询族。
 
 use super::super::*;
+use super::usage::push_account_snapshot_search;
+use gateway_admin::model::observability::UsageErrorOrigin;
 
 const REQUEST_ERROR_SELECT: &str = "select 'model_request'::text as source,
        mr.user_id, u.username as user_email, nullif(u.display_name, '') as username,
@@ -226,6 +228,23 @@ fn push_request_error_predicates(
     statement.push(" and mr.error_kind is not null and mr.error_kind <> 'cancelled'");
     push_range(statement, "mr.completed_at", range);
     push_request_scope(statement, filter);
+    if let Some(value) = &filter.account_search {
+        push_account_snapshot_search(statement, "mr", value);
+    }
+    if let Some(origin) = filter.error_origin {
+        push_error_origin(
+            statement,
+            origin,
+            ErrorOriginColumns {
+                raw: "mr.raw_upstream_error",
+                code: "mr.provider_error_code",
+                status: "mr.upstream_status_code",
+                kind: "mr.error_kind",
+                continuation: "mr.continuation_unavailable_reason",
+                exit: "mr.upstream_connection_exit_reason",
+            },
+        );
+    }
     for (column, value) in [
         ("mr.client_api_key_ref", &filter.client_api_key_ref),
         ("mr.id", &filter.request_id),
@@ -268,6 +287,23 @@ fn push_ops_event_predicates(
     filter: &OpsErrorFilter,
 ) {
     push_range(statement, "oe.created_at", range);
+    if let Some(value) = &filter.account_search {
+        push_account_snapshot_search(statement, "oe", value);
+    }
+    if let Some(origin) = filter.error_origin {
+        push_error_origin(
+            statement,
+            origin,
+            ErrorOriginColumns {
+                raw: "oe.raw_upstream_error",
+                code: "oe.provider_error_code",
+                status: "oe.status_code",
+                kind: "oe.failure_kind",
+                continuation: "null::text",
+                exit: "null::text",
+            },
+        );
+    }
     push_text_equality(
         statement,
         "coalesce(mr.user_id, oe.entry_context->>'userId')",
@@ -340,6 +376,68 @@ fn push_ops_event_predicates(
             search,
         );
     }
+}
+
+struct ErrorOriginColumns {
+    raw: &'static str,
+    code: &'static str,
+    status: &'static str,
+    kind: &'static str,
+    continuation: &'static str,
+    exit: &'static str,
+}
+
+fn push_error_origin(
+    statement: &mut QueryBuilder<Postgres>,
+    origin: UsageErrorOrigin,
+    ErrorOriginColumns {
+        raw,
+        code,
+        status,
+        kind,
+        continuation,
+        exit,
+    }: ErrorOriginColumns,
+) {
+    // The same evidence and rule order as UsageErrorEvidence::origin. Legacy
+    // plain-text error bodies are valid history and contribute no JSON evidence.
+    use UsageErrorOrigin as O;
+    statement.push(format!(
+        " and (select case
+              when nullif({code}, '') is not null or {status} >= 400
+                or {continuation} = any("
+    ));
+    statement.push_bind(O::UPSTREAM_CONTINUATION_REASONS);
+    statement.push(format!(") or {kind} = any("));
+    statement.push_bind(O::UPSTREAM_ERROR_KINDS);
+    statement.push(
+        ") or exists (
+              select from unnest(array['code','type','message']) field
+              where json_typeof(e.error->field) = 'string' and e.error->>field <> ''
+            ) or (
+              j.body->>'type' = 'websocket.close' and json_typeof(j.body->'code') = 'number'
+              and j.body->>'code' ~ '^(0|[1-9][0-9]{0,4})$'
+              and (length(j.body->>'code') < 5 or (j.body->>'code') collate \"C\" <= '65535')
+            ) then 'upstream'",
+    );
+    statement.push(format!(" when {continuation} = any("));
+    statement.push_bind(O::PROXY_CONTINUATION_REASONS);
+    statement.push(format!(") or {kind} = any("));
+    statement.push_bind(O::PROXY_ERROR_KINDS);
+    statement.push(format!(") or {exit} = any("));
+    statement.push_bind(O::PROXY_EXIT_REASONS);
+    statement.push(format!(") then 'proxy' when {exit} = any("));
+    statement.push_bind(O::UPSTREAM_EXIT_REASONS);
+    statement.push(format!(") then 'upstream' when {kind} = "));
+    statement.push_bind(O::CONNECTION_ERROR_KIND);
+    statement.push(format!(" or {exit} = any("));
+    statement.push_bind(O::CONNECTION_EXIT_REASONS);
+    statement.push(format!(
+        ") then 'connection' else 'unknown' end
+         from lateral (select case when pg_input_is_valid({raw}, 'jsonb') then {raw}::json end as body) j
+         cross join lateral (select coalesce(j.body->'error', j.body#>'{{response,error}}') as error) e) = "
+    ));
+    statement.push_bind(origin.as_str());
 }
 
 fn push_range(statement: &mut QueryBuilder<Postgres>, column: &str, range: ObservabilityRange) {

@@ -114,6 +114,11 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
         total_slots,
         weight: account.weight.get(),
         model_access: account.model_access,
+        outbound_proxy_id: account
+            .outbound_proxy
+            .as_ref()
+            .and_then(|proxy| proxy.request_context())
+            .map(|context| context.proxy_id.clone()),
         outbound_proxy_endpoint: account
             .outbound_proxy
             .as_ref()

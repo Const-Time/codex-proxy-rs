@@ -84,9 +84,10 @@ async function handleKeydown(event: KeyboardEvent, index: number) {
     return
 
   event.preventDefault()
+  const group = (event.currentTarget as HTMLElement).parentElement
   selectOption(nextIndex)
   await nextTick()
-  const buttons = (event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>('button')
+  const buttons = group?.querySelectorAll<HTMLButtonElement>('button')
   buttons?.[nextIndex]?.focus()
 }
 </script>

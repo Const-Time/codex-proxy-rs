@@ -1098,6 +1098,7 @@ fn total_record(
     now: DateTime<Utc>,
 ) -> UsageListRecord {
     UsageListRecord {
+        outcome: gateway_admin::model::observability::RequestOutcome::Succeeded,
         requested_service_tier: None,
         upstream_service_tier: None,
         turn_state: None,

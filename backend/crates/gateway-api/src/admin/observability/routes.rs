@@ -86,6 +86,9 @@ where
 {
     let mut command = usage_command(&query).map_err(map_wire_error)?;
     command.filter.owner_user_id = personal_owner(&auth, query.personal);
+    if command.filter.owner_user_id.is_some() && command.filter.account_search.is_some() {
+        return Err(AdminError::bad_request("个人使用记录不支持按上游账号搜索"));
+    }
     let result = state
         .admin_services()
         .observability()
@@ -253,6 +256,11 @@ where
     let mut command = ops_command(&query).map_err(map_wire_error)?;
     let owner = personal_owner(&auth, query.personal);
     if let Some(owner) = &owner {
+        if command.filter.account_search.is_some() || command.filter.error_origin.is_some() {
+            return Err(AdminError::bad_request(
+                "个人错误记录不支持按上游账号或错误来源筛选",
+            ));
+        }
         command.filter.user_id = Some(owner.clone());
     }
     let result = state

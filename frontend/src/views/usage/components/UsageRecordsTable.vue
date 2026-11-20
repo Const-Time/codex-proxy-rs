@@ -19,6 +19,7 @@ import UsageLatencyCell from './UsageLatencyCell.vue'
 import UsageModelCell from './UsageModelCell.vue'
 import UsageRateCell from './UsageRateCell.vue'
 import UsageReasoningEffortCell from './UsageReasoningEffortCell.vue'
+import UsageRecordTimeCell from './UsageRecordTimeCell.vue'
 import UsageTokenCell from './UsageTokenCell.vue'
 import UsageTransportBadge from './UsageTransportBadge.vue'
 import UsageTurnStateCell from './UsageTurnStateCell.vue'
@@ -29,6 +30,7 @@ withDefaults(
     rows: UsageDisplayRecord[]
     loading?: boolean
     emptyText?: string
+    all?: boolean
   }>(),
   {
     loading: false,
@@ -37,11 +39,21 @@ withDefaults(
 )
 // 使用记录表只负责该领域的单元格呈现；筛选与分页由页面组合。
 const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
+const outcomeLabels: Record<string, string> = {
+  succeeded: '成功',
+  failed: '失败',
+  incomplete: '未完成',
+  cancelled: '已取消',
+  running: '进行中',
+}
 </script>
 
 <template>
   <BaseTable
-    table-id="usage-records"
+    :key="personal ? 'personal' : 'admin'"
+    :table-id="personal ? 'personal-usage-records' : 'usage-records'"
+    density="compact"
+    horizontal-on-mobile
     :columns="columns"
     :rows="rows"
     :loading="loading"
@@ -52,6 +64,14 @@ const personal = inject<Readonly<Ref<boolean>>>('personalUsage')
     </template>
     <template v-if="$slots['toolbar-actions']" #toolbar-actions>
       <slot name="toolbar-actions" />
+    </template>
+    <template v-if="all" #logicalOutcome="{ row }">
+      <span class="text-cp-xs font-bold" :class="row.logicalOutcome === 'succeeded' ? 'text-cp-success-text' : row.logicalOutcome === 'cancelled' ? 'text-cp-text-secondary' : 'text-cp-warning-text'">
+        {{ outcomeLabels[row.logicalOutcome ?? ''] || row.logicalOutcome || '—' }}
+      </span>
+    </template>
+    <template #createdAtDisplay="{ row }">
+      <UsageRecordTimeCell :display="row.createdAtDisplay" :datetime="row.createdAt" />
     </template>
     <template #userEmail="{ row }">
       <div class="grid min-w-0 gap-1">

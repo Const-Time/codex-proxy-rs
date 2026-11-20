@@ -17,6 +17,8 @@ import { errorMessage } from '@/utils/async'
 
 interface UseUsageRecordsTableOptions {
   personal?: boolean
+  recordView: Readonly<Ref<string>>
+  accountSearch: Readonly<Ref<string>>
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>
   refreshTimeRangeEnd: () => void
   recordFilters?: Readonly<Ref<Record<string, string | undefined>>>
@@ -94,7 +96,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     }
 
     await Promise.all([
-      loadUsagePage(background),
+      ...(options.recordView.value === 'errors' ? [] : [loadUsagePage(background)]),
       ...(scope === 'all' ? [loadUsageAnalytics(globalParams, background)] : []),
     ])
   }
@@ -108,6 +110,8 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
       const result = await getUsageRecords({
         currentPage: currentPage.value,
         pageSize: pageSize.value,
+        accountSearch: options.personal ? undefined : options.accountSearch.value.trim() || undefined,
+        includeFailures: options.recordView.value === 'all' || undefined,
         ...tableTimeRangeParams.value,
         ...filterParams(),
       }, tableAbort.signal)
@@ -253,6 +257,22 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   onMounted(() => {
     loadUsageRecords()
   })
+
+  watch(options.recordView, (view) => {
+    tableRequestId += 1
+    tableAbort?.abort()
+    records.value = []
+    resetPagination()
+    if (view !== 'errors')
+      void loadUsagePage(false)
+  })
+
+  watchDebounced(options.accountSearch, () => {
+    if (options.personal || options.recordView.value === 'errors')
+      return
+    resetPagination()
+    void loadUsagePage(false)
+  }, { debounce: 250 })
 
   watch(performanceMetric, () => {
     void loadCard('performance')

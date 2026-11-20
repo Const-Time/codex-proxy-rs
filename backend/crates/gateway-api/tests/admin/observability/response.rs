@@ -939,6 +939,7 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .lock()
         .expect("usage records")
         .push(UsageListRecord {
+            outcome: gateway_admin::model::observability::RequestOutcome::Succeeded,
             requested_service_tier: Some("priority".into()),
             upstream_service_tier: Some("default".into()),
             turn_state: Some("gAAAA-test-turn-state".to_owned()),

@@ -139,6 +139,7 @@ export interface Account {
   dispatchHours: AccountDispatchHours
   quotaUsageLimits: { shortTermPercent: number, weeklyPercent: number }
   autoUseQuotaCredits: boolean
+  outboundProxyId?: string | null
   outboundProxyEndpoint: string | null
   id: string
   name: string

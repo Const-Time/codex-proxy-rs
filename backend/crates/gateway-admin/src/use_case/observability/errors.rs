@@ -97,107 +97,28 @@ fn error_origin(
         || upstream_code.is_some_and(|code| !code.is_empty())
         || websocket_close_code.is_some()
         || upstream_status_code.is_some_and(|status| status >= 400)
-        || matches!(
-            continuation_reason,
-            Some("upstream_rejected" | "quota_exhausted")
-        )
-        || matches!(
-            error_kind,
-            // 这里匹配内部 errorKind；message_too_big 只由收到的上游 close 1009 产生
-            Some("permission_denied" | "message_too_big" | "upstream_capacity_unavailable")
-        )
+        || continuation_reason
+            .is_some_and(|value| UsageErrorOrigin::UPSTREAM_CONTINUATION_REASONS.contains(&value))
+        || error_kind.is_some_and(|value| UsageErrorOrigin::UPSTREAM_ERROR_KINDS.contains(&value))
     {
         return UsageErrorOrigin::Upstream;
     }
-    if matches!(
-        continuation_reason,
-        Some(
-            "scope_unavailable"
-                | "pool_unavailable"
-                | "fresh_connection_required"
-                | "connection_busy"
-                | "latest_response_mismatch"
-                | "reused_connection_lost"
-                | "transport_payload_too_large"
-        )
-    ) || matches!(
-        error_kind,
-        Some(
-            "process_interrupted"
-                | "process_terminated"
-                | "internal_error"
-                | "model_not_found"
-                | "no_available_provider"
-                | "no_eligible_account"
-                | "account_capacity_unavailable"
-                | "middleware_capacity_unavailable"
-                | "concurrency_queue_full"
-                | "concurrency_queue_timeout"
-                | "provider_infrastructure_unavailable"
-                | "session_policy_restricted"
-                | "request_policy_denied"
-                | "policy_denied"
-                | "budget_exhausted"
-                | "key_budget_unavailable"
-                | "client_budget_unavailable"
-                | "user_concurrency_limited"
-                | "user_rate_limited"
-                | "client_key_concurrency_limited"
-                | "client_key_rate_limited"
-                | "group_daily_budget_exceeded"
-                | "group_weekly_budget_exceeded"
-        )
-    ) || matches!(
-        connection_exit_reason,
-        Some(
-            "command_channel_closed"
-                | "local_close"
-                | "message_receiver_closed"
-                | "client_cancelled"
-                | "downstream_send_failed"
-                | "downstream_connection_closed"
-                | "downstream_rebound"
-                | "pool_shutdown"
-                | "max_age_expired"
-                | "idle_timeout_expired"
-                | "proxy_capacity_evicted"
-                | "search_activation_required"
-        )
-    ) {
+    if continuation_reason
+        .is_some_and(|value| UsageErrorOrigin::PROXY_CONTINUATION_REASONS.contains(&value))
+        || error_kind.is_some_and(|value| UsageErrorOrigin::PROXY_ERROR_KINDS.contains(&value))
+        || connection_exit_reason
+            .is_some_and(|value| UsageErrorOrigin::PROXY_EXIT_REASONS.contains(&value))
+    {
         return UsageErrorOrigin::Proxy;
     }
-    if matches!(
-        connection_exit_reason,
-        Some(
-            "upstream_close"
-                | "normal_close"
-                | "unexpected_binary_event"
-                | "incomplete_response"
-                | "failed_response"
-        )
-    ) {
+    if connection_exit_reason
+        .is_some_and(|value| UsageErrorOrigin::UPSTREAM_EXIT_REASONS.contains(&value))
+    {
         return UsageErrorOrigin::Upstream;
     }
-    if error_kind == Some("transport")
-        || matches!(
-            connection_exit_reason,
-            Some(
-                "eof"
-                    | "unexpected_eof"
-                    | "transport_error"
-                    | "connection_reset"
-                    | "connection_aborted"
-                    | "broken_pipe"
-                    | "tcp_reset"
-                    | "reset_without_closing_handshake"
-                    | "transport_timeout"
-                    | "outbound_transport_error"
-                    | "receive_idle_timeout"
-                    | "pong_timeout"
-                    | "ping_write_timeout"
-                    | "pong_write_timeout"
-            )
-        )
+    if error_kind == Some(UsageErrorOrigin::CONNECTION_ERROR_KIND)
+        || connection_exit_reason
+            .is_some_and(|value| UsageErrorOrigin::CONNECTION_EXIT_REASONS.contains(&value))
     {
         return UsageErrorOrigin::Connection;
     }

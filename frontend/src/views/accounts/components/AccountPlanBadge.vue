@@ -17,7 +17,11 @@ const props = withDefaults(
 )
 
 const planPalettes: Record<string, string> = {
+  api: 'bg-cp-cyan-container-strong text-cp-cyan-on-container',
   free: 'bg-cp-cyan-container text-cp-cyan-on-container',
+  plus: 'bg-cp-blue-container-strong text-cp-blue-on-container',
+  team: 'bg-cp-green-container-strong text-cp-green-on-container',
+  business: 'bg-cp-green-container-strong text-cp-green-on-container',
   pro: 'bg-cp-purple-container-strong text-cp-purple-on-container',
   prolite: 'bg-cp-purple-container text-cp-purple-on-container',
 }
@@ -34,10 +38,10 @@ const displayText = computed(() => props.authenticationKind === 'api_key' ? 'API
 
 const sizeClass = computed(() => {
   if (props.size === 'xs')
-    return 'h-4.5 rounded-full px-1.5 text-[10px] font-bold'
+    return 'min-h-4.5 rounded-full px-1.5 text-[10px] font-bold'
   return props.size === 'sm'
-    ? 'h-5 rounded-full px-1.75 text-cp-xs font-bold'
-    : 'h-5.5 rounded-full px-2 text-cp-xs font-heavy'
+    ? 'min-h-5 rounded-full px-1.75 text-cp-xs font-bold'
+    : 'min-h-5.5 rounded-full px-2 text-cp-xs font-heavy'
 })
 
 const paletteClass = computed(() => {
@@ -52,10 +56,10 @@ const paletteClass = computed(() => {
 
 <template>
   <span
-    class="inline-flex shrink-0 items-center justify-center whitespace-nowrap leading-none shadow-cp-tertiary"
+    class="inline-flex max-w-full items-center justify-center py-0.5 text-center leading-tight shadow-cp-tertiary"
     :class="[sizeClass, paletteClass]"
     :title="rawPlanType || undefined"
   >
-    <span>{{ displayText }}</span>
+    <span class="min-w-0 wrap-anywhere whitespace-normal">{{ displayText }}</span>
   </span>
 </template>

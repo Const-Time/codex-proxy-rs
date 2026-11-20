@@ -75,6 +75,7 @@ export interface UsageRecordMetadata {
 }
 
 export interface UsageListRecord {
+  logicalOutcome?: string
   turnState?: string | null
   turnStateSource?: string | null
   id: string
@@ -511,9 +512,9 @@ interface PageQuery {
   pageSize: number
 }
 
-type UsagePageQuery = UsageRangeQuery & PageQuery
+type UsagePageQuery = UsageRangeQuery & PageQuery & { includeFailures?: boolean, accountSearch?: string }
 
-type OpsErrorPageQuery = UsagePageQuery
+type OpsErrorPageQuery = UsageRangeQuery & PageQuery & { errorOrigin?: UsageErrorOrigin, accountSearch?: string }
 
 interface UsageDetailQuery {
   personal?: boolean

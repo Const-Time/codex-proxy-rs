@@ -84,7 +84,7 @@ onMounted(() => void load())
 </script>
 
 <template>
-  <BaseFilterPanel :active-count="Object.values(filters).filter(value => value.trim()).length">
+  <BaseFilterPanel collapsible :active-count="Object.values(filters).filter(value => value.trim()).length">
     <div class="space-y-2" role="group" aria-label="请求明细筛选">
       <div class="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-[repeat(7,minmax(0,1fr))_auto]">
         <FormItem label="分组">

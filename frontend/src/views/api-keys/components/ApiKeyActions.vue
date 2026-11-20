@@ -3,6 +3,8 @@ import type { getApiKeys } from '@/api'
 import { Pencil, Power, Terminal, Trash2, Upload } from '@lucide/vue'
 
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
+import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
+import RowActionMenu from '@/components/RowActionMenu.vue'
 
 type ApiKeyRow = Awaited<ReturnType<typeof getApiKeys>>['items'][number]
 
@@ -32,40 +34,26 @@ const emit = defineEmits<{
     >
       <Pencil class="size-3.5 text-cp-link" />
     </BaseIconButton>
-    <BaseIconButton
-      variant="ghost"
-      size="sm"
-      label="使用密钥"
-      :loading="revealing"
-      :disabled="revealing"
-      @click.stop="emit('use', apiKey)"
-    >
-      <Terminal class="size-3.5 text-cp-primary-text" />
-    </BaseIconButton>
-
-    <BaseIconButton
-      variant="ghost"
-      size="sm"
-      label="导入 CCSwitch"
-      :disabled="revealing"
-      @click.stop="emit('importCcs', apiKey)"
-    >
-      <Upload class="size-3.5 text-cp-link" />
-    </BaseIconButton>
-
-    <BaseIconButton
-      variant="ghost"
-      size="sm"
-      :label="apiKey.enabled ? '禁用密钥' : '启用密钥'"
-      :loading="updatingStatus"
-      @click.stop="emit('toggle', apiKey)"
-    >
-      <Power
-        class="size-3.5"
-        :class="apiKey.enabled ? 'text-cp-warning' : 'text-cp-success'"
-      />
-    </BaseIconButton>
-
+    <RowActionMenu v-slot="{ select }" label="更多密钥操作">
+      <BaseMenuItem role="menuitem" tabindex="-1" :loading="revealing" @click="select(() => emit('use', apiKey))">
+        <template #icon>
+          <Terminal class="size-3.5 text-cp-primary-text" />
+        </template>
+        使用密钥
+      </BaseMenuItem>
+      <BaseMenuItem role="menuitem" tabindex="-1" :disabled="revealing" @click="select(() => emit('importCcs', apiKey))">
+        <template #icon>
+          <Upload class="size-3.5 text-cp-link" />
+        </template>
+        导入 CCSwitch
+      </BaseMenuItem>
+      <BaseMenuItem role="menuitem" tabindex="-1" :loading="updatingStatus" @click="select(() => emit('toggle', apiKey))">
+        <template #icon>
+          <Power class="size-3.5" :class="apiKey.enabled ? 'text-cp-warning' : 'text-cp-success'" />
+        </template>
+        {{ apiKey.enabled ? '禁用密钥' : '启用密钥' }}
+      </BaseMenuItem>
+    </RowActionMenu>
     <BaseIconButton
       variant="ghost"
       size="sm"

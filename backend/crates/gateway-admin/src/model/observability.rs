@@ -131,6 +131,8 @@ impl OtherRequestOutcome {
 /// 用量记录过滤条件。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFilter {
+    pub include_failures: bool,
+    pub account_search: Option<String>,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
     pub client_transport: Option<String>,
@@ -163,6 +165,8 @@ pub struct UsageQuery {
 /// 运维错误过滤条件。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpsErrorFilter {
+    pub account_search: Option<String>,
+    pub error_origin: Option<UsageErrorOrigin>,
     pub user_id: Option<String>,
     pub group_id: Option<String>,
     pub client_transport: Option<String>,
@@ -608,6 +612,7 @@ pub struct DashboardObservation {
 /// 使用记录表格的窄读模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub outcome: RequestOutcome,
     pub requested_service_tier: Option<String>,
     pub upstream_service_tier: Option<String>,
     /// 上游返回的 turn-state，未返回时为本次出站请求值；仅管理员可见。
@@ -674,6 +679,93 @@ pub enum UsageErrorOrigin {
 }
 
 impl UsageErrorOrigin {
+    // 用于 Admin 展示和 Store 筛选的相同来源规则。
+    pub const CONNECTION_ERROR_KIND: &str = "transport";
+
+    pub const UPSTREAM_CONTINUATION_REASONS: &[&str] = &["upstream_rejected", "quota_exhausted"];
+
+    pub const UPSTREAM_ERROR_KINDS: &[&str] = &[
+        "permission_denied",
+        "message_too_big",
+        "upstream_capacity_unavailable",
+    ];
+
+    pub const PROXY_CONTINUATION_REASONS: &[&str] = &[
+        "scope_unavailable",
+        "pool_unavailable",
+        "fresh_connection_required",
+        "connection_busy",
+        "latest_response_mismatch",
+        "reused_connection_lost",
+        "transport_payload_too_large",
+    ];
+
+    pub const PROXY_ERROR_KINDS: &[&str] = &[
+        "process_interrupted",
+        "process_terminated",
+        "internal_error",
+        "model_not_found",
+        "no_available_provider",
+        "no_eligible_account",
+        "account_capacity_unavailable",
+        "middleware_capacity_unavailable",
+        "concurrency_queue_full",
+        "concurrency_queue_timeout",
+        "provider_infrastructure_unavailable",
+        "session_policy_restricted",
+        "request_policy_denied",
+        "policy_denied",
+        "budget_exhausted",
+        "key_budget_unavailable",
+        "client_budget_unavailable",
+        "user_concurrency_limited",
+        "user_rate_limited",
+        "client_key_concurrency_limited",
+        "client_key_rate_limited",
+        "group_daily_budget_exceeded",
+        "group_weekly_budget_exceeded",
+    ];
+
+    pub const PROXY_EXIT_REASONS: &[&str] = &[
+        "command_channel_closed",
+        "local_close",
+        "message_receiver_closed",
+        "client_cancelled",
+        "downstream_send_failed",
+        "downstream_connection_closed",
+        "downstream_rebound",
+        "pool_shutdown",
+        "max_age_expired",
+        "idle_timeout_expired",
+        "proxy_capacity_evicted",
+        "search_activation_required",
+    ];
+
+    pub const UPSTREAM_EXIT_REASONS: &[&str] = &[
+        "upstream_close",
+        "normal_close",
+        "unexpected_binary_event",
+        "incomplete_response",
+        "failed_response",
+    ];
+
+    pub const CONNECTION_EXIT_REASONS: &[&str] = &[
+        "eof",
+        "unexpected_eof",
+        "transport_error",
+        "connection_reset",
+        "connection_aborted",
+        "broken_pipe",
+        "tcp_reset",
+        "reset_without_closing_handshake",
+        "transport_timeout",
+        "outbound_transport_error",
+        "receive_idle_timeout",
+        "pong_timeout",
+        "ping_write_timeout",
+        "pong_write_timeout",
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

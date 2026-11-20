@@ -286,6 +286,7 @@ pub(crate) fn usage_list_record_view(record: domain::UsageListRecord) -> UsageLi
         .clone()
         .or_else(|| record.requested_model_id.clone());
     UsageListRecordView {
+        logical_outcome: outcome_name(&record.outcome).to_owned(),
         requested_service_tier: record.requested_service_tier,
         upstream_service_tier: record.upstream_service_tier,
         turn_state: record.turn_state,

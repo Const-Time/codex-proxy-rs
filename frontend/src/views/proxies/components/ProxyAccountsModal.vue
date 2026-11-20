@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { OutboundProxyAccount, OutboundProxyRecord } from '@/api'
-import { Search, Unlink } from '@lucide/vue'
+import { Plus, Search, Unlink } from '@lucide/vue'
 import { computed, shallowRef, watch } from 'vue'
 import AccountGroupMarks from '@/components/AccountGroupMarks.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
@@ -14,12 +15,14 @@ import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import AccountPlanBadge from '@/views/accounts/components/AccountPlanBadge.vue'
 import { stablePresetVisualToneClass } from '@/views/accounts/utils/visualTone'
 import { useProxyAccounts } from '../composables/useProxyAccounts'
+import ProxyAssignAccountsModal from './ProxyAssignAccountsModal.vue'
 
 const props = defineProps<{
   proxy: OutboundProxyRecord | null
 }>()
-const emit = defineEmits<{ removed: [] }>()
+const emit = defineEmits<{ changed: [] }>()
 const open = defineModel<boolean>({ required: true })
+const showAssign = shallowRef(false)
 const pendingRemove = shallowRef<OutboundProxyAccount | null>(null)
 const showRemove = computed({
   get: () => pendingRemove.value !== null,
@@ -31,7 +34,7 @@ const showRemove = computed({
 const { accounts, loading, error, pagination, search, setPage, setPageSize, removing, removeAccount } = useProxyAccounts({
   isOpen: () => open.value,
   proxyId: () => props.proxy?.id,
-  onRemoved: () => emit('removed'),
+  onRemoved: () => emit('changed'),
 })
 const columns = defineTableColumns<OutboundProxyAccount>([
   { key: 'identity', label: '账号', kind: 'identity', size: '3xl' },
@@ -69,17 +72,25 @@ async function confirmRemove() {
 
 watch([open, () => props.proxy?.id], () => {
   pendingRemove.value = null
+  if (!open.value)
+    showAssign.value = false
 })
 </script>
 
 <template>
   <BaseModal v-model="open" title="关联账号" :description="description" size="lg" :dismissible="!removing">
     <div class="flex min-h-0 flex-col">
-      <BaseInput v-model="search" class="mb-4 shrink-0 sm:w-80" :disabled="removing" aria-label="搜索关联账号" placeholder="搜索账号名称或邮箱...">
-        <template #prefix>
-          <Search class="size-4.5 text-cp-text-tertiary" />
-        </template>
-      </BaseInput>
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <BaseInput v-model="search" class="min-w-40 flex-1 sm:max-w-80" :disabled="removing" aria-label="搜索关联账号" placeholder="账号名称或邮箱">
+          <template #prefix>
+            <Search class="size-4 text-cp-text-tertiary" aria-hidden="true" />
+          </template>
+        </BaseInput>
+        <BaseButton :disabled="!proxy?.lastTest?.success || removing" @click="showAssign = true">
+          <Plus class="size-4" aria-hidden="true" />
+          分配账号
+        </BaseButton>
+      </div>
       <BaseTable :key="proxy?.id" class="min-h-0 shrink-0 [--cp-table-row-height:64px]" :style="{ height: tableHeight }" :columns="columns" :rows="rows" :loading="loading" :empty-text="emptyText">
         <template #identity="{ row }">
           <div class="flex min-w-0 items-center gap-3">
@@ -123,6 +134,7 @@ watch([open, () => props.proxy?.id], () => {
       <BaseTablePagination :pagination="pagination" :loading="loading || removing" @page-change="setPage" @page-size-change="setPageSize" />
     </div>
   </BaseModal>
+  <ProxyAssignAccountsModal v-model="showAssign" :proxy="proxy" @assigned="setPage(1); emit('changed')" />
   <BaseConfirmModal v-model="showRemove" title="移除关联账号" confirm-text="移除" :loading="removing" @confirm="confirmRemove">
     <p class="m-0 break-words">
       将“{{ pendingRemove?.name }}”从“{{ proxy?.name }}”移除后，该账号将改为直连。

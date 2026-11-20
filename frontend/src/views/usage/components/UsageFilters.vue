@@ -6,6 +6,7 @@ import BaseIconButton from '@/components/base/BaseIconButton.vue'
 defineProps<{
   refreshing: boolean
   loading: boolean
+  label?: string
 }>()
 
 const emit = defineEmits<{
@@ -19,7 +20,7 @@ const emit = defineEmits<{
       <BaseIconButton
         variant="ghost"
         size="md"
-        label="刷新使用记录"
+        :label="label || '刷新使用记录'"
         :loading="refreshing"
         :disabled="loading || refreshing"
         @click="emit('refresh')"
