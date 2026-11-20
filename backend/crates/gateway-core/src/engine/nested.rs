@@ -315,8 +315,8 @@ pub(crate) struct ExecutionLifetime {
     cancellation: CancellationToken,
     permit: Mutex<Option<Arc<ActiveChild>>>,
     parent: Mutex<std::sync::Weak<Self>>,
-    // The current attempt owns the strong reference alongside its Provider lease.
-    // This projection cannot retain a completed attempt or a parent execution.
+    // The current attempt owns the strong reference. Ancestor exclusion
+    // continues until the attempt is dropped, even after its stream lease ends.
     account: Mutex<AccountProjection>,
 }
 #[derive(Default)]

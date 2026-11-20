@@ -499,7 +499,9 @@ async fn native_grandchildren_exclude_all_live_ancestors_and_refresh_after_late_
             .collect::<Vec<_>>(),
         ["acct_allowed", "acct_alternative"]
     );
-    assert_eq!(fixture.core.leases.lock().unwrap().len(), 2);
+    // Upstream streams have ended. The live executions still exclude the
+    // ancestor accounts while their responses await downstream commit.
+    assert!(fixture.core.leases.lock().unwrap().is_empty());
     for account in [Some("acct_allowed"), Some("acct_alternative"), None] {
         let request = MiddlewareRequest::new(
             "openai",
