@@ -103,7 +103,7 @@ onMounted(() => void load())
           <BaseSelect v-model="filters.clientApiKeyId" class="w-full" aria-label="按密钥筛选" :disabled="pending.keys" :options="[{ label: '全部密钥', value: '' }, ...keys]" />
         </FormItem>
         <FormItem label="模型">
-          <BaseInput v-model="filters.model" class="w-full" aria-label="筛选模型" placeholder="模型名称（精确匹配）" />
+          <BaseInput v-model="filters.model" class="w-full" :class="personal ? 'sm:max-w-75' : undefined" aria-label="筛选模型" placeholder="模型名称（精确匹配）" :maxlength="128" clearable />
         </FormItem>
         <FormItem label="接入类型">
           <BaseSelect v-model="filters.clientTransport" class="w-full" aria-label="筛选接入类型" :options="transports" />

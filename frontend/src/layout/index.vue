@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
-import { nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 
@@ -11,6 +11,7 @@ import { useUiStore } from '@/stores/modules/ui'
 
 import AppAboutModal from './components/AppAboutModal.vue'
 import AppSidebar from './components/AppSidebar.vue'
+import FloatingSidebarToggle from './components/FloatingSidebarToggle.vue'
 import SystemUpdateModal from './components/SystemUpdateModal/index.vue'
 
 const uiStore = useUiStore()
@@ -32,25 +33,34 @@ async function openMobileSidebar() {
   sidebarTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
   mobileSidebarOpen.value = true
   await nextTick()
-  mobileSidebar.value?.querySelector<HTMLButtonElement>('button')?.focus()
+  const sidebar = mobileSidebar.value
+  const initialFocus = sidebar?.querySelector<HTMLElement>('[aria-current="page"]')
+    ?? sidebar?.querySelector<HTMLElement>('[data-sidebar-close]')
+  initialFocus?.focus()
 }
 
-async function closeMobileSidebar() {
+function closeMobileSidebar() {
   mobileSidebarOpen.value = false
-  await nextTick()
-  if (sidebarTrigger?.isConnected)
-    sidebarTrigger.focus()
 }
-provide('openMobileSidebar', openMobileSidebar)
+
+function restoreSidebarFocus() {
+  if (
+    !document.activeElement?.closest('[aria-modal="true"]')
+    && sidebarTrigger?.isConnected && sidebarTrigger.getClientRects().length
+  ) {
+    sidebarTrigger.focus()
+  }
+  sidebarTrigger = null
+}
 watch(desktop, value => value && closeMobileSidebar())
 onKeyStroke('Escape', (event) => {
-  if (!event.defaultPrevented && mobileSidebarOpen.value)
+  if (!event.defaultPrevented && mobileSidebarOpen.value && mobileSidebar.value?.contains(document.activeElement))
     closeMobileSidebar()
 })
 onKeyStroke('Tab', (event) => {
-  if (!mobileSidebarOpen.value || event.defaultPrevented)
+  if (!mobileSidebarOpen.value || event.defaultPrevented || !mobileSidebar.value?.contains(document.activeElement))
     return
-  const controls = Array.from(mobileSidebar.value?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]') ?? [])
+  const controls = Array.from(mobileSidebar.value?.querySelectorAll<HTMLElement>('button:not(:disabled):not([tabindex="-1"]), a[href]:not([tabindex="-1"]), input:not(:disabled):not([tabindex="-1"]), [tabindex="0"]') ?? [])
     .filter(element => element.getClientRects().length > 0)
   const first = controls[0]
   const last = controls.at(-1)
@@ -103,14 +113,15 @@ watch(
 </script>
 
 <template>
-  <div class="relative flex h-dvh overflow-hidden bg-cp-bg-layout">
+  <div class="relative flex h-dvh overflow-hidden bg-cp-bg-layout" :inert="mobileSidebarOpen">
     <AppSidebar
       :collapsed="sidebarCollapsed"
       @toggle="toggleSidebar"
       @open-about="aboutOpen = true"
       @open-system-update="openSystemUpdate"
     />
-    <main :inert="mobileSidebarOpen" class="relative isolate h-dvh min-w-0 flex-1 overflow-hidden">
+    <FloatingSidebarToggle v-show="!mobileSidebarOpen" @open="openMobileSidebar" />
+    <main class="relative isolate h-dvh min-w-0 flex-1 overflow-hidden">
       <BaseScrollbar ref="pageScrollbarRef" wrap-class="bg-cp-bg-layout">
         <div class="flex min-h-full min-w-0 flex-col p-4 min-[961px]:p-6">
           <RouterView v-slot="{ Component }">
@@ -121,12 +132,13 @@ watch(
     </main>
 
     <Teleport to="body">
-      <Transition name="mobile-sidebar">
+      <Transition name="mobile-sidebar" @after-leave="restoreSidebarFocus">
         <div v-if="mobileSidebarOpen" ref="mobileSidebar" class="fixed inset-0 z-50 min-[961px]:hidden" role="dialog" aria-modal="true" aria-label="导航菜单" tabindex="-1">
           <button
             type="button"
             class="absolute inset-0 border-0 bg-black/32 backdrop-blur-[1px] cursor-default"
             aria-label="关闭侧边栏"
+            tabindex="-1"
             @click="closeMobileSidebar"
           />
           <div class="mobile-sidebar-panel absolute inset-y-0 left-0 flex">
@@ -134,8 +146,8 @@ watch(
               mobile
               @close="closeMobileSidebar"
               @navigate="closeMobileSidebar"
-              @open-about="aboutOpen = true"
-              @open-system-update="openSystemUpdate"
+              @open-about="closeMobileSidebar(); aboutOpen = true"
+              @open-system-update="closeMobileSidebar(); openSystemUpdate()"
             />
           </div>
         </div>

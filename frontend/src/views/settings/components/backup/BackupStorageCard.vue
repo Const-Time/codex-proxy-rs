@@ -71,7 +71,7 @@ function toggleSecretVisible(): void {
         <BaseButton
           variant="secondary"
           :loading="testing"
-          :disabled="loading"
+          :disabled="loading || saving"
           :title="verified ? '已通过连接测试' : '尚未通过连接测试'"
           @click="emit('test')"
         >
@@ -81,7 +81,7 @@ function toggleSecretVisible(): void {
           </template>
           {{ testing ? '测试中...' : '测试连接' }}
         </BaseButton>
-        <BaseButton variant="primary" :loading="saving" :disabled="loading" @click="emit('save')">
+        <BaseButton variant="primary" :loading="saving" :disabled="loading || testing" @click="emit('save')">
           <template #icon>
             <Save class="size-4" />
           </template>
@@ -95,6 +95,7 @@ function toggleSecretVisible(): void {
         <BaseFormItem label="端点地址" description="S3 兼容服务的 HTTPS 地址">
           <BaseInput
             v-model="storage.endpoint"
+            :disabled="loading || saving"
             aria-label="端点地址"
             placeholder="https://<account_id>.r2.cloudflarestorage.com"
           >
@@ -105,20 +106,21 @@ function toggleSecretVisible(): void {
         </BaseFormItem>
 
         <BaseFormItem label="区域" description="R2 使用固定值 auto；其它服务按提供方填写">
-          <BaseInput v-model="storage.region" aria-label="区域" />
+          <BaseInput v-model="storage.region" :disabled="loading || saving" aria-label="区域" />
         </BaseFormItem>
 
         <BaseFormItem label="存储桶" description="私有存储桶名称">
-          <BaseInput v-model="storage.bucket" aria-label="存储桶" />
+          <BaseInput v-model="storage.bucket" :disabled="loading || saving" aria-label="存储桶" />
         </BaseFormItem>
 
         <BaseFormItem label="Key 前缀" description="对象前缀，历史归档已保存完整旧前缀">
-          <BaseInput v-model="storage.prefix" aria-label="Key 前缀" />
+          <BaseInput v-model="storage.prefix" :disabled="loading || saving" aria-label="Key 前缀" />
         </BaseFormItem>
 
         <BaseFormItem label="Access Key ID" description="对象存储专用凭据">
           <BaseInput
             v-model="storage.accessKeyId"
+            :disabled="loading || saving"
             aria-label="Access Key ID"
             :type="accessKeyInputType"
             autocomplete="off"
@@ -141,6 +143,7 @@ function toggleSecretVisible(): void {
         <BaseFormItem label="Secret Access Key" description="对象存储专用 Secret">
           <BaseInput
             v-model="storage.secretAccessKey"
+            :disabled="loading || saving"
             aria-label="Secret Access Key"
             :type="secretInputType"
             autocomplete="new-password"
@@ -161,7 +164,7 @@ function toggleSecretVisible(): void {
         </BaseFormItem>
 
         <div class="col-span-2 flex items-center gap-4 @max-[640px]:col-span-1">
-          <BaseCheckbox v-model="storage.forcePathStyle" label="强制路径风格" show-label />
+          <BaseCheckbox v-model="storage.forcePathStyle" :disabled="loading || saving" label="强制路径风格" show-label />
         </div>
       </BaseForm>
     </div>

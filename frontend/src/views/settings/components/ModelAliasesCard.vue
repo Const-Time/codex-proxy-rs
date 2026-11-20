@@ -9,10 +9,10 @@ import BaseInput from '@/components/base/BaseInput.vue'
 withDefaults(defineProps<{
   mappings: Array<{ requestedModel: string, upstreamModel: string }>
   loading?: boolean
-  error?: string
+  disabled?: boolean
 }>(), {
   loading: false,
-  error: '',
+  disabled: false,
 })
 
 const emit = defineEmits<{
@@ -29,13 +29,12 @@ const emit = defineEmits<{
   >
     <div class="grid gap-4">
       <div class="flex flex-wrap items-center gap-3">
-        <BaseButton variant="secondary" :disabled="loading" @click="emit('addMapping')">
+        <BaseButton variant="secondary" :disabled="loading || disabled" @click="emit('addMapping')">
           <template #icon>
             <Plus class="size-4" />
           </template>
           添加映射
         </BaseButton>
-        <span v-if="error" class="text-xs font-emphasis text-cp-error-text">{{ error }}</span>
       </div>
 
       <div class="flex items-center gap-2 text-cp-sm font-emphasis text-cp-text-secondary">
@@ -63,6 +62,7 @@ const emit = defineEmits<{
         >
           <BaseInput
             :model-value="row.requestedModel"
+            :disabled="disabled"
             placeholder="请求模型"
             aria-label="请求模型"
             @update:model-value="emit('updateMapping', index, 'requestedModel', $event)"
@@ -70,6 +70,7 @@ const emit = defineEmits<{
           <span class="hidden text-cp-text-quaternary sm:block">→</span>
           <BaseInput
             :model-value="row.upstreamModel"
+            :disabled="disabled"
             class="col-start-1 row-start-2 sm:col-auto sm:row-auto"
             placeholder="上游模型"
             aria-label="上游模型名称"
@@ -79,6 +80,7 @@ const emit = defineEmits<{
             variant="ghost"
             class="col-start-2 row-span-2 row-start-1 sm:col-auto sm:row-auto sm:row-span-1"
             label="删除映射"
+            :disabled="disabled"
             @click="emit('removeMapping', index)"
           >
             <Trash2 class="size-4 text-cp-error" />

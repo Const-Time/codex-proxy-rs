@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 
 import { useBackupRecords } from '../../composables/useBackupRecords'
 import { useBackupSettings } from '../../composables/useBackupSettings'
@@ -18,6 +19,8 @@ const {
   testing,
   savingSchedule,
   loaded,
+  error: settingsError,
+  dirty,
   verified,
   storage,
   schedule,
@@ -52,6 +55,8 @@ const {
   stopPolling,
 } = useBackupRecords()
 
+defineExpose({ dirty })
+
 const showR2Guide = ref(false)
 
 const storageConfigured = computed(
@@ -74,8 +79,10 @@ watch(
   async (isActive) => {
     if (isActive) {
       await loadSettings()
-      await loadRecords()
-      startPolling()
+      if (props.active)
+        await loadRecords()
+      if (props.active)
+        startPolling()
     }
     else {
       stopPolling()
@@ -87,9 +94,15 @@ watch(
 
 <template>
   <div class="grid w-full gap-5">
+    <div v-if="settingsError" class="flex flex-wrap items-center gap-2 text-cp-sm text-cp-error" role="alert">
+      {{ settingsError }}
+      <BaseButton size="sm" variant="secondary" @click="loadSettings">
+        重新加载
+      </BaseButton>
+    </div>
     <BackupStorageCard
       v-model:storage="storage"
-      :loading="settingsLoading"
+      :loading="settingsLoading || !loaded || savingSchedule"
       :saving="savingStorage"
       :testing="testing"
       :verified="verified"
@@ -100,7 +113,7 @@ watch(
 
     <BackupScheduleCard
       v-model:schedule="schedule"
-      :loading="settingsLoading"
+      :loading="settingsLoading || !loaded || savingStorage || testing"
       :saving="savingSchedule"
       :storage-ready="storageReady"
       @save="saveSchedule()"

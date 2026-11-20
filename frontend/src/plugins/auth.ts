@@ -11,8 +11,9 @@ export const authPlugin: Plugin = {
 
     setUnauthorizedHandler(async () => {
       authStore.invalidateSession()
-      if (router.currentRoute.value.path !== '/login')
-        await router.replace({ name: 'login' })
+      const current = router.currentRoute.value
+      if (current.path !== '/login')
+        await router.replace({ name: 'login', query: { redirect: current.fullPath } })
     })
   },
 }

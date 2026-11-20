@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
 import { computed, shallowRef } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from '@/stores/modules/auth'
 import { useThemeStore } from '@/stores/modules/theme'
@@ -11,6 +11,7 @@ import LoginBackground from './components/LoginBackground.vue'
 import LoginPanel from './components/LoginPanel.vue'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const { effectiveTheme } = storeToRefs(themeStore)
@@ -45,7 +46,11 @@ async function handleSubmit(): Promise<void> {
   }
 
   try {
-    await router.push('/')
+    const destination = route.query.redirect
+    const target = typeof destination === 'string' && destination.startsWith('/') && !destination.startsWith('//') && !destination.includes('\\')
+      ? router.resolve(destination)
+      : undefined
+    await router.replace(target?.matched.length && target.name !== 'login' ? target.fullPath : '/')
   }
   finally {
     // 成功时登录页会卸载；导航失败并停留当前页时才恢复按钮。
@@ -61,7 +66,7 @@ async function handleSubmit(): Promise<void> {
     <LoginBackground />
 
     <section
-      class="grid min-h-dvh items-center justify-items-center px-5 py-[clamp(24px,5dvh,64px)] min-[980px]:justify-items-end min-[980px]:pr-[clamp(48px,17.3vw,332px)] max-[560px]:p-4.5"
+      class="grid min-h-dvh items-center justify-items-center px-5 py-16 min-[980px]:justify-items-end min-[980px]:py-[clamp(24px,5dvh,64px)] min-[980px]:pr-[clamp(48px,17.3vw,332px)] max-[560px]:px-4.5"
       aria-label="Codex Proxy RS 登录"
     >
       <LoginPanel

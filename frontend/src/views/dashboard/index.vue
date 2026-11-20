@@ -11,6 +11,7 @@ const {
   trendSummary,
   trendLoading,
   trendError,
+  summaryError,
   healthTimeline,
   accountUsage,
   wireProfiles,
@@ -35,6 +36,7 @@ const {
     :trend-summary="trendSummary"
     :trend-loading="trendLoading"
     :trend-error="trendError"
+    :summary-error="summaryError"
     :health-timeline="healthTimeline"
     :account-usage="accountUsage"
     :wire-profiles="wireProfiles"

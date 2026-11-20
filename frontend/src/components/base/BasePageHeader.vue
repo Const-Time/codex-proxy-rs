@@ -1,12 +1,8 @@
 <script setup lang="ts">
-import { Menu } from '@lucide/vue'
-import { inject } from 'vue'
-
 defineProps<{
   title: string
   description?: string
 }>()
-const openMobileSidebar = inject<() => void>('openMobileSidebar')
 </script>
 
 <template>
@@ -15,22 +11,13 @@ const openMobileSidebar = inject<() => void>('openMobileSidebar')
   >
     <div class="min-w-0 flex-1 basis-64">
       <div class="flex min-w-0 items-center gap-3">
-        <button
-          v-if="openMobileSidebar"
-          type="button"
-          class="inline-flex size-11 shrink-0 items-center justify-center rounded-cp border-0 bg-cp-fill-secondary text-cp-text min-[961px]:hidden"
-          aria-label="打开侧边栏"
-          @click="openMobileSidebar"
-        >
-          <Menu class="size-5" />
-        </button>
-        <h1 class="m-0 text-[34px] leading-[1.15] font-extrabold text-cp-text">
+        <h1 class="m-0 text-[30px] leading-tight font-extrabold text-cp-text">
           {{ title }}
         </h1>
       </div>
       <p
         v-if="description || $slots.description"
-        class="mt-2.5 mb-0 flex items-center gap-2 text-cp-xl leading-[1.15] font-semibold text-cp-text-secondary"
+        class="mt-2 mb-0 flex items-center gap-2 text-cp-sm leading-relaxed font-medium text-cp-text-secondary"
       >
         <slot name="description">
           {{ description }}

@@ -11,6 +11,7 @@ export function useSettingsForm() {
   const loading = shallowRef(true)
   const saving = shallowRef(false)
   const error = shallowRef('')
+  const saved = shallowRef<Awaited<ReturnType<typeof getSettings>>>()
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
   const form = reactive({
     maxRetryAfterSeconds: 240 as number | null,
@@ -42,6 +43,14 @@ export function useSettingsForm() {
       },
     })
   }
+
+  const retentionModel = (key: 'usageRetentionDays' | 'opsEventRetentionDays' | 'auditRetentionDays') => computed({
+    get: () => Number.isNaN(form[key]) ? '' : String(form[key]),
+    set: (value: string) => { form[key] = value.trim() ? Number(value) : Number.NaN },
+  })
+  const usageRetentionDaysValue = retentionModel('usageRetentionDays')
+  const opsEventRetentionDaysValue = retentionModel('opsEventRetentionDays')
+  const auditRetentionDaysValue = retentionModel('auditRetentionDays')
 
   const maxRetryAfterSecondsValue = numericModel('maxRetryAfterSeconds')
   const resetCreditLeadMinutesValue = numericModel('resetCreditLeadMinutes')
@@ -79,11 +88,28 @@ export function useSettingsForm() {
     }))
   }
 
+  const currentDraft = () => JSON.stringify([form, mappings.value])
+  const savedDraft = shallowRef('')
+  const dirty = computed(() => Boolean(saved.value && currentDraft() !== savedDraft.value))
+
+  function rememberSettings(data: Awaited<ReturnType<typeof getSettings>>) {
+    applySettings(data)
+    saved.value = data
+    savedDraft.value = currentDraft()
+  }
+
+  function resetSettings() {
+    if (saved.value)
+      rememberSettings(saved.value)
+  }
+
   async function loadSettings() {
+    if (saved.value)
+      return
     loading.value = true
     error.value = ''
     try {
-      applySettings(await getSettings())
+      rememberSettings(await getSettings())
     }
     catch (cause: unknown) {
       error.value = errorMessage(cause, '设置加载失败')
@@ -127,7 +153,7 @@ export function useSettingsForm() {
   }
 
   async function saveSettings() {
-    if (saving.value || loading.value)
+    if (saving.value || loading.value || !dirty.value)
       return
     const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy } = form
     if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy) {
@@ -151,8 +177,14 @@ export function useSettingsForm() {
       toast.warning('请修正客户端最低版本格式')
       return
     }
+    if (!Number.isInteger(form.usageRetentionDays) || form.usageRetentionDays < 31 || form.usageRetentionDays > 4294967295
+      || [form.opsEventRetentionDays, form.auditRetentionDays].some(value => !Number.isInteger(value) || value < 1 || value > 4294967295)) {
+      toast.warning('请求记录至少保留 31 天，运维事件和操作日志至少保留 1 天')
+      return
+    }
     try {
       saving.value = true
+      error.value = ''
       const result = await updateSettings({
         maxRetryAfterSeconds,
         resetCreditLeadMinutes,
@@ -170,13 +202,12 @@ export function useSettingsForm() {
         auditRetentionDays: form.auditRetentionDays,
         subscriptionAutoResetEnabled: form.subscriptionAutoResetEnabled,
       })
-      applySettings(result)
+      rememberSettings(result)
       toast.success('设置已保存')
     }
     catch (cause: unknown) {
       error.value = errorMessage(cause, '保存失败')
       toast.error(error.value)
-      await loadSettings()
     }
     finally {
       saving.value = false
@@ -189,6 +220,11 @@ export function useSettingsForm() {
     error,
     form,
     mappings,
+    dirty,
+    resetSettings,
+    usageRetentionDaysValue,
+    opsEventRetentionDaysValue,
+    auditRetentionDaysValue,
     addMapping,
     updateMapping,
     removeMapping,

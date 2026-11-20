@@ -34,12 +34,12 @@ router.beforeEach(async (to) => {
     const isAuth = await authStore.checkAuth()
     if (!isAuth) {
       // 未认证，跳转到登录页
-      return '/login'
+      return { name: 'login', query: { redirect: to.fullPath } }
     }
   }
 
   if (!authStore.isAuthenticated) {
-    return '/login'
+    return { name: 'login', query: { redirect: to.fullPath } }
   }
   if (!authStore.isAdmin && !['/api-keys', '/my-usage', '/profile', '/theme'].includes(to.path))
     return '/api-keys'

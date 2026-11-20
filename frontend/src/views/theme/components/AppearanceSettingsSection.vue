@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { Check, RotateCcw, Save, Undo2 } from '@lucide/vue'
+import { Check, Eye, Pencil, RotateCcw, Save, Search, Undo2 } from '@lucide/vue'
+import { useMediaQuery } from '@vueuse/core'
+import { shallowRef } from 'vue'
 
 import BaseButton from '@/components/base/BaseButton.vue'
+import BaseInput from '@/components/base/BaseInput.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
@@ -37,6 +40,10 @@ const {
   restoreDefaults,
   save,
 } = useThemeEditor()
+
+const desktopPreview = useMediaQuery('(min-width: 768px)')
+const mobilePreview = shallowRef(false)
+const query = shallowRef('')
 
 const scopeOptions = [
   { label: '全局', value: 'global' },
@@ -74,13 +81,13 @@ function saveTheme(event: MouseEvent) {
 
       <template #actions>
         <div class="flex flex-wrap items-center justify-end gap-2">
-          <BaseSegmented
-            :model-value="scope"
-            label="主题编辑层级"
-            :options="scopeOptions"
-            size="sm"
-            @update:model-value="switchScope"
-          />
+          <BaseButton v-if="!desktopPreview" size="sm" :aria-pressed="mobilePreview" @click="mobilePreview = !mobilePreview">
+            <template #icon>
+              <Pencil v-if="mobilePreview" class="size-3.5" />
+              <Eye v-else class="size-3.5" />
+            </template>
+            {{ mobilePreview ? '编辑主题' : '查看预览' }}
+          </BaseButton>
           <BaseButton size="sm" variant="ghost" :disabled="!dirty" @click="resetDraft">
             <template #icon>
               <Undo2 class="size-3.5" />
@@ -109,12 +116,21 @@ function saveTheme(event: MouseEvent) {
       aria-label="主题编辑器"
     >
       <div
-        class="theme-workbench-body grid min-h-180 gap-3 xl:min-h-0 xl:flex-1 xl:overflow-hidden xl:grid-cols-[370px_minmax(0,1fr)]"
+        class="theme-workbench-body grid gap-3 md:min-h-180 xl:min-h-0 xl:flex-1 xl:overflow-hidden xl:grid-cols-[370px_minmax(0,1fr)]"
       >
         <aside
-          class="grid h-full min-h-0 grid-rows-[minmax(0,1fr)] gap-3 overflow-hidden rounded-cp-lg bg-cp-bg-container pt-3 pr-0 pb-3 pl-3 shadow-cp-secondary"
+          v-show="desktopPreview || !mobilePreview"
+          class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 overflow-hidden rounded-cp-lg bg-cp-bg-container px-3 py-3 shadow-cp-secondary"
           aria-label="主题 Token 编辑面板"
         >
+          <div class="grid gap-3">
+            <BaseSegmented :model-value="scope" label="主题编辑层级" :options="scopeOptions" @update:model-value="switchScope" />
+            <BaseInput v-model="query" aria-label="搜索主题变量" clearable placeholder="搜索变量或用途">
+              <template #prefix>
+                <Search class="size-4" aria-hidden="true" />
+              </template>
+            </BaseInput>
+          </div>
           <BaseScrollbar class="h-full min-h-0">
             <div class="pr-4">
               <ThemeGlobalTokenPanel
@@ -122,7 +138,7 @@ function saveTheme(event: MouseEvent) {
                 v-model:category="globalCategory"
                 :draft="draft"
                 :resolved="resolvedPreview"
-                query=""
+                :query="query"
                 @mode="setMode"
                 @preset="selectPreset"
                 @primary="setPrimaryColor"
@@ -135,7 +151,7 @@ function saveTheme(event: MouseEvent) {
                 v-model="component"
                 :draft="draft"
                 :resolved="resolvedPreview"
-                query=""
+                :query="query"
                 @change="setTokenOverride"
                 @reset="resetTokenOverride"
                 @component-number="setComponentNumber"
@@ -145,7 +161,7 @@ function saveTheme(event: MouseEvent) {
           </BaseScrollbar>
         </aside>
 
-        <div class="hidden min-h-0 min-[768px]:block">
+        <div v-if="desktopPreview || mobilePreview" class="min-h-120 xl:min-h-0">
           <ThemeEditorPreview v-model="preview" class="h-full" :theme="previewTheme" :style="previewStyle" />
         </div>
       </div>

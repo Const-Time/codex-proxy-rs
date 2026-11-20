@@ -3,16 +3,18 @@ import type { CSSProperties } from 'vue'
 import type { ThemeColorTokens } from '@/composables/useThemeColor'
 import type { ThemeName } from '@/theme'
 
-import { computed, onMounted, shallowRef, useTemplateRef } from 'vue'
+import { computed, onMounted, shallowRef, useTemplateRef, watch } from 'vue'
 
 import { provideThemeColorTokens } from '@/composables/useThemeColor'
 
 const props = defineProps<{
   theme: ThemeName
   style: CSSProperties
+  stylesRevision: number
 }>()
 
 const host = useTemplateRef<HTMLElement>('host')
+let previewStyles: HTMLStyleElement | undefined
 const contentRoot = shallowRef<HTMLElement | null>(null)
 const themeTokens = computed<ThemeColorTokens>(() => props.style as ThemeColorTokens)
 
@@ -37,6 +39,7 @@ onMounted(() => {
   const applicationStyles = document.createElement('style')
   const previewRoot = document.createElement('div')
 
+  previewStyles = applicationStyles
   applicationStyles.dataset.themePreviewStyles = ''
   applicationStyles.textContent = serializeDocumentStyles()
   previewRoot.dataset.themePreviewRoot = ''
@@ -44,6 +47,10 @@ onMounted(() => {
   shadowRoot.append(applicationStyles, previewRoot)
   contentRoot.value = previewRoot
 })
+watch(() => props.stylesRevision, () => {
+  if (previewStyles)
+    previewStyles.textContent = serializeDocumentStyles()
+}, { flush: 'post' })
 </script>
 
 <template>

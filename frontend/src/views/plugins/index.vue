@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginObserverBinding, PluginOnlineRelease, PluginRetryPolicyBinding, PluginUpstreamAdapterBinding } from '@/api/modules/plugins'
+import { PackageOpen, Plus, RefreshCw, Upload } from '@lucide/vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
 import { checkPluginUpdate, getPluginArtifacts, getPlugins, installPluginUpdate, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
@@ -7,16 +8,41 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
+import BaseEmpty from '@/components/base/BaseEmpty.vue'
+import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
+import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
+import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import RowActionMenu from '@/components/RowActionMenu.vue'
 import PluginFrame from './PluginFrame.vue'
 
 const instances = ref<PluginInstance[]>([])
 const artifacts = ref<PluginArtifact[]>([])
 const busy = ref(false)
 const failure = ref('')
+const view = ref('installed')
+const search = ref('')
+const tabs = computed(() => [
+  { label: `已安装 (${instances.value.length})`, value: 'installed' },
+  { label: `已上传制品 (${artifacts.value.length})`, value: 'artifacts' },
+])
+const query = computed(() => search.value.trim().toLowerCase())
+const filteredInstances = computed(() => instances.value.filter(item =>
+  [item.name, item.artifact.pluginId, item.artifact.version].some(value => value.toLowerCase().includes(query.value)),
+))
+const filteredArtifacts = computed(() => artifacts.value.filter(item =>
+  [item.displayName, item.pluginId, item.version, item.sha256].some(value => value.toLowerCase().includes(query.value)),
+))
+const statusLabels: Record<string, string> = {
+  ready: '运行中',
+  disabled: '已停用',
+  failed: '启动失败',
+}
+const fileInput = ref<HTMLInputElement>()
 const notices = ref<Record<string, string>>({})
 const onlineUpdates = ref<Record<string, { revision: number, release: PluginOnlineRelease }>>({})
 const confirmUpdate = ref(false)
@@ -49,6 +75,12 @@ async function applyOnline() {
 }
 const editing = ref<PluginInstance>()
 const editOpen = ref(false)
+const editSection = ref('configuration')
+const editSections = [
+  { label: '基本配置', value: 'configuration' },
+  { label: '密钥', value: 'secrets' },
+  { label: '能力绑定', value: 'bindings' },
+]
 const name = ref('')
 const inferenceKey = ref('')
 const keySearch = ref('')
@@ -192,6 +224,20 @@ const selected = ref<{
   plugin: PluginInstance
   page: PluginManagementPage
 }>()
+const managementOpen = computed({
+  get: () => !!selected.value,
+  set(open) {
+    if (!open)
+      selected.value = undefined
+  },
+})
+watch(editOpen, (open) => {
+  if (!open) {
+    secrets.value = {}
+    removeSecrets.value = {}
+    trust.value = false
+  }
+})
 watch(() => [selected.value?.plugin.id, selected.value?.plugin.revision], () => {
   inferenceKey.value = ''
 }, { flush: 'sync' })
@@ -226,18 +272,19 @@ async function perform(work: () => Promise<void>) {
   }
   catch (error) {
     failure.value = error instanceof Error ? error.message : '插件操作失败，请刷新核实状态'
-    selected.value = undefined
   }
   finally {
     busy.value = false
   }
 }
-function edit(item?: PluginInstance) {
+function edit(item?: PluginInstance, pkg?: PluginArtifact) {
+  failure.value = ''
+  editSection.value = 'configuration'
   selected.value = undefined
   editing.value = item
   editOpen.value = true
-  name.value = item?.name ?? ''
-  digest.value = item?.artifact.sha256 ?? artifacts.value[0]?.sha256 ?? ''
+  name.value = item?.name ?? pkg?.displayName ?? ''
+  digest.value = pkg?.sha256 ?? item?.artifact.sha256 ?? artifacts.value[0]?.sha256 ?? ''
   configuration.value = JSON.stringify(item?.configuration ?? {}, null, 2)
   routerEnabled.value = !!item?.modelRouter
   routerOrder.value = String(item?.modelRouter?.order ?? 0)
@@ -297,12 +344,10 @@ async function upload(event: Event) {
     }
     else if (matches.length > 1) {
       editOpen.value = false
-      throw new Error('新版已上传。存在多个同名插件实例，请在要升级的实例中点击“配置 / 切换版本”，配置和历史会保留。')
+      throw new Error('新版已上传。存在多个同名插件实例，请在要升级的实例中点击“配置”，配置和历史会保留。')
     }
     else {
-      edit()
-      digest.value = result.sha256
-      name.value = result.displayName
+      edit(undefined, result)
     }
   })
   input.value = ''
@@ -332,252 +377,303 @@ onMounted(() => perform(async () => { }))
 
 <template>
   <div class="space-y-5">
-    <BasePageHeader title="插件" description="安装可信插件，管理配置、运行状态和版本。" />
-    <div class="flex flex-wrap items-center gap-3">
-      <label for="plugin-upload" class="cursor-pointer rounded-lg border border-cp-border p-3">
-        上传插件包（.tar.gz）
-        <input id="plugin-upload" type="file" accept=".gz,.tgz" :disabled="busy" class="sr-only" @change="upload">
-      </label>
-      <BaseButton :disabled="busy || !artifacts.length" @click="edit()">
-        创建实例
-      </BaseButton>
-      <BaseButton variant="secondary" :disabled="busy" @click="perform(async () => {})">
-        刷新
-      </BaseButton>
+    <BasePageHeader title="插件" description="安装和管理网关插件。">
+      <template #actions>
+        <input ref="fileInput" type="file" aria-label="上传插件包" accept=".gz,.tgz" hidden :disabled="busy" @change="upload">
+        <BaseButton variant="secondary" :disabled="busy" @click="fileInput?.click()">
+          <template #icon>
+            <Upload class="size-4" />
+          </template>
+          上传插件包
+        </BaseButton>
+        <BaseButton :disabled="busy || !artifacts.length" @click="edit()">
+          <template #icon>
+            <Plus class="size-4" />
+          </template>
+          创建实例
+        </BaseButton>
+      </template>
+    </BasePageHeader>
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <BaseSegmented v-model="view" :options="tabs" label="插件列表" />
+      <div class="flex max-w-full items-center gap-2">
+        <BaseInput v-model="search" clearable aria-label="搜索插件" placeholder="搜索名称、标识或版本" />
+        <BaseIconButton label="刷新插件列表" :loading="busy" @click="perform(async () => {})">
+          <RefreshCw class="size-4" />
+        </BaseIconButton>
+      </div>
     </div>
-    <p v-if="failure" role="alert" class="text-red-600">
+    <p v-if="failure && !editOpen && !managementOpen" role="alert" class="text-cp-error">
       {{ failure }}
     </p>
-    <BaseCard v-if="editOpen" class="space-y-4 p-5">
-      <h2 class="text-lg font-semibold">
-        {{ editing ? '配置与版本切换' : '安装插件' }}
-      </h2>
-      <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-      <label for="plugin-name" class="block">实例名称<BaseInput id="plugin-name" v-model="name" placeholder="实例名称" :disabled="busy" /></label>
-      <BaseSelect v-model="digest" aria-label="插件制品版本" :options="options" :disabled="busy" placeholder="选择已上传制品" />
-      <p v-if="artifact?.versionWarning" class="text-amber-600">
-        {{ artifact.versionWarning }}
-      </p>
-      <p v-if="artifact?.unsupportedCapabilities.length" class="text-amber-600">
-        尚未支持：{{ artifact.unsupportedCapabilities.join('、') }}。可以保存配置，暂不能启用。
-      </p>
-      <!-- The shared field component forwards id to its native control. -->
-      <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-      <label for="plugin-configuration" class="block">配置（JSON）<BaseTextarea id="plugin-configuration" v-model="configuration" :rows="8" :disabled="busy" /></label>
-      <details><summary>查看配置要求</summary><pre class="overflow-auto text-sm">{{ JSON.stringify(artifact?.manifest.configurationSchema, null, 2) }}</pre></details>
-      <div v-for="field in secretFields" :key="field" class="space-y-2">
-        <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-        <label :for="`plugin-secret-${field}`" class="block">{{ field }}<BaseInput :id="`plugin-secret-${field}`" v-model="secrets[field]" type="password" autocomplete="new-password" :placeholder="editing?.configuredSecrets.includes(field) ? '已配置，留空保留' : '填写敏感配置'" :disabled="busy || !artifact?.manifest.secretFields.includes(field)" /></label>
-        <BaseCheckbox v-if="editing?.configuredSecrets.includes(field)" v-model="removeSecrets[field]" show-label :label="`清除 ${field}`" :disabled="busy" />
-      </div>
-      <details class="space-y-3">
-        <summary>模型路由</summary>
-        <BaseCheckbox v-model="routerEnabled" show-label label="使用此插件选择模型和 Provider" :disabled="busy" />
-        <template v-if="routerEnabled">
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-router-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-router-order" v-model="routerOrder" type="number" :disabled="busy" /></label>
-          <BaseSelect v-model="routerScope" aria-label="模型路由作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label v-if="routerScope !== 'all'" for="plugin-router-ids" class="block">{{ routerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-router-ids" v-model="routerIds" :rows="3" :disabled="busy" /></label>
-          <BaseSelect v-model="routerFailure" aria-label="路由插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '委托后续路由策略', value: 'delegate' }]" :disabled="busy" />
-          <p class="text-sm text-cp-text-secondary">
-            路由选择仍受 Key 权限、模型能力和续接约束。首个明确决定生效；明确拒绝不会继续委托。插件变更或停用会撤销旧请求。
-          </p>
-        </template>
-      </details>
-      <details class="space-y-3">
-        <summary>账号调度</summary>
-        <BaseCheckbox v-model="schedulerEnabled" show-label label="使用此插件选择上游账号" :disabled="busy" />
-        <template v-if="schedulerEnabled">
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-scheduler-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-scheduler-order" v-model="schedulerOrder" type="number" :disabled="busy" /></label>
-          <BaseSelect v-model="schedulerScope" aria-label="账号调度作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label v-if="schedulerScope !== 'all'" for="plugin-scheduler-ids" class="block">{{ schedulerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-scheduler-ids" v-model="schedulerIds" :rows="3" :disabled="busy" /></label>
-          <BaseSelect v-model="schedulerFailure" aria-label="调度插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '使用宿主账号调度', value: 'delegate' }]" :disabled="busy" />
-          <p class="text-sm text-cp-text-secondary">
-            按顺序只调用首个匹配的调度插件，委托时使用宿主选号。账号选择仍受 Key 权限、续接绑定和可用容量约束。明确拒绝会终止请求；插件变更或停用会撤销旧请求。
-          </p>
-        </template>
-      </details>
-      <details class="space-y-3">
-        <summary>上游适配器</summary>
-        <BaseCheckbox v-model="upstreamEnabled" show-label label="使用此插件适配上游请求" :disabled="busy" />
-        <template v-if="upstreamEnabled">
-          <BaseSelect v-model="upstreamScope" aria-label="上游适配器作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label v-if="upstreamScope !== 'all'" for="plugin-upstream-ids" class="block">{{ upstreamScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-upstream-ids" v-model="upstreamIds" :rows="3" :disabled="busy" /></label>
-          <p class="text-sm text-cp-text-secondary">
-            使用插件声明的 Provider 和公开模型范围，重叠绑定会被拒绝。账号权限、选择和计费仍由网关管理；匹配的适配器不可用时请求会失败。当前可保存绑定，启用支持以制品提示为准。
-          </p>
-        </template>
-      </details>
-      <details class="space-y-3">
-        <summary>重试策略</summary>
-        <BaseCheckbox v-model="retryEnabled" show-label label="由此插件决定是否继续恢复请求" :disabled="busy" />
-        <template v-if="retryEnabled">
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-retry-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-retry-order" v-model="retryOrder" type="number" :disabled="busy" /></label>
-          <BaseSelect v-model="retryScope" aria-label="重试策略作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label v-if="retryScope !== 'all'" for="plugin-retry-ids" class="block">{{ retryScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-retry-ids" v-model="retryIds" :rows="3" :disabled="busy" /></label>
-          <p class="text-sm text-cp-text-secondary">
-            依次咨询匹配的策略，插件委托或故障时交给后续策略处理。明确停止会保留原始失败。整条链最多等待两秒；插件不能增加重试次数、缩短退避或绕过安全恢复条件。
-          </p>
-        </template>
-      </details>
-      <details class="space-y-3 rounded-lg border border-cp-border p-3">
-        <summary>观察订阅</summary>
-        <p class="text-sm text-cp-text-secondary">
-          观察插件可读取请求终态、用量和费用，以及实际上游 WebSocket 的原始响应内容。请选择需要共享的事件和作用范围。
+    <BaseModal v-model="editOpen" :title="editing ? '配置插件' : '安装插件'" size="lg" :dismissible="!busy">
+      <div class="space-y-4">
+        <BaseSegmented v-model="editSection" :options="editSections" label="插件配置分区" />
+        <p v-if="failure" role="alert" class="text-cp-error">
+          {{ failure }}
         </p>
-        <BaseCheckbox v-model="observerEnabled" show-label label="向此插件投递观察事件" :disabled="busy" />
-        <template v-if="observerEnabled">
+        <div v-show="editSection === 'configuration'" class="space-y-4">
           <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-observer-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-observer-order" v-model="observerOrder" type="number" :disabled="busy" /></label>
-          <BaseCheckbox v-model="observerCompleted" show-label label="请求完成事件" :disabled="busy" />
-          <template v-if="observerCompleted">
-            <BaseSelect v-model="observerCompletedScope" aria-label="请求完成观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-            <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-            <label v-if="observerCompletedScope !== 'all'" for="plugin-observer-completed-ids" class="block">{{ observerCompletedScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-completed-ids" v-model="observerCompletedIds" :rows="3" :disabled="busy" /></label>
-          </template>
-          <BaseCheckbox v-model="observerWebSocket" show-label label="实际上游 WebSocket 响应帧" :disabled="busy" />
-          <template v-if="observerWebSocket">
-            <BaseSelect v-model="observerWebSocketScope" aria-label="WebSocket 观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-            <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-            <label v-if="observerWebSocketScope !== 'all'" for="plugin-observer-websocket-ids" class="block">{{ observerWebSocketScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-websocket-ids" v-model="observerWebSocketIds" :rows="3" :disabled="busy" /></label>
-          </template>
-          <p class="text-sm text-cp-text-secondary">
-            观察失败或停用不会改变请求结果。投递有容量和时间限制，繁忙时可能跳过事件；插件可用事件 ID 自行去重。
+          <label for="plugin-name" class="block">实例名称<BaseInput id="plugin-name" v-model="name" placeholder="实例名称" :disabled="busy" /></label>
+          <BaseSelect v-model="digest" aria-label="插件制品版本" :options="options" :disabled="busy" placeholder="选择已上传制品" />
+          <p v-if="artifact?.versionWarning" class="text-amber-600">
+            {{ artifact.versionWarning }}
           </p>
-        </template>
-      </details>
-      <details class="space-y-3">
-        <summary>中间件绑定</summary>
-        <p class="text-sm text-cp-text-secondary">
-          仅用于声明中间件能力的插件。当前可保存绑定，待请求入口接入后才能启用；是否支持以制品上方的提示为准。
-        </p>
-        <BaseCheckbox v-model="middlewareEnabled" show-label label="配置中间件的顺序与作用范围" :disabled="busy" />
-        <template v-if="middlewareEnabled">
+          <p v-if="artifact?.unsupportedCapabilities.length" class="text-amber-600">
+            尚未支持：{{ artifact.unsupportedCapabilities.join('、') }}。可以保存配置，暂不能启用。
+          </p>
+          <!-- The shared field component forwards id to its native control. -->
           <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-middleware-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-middleware-order" v-model="middlewareOrder" type="number" :disabled="busy" /></label>
-          <div class="flex flex-wrap gap-4">
-            <BaseCheckbox v-model="middlewareHttp" show-label label="HTTP 入口" :disabled="busy" />
-            <BaseCheckbox v-model="middlewareWebSocket" show-label label="WebSocket 会话" :disabled="busy" />
-            <BaseCheckbox v-model="middlewareService" show-label label="宿主服务调用" :disabled="busy" />
-            <BaseCheckbox v-model="middlewareRequest" show-label label="每个逻辑请求" :disabled="busy" />
-            <BaseCheckbox v-model="middlewareAttempt" show-label label="每次上游尝试" :disabled="busy" />
+          <label for="plugin-configuration" class="block">配置（JSON）<BaseTextarea id="plugin-configuration" v-model="configuration" :rows="8" :disabled="busy" /></label>
+          <details><summary>查看配置要求</summary><pre class="overflow-auto text-sm">{{ JSON.stringify(artifact?.manifest.configurationSchema, null, 2) }}</pre></details>
+        </div>
+        <div v-show="editSection === 'secrets'" class="space-y-4">
+          <BaseEmpty v-if="!secretFields.length" title="这个版本没有密钥配置" size="sm" />
+          <div v-for="field in secretFields" :key="field" class="space-y-2">
+            <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+            <label :for="`plugin-secret-${field}`" class="block">{{ field }}</label>
+            <div class="flex items-center gap-2">
+              <BaseInput :id="`plugin-secret-${field}`" v-model="secrets[field]" type="password" autocomplete="new-password" :placeholder="removeSecrets[field] ? '保存时清除' : editing?.configuredSecrets.includes(field) ? '已配置，留空保留' : '填写密钥'" :disabled="busy || removeSecrets[field] || !artifact?.manifest.secretFields.includes(field)" />
+              <BaseButton v-if="editing?.configuredSecrets.includes(field)" size="sm" variant="secondary" :disabled="busy" @click="removeSecrets[field] = !removeSecrets[field]">
+                {{ removeSecrets[field] ? '撤销清除' : '清除' }}
+              </BaseButton>
+            </div>
           </div>
-          <BaseSelect v-model="middlewareScope" aria-label="中间件作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-          <p v-if="middlewareHttp || middlewareWebSocket || middlewareService" class="text-sm text-cp-text-secondary">
-            HTTP、WebSocket 会话与宿主服务调用需选择全部请求。指定 Key 或分组仅适用于逻辑请求与上游尝试。
-          </p>
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label v-if="middlewareScope !== 'all'" for="plugin-middleware-ids" class="block">{{ middlewareScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-middleware-ids" v-model="middlewareIds" :rows="3" :disabled="busy" /></label>
-          <p class="text-sm text-cp-text-secondary">
-            范围只决定哪些请求调用插件，不增加 Key 权限。同序号按实例 ID 排序；修改或停用会撤销旧调用。升级准备失败仍使用旧版本。
-          </p>
-        </template>
-      </details>
-      <details class="space-y-3">
-        <summary>外部认证</summary>
-        <p class="text-sm text-cp-text-secondary">
-          仅用于声明入口认证能力的插件。同一时间只能启用一个认证器；此配置不会发送给插件。变更或停用会撤销旧授权。
-        </p>
-        <BaseCheckbox v-model="authenticationEnabled" show-label label="使用此插件认证客户端请求" :disabled="busy" />
-        <template v-if="authenticationEnabled">
-          <BaseSelect v-model="authenticationPolicy" aria-label="不匹配时的认证行为" :options="[{ label: '拒绝所有未匹配请求', value: 'reject' }, { label: '仅对明确未匹配的请求尝试普通 Key', value: 'delegate' }]" :disabled="busy" />
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-auth-identities" class="block">外部身份到本地 Key 的映射（JSON）<BaseTextarea id="plugin-auth-identities" v-model="authenticationIdentities" :rows="5" :disabled="busy" placeholder="{&quot;external-user&quot;: &quot;key_id&quot;}" /></label>
-          <p class="text-sm text-cp-text-secondary">
-            填写 Key ID，不要填写密钥。映射身份将使用该 Key 所属用户的分组权限、倍率与共享额度。认证器超时、拒绝或返回未知身份时不会回退。
-          </p>
-        </template>
-      </details>
-      <p class="text-sm text-cp-text-secondary">
-        插件进程以网关的系统身份运行，可访问主机文件、凭据和网络。仅安装可信来源的插件。
-      </p>
-      <BaseCheckbox v-model="trust" show-label label="我信任此插件及所选版本，允许它在网关上运行" :disabled="busy" />
-      <div class="flex gap-3">
-        <BaseButton :disabled="busy || !trust || !artifact || !!artifact.unsupportedCapabilities.length" @click="save(true)">
-          保存并启用
-        </BaseButton>
-        <BaseButton variant="secondary" :disabled="busy || !artifact" @click="save(false)">
-          保存并停用
-        </BaseButton>
-        <BaseButton variant="secondary" :disabled="busy" @click="editOpen = false; secrets = {}">
-          取消
-        </BaseButton>
+        </div>
+        <div v-show="editSection === 'bindings'" class="space-y-3">
+          <details class="space-y-3">
+            <summary>模型路由</summary>
+            <BaseCheckbox v-model="routerEnabled" show-label label="使用此插件选择模型和 Provider" :disabled="busy" />
+            <template v-if="routerEnabled">
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label for="plugin-router-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-router-order" v-model="routerOrder" type="number" :disabled="busy" /></label>
+              <BaseSelect v-model="routerScope" aria-label="模型路由作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label v-if="routerScope !== 'all'" for="plugin-router-ids" class="block">{{ routerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-router-ids" v-model="routerIds" :rows="3" :disabled="busy" /></label>
+              <BaseSelect v-model="routerFailure" aria-label="路由插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '委托后续路由策略', value: 'delegate' }]" :disabled="busy" />
+              <p class="text-sm text-cp-text-secondary">
+                路由选择仍受 Key 权限、模型能力和续接约束。首个明确决定生效；明确拒绝不会继续委托。插件变更或停用会撤销旧请求。
+              </p>
+            </template>
+          </details>
+          <details class="space-y-3">
+            <summary>账号调度</summary>
+            <BaseCheckbox v-model="schedulerEnabled" show-label label="使用此插件选择上游账号" :disabled="busy" />
+            <template v-if="schedulerEnabled">
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label for="plugin-scheduler-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-scheduler-order" v-model="schedulerOrder" type="number" :disabled="busy" /></label>
+              <BaseSelect v-model="schedulerScope" aria-label="账号调度作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label v-if="schedulerScope !== 'all'" for="plugin-scheduler-ids" class="block">{{ schedulerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-scheduler-ids" v-model="schedulerIds" :rows="3" :disabled="busy" /></label>
+              <BaseSelect v-model="schedulerFailure" aria-label="调度插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '使用宿主账号调度', value: 'delegate' }]" :disabled="busy" />
+              <p class="text-sm text-cp-text-secondary">
+                按顺序只调用首个匹配的调度插件，委托时使用宿主选号。账号选择仍受 Key 权限、续接绑定和可用容量约束。明确拒绝会终止请求；插件变更或停用会撤销旧请求。
+              </p>
+            </template>
+          </details>
+          <details class="space-y-3">
+            <summary>上游适配器</summary>
+            <BaseCheckbox v-model="upstreamEnabled" show-label label="使用此插件适配上游请求" :disabled="busy" />
+            <template v-if="upstreamEnabled">
+              <BaseSelect v-model="upstreamScope" aria-label="上游适配器作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label v-if="upstreamScope !== 'all'" for="plugin-upstream-ids" class="block">{{ upstreamScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-upstream-ids" v-model="upstreamIds" :rows="3" :disabled="busy" /></label>
+              <p class="text-sm text-cp-text-secondary">
+                使用插件声明的 Provider 和公开模型范围，重叠绑定会被拒绝。账号权限、选择和计费仍由网关管理；匹配的适配器不可用时请求会失败。当前可保存绑定，启用支持以制品提示为准。
+              </p>
+            </template>
+          </details>
+          <details class="space-y-3">
+            <summary>重试策略</summary>
+            <BaseCheckbox v-model="retryEnabled" show-label label="由此插件决定是否继续恢复请求" :disabled="busy" />
+            <template v-if="retryEnabled">
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label for="plugin-retry-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-retry-order" v-model="retryOrder" type="number" :disabled="busy" /></label>
+              <BaseSelect v-model="retryScope" aria-label="重试策略作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label v-if="retryScope !== 'all'" for="plugin-retry-ids" class="block">{{ retryScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-retry-ids" v-model="retryIds" :rows="3" :disabled="busy" /></label>
+              <p class="text-sm text-cp-text-secondary">
+                依次咨询匹配的策略，插件委托或故障时交给后续策略处理。明确停止会保留原始失败。整条链最多等待两秒；插件不能增加重试次数、缩短退避或绕过安全恢复条件。
+              </p>
+            </template>
+          </details>
+          <details class="space-y-3 rounded-lg border border-cp-border p-3">
+            <summary>观察订阅</summary>
+            <p class="text-sm text-cp-text-secondary">
+              观察插件可读取请求终态、用量和费用，以及实际上游 WebSocket 的原始响应内容。请选择需要共享的事件和作用范围。
+            </p>
+            <BaseCheckbox v-model="observerEnabled" show-label label="向此插件投递观察事件" :disabled="busy" />
+            <template v-if="observerEnabled">
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label for="plugin-observer-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-observer-order" v-model="observerOrder" type="number" :disabled="busy" /></label>
+              <BaseCheckbox v-model="observerCompleted" show-label label="请求完成事件" :disabled="busy" />
+              <template v-if="observerCompleted">
+                <BaseSelect v-model="observerCompletedScope" aria-label="请求完成观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+                <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+                <label v-if="observerCompletedScope !== 'all'" for="plugin-observer-completed-ids" class="block">{{ observerCompletedScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-completed-ids" v-model="observerCompletedIds" :rows="3" :disabled="busy" /></label>
+              </template>
+              <BaseCheckbox v-model="observerWebSocket" show-label label="实际上游 WebSocket 响应帧" :disabled="busy" />
+              <template v-if="observerWebSocket">
+                <BaseSelect v-model="observerWebSocketScope" aria-label="WebSocket 观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+                <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+                <label v-if="observerWebSocketScope !== 'all'" for="plugin-observer-websocket-ids" class="block">{{ observerWebSocketScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-websocket-ids" v-model="observerWebSocketIds" :rows="3" :disabled="busy" /></label>
+              </template>
+              <p class="text-sm text-cp-text-secondary">
+                观察失败或停用不会改变请求结果。投递有容量和时间限制，繁忙时可能跳过事件；插件可用事件 ID 自行去重。
+              </p>
+            </template>
+          </details>
+          <details class="space-y-3">
+            <summary>中间件绑定</summary>
+            <p class="text-sm text-cp-text-secondary">
+              仅用于声明中间件能力的插件。当前可保存绑定，待请求入口接入后才能启用；是否支持以制品上方的提示为准。
+            </p>
+            <BaseCheckbox v-model="middlewareEnabled" show-label label="配置中间件的顺序与作用范围" :disabled="busy" />
+            <template v-if="middlewareEnabled">
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label for="plugin-middleware-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-middleware-order" v-model="middlewareOrder" type="number" :disabled="busy" /></label>
+              <div class="flex flex-wrap gap-4">
+                <BaseCheckbox v-model="middlewareHttp" show-label label="HTTP 入口" :disabled="busy" />
+                <BaseCheckbox v-model="middlewareWebSocket" show-label label="WebSocket 会话" :disabled="busy" />
+                <BaseCheckbox v-model="middlewareService" show-label label="宿主服务调用" :disabled="busy" />
+                <BaseCheckbox v-model="middlewareRequest" show-label label="每个逻辑请求" :disabled="busy" />
+                <BaseCheckbox v-model="middlewareAttempt" show-label label="每次上游尝试" :disabled="busy" />
+              </div>
+              <BaseSelect v-model="middlewareScope" aria-label="中间件作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
+              <p v-if="middlewareHttp || middlewareWebSocket || middlewareService" class="text-sm text-cp-text-secondary">
+                HTTP、WebSocket 会话与宿主服务调用需选择全部请求。指定 Key 或分组仅适用于逻辑请求与上游尝试。
+              </p>
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label v-if="middlewareScope !== 'all'" for="plugin-middleware-ids" class="block">{{ middlewareScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-middleware-ids" v-model="middlewareIds" :rows="3" :disabled="busy" /></label>
+              <p class="text-sm text-cp-text-secondary">
+                范围只决定哪些请求调用插件，不增加 Key 权限。同序号按实例 ID 排序；修改或停用会撤销旧调用。升级准备失败仍使用旧版本。
+              </p>
+            </template>
+          </details>
+          <details class="space-y-3">
+            <summary>外部认证</summary>
+            <p class="text-sm text-cp-text-secondary">
+              仅用于声明入口认证能力的插件。同一时间只能启用一个认证器；此配置不会发送给插件。变更或停用会撤销旧授权。
+            </p>
+            <BaseCheckbox v-model="authenticationEnabled" show-label label="使用此插件认证客户端请求" :disabled="busy" />
+            <template v-if="authenticationEnabled">
+              <BaseSelect v-model="authenticationPolicy" aria-label="不匹配时的认证行为" :options="[{ label: '拒绝所有未匹配请求', value: 'reject' }, { label: '仅对明确未匹配的请求尝试普通 Key', value: 'delegate' }]" :disabled="busy" />
+              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
+              <label for="plugin-auth-identities" class="block">外部身份到本地 Key 的映射（JSON）<BaseTextarea id="plugin-auth-identities" v-model="authenticationIdentities" :rows="5" :disabled="busy" placeholder="{&quot;external-user&quot;: &quot;key_id&quot;}" /></label>
+              <p class="text-sm text-cp-text-secondary">
+                填写 Key ID，不要填写密钥。映射身份将使用该 Key 所属用户的分组权限、倍率与共享额度。认证器超时、拒绝或返回未知身份时不会回退。
+              </p>
+            </template>
+          </details>
+        </div>
       </div>
-    </BaseCard>
-    <p v-if="!instances.length && !busy" class="text-cp-text-secondary">
-      还没有安装插件。
-    </p>
-    <BaseCard v-for="item in instances" :key="item.id" class="space-y-3 p-5">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 class="font-semibold">
-            {{ item.name }}
-          </h2><p class="text-sm text-cp-text-secondary">
-            {{ item.artifact.pluginId }} · {{ item.artifact.version }} · {{ { ready: '运行中', disabled: '已停用', failed: '启动失败或进程已退出' }[item.status] ?? item.status }}
+      <template #footer>
+        <div class="w-full space-y-3">
+          <p class="text-sm text-cp-text-secondary">
+            插件进程以网关的系统身份运行，可访问主机文件、凭据和网络。仅安装可信来源的插件。
+          </p>
+          <BaseCheckbox v-model="trust" show-label label="我信任此插件及所选版本，允许它在网关上运行" :disabled="busy" />
+          <div class="flex flex-wrap justify-end gap-2">
+            <BaseButton variant="secondary" :disabled="busy" @click="editOpen = false">
+              取消
+            </BaseButton>
+            <BaseButton variant="secondary" :disabled="busy || !artifact" @click="save(false)">
+              保存并停用
+            </BaseButton>
+            <BaseButton :disabled="busy || !trust || !artifact || !!artifact.unsupportedCapabilities.length" @click="save(true)">
+              保存并启用
+            </BaseButton>
+          </div>
+        </div>
+      </template>
+    </BaseModal>
+
+    <div v-if="view === 'installed'" class="grid gap-3">
+      <BaseEmpty v-if="!filteredInstances.length && !busy" :icon="PackageOpen" :title="query ? '没有匹配的插件' : '还没有安装插件'" />
+      <BaseCard v-for="item in filteredInstances" :key="item.id" class="space-y-3 p-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <h2 class="font-semibold break-all">
+                {{ item.name }}
+              </h2>
+              <span class="rounded-full bg-cp-fill-alter px-2 py-0.5 text-cp-xs font-medium" :class="item.status === 'ready' ? 'text-cp-success' : item.status === 'failed' ? 'text-cp-error' : 'text-cp-text-secondary'">{{ statusLabels[item.status] ?? item.status }}</span>
+            </div>
+            <p class="mt-1 text-cp-xs break-all text-cp-text-secondary">
+              {{ item.artifact.pluginId }} · {{ item.artifact.version }}
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <BaseButton v-for="page in item.status === 'ready' ? item.pages : []" :key="page.id" size="sm" variant="secondary" @click="failure = ''; selected = { plugin: item, page }">
+              {{ page.title }}
+            </BaseButton>
+            <BaseButton size="sm" variant="secondary" :disabled="busy" @click="edit(item)">
+              配置
+            </BaseButton>
+            <RowActionMenu v-slot="{ select }" :label="`${item.name}的更多操作`" :loading="busy">
+              <BaseMenuItem v-if="['local.model-health', 'cpr.shared-budget-manager'].includes(item.artifact.pluginId)" role="menuitem" tabindex="-1" @click="select(() => checkOnline(item))">
+                检查更新
+              </BaseMenuItem>
+              <BaseMenuItem v-if="onlineUpdates[item.id]?.revision === item.revision" role="menuitem" tabindex="-1" @click="select(() => { updating = item; confirmUpdate = true })">
+                在线更新
+              </BaseMenuItem>
+              <BaseMenuItem v-if="item.enabled" role="menuitem" tabindex="-1" @click="select(() => disable(item))">
+                停用
+              </BaseMenuItem>
+              <BaseMenuItem role="menuitem" tabindex="-1" tone="destructive" @click="select(() => { removing = item; confirmDelete = true })">
+                卸载
+              </BaseMenuItem>
+            </RowActionMenu>
+          </div>
+        </div>
+        <p v-if="notices[item.id]" class="text-sm text-cp-text-secondary">
+          {{ notices[item.id] }}
+          <a v-if="onlineUpdates[item.id]" :href="onlineUpdates[item.id]!.release.releaseUrl" target="_blank" rel="noopener noreferrer" class="underline">查看发布说明</a>
+        </p>
+        <p v-if="item.runtimeLoad" class="text-xs text-cp-text-secondary" title="实时采样，各项可能重叠；刷新列表更新">
+          在途 {{ item.runtimeLoad.activeCalls }} · 执行 {{ item.runtimeLoad.executingCalls }} · 排队 {{ item.runtimeLoad.queuedCalls }} · 等待恢复 {{ item.runtimeLoad.resumingCalls }} · 回调 {{ item.runtimeLoad.pendingCallbacks }} · 流 {{ item.runtimeLoad.activeStreams }}
+        </p>
+      </BaseCard>
+    </div>
+    <div v-else class="grid gap-3">
+      <BaseEmpty v-if="!filteredArtifacts.length && !busy" :icon="PackageOpen" :title="query ? '没有匹配的制品' : '还没有上传制品'" />
+      <BaseCard v-for="pkg in filteredArtifacts" :key="pkg.sha256" class="flex flex-wrap items-center justify-between gap-3 p-4">
+        <div class="min-w-0">
+          <h2 class="font-semibold break-all">
+            {{ pkg.displayName }}
+          </h2>
+          <p class="mt-1 text-cp-xs break-all text-cp-text-secondary">
+            {{ pkg.pluginId }} · {{ pkg.version }} · {{ pkg.sha256.slice(0, 8) }}
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
-          <BaseButton v-if="['local.model-health', 'cpr.shared-budget-manager'].includes(item.artifact.pluginId)" variant="secondary" :disabled="busy" @click="checkOnline(item)">
-            检查更新
+          <BaseButton variant="secondary" size="sm" :disabled="busy" @click="edit(undefined, pkg)">
+            创建实例
           </BaseButton>
-          <BaseButton v-if="onlineUpdates[item.id]?.revision === item.revision" :disabled="busy" @click="updating = item; confirmUpdate = true">
-            在线更新
-          </BaseButton>
-          <BaseButton variant="secondary" :disabled="busy" @click="edit(item)">
-            配置 / 切换版本
-          </BaseButton>
-          <BaseButton v-if="item.enabled" variant="secondary" :disabled="busy" @click="disable(item)">
-            停用
-          </BaseButton>
-          <BaseButton variant="secondary" :disabled="busy" @click="removing = item; confirmDelete = true">
-            卸载
+          <BaseButton variant="secondary" size="sm" :disabled="busy || instances.some(item => item.artifact.sha256 === pkg.sha256)" @click="removingArtifact = pkg.sha256; confirmArtifactDelete = true">
+            删除制品
           </BaseButton>
         </div>
+      </BaseCard>
+    </div>
+    <BaseModal v-model="managementOpen" :title="selected?.page.title ?? '插件管理'" size="xl">
+      <div v-if="selected" class="space-y-3">
+        <p class="text-sm text-cp-text-secondary">
+          推理使用本人 Key 的权限与额度，按现有倍率计费。更换 Key 或关闭页面会取消页面直接发起的推理；已启动的后台检测不受影响，请在插件内暂停或结束。
+        </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <BaseInput v-model="keySearch" aria-label="搜索本人推理 Key" placeholder="搜索本人 Key" class="max-w-xs" @keydown.enter="searchKeys" />
+          <BaseButton variant="secondary" :disabled="busy" @click="searchKeys">
+            查询 Key
+          </BaseButton>
+          <BaseSelect v-model="inferenceKey" aria-label="选择推理 Key" :options="keyOptions" placeholder="选择本人 Key 后允许推理" class="max-w-sm" />
+        </div>
+        <p v-if="failure" role="alert" class="text-cp-error">
+          {{ failure }}
+        </p>
+        <PluginFrame :key="[selected.plugin.id, selected.plugin.revision, selected.page.id].join('/')" :plugin="selected.plugin" :page="selected.page" :client-key-id="inferenceKey" />
       </div>
-      <p v-if="notices[item.id]" class="text-sm text-cp-text-secondary">
-        {{ notices[item.id] }}
-        <a v-if="onlineUpdates[item.id]" :href="onlineUpdates[item.id]!.release.releaseUrl" target="_blank" rel="noopener noreferrer" class="underline">查看发布说明</a>
-      </p>
-      <p v-if="item.runtimeLoad" class="text-xs text-cp-text-secondary" title="实时采样，各项可能重叠；刷新列表更新">
-        在途 {{ item.runtimeLoad.activeCalls }} · 执行 {{ item.runtimeLoad.executingCalls }} · 排队 {{ item.runtimeLoad.queuedCalls }} · 等待恢复 {{ item.runtimeLoad.resumingCalls }} · 回调 {{ item.runtimeLoad.pendingCallbacks }} · 流 {{ item.runtimeLoad.activeStreams }}
-      </p>
-      <div v-if="item.status === 'ready'" class="flex gap-2">
-        <BaseButton v-for="page in item.pages" :key="page.id" variant="secondary" @click="selected = { plugin: item, page }; editOpen = false">
-          {{ page.title }}
-        </BaseButton>
-      </div>
-    </BaseCard>
-    <BaseCard v-if="selected" class="space-y-3 p-4">
-      <p class="text-sm text-cp-text-secondary">
-        推理使用本人 Key 的权限与额度，按现有倍率计费。更换 Key 或关闭页面会取消页面直接发起的推理；已启动的后台检测不受影响，请在插件内暂停或结束。
-      </p>
-      <div class="flex flex-wrap gap-3">
-        <BaseInput v-model="keySearch" aria-label="搜索本人推理 Key" placeholder="搜索本人 Key" class="max-w-xs" />
-        <BaseButton variant="secondary" :disabled="busy" @click="searchKeys">
-          查询 Key
-        </BaseButton>
-        <BaseSelect v-model="inferenceKey" aria-label="选择推理 Key" :options="keyOptions" placeholder="选择本人 Key 后允许推理" class="max-w-sm" />
-        <BaseButton variant="secondary" @click="selected = undefined; inferenceKey = ''">
-          关闭页面
-        </BaseButton>
-      </div>
-      <PluginFrame :key="`${selected.plugin.id}/${selected.plugin.revision}/${selected.page.id}`" :plugin="selected.plugin" :page="selected.page" :client-key-id="inferenceKey" />
-    </BaseCard>
-    <details v-if="artifacts.length" class="space-y-3">
-      <summary>已上传制品（{{ artifacts.length }}）</summary>
-      <div v-for="pkg in artifacts" :key="pkg.sha256" class="flex flex-wrap items-center justify-between gap-3 p-3">
-        <span>{{ pkg.displayName }} · {{ pkg.version }} · {{ pkg.sha256.slice(0, 8) }}</span>
-        <BaseButton variant="secondary" :disabled="busy || instances.some(item => item.artifact.sha256 === pkg.sha256)" @click="removingArtifact = pkg.sha256; confirmArtifactDelete = true">
-          删除制品
-        </BaseButton>
-      </div>
-    </details>
+    </BaseModal>
     <BaseConfirmModal v-model="confirmUpdate" title="在线更新插件" :description="updateDescription" :loading="busy" @confirm="applyOnline" />
     <BaseConfirmModal v-model="confirmArtifactDelete" title="删除制品" description="仅能删除没有实例使用的制品。删除后需要重新上传才能安装该版本。" destructive :loading="busy" @confirm="perform(async () => { await removePluginArtifact(removingArtifact); confirmArtifactDelete = false })" />
     <BaseConfirmModal v-model="confirmDelete" title="卸载插件" description="将停止该插件并删除实例配置和私有状态，进行中的调用会被取消。已上传制品保留，重新安装不会恢复旧状态。" destructive :loading="busy" @confirm="perform(async () => { if (removing) await uninstallPlugin(removing); confirmDelete = false })" />

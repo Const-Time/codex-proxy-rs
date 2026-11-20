@@ -1,6 +1,6 @@
 import type { BackupSettingsView, UpdateBackupStoragePayload } from '@/api'
 
-import { reactive, shallowRef } from 'vue'
+import { computed, reactive, shallowRef } from 'vue'
 import {
   getBackupSettings,
   testBackupStorage,
@@ -41,8 +41,15 @@ export function useBackupSettings() {
     retentionCount: '7',
   })
 
+  const savedStorage = shallowRef({ ...storage })
+  const savedSchedule = shallowRef({ ...schedule })
+  const storageDirty = computed(() => loaded.value && JSON.stringify(storage) !== JSON.stringify(savedStorage.value))
+  const scheduleDirty = computed(() => loaded.value && JSON.stringify(schedule) !== JSON.stringify(savedSchedule.value))
+  const dirty = computed(() => storageDirty.value || scheduleDirty.value)
+  const busy = computed(() => savingStorage.value || savingSchedule.value || testing.value)
+
   async function load(): Promise<void> {
-    if (loaded.value)
+    if (loaded.value || loading.value)
       return
     loading.value = true
     error.value = ''
@@ -59,7 +66,9 @@ export function useBackupSettings() {
     }
   }
 
-  function applySettings(data: BackupSettingsView): void {
+  function applySettings(data: BackupSettingsView, preserve?: 'storage' | 'schedule'): void {
+    const storageDraft = preserve === 'storage' && storageDirty.value ? changedFields(storage, savedStorage.value) : undefined
+    const scheduleDraft = preserve === 'schedule' && scheduleDirty.value ? changedFields(schedule, savedSchedule.value) : undefined
     storageRevision.value = data.storageRevision
     verified.value = data.verified
     storage.endpoint = data.endpoint ?? ''
@@ -74,6 +83,12 @@ export function useBackupSettings() {
     schedule.scheduleTimezone = data.scheduleTimezone ?? 'Asia/Shanghai'
     schedule.retentionDays = String(data.retentionDays)
     schedule.retentionCount = String(data.retentionCount)
+    savedStorage.value = { ...storage }
+    savedSchedule.value = { ...schedule }
+    if (storageDraft)
+      Object.assign(storage, storageDraft)
+    if (scheduleDraft)
+      Object.assign(schedule, scheduleDraft)
   }
 
   function storagePayload(): UpdateBackupStoragePayload {
@@ -89,11 +104,13 @@ export function useBackupSettings() {
   }
 
   async function saveStorage(): Promise<boolean> {
+    if (!loaded.value || busy.value)
+      return false
     savingStorage.value = true
     try {
       const data = await updateBackupStorage(storagePayload())
       const schedulePaused = schedule.scheduleEnabled && !data.scheduleEnabled
-      applySettings(data)
+      applySettings(data, 'schedule')
       toast.success(schedulePaused ? '存储配置已保存，定时备份已暂停，请测试连接后重新启用' : '存储配置已保存')
       return true
     }
@@ -107,6 +124,8 @@ export function useBackupSettings() {
   }
 
   async function runTest(): Promise<void> {
+    if (!loaded.value || busy.value)
+      return
     testing.value = true
     try {
       const result = await testBackupStorage()
@@ -129,6 +148,8 @@ export function useBackupSettings() {
   }
 
   async function saveSchedule(): Promise<boolean> {
+    if (!loaded.value || busy.value)
+      return false
     savingSchedule.value = true
     try {
       const data = await updateBackupSchedule({
@@ -138,7 +159,7 @@ export function useBackupSettings() {
         retentionDays: Number(schedule.retentionDays) || 0,
         retentionCount: Number(schedule.retentionCount) || 0,
       })
-      applySettings(data)
+      applySettings(data, 'storage')
       toast.success('调度配置已保存')
       return true
     }
@@ -158,6 +179,7 @@ export function useBackupSettings() {
     savingSchedule,
     error,
     loaded,
+    dirty,
     storageRevision,
     verified,
     storage,
@@ -167,4 +189,13 @@ export function useBackupSettings() {
     runTest,
     saveSchedule,
   }
+}
+
+function changedFields<T extends object>(form: T, saved: T): Partial<T> {
+  const changes: Partial<T> = {}
+  for (const key of Object.keys(form) as (keyof T)[]) {
+    if (form[key] !== saved[key])
+      changes[key] = form[key]
+  }
+  return changes
 }

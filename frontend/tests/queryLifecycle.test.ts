@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
+import { computed, reactive, shallowRef } from 'vue'
 
 function load<T>(path: string, overrides: Record<string, unknown>, globals: Record<string, unknown> = {}) {
   const disposals: Array<() => void> = []
@@ -246,4 +247,54 @@ test('a superseded account connection test cannot close the current stream', asy
   assert.equal(view.testingConnectionId.value, undefined)
   fixture.dispose()
   requestState.dispose()
+})
+
+test('saving backup storage preserves the schedule draft and blocks overlapping writes', async () => {
+  const defaults = {
+    endpoint: 'https://s3.fixture.invalid',
+    bucket: 'backups',
+    storageRevision: 1,
+    verified: true,
+    scheduleEnabled: true,
+    retentionDays: 7,
+    retentionCount: 7,
+    forcePathStyle: false,
+  }
+  let finishStorage: (data: typeof defaults) => void = () => {}
+  const fixture = load<{ useBackupSettings: typeof import('../src/views/settings/composables/useBackupSettings.ts').useBackupSettings }>('../src/views/settings/composables/useBackupSettings.ts', {
+    'vue': { computed, reactive, shallowRef },
+    '@/components/base/BaseToast': { toast: { success: () => {}, error: (error: unknown) => assert.fail(String(error)) } },
+    '@/api': {
+      getBackupSettings: async () => defaults,
+      updateBackupStorage: () => new Promise<typeof defaults>((resolve) => {
+        finishStorage = resolve
+      }),
+      updateBackupSchedule: async (data: { retentionDays: number }) => ({
+        ...defaults,
+        ...data,
+        bucket: 'archive',
+        storageRevision: 2,
+        verified: false,
+      }),
+    },
+  })
+
+  const view = fixture.module.useBackupSettings()
+  await view.load()
+  assert.equal(view.dirty.value, false)
+  view.schedule.retentionDays = '30'
+  view.storage.bucket = 'archive'
+  assert.equal(view.dirty.value, true)
+
+  const write = view.saveStorage()
+  assert.equal(await view.saveSchedule(), false)
+  finishStorage({ ...defaults, bucket: 'archive', storageRevision: 2, scheduleEnabled: false, verified: false })
+  assert.equal(await write, true)
+  assert.equal(view.schedule.retentionDays, '30')
+  assert.equal(view.schedule.scheduleEnabled, false)
+  assert.equal(view.dirty.value, true)
+
+  assert.equal(await view.saveSchedule(), true)
+  assert.equal(view.storage.bucket, 'archive')
+  assert.equal(view.dirty.value, false)
 })

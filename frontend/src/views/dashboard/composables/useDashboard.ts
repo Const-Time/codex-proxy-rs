@@ -14,6 +14,7 @@ export function useDashboard() {
   const trend = shallowRef<DashboardTrend | null>(null)
   const trendLoading = shallowRef(false)
   const trendError = shallowRef('')
+  const summaryError = shallowRef('')
   const loading = shallowRef(false)
   const refreshing = shallowRef(false)
   const lastRefreshedAt = shallowRef('')
@@ -52,9 +53,6 @@ export function useDashboard() {
       loading.value = true
       await loadDashboardSnapshot()
     }
-    catch {
-      // 自动刷新会继续重试，保留最后一次成功快照。
-    }
     finally {
       loading.value = false
     }
@@ -66,9 +64,6 @@ export function useDashboard() {
     refreshing.value = true
     try {
       await loadDashboardSnapshot()
-    }
-    catch {
-      // 手动刷新失败时保留当前数据，不打断概览操作。
     }
     finally {
       refreshing.value = false
@@ -102,14 +97,16 @@ export function useDashboard() {
     const trendKind = activeTrendKind.value
     const requestId = ++trendRequestId
     summaryAbort?.abort()
-    summaryAbort = new AbortController()
+    const controller = new AbortController()
+    summaryAbort = controller
     trendAbort?.abort()
     trendLoading.value = true
     trendError.value = ''
     try {
-      const summary = await getDashboardSummary({ kind: trendKind }, summaryAbort.signal)
-      if (disposed)
+      const summary = await getDashboardSummary({ kind: trendKind }, controller.signal)
+      if (disposed || controller.signal.aborted)
         return
+      summaryError.value = ''
       snapshot.value = dashboardSnapshotView(summary)
       lastRefreshedAt.value = formatDateTime()
       if (isCurrentTrendRequest(requestId, trendKind)) {
@@ -117,9 +114,10 @@ export function useDashboard() {
       }
     }
     catch (error: unknown) {
+      if (!disposed && !controller.signal.aborted)
+        summaryError.value = errorMessage(error, '概览加载失败')
       if (isCurrentTrendRequest(requestId, trendKind))
         trendError.value = errorMessage(error, '趋势加载失败')
-      throw error
     }
     finally {
       if (isCurrentTrendRequest(requestId, trendKind))
@@ -156,6 +154,7 @@ export function useDashboard() {
     trendSummary,
     trendLoading,
     trendError,
+    summaryError,
     healthTimeline,
     accountUsage,
     wireProfiles,

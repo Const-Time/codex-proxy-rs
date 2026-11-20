@@ -72,7 +72,7 @@ const sparklineOption = computed<EChartsOption | null>(() => {
 </script>
 
 <template>
-  <BaseCard as="article" padding="compact" class="cp-dashboard-metric relative h-38.5 w-full">
+  <BaseCard as="article" padding="compact" class="cp-dashboard-metric relative h-38.5 min-w-0 w-full">
     <div class="flex items-start gap-3">
       <BaseMotionIcon
         class="inline-flex size-8.5 shrink-0 items-center justify-center rounded-cp-lg"
@@ -84,7 +84,7 @@ const sparklineOption = computed<EChartsOption | null>(() => {
     </div>
 
     <div class="mt-3.25 flex h-7.75 items-end gap-2">
-      <strong class="font-mono text-[28px] leading-[1.05] font-heavy tabular-nums text-cp-text">
+      <strong class="max-w-full truncate font-mono text-[clamp(21px,2.4vw,28px)] leading-[1.05] font-heavy tabular-nums text-cp-text">
         <AnimatedMetricValue :value="metric.value" :raw-value="metric.valueRaw" :formatter="metric.valueFormatter" />
       </strong>
       <i

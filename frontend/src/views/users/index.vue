@@ -10,6 +10,7 @@ import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
@@ -18,6 +19,7 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import {
   toast,
 } from '@/components/base/BaseToast'
+import RowActionMenu from '@/components/RowActionMenu.vue'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { useAuthStore } from '@/stores/modules/auth'
 import { errorMessage } from '@/utils/async'
@@ -36,7 +38,7 @@ const columns = defineTableColumns<User>([
   { key: 'status', label: '状态', kind: 'status' },
   { key: 'groups', label: '授权分组', kind: 'custom', size: '2xl' },
   { key: 'limits', label: '并发 / RPM', kind: 'numeric', size: 'lg' },
-  { key: 'actions', label: '操作', kind: 'actions', size: 'lg' },
+  { key: 'actions', label: '操作', kind: 'actions', size: 'sm' },
 ])
 const auth = useAuthStore()
 const loading = ref(false)
@@ -204,12 +206,20 @@ onMounted(load)
               <BaseIconButton v-if="user.role !== 'admin' || user.id === auth.user?.id" size="sm" label="编辑用户" :disabled="busy" @click="edit(user)">
                 <Pencil class="size-3.5 text-cp-link" />
               </BaseIconButton>
-              <BaseIconButton v-if="user.role !== 'admin'" size="sm" :label="user.enabled ? '禁用用户' : '启用用户'" :disabled="busy" @click="requestAction(user, 'status')">
-                <Power class="size-3.5" :class="user.enabled ? 'text-cp-warning' : 'text-cp-success'" />
-              </BaseIconButton>
-              <BaseIconButton v-if="user.role !== 'admin'" size="sm" label="删除用户" :disabled="busy" @click="requestAction(user, 'delete')">
-                <Trash2 class="size-3.5 text-cp-error" />
-              </BaseIconButton>
+              <RowActionMenu v-if="user.role !== 'admin'" v-slot="{ select }" :label="`${user.email}的更多操作`" :loading="busy">
+                <BaseMenuItem role="menuitem" tabindex="-1" @click="select(() => requestAction(user, 'status'))">
+                  <template #icon>
+                    <Power class="size-3.5" />
+                  </template>
+                  {{ user.enabled ? '禁用用户' : '启用用户' }}
+                </BaseMenuItem>
+                <BaseMenuItem role="menuitem" tabindex="-1" tone="destructive" @click="select(() => requestAction(user, 'delete'))">
+                  <template #icon>
+                    <Trash2 class="size-3.5" />
+                  </template>
+                  删除用户
+                </BaseMenuItem>
+              </RowActionMenu>
             </div>
           </div>
         </template>

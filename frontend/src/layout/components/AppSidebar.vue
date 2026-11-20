@@ -25,7 +25,7 @@ import { usePreferredReducedMotion, useTimeoutFn } from '@vueuse/core'
 import { gsap } from 'gsap'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { isNavigationFailure, NavigationFailureType, useRoute, useRouter } from 'vue-router'
 
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
@@ -104,7 +104,7 @@ const activeNavIndex = computed(() => {
   return Math.max(0, index)
 })
 const activeNavIndicatorStyle = computed(() => ({
-  transform: `translate3d(0, ${activeNavIndex.value * 58 + (authStore.isAdmin && activeNavIndex.value >= adminNavItems.length ? 88 : 44)}px, 0)`,
+  transform: `translate3d(0, ${activeNavIndex.value * 48 + (authStore.isAdmin && activeNavIndex.value >= adminNavItems.length ? 72 : 36)}px, 0)`,
 }))
 const navFeedbackMuted = shallowRef(false)
 const { start: restoreNavFeedback, stop: stopNavFeedbackRestore } = useTimeoutFn(
@@ -121,10 +121,11 @@ function muteNavFeedbackDuringMove() {
   restoreNavFeedback()
 }
 
-function navigate(path: string) {
+async function navigate(path: string) {
   muteNavFeedbackDuringMove()
-  void router.push(path)
-  emit('navigate')
+  const failure = await router.push(path)
+  if (!failure || isNavigationFailure(failure, NavigationFailureType.duplicated))
+    emit('navigate')
 }
 
 function openSystemUpdate() {
@@ -143,8 +144,8 @@ const sidebarEl = ref<HTMLElement | null>(null)
 const brandLabelEl = ref<HTMLElement | null>(null)
 const navSignalEl = useTemplateRef<HTMLElement>('navSignal')
 const isCollapsed = computed(() => !props.mobile && Boolean(props.collapsed))
-const collapsedSidebarWidth = 88
-const expandedSidebarWidth = 251
+const collapsedSidebarWidth = 76
+const expandedSidebarWidth = 232
 const sidebarWidth = computed(() => (isCollapsed.value ? collapsedSidebarWidth : expandedSidebarWidth))
 const brandLabelVisible = shallowRef(!isCollapsed.value)
 const themeToggleLabel = computed(() => (effectiveTheme.value === 'dark' ? '切换浅色模式' : '切换暗黑模式'))
@@ -385,11 +386,11 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
-    <BaseScrollbar class="my-6 w-full flex-1">
+    <BaseScrollbar class="my-4 w-full flex-1">
       <div class="px-4">
-        <nav class="relative grid gap-3" :class="isCollapsed ? 'mx-auto w-11.5' : 'w-full'" aria-label="主导航">
+        <nav class="relative grid gap-2" :class="isCollapsed ? 'mx-auto w-10' : 'w-full'" aria-label="主导航">
           <span
-            class="pointer-events-none absolute inset-x-0 top-0 h-11.5 overflow-hidden rounded-cp bg-cp-menu-item-selected-bg transition-transform duration-260 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+            class="pointer-events-none absolute inset-x-0 top-0 h-10 overflow-hidden rounded-cp bg-cp-menu-item-selected-bg transition-transform duration-260 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
             :style="activeNavIndicatorStyle"
           >
             <span
@@ -398,15 +399,15 @@ onBeforeUnmount(() => {
             />
           </span>
           <template v-for="(item, index) in navItems" :key="item.path">
-            <div v-if="sectionLabel(index)" class="flex h-8 items-end px-4 pb-1 text-xs font-semibold text-cp-text-quaternary">
+            <div v-if="sectionLabel(index)" class="flex h-7 items-end px-3 pb-1 text-xs font-semibold text-cp-text-quaternary">
               <span :class="isCollapsed ? 'sr-only' : 'sidebar-label whitespace-nowrap'">{{ sectionLabel(index) }}</span>
               <span v-if="isCollapsed" class="h-px w-full bg-cp-fill-tertiary" aria-hidden="true" />
             </div>
             <button
               type="button"
-              class="relative z-10 inline-flex h-11.5 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container"
+              class="relative z-10 inline-flex h-10 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container"
               :class="[
-                isCollapsed ? 'w-11.5 justify-center' : 'w-full gap-3 px-4',
+                isCollapsed ? 'w-10 justify-center' : 'w-full gap-2.5 px-3',
                 isActive(item.path)
                   ? navFeedbackMuted
                     ? 'bg-transparent font-bold text-cp-text transition-none'
@@ -415,9 +416,12 @@ onBeforeUnmount(() => {
                     ? 'bg-transparent font-semibold text-cp-text-secondary transition-none'
                     : 'bg-transparent font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
               ]"
+              :aria-current="isActive(item.path) ? 'page' : undefined"
+              :aria-label="isCollapsed ? item.label : undefined"
+              :title="isCollapsed ? item.label : undefined"
               @click="navigate(item.path)"
             >
-              <component :is="item.icon" class="shrink-0" :size="20" />
+              <component :is="item.icon" class="shrink-0" :size="18" />
               <span
                 class="sidebar-label overflow-hidden whitespace-nowrap transition-[opacity,transform] duration-200"
                 :class="isCollapsed ? 'pointer-events-none w-0' : 'w-auto'"
@@ -490,7 +494,7 @@ onBeforeUnmount(() => {
             <Info :size="isCollapsed ? 19 : 18" />
           </BaseIconButton>
 
-          <BaseIconButton v-if="mobile" variant="ghost" size="sm" label="关闭侧边栏" @click="emit('close')">
+          <BaseIconButton v-if="mobile" variant="ghost" size="sm" label="关闭侧边栏" data-sidebar-close @click="emit('close')">
             <PanelLeftClose :size="18" />
           </BaseIconButton>
 

@@ -7,6 +7,7 @@ type RotationStrategy = RotationOption['value']
 
 defineProps<{
   options: readonly RotationOption[]
+  disabled: boolean
 }>()
 
 const model = defineModel<RotationStrategy | ''>({ required: true })
@@ -22,13 +23,14 @@ const model = defineModel<RotationStrategy | ''>({ required: true })
         v-for="option in options"
         :key="option.value"
         type="button"
-        class="min-h-25 cursor-pointer rounded-cp border-0 px-4 py-3.5 text-left shadow-cp-input outline-none transition-[background-color,box-shadow,color] duration-160 focus-visible:ring-2 focus-visible:ring-cp-control-outline"
+        class="min-h-25 cursor-pointer disabled:cursor-not-allowed rounded-cp border-0 px-4 py-3.5 text-left shadow-cp-input outline-none transition-[background-color,box-shadow,color] duration-160 focus-visible:ring-2 focus-visible:ring-cp-control-outline"
         :class="
           model === option.value
             ? 'bg-cp-control-item-bg-active text-cp-primary-text shadow-cp-tertiary'
             : 'bg-(--cp-input-bg,var(--cp-input-bg)) text-cp-text hover:bg-(--cp-input-hover-bg,var(--cp-input-hover-bg)) hover:shadow-cp-input-hover'
         "
         :aria-pressed="model === option.value"
+        :disabled="disabled"
         @click="model = option.value"
       >
         <span class="flex items-center gap-2">

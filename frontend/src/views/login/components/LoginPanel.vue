@@ -30,7 +30,7 @@ const isPasswordVisible = shallowRef(false)
 
 const passwordType = computed<PasswordInputType>(() => (isPasswordVisible.value ? 'text' : 'password'))
 const passwordToggleLabel = computed<string>(() => (isPasswordVisible.value ? '隐藏密码' : '显示密码'))
-const submitLabel = computed<string>(() => (props.loading ? '正在进入...' : '进入控制台'))
+const submitLabel = computed<string>(() => (props.loading ? '正在进入...' : '登录'))
 const themeToggleLabel = computed<string>(() => (props.effectiveTheme === 'dark' ? '切换浅色模式' : '切换暗黑模式'))
 const themeToggleClasses = computed<Record<string, boolean>>(() => ({
   'is-dark': props.effectiveTheme === 'dark',
@@ -45,7 +45,7 @@ function togglePasswordVisible(): void {
   <BaseCard
     as="form"
     padding="none"
-    class="login-form relative grid min-h-120 w-[min(440px,100%)] gap-2.5 rounded-lg px-7.5 pt-6.5 pb-6 max-[560px]:min-h-auto max-[560px]:gap-4 max-[560px]:p-5.5"
+    class="login-form relative grid w-[min(440px,100%)] gap-4 min-[980px]:min-h-120 rounded-lg px-7.5 pt-6.5 pb-6 max-[560px]:p-5.5"
     @submit.prevent="emit('submit')"
   >
     <div class="login-form-line" />
@@ -61,9 +61,6 @@ function togglePasswordVisible(): void {
           >
             Codex Proxy RS
           </strong>
-          <span class="font-mono text-[10px] leading-[1.2] font-normal text-(--cp-login-brand-caption-color)">
-            USER ACCESS
-          </span>
         </span>
       </div>
 
@@ -88,9 +85,6 @@ function togglePasswordVisible(): void {
       >
         控制台登录
       </h1>
-      <p class="m-0 -ml-2 text-sm leading-[1.45] font-normal text-(--cp-login-description-color) max-[560px]:py-2">
-        「 欢迎回来，登录以开始您的数据之旅 」
-      </p>
     </section>
 
     <div class="grid gap-3">

@@ -3,6 +3,8 @@ import type { AccountGroup } from '@/api'
 import { Pencil, Power, Trash2 } from '@lucide/vue'
 
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
+import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
+import RowActionMenu from '@/components/RowActionMenu.vue'
 
 defineProps<{
   group: AccountGroup
@@ -26,26 +28,19 @@ const emit = defineEmits<{
     >
       <Pencil class="size-3.5 text-cp-link" />
     </BaseIconButton>
-    <BaseIconButton
-      variant="ghost"
-      size="sm"
-      :label="group.enabled ? '禁用分组' : '启用分组'"
-      :loading="updatingStatus"
-      @click.stop="emit('toggle', group)"
-    >
-      <Power
-        class="size-3.5"
-        :class="group.enabled ? 'text-cp-warning' : 'text-cp-success'"
-      />
-    </BaseIconButton>
-    <BaseIconButton
-      variant="ghost"
-      size="sm"
-      label="删除分组"
-      :disabled="deleting"
-      @click.stop="emit('delete', group)"
-    >
-      <Trash2 class="size-3.5 text-cp-error" />
-    </BaseIconButton>
+    <RowActionMenu v-slot="{ select }" :label="`${group.name}的更多操作`" :loading="updatingStatus || deleting">
+      <BaseMenuItem role="menuitem" tabindex="-1" @click="select(() => emit('toggle', group))">
+        <template #icon>
+          <Power class="size-3.5" />
+        </template>
+        {{ group.enabled ? '禁用分组' : '启用分组' }}
+      </BaseMenuItem>
+      <BaseMenuItem role="menuitem" tabindex="-1" tone="destructive" @click="select(() => emit('delete', group))">
+        <template #icon>
+          <Trash2 class="size-3.5" />
+        </template>
+        删除分组
+      </BaseMenuItem>
+    </RowActionMenu>
   </div>
 </template>
