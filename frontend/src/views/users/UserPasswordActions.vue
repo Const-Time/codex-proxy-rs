@@ -65,7 +65,7 @@ async function signInAgain() {
 </script>
 
 <template>
-  <div class="grid gap-3 border-t border-cp-border pt-4">
+  <div class="grid gap-4 rounded-cp-lg bg-cp-fill-quaternary p-4">
     <BaseFormItem label="修改密码" description="独立生效，无需点击保存。修改后该用户所有登录会话失效，密钥及授权分组保留。">
       <BaseInput v-model="newPassword" type="password" autocomplete="new-password" aria-label="新密码" placeholder="至少 12 位，不修改请留空" :disabled="disabled || busy || changedSelf" />
     </BaseFormItem>

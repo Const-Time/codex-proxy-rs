@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { User } from '@/api/modules/users'
-import { Pencil, Power, Search, Trash2 } from '@lucide/vue'
-import { computed, onMounted, ref } from 'vue'
+import { Pencil, Plus, Power, RefreshCw, Search, Trash2 } from '@lucide/vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { createUser, deleteUser, getUsers, setUserEnabled, updateUser } from '@/api/modules/users'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -13,6 +13,8 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
+import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import BaseStatusBadge from '@/components/base/BaseStatusBadge.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
@@ -53,6 +55,12 @@ const busy = computed(() => saving.value || passwordBusy.value || actionBusy.val
 const error = ref('')
 const open = ref(false)
 const editing = ref<User | null>(null)
+const section = ref('identity')
+const formSections = computed(() => [
+  { label: '基本资料', value: 'identity', disabled: selfReset.value || passwordBusy.value },
+  { label: '权限与额度', value: 'access', disabled: selfReset.value || passwordBusy.value },
+  ...(editing.value ? [{ label: '登录安全', value: 'security', disabled: saving.value }] : []),
+])
 const email = ref('')
 const username = ref('')
 const password = ref('')
@@ -62,10 +70,20 @@ const enabled = ref(true)
 const maxConcurrency = ref('')
 const requestsPerMinute = ref('')
 const search = ref('')
-const visibleUsers = computed(() => users.value.filter(user => `${user.email} ${user.username}`.toLowerCase().includes(search.value.toLowerCase())))
-const groupNames = (user: User) => user.groupIds.map(id => groups.value.find(group => group.id === id)?.name ?? id).join('、') || '未分配'
+const searchQuery = computed(() => search.value.trim().toLowerCase())
+const visibleUsers = computed(() => users.value.filter(user =>
+  [user.email, user.username].some(value => value?.toLowerCase().includes(searchQuery.value)),
+))
+const groupCatalog = computed(() => new Map(groups.value.map(group => [group.id, group])))
+
+watch(open, (value) => {
+  if (!value)
+    password.value = ''
+})
 
 async function load() {
+  if (loading.value)
+    return
   loading.value = true
   error.value = ''
   try {
@@ -78,6 +96,7 @@ async function load() {
 }
 function edit(user: User | null) {
   selfReset.value = false
+  section.value = 'identity'
   editing.value = user
   email.value = user?.email ?? ''
   username.value = user?.username ?? ''
@@ -88,16 +107,19 @@ function edit(user: User | null) {
   maxConcurrency.value = String(user?.maxConcurrency || '')
   requestsPerMinute.value = String(user?.requestsPerMinute || '')
   open.value = true
-  void loadGroups()
+  if (!groups.value.length && !groupsLoading.value)
+    void loadGroups()
 }
 async function save() {
   if (busy.value)
     return
   if (!isLoginEmail(email.value.trim())) {
+    section.value = 'identity'
     toast.warning('请输入有效的邮箱地址作为登录账号')
     return
   }
   if (!editing.value && password.value.length < 12) {
+    section.value = 'identity'
     toast.warning('请输入至少 12 位初始密码')
     return
   }
@@ -105,6 +127,7 @@ async function save() {
   try {
     const limits = { maxConcurrency: Number(maxConcurrency.value || 0), requestsPerMinute: Number(requestsPerMinute.value || 0) }
     if (Object.values(limits).some(value => !Number.isSafeInteger(value) || value < 0)) {
+      section.value = 'access'
       toast.warning('并发和 RPM 必须为非负整数，0 表示不限制')
       return
     }
@@ -150,59 +173,71 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="flex flex-col gap-5">
-    <BasePageHeader title="用户管理" description="创建普通用户并分配可用分组。用户自行创建和管理密钥。" />
-    <div class="flex flex-wrap items-center gap-3">
-      <BaseInput v-model="search" aria-label="搜索邮箱或用户名" placeholder="搜索邮箱或用户名" class="w-full sm:w-80">
-        <template #prefix>
-          <Search class="size-4" />
+  <div class="cp-mobile-auto-height flex h-full min-h-0 w-full flex-col gap-5">
+    <BasePageHeader title="用户管理" description="管理登录账号、授权分组和请求限制" />
+    <BaseCard class="cp-mobile-auto-height cp-mobile-table-host flex h-[calc(100dvh-136px)] min-h-125 min-w-0 flex-col">
+      <p v-if="error" role="alert" class="mb-3 rounded-cp bg-cp-error-container px-3 py-2 text-cp-sm text-cp-error-on-container">
+        {{ error }}
+      </p>
+      <BaseTable table-id="users" class="min-h-48 flex-1" density="compact" :columns="columns" :loading="loading" :rows="visibleUsers" :empty-text="searchQuery ? '没有匹配的用户' : '暂无用户'">
+        <template #toolbar>
+          <BaseInput v-model="search" aria-label="搜索邮箱或用户名" placeholder="搜索邮箱或用户名" class="w-full sm:max-w-75" clearable>
+            <template #prefix>
+              <Search class="size-4" />
+            </template>
+          </BaseInput>
         </template>
-      </BaseInput>
-      <BaseButton variant="primary" @click="edit(null)">
-        新建用户
-      </BaseButton>
-      <BaseButton variant="secondary" :loading="loading" @click="load">
-        刷新
-      </BaseButton>
-    </div>
-    <p v-if="error" role="alert" class="text-cp-error">
-      {{ error }}
-    </p>
-    <BaseCard class="cp-mobile-table-host min-w-0">
-      <BaseTable class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="visibleUsers" empty-text="没有匹配的用户">
+        <template #toolbar-actions>
+          <BaseButton variant="primary" :disabled="loading || busy" @click="edit(null)">
+            <template #icon>
+              <Plus class="size-4" />
+            </template>
+            新建用户
+          </BaseButton>
+          <BaseIconButton label="刷新用户" :loading="loading" :disabled="busy" @click="load">
+            <RefreshCw class="size-4" />
+          </BaseIconButton>
+        </template>
         <template #identity="{ row: user }">
-          <div class="min-w-0 py-2">
-            <div class="truncate font-emphasis" :title="user.email">
+          <div class="grid min-w-0 gap-1 py-1">
+            <strong class="truncate text-cp-text" :title="user.username || user.email">
+              {{ user.username || user.email }}
+            </strong>
+            <span v-if="user.username" class="truncate text-cp-xs text-cp-text-secondary" :title="user.email">
               {{ user.email }}
-            </div>
-            <div v-if="user.username" class="mt-1 truncate text-cp-xs text-cp-text-secondary" :title="user.username">
-              {{ user.username }}
-            </div>
+            </span>
           </div>
         </template>
         <template #role="{ row: user }">
-          <div class="min-w-0 py-2">
+          <BaseStatusBadge :tone="user.role === 'admin' ? 'info' : 'neutral'">
             {{ user.role === 'admin' ? '管理员' : '普通用户' }}
-          </div>
+          </BaseStatusBadge>
         </template>
         <template #status="{ row: user }">
-          <div class="min-w-0 py-2">
-            <span class="inline-flex items-center gap-1.5 text-cp-sm font-emphasis" :class="user.enabled ? 'text-cp-success' : 'text-cp-text-tertiary'"><span class="size-1.5 rounded-full bg-current" aria-hidden="true" />{{ user.enabled ? '已启用' : '已禁用' }}</span>
-          </div>
+          <BaseStatusBadge :tone="user.enabled ? 'success' : 'neutral'">
+            {{ user.enabled ? '已启用' : '已禁用' }}
+          </BaseStatusBadge>
         </template>
         <template #groups="{ row: user }">
-          <div class="min-w-0 py-2 break-words text-cp-sm text-cp-text-secondary">
-            {{ groupNames(user) }}
+          <div v-if="user.groupIds.length" class="flex min-w-0 flex-wrap gap-1.5 py-1 max-sm:justify-end">
+            <span
+              v-for="id in user.groupIds"
+              :key="id"
+              class="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-cp-sm bg-cp-fill-quaternary px-2 py-1 text-cp-xs text-cp-text-secondary"
+              :title="groupCatalog.get(id)?.name ?? id"
+            >
+              <span class="size-2 shrink-0 rounded-xs bg-cp-fill-tertiary" :style="{ backgroundColor: groupCatalog.get(id)?.color }" aria-hidden="true" />
+              <span class="truncate">{{ groupCatalog.get(id)?.name ?? id }}</span>
+            </span>
           </div>
+          <span v-else class="text-cp-text-tertiary">未分配</span>
         </template>
         <template #limits="{ row: user }">
-          <div class="min-w-0 py-2">
-            {{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}
-          </div>
+          <span class="whitespace-nowrap">{{ user.maxConcurrency || '不限' }} / {{ user.requestsPerMinute || '不限' }}</span>
         </template>
         <template #actions="{ row: user }">
-          <div class="min-w-0 py-2">
-            <div class="flex items-center gap-1">
+          <div class="min-w-0">
+            <div class="flex items-center gap-1 max-sm:justify-end">
               <BaseIconButton v-if="user.role !== 'admin' || user.id === auth.user?.id" size="sm" label="编辑用户" :disabled="busy" @click="edit(user)">
                 <Pencil class="size-3.5 text-cp-link" />
               </BaseIconButton>
@@ -224,55 +259,72 @@ onMounted(load)
           </div>
         </template>
       </BaseTable>
+      <div class="mt-3 shrink-0 text-cp-xs text-cp-text-tertiary">
+        显示 {{ visibleUsers.length }} / {{ users.length }} 位用户
+      </div>
     </BaseCard>
-    <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!busy && !selfReset" size="md">
+    <BaseModal v-model="open" :title="editing ? '编辑用户' : '新建普通用户'" :dismissible="!busy && !selfReset" size="lg">
       <div class="grid gap-5">
-        <BaseFormItem label="登录邮箱" required description="仅支持邮箱登录。修改后请使用新邮箱登录，密码、密钥和历史记录保留。">
-          <BaseInput v-model="email" aria-label="登录邮箱" type="email" :disabled="saving" maxlength="128" autocomplete="off" placeholder="name@example.com" />
-        </BaseFormItem>
-        <BaseFormItem label="用户名（选填）" description="用于显示，与登录邮箱分开；不填写时显示邮箱。">
-          <BaseInput v-model="username" aria-label="用户名" maxlength="128" :disabled="saving" placeholder="自定义用户名" />
-        </BaseFormItem>
-        <BaseFormItem v-if="!editing" label="初始密码" required>
-          <BaseInput v-model="password" aria-label="初始密码" type="password" autocomplete="new-password" :disabled="saving" placeholder="至少 12 位" />
-        </BaseFormItem>
-        <UserPasswordActions v-if="open && editing" :key="editing.id" :user-id="editing.id" :disabled="saving" @busy="passwordBusy = $event" @self-reset="selfReset = true" />
-        <div v-if="editing && editing.role !== 'admin'" class="flex items-center gap-2">
-          <BaseSwitch v-model="enabled" label="启用用户" :disabled="saving" /><span>启用用户</span>
-        </div>
-        <p v-if="editing && editing.role !== 'admin'" class="text-cp-sm text-cp-text-secondary">
-          禁用后无法登录，已有密钥不能发起新请求。
-        </p>
-        <div v-if="editing?.role !== 'admin'" class="grid gap-4 sm:grid-cols-2">
-          <BaseFormItem label="最大并发">
-            <BaseInput v-model="maxConcurrency" type="number" min="0" step="1" aria-label="最大并发" placeholder="不限制" :disabled="saving" />
+        <BaseSegmented v-model="section" label="用户设置分区" :options="formSections" class="w-full sm:w-fit" :disabled="saving" />
+
+        <section v-show="section === 'identity'" class="grid gap-4" aria-label="基本资料">
+          <div class="grid gap-4 sm:grid-cols-2">
+            <BaseFormItem label="登录邮箱" required description="修改后请使用新邮箱登录。">
+              <BaseInput v-model="email" aria-label="登录邮箱" type="email" :disabled="busy || selfReset" maxlength="128" autocomplete="off" placeholder="name@example.com" />
+            </BaseFormItem>
+            <BaseFormItem label="用户名（选填）" description="留空时显示邮箱。">
+              <BaseInput v-model="username" aria-label="用户名" maxlength="128" :disabled="busy || selfReset" placeholder="自定义用户名" />
+            </BaseFormItem>
+          </div>
+          <BaseFormItem v-if="!editing" label="初始密码" required>
+            <BaseInput v-model="password" aria-label="初始密码" type="password" autocomplete="new-password" :disabled="busy" placeholder="至少 12 位" />
           </BaseFormItem>
-          <BaseFormItem label="每分钟请求数（RPM）">
-            <BaseInput v-model="requestsPerMinute" type="number" min="0" step="1" aria-label="每分钟请求数（RPM）" placeholder="不限制" :disabled="saving" />
+          <div v-if="editing && editing.role !== 'admin'" class="rounded-cp bg-cp-fill-quaternary p-3">
+            <BaseSwitch v-model="enabled" label="启用用户" show-label :disabled="busy || selfReset" />
+            <p class="mt-2 text-cp-sm text-cp-text-secondary">
+              禁用后无法登录，已有密钥不能发起新请求。
+            </p>
+          </div>
+        </section>
+
+        <section v-show="section === 'access'" class="grid gap-5" aria-label="权限与额度">
+          <BaseFormItem label="授权分组" :description="editing?.role === 'admin' ? '分组授权控制个人密钥和额度。取消授权后，该分组的已有密钥将无法发起新请求。' : undefined">
+            <AccountGroupCheckboxGrid v-model="groupIds" :groups="groups" :loading="groupsLoading" :disabled="busy || selfReset" />
           </BaseFormItem>
-        </div>
-        <p v-if="editing?.role !== 'admin'" class="text-cp-sm text-cp-text-secondary">
-          0 表示不限制。同一用户的所有密钥共用并发和 RPM 限制。
-        </p>
-        <BaseFormItem label="授权分组">
-          <AccountGroupCheckboxGrid v-model="groupIds" :groups="groups" :loading="groupsLoading" :disabled="saving" />
-        </BaseFormItem>
-        <p v-if="editing?.role === 'admin'" class="text-cp-sm text-cp-text-secondary">
-          授权分组用于您自己的密钥和额度，不影响系统管理权限。取消授权后，该分组的已有密钥将无法发起新请求。
-        </p>
-        <div v-if="editing && groupIds.length" class="grid gap-3">
-          <p class="text-cp-sm text-cp-text-secondary">
-            额度倍率同时调整该用户的日限和周限，不改变消费计价。默认 1 倍，分组不限额时仍不限额。
-          </p>
-          <BaseFormItem v-for="id in groupIds" :key="id" :label="`${groups.find(group => group.id === id)?.name ?? id} · 额度倍率`">
-            <BaseInput v-model="quotaMultipliers[id]" type="number" min="0.01" max="1000" step="0.01" placeholder="1" :aria-label="`${groups.find(group => group.id === id)?.name ?? id}额度倍率`" :disabled="saving" />
-          </BaseFormItem>
-        </div>
+          <div v-if="editing?.role !== 'admin'" class="grid gap-3 rounded-cp bg-cp-fill-quaternary p-3">
+            <div class="grid gap-4 sm:grid-cols-2">
+              <BaseFormItem label="最大并发">
+                <BaseInput v-model="maxConcurrency" type="number" min="0" step="1" aria-label="最大并发" placeholder="不限制" :disabled="busy || selfReset" />
+              </BaseFormItem>
+              <BaseFormItem label="每分钟请求数（RPM）">
+                <BaseInput v-model="requestsPerMinute" type="number" min="0" step="1" aria-label="每分钟请求数（RPM）" placeholder="不限制" :disabled="busy || selfReset" />
+              </BaseFormItem>
+            </div>
+            <p class="text-cp-sm text-cp-text-secondary">
+              同一用户的所有密钥共用并发和 RPM 限制。0 表示不限制。
+            </p>
+          </div>
+          <div v-if="editing && groupIds.length" class="grid gap-3">
+            <p class="text-cp-sm text-cp-text-secondary">
+              倍率同时调整日额度和周额度，默认 1 倍。
+            </p>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <BaseFormItem v-for="id in groupIds" :key="id" :label="`${groupCatalog.get(id)?.name ?? id} · 额度倍率`">
+                <BaseInput v-model="quotaMultipliers[id]" type="number" min="0.01" max="1000" step="0.01" placeholder="1" :aria-label="`${groupCatalog.get(id)?.name ?? id}额度倍率`" :disabled="busy || selfReset" />
+              </BaseFormItem>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="open && editing" v-show="section === 'security'" aria-label="登录安全">
+          <UserPasswordActions :key="editing.id" :user-id="editing.id" :disabled="saving" @busy="passwordBusy = $event" @self-reset="selfReset = true" />
+        </section>
       </div>
       <template #footer>
-        <BaseButton variant="secondary" :disabled="busy || selfReset" @click="open = false; password = ''">
-          取消
-        </BaseButton><BaseButton variant="primary" :loading="saving" :disabled="passwordBusy || selfReset" @click="save">
+        <BaseButton variant="secondary" :disabled="busy || selfReset" @click="open = false">
+          {{ section === 'security' ? '关闭' : '取消' }}
+        </BaseButton>
+        <BaseButton v-if="section !== 'security'" variant="primary" :loading="saving" :disabled="passwordBusy || selfReset" @click="save">
           保存
         </BaseButton>
       </template>

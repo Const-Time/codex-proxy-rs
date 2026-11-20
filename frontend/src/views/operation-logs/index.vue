@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { OperationLog } from '@/api/modules/operations'
-import { Eye, Search, ShieldCheck } from '@lucide/vue'
-import { onMounted, reactive, ref } from 'vue'
+import { Eye, RefreshCw, Search } from '@lucide/vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { getOperationLogs } from '@/api/modules/operations'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -9,24 +9,27 @@ import BaseFilterPanel from '@/components/base/BaseFilterPanel.vue'
 import FormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
+import BaseStatusBadge from '@/components/base/BaseStatusBadge.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import { errorMessage } from '@/utils/async'
 import { formatDateTime as date } from '@/utils/date'
+import OperationLogDetailModal from './OperationLogDetailModal.vue'
 
-const filters = reactive({ email: '', action: '', ip: '', method: '', authMethod: '', result: '', days: '7' })
+const defaultFilters = { email: '', action: '', ip: '', method: '', authMethod: '', result: '', days: '7' }
+const filters = reactive({ ...defaultFilters })
+const filterCount = computed(() => Object.entries(filters).filter(([key, value]) => value.trim() !== defaultFilters[key as keyof typeof defaultFilters]).length)
 const items = ref<OperationLog[]>([])
 const columns = defineTableColumns<OperationLog>([
   { key: 'time', label: '时间', kind: 'datetime' },
-  { key: 'actor', label: '操作者', kind: 'identity', size: 'xl' },
-  { key: 'action', label: '动作', kind: 'custom', size: '3xl' },
+  { key: 'actor', label: '操作者', kind: 'identity', size: 'xl', mobileFullWidth: true },
+  { key: 'action', label: '路径', kind: 'mono', size: '2xl', mobileFullWidth: true },
   { key: 'result', label: '结果', kind: 'status', size: 'sm' },
   { key: 'duration', label: '耗时', kind: 'numeric', size: 'sm' },
-  { key: 'source', label: '来源 IP', kind: 'custom', size: '2xl' },
+  { key: 'source', label: '来源 IP', kind: 'custom', size: 'xl' },
   { key: 'actions', label: '操作', kind: 'actions', size: 'sm' },
 ])
 const total = ref(0)
@@ -35,17 +38,31 @@ const loading = ref(false)
 const error = ref('')
 const detail = ref<OperationLog | null>(null)
 const detailOpen = ref(false)
-let applied: Record<string, string | number | undefined> = {}
+type AuditQuery = Parameters<typeof getOperationLogs>[0]
+let applied: AuditQuery = {}
 let revision = 0
 const authName = (method: string) => ({ session: '登录会话', api_key: '管理密钥', anonymous: '未认证' }[method] ?? method)
-async function load() {
+let appliedDays = Number(defaultFilters.days)
+
+function timeRange(days: number) {
+  const now = Date.now()
+  return {
+    startTime: new Date(now - days * 86400000).toISOString(),
+    endTime: new Date(now).toISOString(),
+  }
+}
+
+async function load(targetPage: number, query = applied, days = appliedDays) {
   const current = ++revision
   loading.value = true
   error.value = ''
   try {
-    const data = await getOperationLogs({ ...applied, page: page.value })
+    const data = await getOperationLogs({ ...query, page: targetPage })
     if (current !== revision)
       return
+    applied = query
+    appliedDays = days
+    page.value = targetPage
     items.value = data.items
     total.value = data.total
   }
@@ -58,42 +75,43 @@ async function load() {
       loading.value = false
   }
 }
+
 function search() {
-  page.value = 1
   const { days, ...fields } = filters
-  const now = Date.now()
-  applied = { ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.trim() || undefined])), startTime: new Date(now - Number(days) * 86400000).toISOString(), endTime: new Date(now).toISOString() }
-  void load()
+  const query = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.trim() || undefined]))
+  void load(1, { ...query, ...timeRange(Number(days)) }, Number(days))
+}
+function refresh() {
+  void load(1, { ...applied, ...timeRange(appliedDays) })
 }
 function reset() {
-  Object.assign(filters, { email: '', action: '', ip: '', method: '', authMethod: '', result: '', days: '7' })
+  Object.assign(filters, defaultFilters)
   search()
 }
 function changePage(value: number) {
-  page.value = value
-  void load()
+  void load(value)
 }
 onMounted(search)
 </script>
 
 <template>
-  <div class="grid gap-5">
-    <BasePageHeader title="操作日志" description="记录登录、管理修改、敏感操作与鉴权失败，按系统日志保留天数保存。" />
-    <BaseCard class="@container">
-      <BaseFilterPanel :active-count="[filters.email, filters.action, filters.ip, filters.method, filters.authMethod, filters.result].filter(Boolean).length">
-        <form class="grid items-end gap-3 sm:grid-cols-2 @[760px]:grid-cols-4 @[1120px]:grid-cols-[minmax(130px,1.2fr)_minmax(150px,1.4fr)_minmax(130px,1fr)_104px_104px_104px_120px_auto]" @submit.prevent="search">
+  <div class="cp-mobile-auto-height flex h-full min-h-0 w-full flex-col gap-5">
+    <BasePageHeader title="操作日志" description="查看登录、管理变更和鉴权失败记录" />
+    <BaseCard class="cp-mobile-auto-height cp-mobile-table-host @container flex h-[calc(100dvh-136px)] min-h-125 min-w-0 flex-col">
+      <BaseFilterPanel :active-count="filterCount" class="mb-3 shrink-0" collapsible>
+        <form class="grid items-end gap-3 rounded-cp bg-cp-fill-quaternary p-3 @[480px]:grid-cols-2 @[760px]:grid-cols-4" @submit.prevent="search">
           <FormItem label="操作者邮箱">
-            <BaseInput v-model="filters.email" aria-label="操作者邮箱" placeholder="按邮箱筛选">
+            <BaseInput v-model="filters.email" aria-label="操作者邮箱" placeholder="按邮箱筛选" clearable>
               <template #prefix>
                 <Search class="size-4" />
               </template>
             </BaseInput>
           </FormItem>
           <FormItem label="动作 / 路径">
-            <BaseInput v-model="filters.action" aria-label="动作或路径" placeholder="路径或动作" />
+            <BaseInput v-model="filters.action" aria-label="动作或路径" placeholder="路径或动作" clearable />
           </FormItem>
           <FormItem label="IP">
-            <BaseInput v-model="filters.ip" aria-label="IP" placeholder="连接 / 上报 IP" />
+            <BaseInput v-model="filters.ip" aria-label="IP" placeholder="连接 / 上报 IP" clearable />
           </FormItem>
           <FormItem label="请求方法">
             <BaseSelect v-model="filters.method" class="w-full" aria-label="请求方法" :options="[{ label: '全部方法', value: '' }, ...['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(value => ({ label: value, value }))]" />
@@ -109,73 +127,61 @@ onMounted(search)
           </FormItem>
           <div class="flex items-end gap-2 whitespace-nowrap">
             <BaseButton type="submit" variant="primary" :loading="loading">
-              查询 / 刷新
-            </BaseButton><BaseButton type="button" @click="reset">
+              查询
+            </BaseButton>
+            <BaseButton type="button" variant="ghost" @click="reset">
               重置
             </BaseButton>
           </div>
         </form>
       </BaseFilterPanel>
-    </BaseCard>
-    <p v-if="error" role="alert" class="text-cp-error">
-      {{ error }}
-    </p>
-    <BaseCard class="cp-mobile-table-host min-w-0">
-      <BaseTable class="h-auto! min-h-48" :columns="columns" :loading="loading" :rows="items" empty-text="暂无匹配日志">
+      <p v-if="error" role="alert" class="mb-3 rounded-cp bg-cp-error-container px-3 py-2 text-cp-sm text-cp-error-on-container">
+        {{ error }}<span v-if="items.length">。当前显示上次查询结果。</span>
+      </p>
+      <BaseTable table-id="operation-logs" class="min-h-48 flex-1" density="compact" :columns="columns" :loading="loading" :rows="items" empty-text="暂无匹配日志">
+        <template #toolbar>
+          <span class="block pb-1.5 text-cp-sm text-cp-text-secondary">共 {{ total }} 条日志</span>
+        </template>
+        <template #toolbar-actions>
+          <BaseIconButton :loading="loading" label="刷新操作日志" @click="refresh">
+            <RefreshCw class="size-4" />
+          </BaseIconButton>
+        </template>
         <template #time="{ row: item }">
-          <div class="min-w-0 py-2">
-            {{ date(item.occurredAt) }}
-          </div>
+          <span>{{ date(item.occurredAt) }}</span>
         </template>
         <template #actor="{ row: item }">
-          <div class="min-w-0 py-2">
-            <div>
-              <div class="truncate font-emphasis" :title="item.username || item.email || authName(item.authMethod)">
-                {{ item.username || item.email || authName(item.authMethod) }}
-              </div><div class="mt-1 truncate text-cp-xs text-cp-text-secondary" :title="item.email || undefined">
-                {{ item.username ? item.email : authName(item.authMethod) }}
-              </div>
-            </div>
+          <div class="grid min-w-0 gap-1 py-1">
+            <strong class="truncate text-cp-text" :title="item.username || item.email || authName(item.authMethod)">
+              {{ item.username || item.email || authName(item.authMethod) }}
+            </strong>
+            <span v-if="item.username || item.email" class="truncate text-cp-xs text-cp-text-secondary" :title="item.email || undefined">
+              {{ item.username && item.email ? item.email : authName(item.authMethod) }}
+            </span>
           </div>
         </template>
         <template #action="{ row: item }">
-          <div class="min-w-0 py-2">
-            <div class="min-w-0" :title="`${item.method} ${item.path}`">
-              <div class="truncate font-mono text-cp-sm">
-                {{ item.path }}
-              </div><div class="mt-1 font-mono text-cp-xs text-cp-text-tertiary">
-                {{ item.method }}
-              </div>
-            </div>
+          <div class="grid min-w-0 gap-1 py-1" :title="`${item.method} ${item.path}`">
+            <span class="w-fit rounded-cp-sm bg-cp-fill-tertiary px-1.5 py-0.5 text-cp-xs leading-tight text-cp-text-secondary">{{ item.method }}</span>
+            <span class="truncate text-cp-sm max-sm:whitespace-normal max-sm:break-all">{{ item.path }}</span>
           </div>
         </template>
         <template #result="{ row: item }">
-          <div class="min-w-0 py-2">
-            <span class="rounded-full px-2 py-1 text-cp-xs" :class="item.status < 400 ? 'bg-cp-success-container text-cp-success' : 'bg-cp-error-container text-cp-error'">{{ item.status }}</span>
-          </div>
+          <BaseStatusBadge :tone="item.status < 400 ? 'success' : 'danger'">
+            {{ item.status }}
+          </BaseStatusBadge>
         </template>
         <template #duration="{ row: item }">
-          <div class="min-w-0 py-2">
-            {{ item.durationMs }} ms
-          </div>
+          <span class="whitespace-nowrap">{{ item.durationMs }} ms</span>
         </template>
         <template #source="{ row: item }">
-          <div class="min-w-0 py-2">
-            <div class="break-all font-mono text-cp-sm">
-              <div :title="item.forwardedIp ? '代理请求头上报的地址，未经可信代理验证' : '应用直接连接的对端地址，可能是 Docker 网桥或反向代理'">
-                {{ item.forwardedIp || item.clientIp || '未记录' }}
-              </div>
-              <div v-if="item.forwardedIp" class="mt-1 font-sans text-cp-xs text-cp-text-tertiary">
-                代理上报 · 未验证
-              </div>
-              <div class="mt-1 text-cp-xs text-cp-text-secondary">
-                {{ item.forwardedIp ? `连接 ${item.clientIp || '未记录'}` : '直连 · 未上报代理来源' }}
-              </div>
-            </div>
+          <div class="grid min-w-0 gap-1 py-1">
+            <span class="break-all font-mono text-cp-sm" :title="item.forwardedIp ? '代理请求头上报的地址，未经可信代理验证' : '应用直接连接的对端地址，可能是 Docker 网桥或反向代理'">{{ item.forwardedIp || item.clientIp || '未记录' }}</span>
+            <span class="text-cp-xs text-cp-text-tertiary">{{ item.forwardedIp ? '代理上报 · 未验证' : '连接 IP' }}</span>
           </div>
         </template>
         <template #actions="{ row: item }">
-          <div class="min-w-0 py-2">
+          <div class="flex min-w-0 max-sm:justify-end">
             <BaseIconButton size="sm" label="查看操作详情" @click="detail = item; detailOpen = true">
               <Eye class="size-3.5 text-cp-link" />
             </BaseIconButton>
@@ -184,32 +190,6 @@ onMounted(search)
       </BaseTable>
       <BaseTablePagination :pagination="{ currentPage: page, pageSize: 50, total, pageSizes: [50] }" :loading="loading" @page-change="changePage" />
     </BaseCard>
-    <BaseModal v-model="detailOpen" title="操作详情" size="md">
-      <div v-if="detail" class="grid gap-4 text-cp-sm">
-        <p class="flex items-center gap-2 text-cp-text-secondary">
-          <ShieldCheck class="size-4" />仅记录安全元数据，不记录密码、密钥原文或正文。
-        </p><dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-3">
-          <dt>请求 ID</dt><dd class="break-all font-mono">
-            {{ detail.requestId }}
-          </dd><dt>操作者</dt><dd>{{ detail.email || authName(detail.authMethod) }}</dd><dt>路径</dt><dd class="break-all">
-            {{ detail.method }} {{ detail.path }}
-          </dd><dt>连接 IP</dt><dd>
-            {{ detail.clientIp || '未记录' }}<p class="mt-1 text-cp-xs text-cp-text-tertiary">
-              应用直接连接的对端地址，经过 Docker 或反向代理后可能始终相同。
-            </p>
-          </dd><dt>代理上报 IP</dt><dd>
-            {{ detail.forwardedIp || '未上报' }}<p class="mt-1 text-cp-xs text-cp-text-tertiary">
-              来自 X-Forwarded-For、X-Real-IP 或 CF-Connecting-IP，仅供排查，未经可信代理验证。未上报时无法从连接地址还原访客 IP。
-            </p>
-          </dd><dt>认证 / 结果</dt><dd>{{ authName(detail.authMethod) }} / {{ detail.status }}</dd>
-        </dl><section v-for="(change, index) in detail.changes" :key="index" class="rounded-cp bg-cp-fill-quaternary p-3">
-          <p>{{ change.action }} · {{ change.entityKind }}</p><p class="mt-1 break-all font-mono">
-            {{ change.entityRef }}
-          </p><p class="mt-2 text-cp-text-secondary">
-            变更字段：{{ change.changedFields.join('、') || '无' }}
-          </p>
-        </section>
-      </div>
-    </BaseModal>
+    <OperationLogDetailModal v-model="detailOpen" :detail="detail" :authentication-label="detail ? authName(detail.authMethod) : ''" />
   </div>
 </template>
