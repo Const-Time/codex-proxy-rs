@@ -110,13 +110,17 @@ async fn first_websocket_request_error_preserves_http_error_body_and_wire_event(
         .await
         .unwrap();
     assert!(events.iter().all(|event| !event.has_client_event()));
-    let response = error
-        .client_visible_upstream_response()
-        .unwrap_or_else(|| panic!(
+    let response = error.client_visible_upstream_response().unwrap_or_else(|| {
+        panic!(
             "expected HTTP error, got {error:?}; atomic events: {:?}",
-            error.atomic_client_events().iter().filter_map(ProviderEvent::wire_event)
-                .map(|wire| (wire.event_type(), wire.data())).collect::<Vec<_>>()
-        ));
+            error
+                .atomic_client_events()
+                .iter()
+                .filter_map(ProviderEvent::wire_event)
+                .map(|wire| (wire.event_type(), wire.data()))
+                .collect::<Vec<_>>()
+        )
+    });
     assert_eq!(response.status(), 400);
     assert_eq!(
         serde_json::from_slice::<Value>(response.body()).unwrap(),
