@@ -187,6 +187,7 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 带非 2xx `status`/`status_code` 或内置续接错误码的 WebSocket 错误帧继续原样交付。
 上游结构化错误的 message/code/type 会透传给客户端，其中内嵌的账号指纹 UUID 已脱敏。模型映射是
 全局精确映射，未命中时模型名原样交给候选 Provider；分组只限定账号集合，不参与模型改名。
+原生 Responses 的下游 SSE 尚未提交时，上游 WebSocket 首帧明确返回普通请求错误 400，网关直接返回 HTTP 400 和完整的 `error` 对象。已发送业务数据或心跳时，使用 SSE 终态错误。
 
 OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足错误时，代理在允许安全重放且
 尚未交付输出的前提下，先做最多 3 次同账号指数退避，再通过现有调度换号。默认间隔从 500ms 开始，

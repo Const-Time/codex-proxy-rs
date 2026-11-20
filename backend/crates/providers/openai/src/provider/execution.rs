@@ -1029,9 +1029,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         yield event;
                     }
                 } else if atomic_upstream_failure {
-                    failure.error = failure
-                        .error
-                        .with_atomic_client_events(events);
+                    failure.error = super::failure::with_atomic_failure_events(
+                        failure.error,
+                        events,
+                        &context,
+                        response_transport,
+                    );
                 }
                 Err(quota_continuation_replay_error(
                     failure.error,
@@ -1164,9 +1167,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     yield event;
                 }
             } else if atomic_upstream_failure {
-                failure.error = failure
-                    .error
-                    .with_atomic_client_events(events);
+                failure.error = super::failure::with_atomic_failure_events(
+                    failure.error,
+                    events,
+                    &context,
+                    response_transport,
+                );
             }
             Err(quota_continuation_replay_error(
                 failure.error,

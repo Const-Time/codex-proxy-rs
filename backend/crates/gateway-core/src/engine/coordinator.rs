@@ -574,6 +574,16 @@ where
                     error,
                     send_state,
                 } => {
+                    if error.kind() == crate::error::ProviderErrorKind::InvalidRequest
+                        && error
+                            .client_visible_upstream_response()
+                            .is_some_and(|response| response.status() == 400)
+                        && self.response_commit.claim_early_http_error()
+                    {
+                        self.finish_provider_error_with_send_state(&error, send_state)
+                            .await?;
+                        return Err(provider_engine_error(error));
+                    }
                     let requirement = if self.delivery_committed {
                         CommitRequirement::AlreadyCommitted
                     } else {
@@ -2529,6 +2539,10 @@ where
     }
 
     async fn finish_interruption(&mut self, error: &EngineError) -> Result<(), EngineError> {
+        if let Some(current) = self.current.as_mut() {
+            current.stream.abort();
+        }
+        self.middleware_provider = None;
         // 结算 I/O 可能继续等待，先冻结交付事实以保持终态与实际 HTTP 状态一致
         self.response_commit.finish();
         let (outcome, gateway_error) = match error {

@@ -409,7 +409,9 @@ pub async fn stream_execution_response(
     connection_guard: Option<Box<dyn ConnectionGuard>>,
 ) -> Response {
     let (admitted, keepalive) = tokio::sync::oneshot::channel();
-    let _ = admitted.send(session.response_commit());
+    let commit = session.response_commit();
+    commit.prefer_early_http_error();
+    let _ = admitted.send(commit);
     super::keepalive::response(
         stream_execution_response_inner(session, connection_guard),
         keepalive,

@@ -71,6 +71,64 @@ pub(super) async fn stream_failure(
 }
 
 #[tokio::test]
+async fn first_websocket_request_error_preserves_http_error_body_and_wire_event() {
+    let detail = json!({
+        "type": "invalid_request_error", "code": "invalid_value", "message": "Invalid input.",
+        "param": "input[2].id", "extension": { "reason": "duplicate" }
+    });
+    let frame = json!({"type": "error", "status": 400, "error": detail});
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let raw = frame.to_string();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = accept_codex_test_websocket(socket).await;
+        ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(raw.into())).await.unwrap();
+    });
+    let context = AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_early_bad_request").unwrap(),
+            ClientApiKeyId::new("key_openai_contract").unwrap(),
+        )
+        .with_request_metadata(None, "http_sse"),
+        NonZeroU32::new(1).unwrap(),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        None,
+        CancellationToken::new(),
+    );
+    let mut stream = provider_with_base_url(&store, base_url)
+        .execute(planned_request("openai", generate_operation()), context)
+        .await
+        .unwrap();
+    let (events, mut error) = timeout(Duration::from_secs(5), stream_failure(&mut stream))
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| !event.has_client_event()));
+    let response = error
+        .client_visible_upstream_response()
+        .unwrap_or_else(|| panic!(
+            "expected HTTP error, got {error:?}; atomic events: {:?}",
+            error.atomic_client_events().iter().filter_map(ProviderEvent::wire_event)
+                .map(|wire| (wire.event_type(), wire.data())).collect::<Vec<_>>()
+        ));
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        serde_json::from_slice::<Value>(response.body()).unwrap(),
+        json!({"error": detail})
+    );
+    let events = error.take_atomic_client_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].wire_event().unwrap().data(), &frame);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn large_preludes_are_forwarded_before_failure_on_http_and_websocket() {
     for websocket in [false, true] {
         let store = Arc::new(MemoryAccountStore::default());

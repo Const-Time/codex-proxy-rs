@@ -3059,6 +3059,70 @@ fn exhausted_atomic_response_failed_should_deliver_only_the_last_failure_once() 
 }
 
 #[test]
+fn native_sse_reports_http_bad_request_until_a_keepalive_commits_the_response() {
+    for heartbeat_sent in [false, true] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let body = Bytes::from_static(br#"{"error":{"code":"invalid_value","param":"input"}}"#);
+        let event = ProviderEvent::wire(
+            ProtocolWireEvent::json(
+                "openai",
+                Some("error".to_owned()),
+                json!({"type": "error", "status": 400, "error": {"code": "invalid_value", "param": "input"}}),
+            )
+            .unwrap(),
+        );
+        let failure =
+            ProviderError::new(ProviderErrorKind::InvalidRequest, UpstreamSendState::Sent)
+                .with_status(400)
+                .with_retry_prohibited()
+                .with_client_visible_upstream_response(
+                    gateway_core::error::ClientVisibleUpstreamResponse::new(
+                        400,
+                        Some(b"application/json".to_vec()),
+                        body.clone(),
+                    ),
+                )
+                .with_atomic_client_events(vec![event]);
+        let (coordinator, _, _) = coordinator(vec![Script::ObservedStream {
+            account_id: "acct_only",
+            items: vec![Err(failure)],
+        }]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        let commit = session.response_commit();
+        commit.prefer_early_http_error();
+        if heartbeat_sent {
+            assert!(commit.record(Some(200)));
+            let event = block_on(session.next_event()).unwrap().unwrap();
+            assert_eq!(event.into_provider_events().len(), 1);
+            block_on(session.commit_downstream(Some(200))).unwrap();
+        }
+        let result = block_on(session.next_event()).unwrap_err();
+        let EngineError::Provider(error) = result else {
+            panic!(
+                "expected upstream request error, got {result:?} (heartbeat_sent={heartbeat_sent})"
+            );
+        };
+        assert_eq!(
+            error.client_visible_upstream_response().unwrap().body(),
+            &body
+        );
+        assert_eq!(commit.status_code(), heartbeat_sent.then_some(200));
+        if !heartbeat_sent {
+            assert!(!commit.record(Some(200)));
+        }
+    }
+}
+
+#[test]
 fn empty_selection_after_atomic_failure_should_deliver_the_last_upstream_wire() {
     let operation = generate_operation();
     let route_plan = plan(&operation);
@@ -6160,7 +6224,7 @@ mod retry_policy {
             let mut read = Box::pin(session.collect_uncommitted());
             assert!(futures::poll!(&mut read).is_pending());
             assert_eq!(policy.inputs.lock().unwrap().len(), 1);
-            assert_eq!(provider.released_leases.load(Ordering::SeqCst), 0);
+            assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
             drop(read);
             let mut resumed = Box::pin(session.collect_uncommitted());
             assert!(futures::poll!(&mut resumed).is_pending());

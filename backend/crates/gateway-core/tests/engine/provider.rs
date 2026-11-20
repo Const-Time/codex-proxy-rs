@@ -124,6 +124,39 @@ fn provider_stream_should_release_owned_lease_on_drop() {
 }
 
 #[test]
+fn provider_stream_releases_events_and_lease_on_eof_or_error() {
+    for terminal in [
+        None,
+        Some(Err(ProviderError::new(
+            ProviderErrorKind::Unavailable,
+            UpstreamSendState::Sent,
+        ))),
+    ] {
+        let events_released = Arc::new(AtomicBool::new(false));
+        let lease_released = Arc::new(AtomicBool::new(false));
+        let event_owner = DropLease(Arc::clone(&events_released));
+        let mut terminal = terminal;
+        let events = stream::poll_fn(move |_| {
+            let _ = &event_owner;
+            std::task::Poll::Ready(terminal.take())
+        });
+        let metadata = ProviderCallMetadata::new(
+            ProviderKind::new("openai").unwrap(),
+            UpstreamModelId::new("gpt-5").unwrap(),
+            ProviderAccountId::new("acct_terminal").unwrap(),
+            UpstreamTransport::new("http_sse").unwrap(),
+        );
+        let mut provider_stream =
+            ProviderStream::new(metadata, events, DropLease(Arc::clone(&lease_released)));
+
+        let _ = futures::executor::block_on(provider_stream.next());
+        assert!(events_released.load(Ordering::SeqCst));
+        assert!(lease_released.load(Ordering::SeqCst));
+        assert!(futures::executor::block_on(provider_stream.next()).is_none());
+    }
+}
+
+#[test]
 fn provider_stream_should_report_common_account_success_and_first_output() {
     let feedback = Arc::new(AccountFeedbackStats::default());
     let provider = ProviderKind::new("openai").expect("valid provider");

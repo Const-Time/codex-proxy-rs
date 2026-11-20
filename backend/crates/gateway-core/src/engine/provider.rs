@@ -180,12 +180,16 @@ impl<T> ResourceLease for T where T: Send + Sync + 'static {}
 /// 或业务 payload。这样 Coordinator 可以先持久化 attempt，再越过发送屏障。
 pub struct ProviderStream {
     metadata: ProviderCallMetadata,
-    events: EventStream,
-    _lease: Box<dyn ResourceLease>,
+    source: Option<ProviderStreamSource>,
     account_feedback: Option<ProviderStreamAccountFeedback>,
     validator: EventSequenceValidator,
     strict_canonical_seen: bool,
-    terminated: bool,
+}
+
+// The event source can hold its own reference to the same lease.
+struct ProviderStreamSource {
+    events: EventStream,
+    _lease: Box<dyn ResourceLease>,
 }
 
 struct ProviderStreamAccountFeedback {
@@ -282,13 +286,18 @@ impl ProviderStream {
     {
         Self {
             metadata,
-            events: Box::pin(events),
-            _lease: Box::new(lease),
+            source: Some(ProviderStreamSource {
+                events: Box::pin(events),
+                _lease: Box::new(lease),
+            }),
             account_feedback: None,
             validator: EventSequenceValidator::new(),
             strict_canonical_seen: false,
-            terminated: false,
         }
+    }
+
+    pub(super) fn abort(&mut self) {
+        self.source.take();
     }
 
     /// 让公共 stream 边界统一回灌账号成功率与首个有效输出延迟。
@@ -337,14 +346,14 @@ impl Stream for ProviderStream {
 
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if this.terminated {
+        let Some(source) = this.source.as_mut() else {
             return Poll::Ready(None);
-        }
+        };
         if let Some(feedback) = this.account_feedback.as_mut() {
             feedback.start();
         }
 
-        match this.events.as_mut().poll_next(context) {
+        match source.events.as_mut().poll_next(context) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(event))) => {
                 // wire facts 仍推进混合流的序列状态，但不能以旁路观测拒绝 wire。
@@ -355,7 +364,7 @@ impl Stream for ProviderStream {
                     this.strict_canonical_seen |= strict;
                     for fact in event.canonical_facts() {
                         if this.validator.observe(fact).is_err() && strict {
-                            this.terminated = true;
+                            this.abort();
                             let error = ProviderError::new(
                                 ProviderErrorKind::Protocol,
                                 UpstreamSendState::Sent,
@@ -376,14 +385,14 @@ impl Stream for ProviderStream {
                 Poll::Ready(Some(Ok(event)))
             }
             Poll::Ready(Some(Err(error))) => {
-                this.terminated = true;
+                this.abort();
                 if let Some(feedback) = this.account_feedback.as_mut() {
                     feedback.report_failure(&error);
                 }
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
-                this.terminated = true;
+                this.abort();
                 let validation = if this.strict_canonical_seen {
                     this.validator.finish()
                 } else {

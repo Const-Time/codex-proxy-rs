@@ -121,6 +121,31 @@ impl ClientEventDelivery {
     }
 }
 
+pub(super) fn with_atomic_failure_events(
+    mut error: ProviderError,
+    events: Vec<ProviderEvent>,
+    context: &AttemptContext,
+    transport: CodexBackendTransport,
+) -> ProviderError {
+    if transport == CodexBackendTransport::WebSocket
+        && error.kind() == ProviderErrorKind::InvalidRequest
+        && error.upstream_status() == Some(400)
+        && error.retry_is_prohibited()
+        && context.client_transport() == Some("http_sse")
+        && let [event] = events.as_slice()
+        && let Some(wire) = event.wire_event()
+        && wire.event_type() == Some("error")
+        && let Some(detail) = wire.data().get("error").and_then(Value::as_object)
+    {
+        error = error.with_client_visible_upstream_response(ClientVisibleUpstreamResponse::new(
+            400,
+            Some(b"application/json".to_vec()),
+            Bytes::from(json!({ "error": detail }).to_string()),
+        ));
+    }
+    error.with_atomic_client_events(events)
+}
+
 fn is_replaceable_prelude(event: &ProviderEvent) -> bool {
     event
         .wire_event()

@@ -1,5 +1,6 @@
 //! 下游首字节提交事实；传输保活不代表业务事件已交付
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
@@ -8,6 +9,7 @@ use crate::diagnostics::TraceContext;
 #[derive(Clone, Default)]
 pub struct ResponseCommit {
     first: Arc<OnceLock<TransportState>>,
+    prefer_http_error: Arc<AtomicBool>,
     trace: TraceContext,
 }
 
@@ -40,6 +42,16 @@ impl ResponseCommit {
             );
         }
         self.committed_at().is_some()
+    }
+
+    /// Allow a native streaming HTTP response to report an early rejection as JSON.
+    pub fn prefer_early_http_error(&self) {
+        self.prefer_http_error.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn claim_early_http_error(&self) -> bool {
+        self.prefer_http_error.load(Ordering::Acquire)
+            && self.first.set(TransportState::Finished).is_ok()
     }
 
     pub(crate) fn finish(&self) {
