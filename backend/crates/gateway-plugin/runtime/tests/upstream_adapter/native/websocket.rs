@@ -39,7 +39,13 @@ async fn native_bound_save_replaces_the_websocket_handshake_and_retains_only_the
     .unwrap()
     .unwrap();
     assert!(events.iter().any(|event| event.session_update().is_some()));
-    assert_eq!(f.in_flight().await, 1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while f.in_flight().await != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("upstream EOF must release the account before downstream commit");
     started.session.commit_downstream(Some(200)).await.unwrap();
     started.session.detach_finalize().await;
     f.clean(1).await;
