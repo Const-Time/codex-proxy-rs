@@ -210,6 +210,7 @@ impl FakeProviderAdmin {
                 email: account.email.clone(),
                 plan_type: account.plan_type.clone(),
                 preserve_profile: false,
+                preserve_access_token_expiry: false,
                 provider_material: document(),
                 has_refresh_token: account.has_refresh_token,
                 access_token_expires_at: account

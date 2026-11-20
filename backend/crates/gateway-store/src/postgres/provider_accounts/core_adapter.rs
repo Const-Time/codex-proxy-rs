@@ -183,6 +183,7 @@ impl ProviderAccountStore for PgProviderAccountRepository {
             expected_revision,
             profile,
             preserve_profile,
+            preserve_access_token_expiry,
             credential,
             has_refresh_token,
             access_token_expires_at,
@@ -218,7 +219,8 @@ impl ProviderAccountStore for PgProviderAccountRepository {
                  plan_type = case when $14 then plan_type else $5 end,
                  provider_credentials_json = $6,
                  credential_revision = credential_revision + 1,
-                 has_refresh_token = $7, access_token_expires_at = $8,
+                 has_refresh_token = $7,
+                 access_token_expires_at = case when $15 then access_token_expires_at else $8 end,
                  next_refresh_at = $9,
                  credential_state = case
                    when $10::text is not null
@@ -250,6 +252,7 @@ impl ProviderAccountStore for PgProviderAccountRepository {
         .bind(error_reason)
         .bind(message)
         .bind(preserve_profile)
+        .bind(preserve_access_token_expiry)
         .fetch_optional(&self.pool)
         .await
         .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
@@ -410,6 +413,27 @@ impl ProviderAccountStore for PgProviderAccountRepository {
         } else {
             QuotaWriteOutcome::Conflict
         })
+    }
+
+    async fn expire_access_token(
+        &self,
+        account: &CoreProviderAccount,
+        observed_at: std::time::SystemTime,
+    ) -> Result<bool, CoreStoreError> {
+        let result = sqlx::query(
+            "update provider_accounts
+             set access_token_expires_at = least(access_token_expires_at, $3),
+                 updated_at = greatest(now(), updated_at, $3)
+             where id = $1 and credential_revision = $2
+               and (credential_observed_at is null or credential_observed_at <= $3)",
+        )
+        .bind(account.id().as_str())
+        .bind(to_i64(account.revision().get()).map_err(core_store_error)?)
+        .bind(DateTime::<Utc>::from(observed_at))
+        .execute(&self.pool)
+        .await
+        .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
+        Ok(result.rows_affected() == 1)
     }
 
     async fn apply_state_change(&self, change: AccountStateChange) -> Result<(), CoreStoreError> {

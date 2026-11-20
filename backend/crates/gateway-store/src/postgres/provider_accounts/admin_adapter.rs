@@ -323,6 +323,7 @@ impl PgAdminAccountStore {
                     access_token_expires_at: prepared.access_token_expires_at,
                     next_refresh_at: prepared.next_refresh_at,
                     preserve_profile: prepared.preserve_profile,
+                    preserve_access_token_expiry: prepared.preserve_access_token_expiry,
                 },
                 audit: mutation_audit(
                     context,

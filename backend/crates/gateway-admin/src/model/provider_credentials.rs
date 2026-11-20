@@ -780,6 +780,7 @@ pub struct PreparedCredentialRotationFacts {
     pub plan_type: Option<String>,
     /// Token 刷新保留提交时的资料，不以准备阶段的副本覆盖新套餐。
     pub preserve_profile: bool,
+    pub preserve_access_token_expiry: bool,
     pub provider_material: ProviderDocument,
     pub has_refresh_token: bool,
     pub access_token_expires_at: Option<DateTime<Utc>>,

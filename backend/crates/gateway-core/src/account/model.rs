@@ -1109,6 +1109,7 @@ pub struct CredentialCasUpdateParts {
     pub expected_revision: CredentialRevision,
     pub profile: ProviderAccountUpdate,
     pub preserve_profile: bool,
+    pub preserve_access_token_expiry: bool,
     pub credential: PlaintextCredential,
     pub has_refresh_token: bool,
     pub access_token_expires_at: Option<SystemTime>,
@@ -1123,6 +1124,7 @@ pub struct CredentialCasUpdate {
     expected_revision: CredentialRevision,
     profile: ProviderAccountUpdate,
     preserve_profile: bool,
+    preserve_access_token_expiry: bool,
     credential: PlaintextCredential,
     has_refresh_token: bool,
     access_token_expires_at: Option<SystemTime>,
@@ -1138,6 +1140,10 @@ impl fmt::Debug for CredentialCasUpdate {
             .field("expected_revision", &self.expected_revision)
             .field("profile", &self.profile)
             .field("preserve_profile", &self.preserve_profile)
+            .field(
+                "preserve_access_token_expiry",
+                &self.preserve_access_token_expiry,
+            )
             .field("credential", &self.credential)
             .field("has_refresh_token", &self.has_refresh_token)
             .field("access_token_expires_at", &self.access_token_expires_at)
@@ -1173,6 +1179,7 @@ impl CredentialCasUpdate {
             expected_revision,
             profile,
             preserve_profile: false,
+            preserve_access_token_expiry: false,
             credential,
             has_refresh_token,
             access_token_expires_at,
@@ -1188,7 +1195,14 @@ impl CredentialCasUpdate {
         self
     }
 
-    /// 将刷新调度与账号错误事实放入同一个 revision CAS。
+    /// 沿用同一访问令牌时，保留提交时的有效期，避免覆盖在途收到的撤销事实
+    #[must_use]
+    pub const fn preserving_access_token_expiry(mut self) -> Self {
+        self.preserve_access_token_expiry = true;
+        self
+    }
+
+    /// 将刷新调度与账号错误事实放入同一个 revision CAS
     #[must_use]
     pub fn with_account_state(
         mut self,
@@ -1254,6 +1268,7 @@ impl CredentialCasUpdate {
             expected_revision: self.expected_revision,
             profile: self.profile,
             preserve_profile: self.preserve_profile,
+            preserve_access_token_expiry: self.preserve_access_token_expiry,
             credential: self.credential,
             has_refresh_token: self.has_refresh_token,
             access_token_expires_at: self.access_token_expires_at,

@@ -1090,11 +1090,12 @@ fn prepared_rotation(
         expected_revision,
         profile: credential_profile,
         preserve_profile,
+        preserve_access_token_expiry,
         credential,
         has_refresh_token,
         access_token_expires_at,
         next_refresh_at,
-        account_state: _account_state,
+        account_state: _,
     } = credential.into_parts();
     if profile != credential_profile || profile.account_id != account_id {
         return Err(provider_error(ProviderAdminErrorKind::Internal));
@@ -1110,6 +1111,7 @@ fn prepared_rotation(
             email: profile.email,
             plan_type: profile.plan_type,
             preserve_profile,
+            preserve_access_token_expiry,
             provider_material: ProviderDocument::new(OpaqueProviderData::new(
                 credential.into_inner(),
             )),

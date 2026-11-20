@@ -711,6 +711,7 @@ impl CodexCredentialAdmin {
         let oauth = data
             .oauth_mut()
             .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+        let same_access_token = oauth.access_token == *secret.access_token.expose_secret();
         oauth.access_token = secret.access_token.expose_secret().to_owned();
         oauth.refresh_token = secret
             .refresh_token
@@ -739,6 +740,11 @@ impl CodexCredentialAdmin {
         )
         .map_err(|_| CodexCredentialAdminError::InvalidCredential)?
         .preserving_profile();
+        let credential = if same_access_token {
+            credential.preserving_access_token_expiry()
+        } else {
+            credential
+        };
         Ok(PreparedCodexCredentialRotation {
             profile,
             credential,
@@ -775,6 +781,7 @@ impl CodexCredentialAdmin {
                 poid: input.verified_account.poid.clone(),
             });
         }
+        let same_access_token = oauth.access_token == *input.secret.access_token.expose_secret();
         oauth.access_token = input.secret.access_token.expose_secret().to_owned();
         oauth.refresh_token = input
             .secret
@@ -804,6 +811,11 @@ impl CodexCredentialAdmin {
             optional_time(input.next_refresh_at),
         )
         .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+        let credential = if same_access_token {
+            credential.preserving_access_token_expiry()
+        } else {
+            credential
+        };
         Ok(PreparedCodexCredentialRotation {
             profile,
             credential,

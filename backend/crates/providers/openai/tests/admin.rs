@@ -2049,12 +2049,6 @@ async fn quota_refresh_exposes_safe_failure_reasons_and_recovers_without_account
     for (status, code, expected_kind, expected_message) in [
         (
             401,
-            "token_revoked",
-            Kind::BadGateway,
-            "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权",
-        ),
-        (
-            401,
             "unknown_code",
             Kind::BadGateway,
             "OpenAI 拒绝了额度查询（HTTP 401），请检查账号授权状态；若令牌已在服务端失效，请重新授权",
@@ -2130,6 +2124,35 @@ async fn quota_refresh_exposes_safe_failure_reasons_and_recovers_without_account
     let current = store.account(account_id).expect("account after recovery");
     assert_eq!(current.credential_state(), CredentialState::Ready);
     assert!(current.last_error_message().is_none());
+
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"code": "token_revoked", "message": "raw-secret-marker"}
+        })))
+        .mount(&server)
+        .await;
+    let error = bundle
+        .admin_provider()
+        .quota(ProviderQuotaRequest {
+            account_id: before.id().clone(),
+            refresh: true,
+            rolling_usage: None,
+        })
+        .await
+        .expect_err("revoked token");
+    assert_eq!(error.kind(), Kind::BadGateway);
+    assert_eq!(
+        error.public_message(),
+        Some(
+            "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权"
+        )
+    );
+    let revoked = store.account(account_id).expect("account after revocation");
+    assert!(revoked.access_token_expires_at().unwrap() <= SystemTime::now());
+    assert_eq!(revoked.revision(), current.revision());
+    assert_eq!(revoked.quota(), current.quota());
 }
 
 #[tokio::test]

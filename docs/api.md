@@ -601,8 +601,9 @@ OAuth start 使用：
   失败事实。
 - 成功额度观测会 revision-fenced 写入 quota；明确 `Allowed` 投影为 `normal`，明确耗尽投影为
   `quota_exhausted`。额度观测不会清除凭据过期、无效或封禁事实；这些事实统一投影为 `error`，并由
-  `errorReason` 区分。额度接口的 401/403 也不足以判定 refresh token 永久失效，credential 终态只由
-  OAuth refresh 的明确永久错误写入。
+  `errorReason` 区分。额度接口返回 HTTP 401 且错误码为 `token_revoked` 时，缩短该凭据版本的访问令牌有效期，
+  保留刷新令牌、重试计划和额度事实。访问令牌过期的账号优先投影为 `error`。OAuth refresh 的明确永久错误
+  才会写入刷新令牌失效的终态。
 - 正常 Responses 请求会解析上游响应的 rate-limit headers，合并进同一 quota 快照并同步状态。Free、
   K12 等套餐共用该状态机；套餐只参与账号展示和账号模型目录 cache 隔离，不存在 K12 专属额度路径。
 - 账号展开区的 Token 结构、模型排行和列表 Token 汇总优先使用账号级周额度窗口，无可统计的周窗口时

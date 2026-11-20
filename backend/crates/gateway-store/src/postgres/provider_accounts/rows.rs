@@ -378,6 +378,7 @@ pub struct ProviderCredentialUpdate {
     pub access_token_expires_at: Option<DateTime<Utc>>,
     pub next_refresh_at: Option<DateTime<Utc>>,
     pub preserve_profile: bool,
+    pub preserve_access_token_expiry: bool,
 }
 
 impl fmt::Debug for ProviderCredentialUpdate {

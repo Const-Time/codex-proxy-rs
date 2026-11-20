@@ -47,7 +47,7 @@ use document::{
     DEFAULT_CODEX_LIMIT_ID, RATE_LIMITS_BY_LIMIT_ID, RateLimitSnapshotsByLimitId,
     canonicalize_rate_limit_document,
 };
-use evidence::{QuotaEndpointFailure, classify_quota_endpoint_failure};
+use evidence::{QuotaEndpointFailure, classify_quota_endpoint_failure, upstream_error_code};
 use recovery::{RECOVERY_FIELD, reconcile_refresh};
 use snapshot::{
     parse_account_quota_snapshot, quota_projection_ttl, quota_snapshot_from_observation,
@@ -96,6 +96,7 @@ pub struct CodexQuotaSyncSummary {
     pub updated: u64,
     pub exhausted: u64,
     pub banned: u64,
+    pub revoked: u64,
     pub transient: u64,
     pub stale: u64,
 }
@@ -193,30 +194,6 @@ fn upstream_error_status(error: &CodexClientError) -> Option<u16> {
         CodexClientError::Upstream { status, .. } => Some(status.as_u16()),
         _ => None,
     }
-}
-
-/// 从上游错误体提取稳定错误码：优先 `/error/code`，其次 `/code`。
-///
-/// 只接受有界的 ASCII 标识，避免把自由文本作为错误码写入诊断。
-fn upstream_error_code(error: &CodexClientError) -> Option<String> {
-    let CodexClientError::Upstream { body, .. } = error else {
-        return None;
-    };
-    let value = serde_json::from_str::<Value>(body).ok()?;
-    let code = value
-        .pointer("/error/code")
-        .or_else(|| value.pointer("/code"))
-        .and_then(Value::as_str)?
-        .trim();
-    if code.is_empty()
-        || code.len() > 64
-        || !code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return None;
-    }
-    Some(code.to_owned())
 }
 
 pub struct CodexCredentialQuotaService {
@@ -876,6 +853,16 @@ impl CodexCredentialQuotaService {
                                 );
                             }
                         }
+                        Some(QuotaEndpointFailure::AccessTokenRevoked) => {
+                            match self.store.expire_access_token(&account, observed_at).await {
+                                Ok(true) => summary.revoked += 1,
+                                Ok(false) => summary.stale += 1,
+                                Err(error) => {
+                                    summary.transient += 1;
+                                    tracing::warn!(account_id = %account.id(), %error, "OpenAI access token expiry write failed");
+                                }
+                            }
+                        }
                         Some(QuotaEndpointFailure::Credential { state, reason }) => {
                             summary.banned += 1;
                             self.persist_credential_failure(&account, state, reason, observed_at)
@@ -1266,6 +1253,11 @@ impl CodexCredentialQuotaService {
                 match classify_quota_endpoint_failure(&error) {
                     Some(QuotaEndpointFailure::Exhausted(evidence)) => {
                         self.record_confirmed_exhaustion(&account, evidence, None, observed_at)
+                            .await?;
+                    }
+                    Some(QuotaEndpointFailure::AccessTokenRevoked) => {
+                        self.store
+                            .expire_access_token(&account, observed_at)
                             .await?;
                     }
                     Some(QuotaEndpointFailure::Credential { state, reason }) => {

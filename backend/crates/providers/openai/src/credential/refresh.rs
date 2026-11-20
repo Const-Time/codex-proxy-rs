@@ -115,6 +115,7 @@ fn log_refresh_deferred(
 }
 
 struct RefreshFailureContext<'a> {
+    observed_at: SystemTime,
     reason: &'static str,
     message: Option<String>,
     upstream: Option<&'a RefreshUpstreamFailure>,
@@ -122,11 +123,13 @@ struct RefreshFailureContext<'a> {
 
 impl<'a> RefreshFailureContext<'a> {
     const fn new(
+        observed_at: SystemTime,
         reason: &'static str,
         message: Option<String>,
         upstream: Option<&'a RefreshUpstreamFailure>,
     ) -> Self {
         Self {
+            observed_at,
             reason,
             message,
             upstream,
@@ -288,6 +291,7 @@ impl CodexCredentialRefreshService {
             .refresh_token
             .as_ref()
             .ok_or(CodexCredentialRefreshError::InvalidRefreshResponse)?;
+        let observed_at = SystemTime::now();
         let refresh_result = self
             .refresher
             .refresh_with_proxy(refresh_token.expose_secret(), due.account.outbound_proxy())
@@ -302,6 +306,7 @@ impl CodexCredentialRefreshService {
                         CredentialState::Banned,
                         AccountErrorReason::AccountBanned,
                         RefreshFailureContext::new(
+                            observed_at,
                             "refresh_recovery_window_exhausted",
                             message,
                             upstream,
@@ -318,6 +323,7 @@ impl CodexCredentialRefreshService {
                         CredentialState::Expired,
                         AccountErrorReason::CredentialExpired,
                         RefreshFailureContext::new(
+                            observed_at,
                             "refresh_recovery_window_exhausted",
                             message,
                             upstream,
@@ -336,6 +342,7 @@ impl CodexCredentialRefreshService {
                     CredentialState::Expired,
                     AccountErrorReason::CredentialExpired,
                     RefreshFailureContext::new(
+                        observed_at,
                         "refresh_invalid_grant",
                         message,
                         upstream.as_deref(),
@@ -349,7 +356,12 @@ impl CodexCredentialRefreshService {
                     &due.account,
                     CredentialState::Banned,
                     AccountErrorReason::AccountBanned,
-                    RefreshFailureContext::new("account_banned", message, upstream.as_deref()),
+                    RefreshFailureContext::new(
+                        observed_at,
+                        "account_banned",
+                        message,
+                        upstream.as_deref(),
+                    ),
                     CodexCredentialRefreshOutcome::Banned { account_id },
                 )
                 .await
@@ -523,19 +535,12 @@ impl CodexCredentialRefreshService {
         outcome: CodexCredentialRefreshOutcome,
     ) -> Result<CodexCredentialRefreshOutcome, CodexCredentialRefreshError> {
         let RefreshFailureContext {
+            observed_at,
             reason,
             message,
             upstream,
         } = failure;
-        match self.repository.load_runtime_credential(account).await {
-            Ok(_) => {}
-            Err(CredentialRepositoryError::RevisionConflict) => {
-                return Ok(CodexCredentialRefreshOutcome::Stale {
-                    account_id: account.id().to_string(),
-                });
-            }
-            Err(error) => return Err(error.into()),
-        }
+        // 用 RT 请求开始时间和凭据版本原子写入，避免额度观测使同一 RT 的永久拒绝丢失
         let persisted_message = message
             .as_ref()
             .filter(|message| !message.trim().is_empty())
@@ -547,7 +552,7 @@ impl CodexCredentialRefreshService {
             .apply_state_with_reason(
                 account,
                 credential_state,
-                SystemTime::now(),
+                observed_at,
                 Some(error_reason),
                 persisted_message,
             )
