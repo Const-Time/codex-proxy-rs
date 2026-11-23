@@ -209,7 +209,7 @@ watch([timeRange, customDates], () => {
 <style scoped>
 @media (min-width: 640px) {
   .usage-record-list {
-    height: clamp(30rem, 68dvh, 44rem);
+    height: clamp(56rem, 82dvh, 64rem);
   }
 }
 </style>
