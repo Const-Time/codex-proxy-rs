@@ -1,17 +1,14 @@
 import type { ApiKeyConfiguration } from '@/api'
 
 export interface ApiKeyAccountForm extends ApiKeyConfiguration {
-  name: string
   apiKey: string
 }
 
 export function emptyApiKeyAccountForm(): ApiKeyAccountForm {
-  return { name: '', base_url: '', apiKey: '', transport: 'http' }
+  return { base_url: '', apiKey: '', transport: 'http' }
 }
 
 export function apiKeyAccountError(form: ApiKeyAccountForm, editing = false): string | undefined {
-  if (!editing && !form.name.trim())
-    return '请输入账号名称'
   if (form.base_url.trim().length > 2048)
     return '上游 API 地址不能超过 2048 个字符'
   try {

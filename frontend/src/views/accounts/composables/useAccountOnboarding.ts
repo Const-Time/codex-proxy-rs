@@ -184,7 +184,14 @@ export function useAccountOnboarding(options: {
         provider,
         settings: accountImportSettings(createForm.value),
         outboundProxyId: createForm.value.proxyMode === 'proxy' ? createForm.value.proxyId.trim() : undefined,
-        data: { provider, authentication_kind: 'api_key', name: form.name.trim(), base_url: form.base_url.trim(), api_key: form.apiKey, transport: form.transport },
+        data: {
+          provider,
+          authentication_kind: 'api_key',
+          name: createForm.value.apiKeyName.trim() || undefined,
+          base_url: form.base_url.trim(),
+          api_key: form.apiKey,
+          transport: form.transport,
+        },
       })
       return 'API Key 账号已添加'
     }

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { AccountCreateForm } from './model'
 import type { AccountGroupRef } from '@/api'
+import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
+import BaseInput from '@/components/base/BaseInput.vue'
 import AccountSettingsFields from '../AccountSettingsFields.vue'
 import AccountProviderChooser from './AccountProviderChooser.vue'
 
@@ -21,6 +23,9 @@ const form = defineModel<AccountCreateForm>({ required: true })
       </legend>
       <AccountProviderChooser :selected="form.provider" :disabled="disabled" @select="form.provider = $event" />
     </fieldset>
+    <BaseFormItem v-if="form.provider === 'openai'" label="API Key 账号名称">
+      <BaseInput v-model="form.apiKeyName" placeholder="留空时使用「密钥账号」" :disabled="disabled" />
+    </BaseFormItem>
     <AccountSettingsFields
       v-model:enabled="form.enabled"
       v-model:concurrency-limit="form.concurrencyLimit"

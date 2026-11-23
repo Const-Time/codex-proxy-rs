@@ -14,9 +14,6 @@ const transportOptions = [
 
 <template>
   <div class="grid gap-4">
-    <BaseFormItem v-if="!editing" label="账号名称" required>
-      <BaseInput v-model="form.name" placeholder="输入上游名称" :disabled="disabled" />
-    </BaseFormItem>
     <BaseFormItem label="Base URL" required>
       <template #extra>
         <span class="text-cp-xs text-cp-text-quaternary" title="填写 API 前缀，接口路径会自动追加">API 前缀</span>

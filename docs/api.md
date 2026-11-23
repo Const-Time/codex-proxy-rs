@@ -483,6 +483,7 @@ API Key 账号使用以下独立凭据形态：
 `transport` 可省略（默认 `http`）或设为 `prefer_websocket`。API Key 使用 Bearer 认证与普通 JSON，
 不携带 OAuth Cookie 或 ChatGPT 身份。上游须提供标准 `/models` 列表，模型目录按账号和凭据版本隔离。
 API Key 每次导入创建独立账号；更新已有账号使用 `rotate`。导出会显式包含密钥，沿用敏感导出的确认合同。
+省略 `data.name` 时使用「密钥账号」。在管理端直接添加 API Key 账号时，可在账号设置页填写此名称。
 
 sub2api 的 `platform=openai`、`type=apikey` 使用 `credentials.base_url` / `credentials.api_key`；
 导入时按其端点规则将服务根、版本前缀或完整 `/responses` 地址转换为 API 前缀，缺省地址为官方 `/v1`。

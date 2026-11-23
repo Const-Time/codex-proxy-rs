@@ -1004,6 +1004,7 @@ async fn api_key_import_export_preserves_target_without_oauth_exchange() {
         .into_accounts()
         .pop()
         .unwrap();
+    assert_eq!(restored.account.name(), "relay");
     let CodexCredentialData::ApiKey(data) =
         CodexCredentialCodec::decode_complete(&restored.credential).unwrap()
     else {
@@ -1015,6 +1016,28 @@ async fn api_key_import_export_preserves_target_without_oauth_exchange() {
         data.transport,
         provider_openai::credential::ApiKeyTransport::Http
     );
+}
+
+#[tokio::test]
+async fn unnamed_api_key_import_uses_default_display_name() {
+    let service = CodexCredentialAdminService::new(
+        Arc::new(UnusedRefresher),
+        Arc::new(TestLeaseCoordinator::default()),
+        runtime_policy(),
+    );
+    let imported = service
+        .prepare_import_document(serde_json::json!({
+            "provider": "openai",
+            "authentication_kind": "api_key",
+            "base_url": "https://relay.example/v1",
+            "api_key": "sk-test-only",
+        }))
+        .await
+        .expect("import API account")
+        .into_accounts()
+        .pop()
+        .expect("one account");
+    assert_eq!(imported.account.name(), "密钥账号");
 }
 
 #[tokio::test]
