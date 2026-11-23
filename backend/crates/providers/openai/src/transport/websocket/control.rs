@@ -1,15 +1,30 @@
 //! WebSocket 有界消息通道与原连接文本透传；空闲读取与响应正文消费互斥
 
+use std::time::Duration;
+
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use super::CodexWebSocketExchangeError;
 
+pub(super) const WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
 pub(super) enum PumpCommand {
+    Upload {
+        text: tungstenite::Utf8Bytes,
+        deadline: tokio::time::Instant,
+        accepted:
+            oneshot::Sender<oneshot::Receiver<Result<UploadOutcome, CodexWebSocketExchangeError>>>,
+    },
     Send {
         message: Message,
         ack: oneshot::Sender<Result<(), CodexWebSocketExchangeError>>,
     },
+}
+
+pub(super) enum UploadOutcome {
+    Flushed,
+    InterruptedWithReply,
 }
 
 pub(super) async fn send_message(

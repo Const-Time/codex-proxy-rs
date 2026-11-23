@@ -9,7 +9,7 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, client_async_tls_with_config, connect_async_tls_with_config,
 };
 use tungstenite::{
-    self, Message,
+    self,
     extensions::{ExtensionsConfig, compression::deflate::DeflateConfig},
     handshake::client::Request as WsRequest,
     http::Response as WsResponse,
@@ -27,6 +27,7 @@ use crate::{
 };
 
 use super::{
+    control::WEBSOCKET_SEND_TIMEOUT,
     error::CodexWebSocketExchangeError,
     model::{CodexWebSocketConnection, CodexWebSocketRequest, WebSocketContinuationRequirement},
     pool::CodexWebSocketConnectionMetadata,
@@ -35,7 +36,6 @@ use super::{
 
 const WEBSOCKET_EXTENSIONS: &str = "permessage-deflate; client_max_window_bits";
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 impl CodexWebSocketConnection {
     /// 构造 Responses WebSocket 连接描述。
@@ -134,13 +134,12 @@ pub(super) async fn send_websocket_request(
 ) -> Result<(), CodexWebSocketExchangeError> {
     timeout(
         WEBSOCKET_SEND_TIMEOUT,
-        websocket.send(Message::Text(payload_text.to_string().into())),
+        websocket.send(tungstenite::Message::Text(payload_text.to_owned().into())),
     )
     .await
     .map_err(|_| CodexWebSocketExchangeError::SendTimeout {
         timeout: WEBSOCKET_SEND_TIMEOUT,
-    })??;
-    Ok(())
+    })?
 }
 
 pub(super) fn websocket_connection_metadata(

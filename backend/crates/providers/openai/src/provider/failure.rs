@@ -651,10 +651,11 @@ pub(super) fn websocket_retry_backoff(retry_index: NonZeroU32) -> Duration {
 }
 
 pub(super) fn continuation_replay_required_error(reason: &'static str) -> ProviderError {
-    ProviderError::new(
-        ProviderErrorKind::ContinuationRecoveryRequired,
-        UpstreamSendState::NotSent,
-    )
+    continuation_replay_error(reason, UpstreamSendState::NotSent)
+}
+
+fn continuation_replay_error(reason: &'static str, send_state: UpstreamSendState) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::ContinuationRecoveryRequired, send_state)
     .with_continuation_failure(ContinuationFailure::HistoryUnavailable)
     .with_continuation_recovery_disposition(
         ContinuationRecoveryDisposition::ClientReplayRequired,
@@ -889,10 +890,13 @@ pub(super) fn map_client_error(
             ))
         }
         CodexClientError::WebSocket(error) if error.continuation_unavailable_reason().is_some() => {
-            let mut failure = MappedProviderFailure::plain(continuation_replay_required_error(
+            let mut failure = MappedProviderFailure::plain(continuation_replay_error(
                 continuation_unavailable_reason.unwrap_or("scope_unavailable"),
+                websocket_send_state(&error),
             ));
-            if let Some(client_visible_error) = websocket_client_visible_error(&error) {
+            if !error.message_too_big_close()
+                && let Some(client_visible_error) = websocket_client_visible_error(&error)
+            {
                 failure.error = failure
                     .error
                     .with_client_visible_upstream_error(client_visible_error);
@@ -909,7 +913,9 @@ pub(super) fn map_client_error(
             if matches!(
                 error.classified(),
                 CodexWebSocketExchangeError::MessageTooLarge
-            ) {
+            ) || error.message_too_big_close()
+            {
+                // 首条文本前可回退的 1009 已在 transport 处理；预热或已收到回复时禁止重放
                 failure.error = failure.error.with_retry_prohibited();
             }
             if let Some(close_code) = close_code {
@@ -1067,6 +1073,7 @@ fn websocket_diagnostic(error: &CodexWebSocketExchangeError) -> ProviderDiagnost
         CodexWebSocketExchangeError::MessageTooLarge => ("prepare", "websocket_message_too_large"),
         CodexWebSocketExchangeError::InvalidRequest(_) => ("prepare", "invalid_request"),
         CodexWebSocketExchangeError::SendTimeout { .. } => ("send", "send_timeout"),
+        CodexWebSocketExchangeError::SendNotStarted => ("send", "send_not_started"),
         CodexWebSocketExchangeError::ReceiveIdleTimeout { .. } => {
             ("receive", "receive_idle_timeout")
         }
@@ -1158,6 +1165,9 @@ fn websocket_diagnostic_message(error: &CodexWebSocketExchangeError) -> Provider
         CodexWebSocketExchangeError::SendTimeout { timeout } => {
             format!("OpenAI WebSocket payload send timed out after {timeout:?}")
         }
+        CodexWebSocketExchangeError::SendNotStarted => {
+            "OpenAI WebSocket connection closed before payload send started".to_owned()
+        }
         CodexWebSocketExchangeError::InvalidSse(_) => {
             "OpenAI WebSocket returned an invalid Responses event stream".to_owned()
         }
@@ -1168,7 +1178,7 @@ fn websocket_diagnostic_message(error: &CodexWebSocketExchangeError) -> Provider
         CodexWebSocketExchangeError::ConnectionLimitReached => {
             "OpenAI requested a new WebSocket connection".to_owned()
         }
-        CodexWebSocketExchangeError::ContinuationUnavailable { reason } => {
+        CodexWebSocketExchangeError::ContinuationUnavailable { reason, .. } => {
             format!("OpenAI connection-local previous response is unavailable: {reason}")
         }
         CodexWebSocketExchangeError::ReceiveIdleTimeout { timeout } => {
@@ -1489,6 +1499,10 @@ pub(super) fn account_failure(
 
 pub(super) fn websocket_send_state(error: &CodexWebSocketExchangeError) -> UpstreamSendState {
     match error.classified() {
+        CodexWebSocketExchangeError::ContinuationUnavailable {
+            source: Some(source),
+            ..
+        } => websocket_send_state(source),
         CodexWebSocketExchangeError::InvalidRequest(_)
         | CodexWebSocketExchangeError::Connect(_)
         | CodexWebSocketExchangeError::ConnectTimeout { .. }
@@ -1496,6 +1510,7 @@ pub(super) fn websocket_send_state(error: &CodexWebSocketExchangeError) -> Upstr
         | CodexWebSocketExchangeError::OriginHalfOpenBusy
         | CodexWebSocketExchangeError::SharedConnectFailed
         | CodexWebSocketExchangeError::MessageTooLarge
+        | CodexWebSocketExchangeError::SendNotStarted
         | CodexWebSocketExchangeError::ContinuationUnavailable { .. } => UpstreamSendState::NotSent,
         CodexWebSocketExchangeError::Upstream(_)
         | CodexWebSocketExchangeError::ConnectionLimitReached
@@ -1534,6 +1549,7 @@ pub(super) fn websocket_error_kind(error: &CodexWebSocketExchangeError) -> Provi
         CodexWebSocketExchangeError::Upstream(_) => ProviderErrorKind::Unavailable,
         CodexWebSocketExchangeError::ConnectionLimitReached => ProviderErrorKind::RateLimited,
         CodexWebSocketExchangeError::Transport(_)
+        | CodexWebSocketExchangeError::SendNotStarted
         | CodexWebSocketExchangeError::Connect(_)
         | CodexWebSocketExchangeError::StreamEndedBeforeTerminal { .. }
         | CodexWebSocketExchangeError::ReusedConnectionDiedBeforeFirstEvent { .. } => {
@@ -1542,10 +1558,7 @@ pub(super) fn websocket_error_kind(error: &CodexWebSocketExchangeError) -> Provi
         // live 流可能包在 PostSendAmbiguous 中；RFC 6455 close 1009 是请求过大。
         CodexWebSocketExchangeError::ClosedBeforeTerminal(_)
         | CodexWebSocketExchangeError::PostSendAmbiguous { .. } => {
-            if error
-                .close_before_terminal()
-                .is_some_and(|close| close.code() == Some(WEBSOCKET_CLOSE_MESSAGE_TOO_BIG))
-            {
+            if error.message_too_big_close() {
                 ProviderErrorKind::MessageTooBig
             } else {
                 ProviderErrorKind::Transport

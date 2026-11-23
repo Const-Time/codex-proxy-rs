@@ -1047,8 +1047,10 @@ Flex 保留独立档位；请求 `auto`、未知档位或缺少对应 Standard �
   无已注册的活动目标或 ID 不匹配返回 `response_not_found`；目标已注册但不支持 steering 时返回 `steering_not_supported`；
   本地队列满返回 `too_many_pending_steers`。这些 `response.steer.failed` 归还原始输入，不中止当前生成。
   缺少目标、输入形状错误或多余顶层字段返回同类事件的 `invalid_input`，未知消息类型仍拒绝。
-- OpenAI response.create 达到 15 MiB 时，允许降级的请求在发送前转 HTTP；依赖原 WS 的增量续接在无法安全继续时
-  要求客户端携带完整历史重试。上游 1009 按请求过大处理，保留关闭诊断。
+- OpenAI 网关依据握手响应的 `x-codex-websocket-max-message-bytes` 检查最终 `response.create` 的字节数，超限时按请求类型选择传输。
+  上传期间收到的 1009 也适用，前提是本次请求已开始发送且尚未收到响应文本。允许降级的请求转 HTTP/SSE，
+  依赖原连接的增量续接要求客户端重放完整历史，显式预热保留 WS 错误。若已收到响应文本（包括元数据），
+  或只遇到断管、TCP 重置，保留传输错误及其诊断。
 - OpenAI 的空 `response.created` / `response.in_progress` 和响应元数据即时交付；只有这些可替换前导事件时，仍允许 Provider 已证明安全且在原预算内的恢复。正文、推理、工具调用或未知业务事件一旦交付，不再自动重放；插件改写事件也按不可重放处理。
 - 已通过准入的 SSE 请求在首个上游事件前每 15 秒发送注释保活；鉴权与准入失败保留原 HTTP 错误。心跳只提交 HTTP 状态，不伪造业务输出或用量。心跳后的失败使用 `response.failed` 和 `[DONE]`，保留实际 HTTP 200 及失败审计。
 - `turn_rate_limit_exceeded` 仅拒绝当前请求：保留上游错误和重试建议，不自动重放、不将账号标记为冷却。
