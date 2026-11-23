@@ -2001,3 +2001,118 @@ async fn codex_backend_client_should_discard_pooled_websocket_after_unknown_resp
     assert_eq!(second.websocket_pool_decision.unwrap().kind(), "new");
     assert_eq!(accepted_connections.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn response_exclusions_bind_websocket_reuse_and_exact_continuation() {
+    const EXCLUSIONS: &[&[&str]] = &[
+        &[],
+        &["tools,usage.attribution"],
+        &["tools"],
+        &["tools", "usage.attribution"],
+        &[""],
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut handlers = tokio::task::JoinSet::new();
+        for (index, &expected) in EXCLUSIONS.iter().enumerate() {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_codex_test_websocket_with(stream, |request, _| {
+                let actual: Vec<_> = request
+                    .headers()
+                    .get_all("x-codex-exclude")
+                    .iter()
+                    .map(|value| value.to_str().unwrap())
+                    .collect();
+                assert_eq!(actual, expected);
+            })
+            .await;
+            handlers.spawn(async move {
+                let mut turn = 0;
+                while let Some(Ok(Message::Text(_))) = socket.next().await {
+                    let id = format!("resp_{index}_{turn}");
+                    socket
+                        .send(Message::Text(
+                            completed_websocket_response(&id, 1, 1).into(),
+                        ))
+                        .await
+                        .unwrap();
+                    turn += 1;
+                }
+            });
+        }
+        drop(listener);
+        while let Some(result) = handlers.join_next().await {
+            result.unwrap();
+        }
+    });
+    let pool = Arc::new(CodexWebSocketPool::new(Duration::from_mins(1)));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(pool.clone());
+    let make_request = |values: &[&str]| {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use gateway_core::operation::{GenerateRequest, ProtocolPayload};
+        use provider_openai::encode_generate_request;
+
+        let headers: Vec<_> = values
+            .iter()
+            .map(|value| ["x-codex-exclude".to_owned(), STANDARD.encode(value)])
+            .collect();
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            codex_request_body("gpt-test", "be brief", vec![]),
+        )
+        .unwrap()
+        .with_context(Map::from_iter([(
+            "opaque_request_headers".to_owned(),
+            json!(headers),
+        )]));
+        let mut request =
+            encode_generate_request(&GenerateRequest::from_protocol_payload(payload), "gpt-test")
+                .unwrap();
+        request.local_conversation_id = Some("shared-session".into());
+        request.use_websocket = true;
+        request
+    };
+    let context = request_context("req_exclusions", Some("account"));
+    for (index, &values) in EXCLUSIONS.iter().enumerate() {
+        let request = make_request(values);
+        for (turn, expected) in ["new", "reuse"].into_iter().enumerate() {
+            let response = backend.create_response(&request, context).await.unwrap();
+            assert_eq!(
+                response.websocket_pool_decision.unwrap().kind(),
+                expected,
+                "{values:?}"
+            );
+            assert!(response.body.contains(&format!("resp_{index}_{turn}")));
+        }
+        let continue_from_last_response = |mut request: CodexResponsesRequest| {
+            request.set_previous_response_id(Some(format!("resp_{index}_1")));
+            request.previous_response_scope = Some(PreviousResponseScope::ConnectionLocal);
+            request
+        };
+        let changed = make_request(EXCLUSIONS[(index + 1) % EXCLUSIONS.len()]);
+        let error = backend
+            .create_response(&continue_from_last_response(changed), context)
+            .await
+            .expect_err("changed exclusions must require replay");
+        assert!(matches!(
+            error,
+            CodexClientError::WebSocket(CodexWebSocketExchangeError::ContinuationUnavailable {
+                reason: PreviousResponseUnavailableReason::FreshConnectionRequired,
+                ..
+            })
+        ));
+        let response = backend
+            .create_response(&continue_from_last_response(request), context)
+            .await
+            .unwrap();
+        assert!(response.body.contains(&format!("resp_{index}_2")));
+    }
+    pool.shutdown().await;
+    server.await.unwrap();
+}

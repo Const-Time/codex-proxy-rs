@@ -154,6 +154,9 @@ Responses 不透传下游的逐跳头、反代元数据（如 `cf-*`、`x-forwar
 API Key 上游还会移除 Cookie、ChatGPT 账号身份、`x-codex-*`、`x-openai-internal-*`、会话/线程身份头及
 `X-OpenAI-Actor-Authorization`，避免把 OAuth 或网关托管身份传给第三方 API。
 
+Codex OAuth 上游透传 `x-codex-exclude`。上游 WebSocket 在握手时读取该头，连接池按实际发送的所有同名头值复用连接。
+值变化时，依赖原连接的精确续接要求客户端重放完整历史。
+
 Responses WebSocket 仅接受文本 `response.create`，同一连接串行执行。当前响应期间收到的后续业务帧
 留在有界接收队列中，待当前响应完成终结和写出后再逐条校验、准入与执行，不因请求提前到达而断开。
 这对齐 Codex 客户端 `stream_request` 持锁至本轮结束的串行行为，不表示支持额外控制消息类型。

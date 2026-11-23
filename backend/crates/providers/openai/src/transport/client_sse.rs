@@ -317,8 +317,13 @@ impl CodexBackendClient {
             }
         }
         let connection_profile = websocket_connection_profile(&headers);
-        let pool_key =
-            self.websocket_pool_key(request, context, pool_account_id, &connection_profile);
+        let pool_key = self.websocket_pool_key(
+            request,
+            context,
+            pool_account_id,
+            &connection_profile,
+            websocket_create.connection().headers(),
+        );
         let pool_log_context = pool_key.as_ref().map(WebSocketPoolLogContext::from_key);
         let response_control = context.response_control.or(self.response_control.as_ref());
         let downstream_cancellation = response_control.and_then(
@@ -598,6 +603,7 @@ impl CodexBackendClient {
         context: CodexRequestContext<'_>,
         pool_account_id: Option<&str>,
         connection_profile: &str,
+        opening_headers: &[(String, String)],
     ) -> Option<CodexWebSocketPoolKey> {
         let account_id = pool_account_id.or(context.account_id)?;
         let conversation_id = request
@@ -607,7 +613,8 @@ impl CodexBackendClient {
         let mut key = CodexWebSocketPoolKey::new(&self.base_url, account_id, conversation_id)
             .with_egress_key(&self.egress_key)
             .with_outbound_proxy(self.outbound_proxy.as_ref())
-            .with_connection_profile(connection_profile);
+            .with_connection_profile(connection_profile)
+            .with_response_exclusions(opening_headers);
         key = key.with_routing_affinity(self.routing_affinity.as_ref().map(|pin| pin.id()));
         if let Some(connection_id) = request.downstream_websocket_connection_id.as_deref() {
             key = key.with_downstream_connection_id(connection_id);
