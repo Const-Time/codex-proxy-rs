@@ -16,7 +16,8 @@ const props = defineProps<{
 const frame = ref<HTMLIFrameElement>()
 const source = ref('')
 const failure = ref('')
-const height = ref(600)
+const initialHeight = 600
+const height = ref(initialHeight)
 let controller = new AbortController()
 let channel = ''
 let session = ''
@@ -38,6 +39,7 @@ async function load() {
   lastId = 0
   inFlight = 0
   failure.value = ''
+  height.value = initialHeight
   const currentChannel = channel
   const currentSession = session
   models = new PluginModelBridge(props.clientKeyId, (input, signal) => callPluginModel({ instanceId: props.plugin.id, revision: props.plugin.revision }, input, signal), (packet) => {
@@ -45,7 +47,7 @@ async function load() {
       frame.value?.contentWindow?.postMessage({ target: PLUGIN_MANAGEMENT_BRIDGE, version: PLUGIN_MANAGEMENT_BRIDGE_VERSION, channel: currentChannel, session: currentSession, ...packet }, '*')
   })
   try {
-    const result = await assemblePluginManagementPage({ ...props.plugin, target: { instanceId: props.plugin.id, revision: props.plugin.revision } }, props.page, channel, session, location.origin, readPluginFrameTheme(), 600, current.signal, props.clientKeyId)
+    const result = await assemblePluginManagementPage({ ...props.plugin, target: { instanceId: props.plugin.id, revision: props.plugin.revision } }, props.page, channel, session, location.origin, readPluginFrameTheme(), initialHeight, current.signal, props.clientKeyId)
     if (!current.signal.aborted)
       source.value = result.srcdoc
   }
@@ -86,7 +88,7 @@ async function receive(event: MessageEvent) {
   if (message.type === 'resize') {
     const value = message.payload?.height
     if (Number.isSafeInteger(value) && value > 0)
-      height.value = Math.min(16000, Math.max(300, value))
+      height.value = Math.min(16_000, value)
     return
   }
   if (message.type === 'callback-ticket') {
@@ -146,7 +148,7 @@ onBeforeUnmount(() => {
   <p v-if="failure" role="alert" class="text-red-600">
     {{ failure }}
   </p>
-  <iframe v-else-if="source" ref="frame" :srcdoc="source" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" :title="page.title" :style="{ height: `${height}px` }" class="w-full border-0" />
+  <iframe v-else-if="source" ref="frame" :srcdoc="source" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" :title="page.title" :style="{ height: `${height}px` }" class="block w-full border-0" />
   <p v-else class="text-cp-text-secondary">
     正在加载插件页面…
   </p>

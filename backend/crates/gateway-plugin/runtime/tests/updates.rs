@@ -234,6 +234,7 @@ async fn update_preserves_instance_configuration_secrets_and_private_state_and_r
             .is_err()
     );
     assert!(store.list().await.unwrap()[0] == original);
+    assert!(store.artifact_info(&old.sha256).await.is_ok());
     assert!(
         before
             == store
@@ -254,6 +255,7 @@ async fn update_preserves_instance_configuration_secrets_and_private_state_and_r
     assert_eq!(upgraded.name, original.name);
     assert_eq!(upgraded.configuration, original.configuration);
     assert!(upgraded.enabled);
+    assert!(store.artifact_info(&old.sha256).await.is_err());
     let after = store.list().await.unwrap().remove(0);
     assert_eq!(after.secrets, original.secrets);
     assert!(
@@ -270,6 +272,76 @@ async fn update_preserves_instance_configuration_secrets_and_private_state_and_r
             .is_err()
     );
     manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn switching_to_newer_artifact_cleans_up_only_after_its_last_instance_upgrades() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let engine = PluginEngine::new(
+        cache.path().into(),
+        "3.15.0".parse().unwrap(),
+        store.clone(),
+    );
+    let package = engine.inspect(archive("2.0.0", false)).await.unwrap();
+    let manager = PluginManager::new(
+        store.clone(),
+        Arc::new(Runtime {
+            engine,
+            package,
+            store: store.clone(),
+            edit_during_download: AtomicBool::new(false),
+        }),
+    );
+    let old = manager
+        .upload(archive("1.0.0", false), &actor())
+        .await
+        .unwrap();
+    let newer = manager
+        .upload(archive("2.0.0", false), &actor())
+        .await
+        .unwrap();
+    let first = manager
+        .update(None, update(&old.sha256, 0, false), &actor())
+        .await
+        .unwrap();
+    let second = manager
+        .update(None, update(&old.sha256, 0, false), &actor())
+        .await
+        .unwrap();
+
+    let first = manager
+        .update(
+            Some(&first.id),
+            update(&newer.sha256, first.revision, false),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    assert!(store.artifact_info(&old.sha256).await.is_ok());
+    manager
+        .update(
+            Some(&second.id),
+            update(&newer.sha256, second.revision, false),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    assert!(store.artifact_info(&old.sha256).await.is_err());
+
+    let old = manager
+        .upload(archive("1.0.0", false), &actor())
+        .await
+        .unwrap();
+    manager
+        .update(
+            Some(&first.id),
+            update(&old.sha256, first.revision, false),
+            &actor(),
+        )
+        .await
+        .unwrap();
+    assert!(store.artifact_info(&newer.sha256).await.is_ok());
 }
 #[tokio::test]
 async fn update_keeps_disabled_instance_disabled_and_does_not_overwrite_concurrent_settings() {

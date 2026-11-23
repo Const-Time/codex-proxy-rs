@@ -50,7 +50,7 @@ const updating = ref<PluginInstance>()
 const updateDescription = computed(() => {
   const item = updating.value
   const release = item && onlineUpdates.value[item.id]?.release
-  return item && release ? `从已配置的发布源下载并更新至 ${release.version}，保留当前实例的配置、密钥、定时计划和检测历史。更新会中断正在运行的插件调用，请先暂停检测。` : ''
+  return item && release ? `从已配置的发布源下载并更新至 ${release.version}，保留当前实例的配置、密钥、定时计划和检测历史。更新会中断正在运行的插件调用，请先暂停检测。升级成功后会清理未被其他实例使用的旧制品。` : ''
 })
 async function checkOnline(item: PluginInstance) {
   await perform(async () => {
@@ -416,6 +416,9 @@ onMounted(() => perform(async () => { }))
           <!-- eslint-disable-next-line vue-a11y/label-has-for -->
           <label for="plugin-name" class="block">实例名称<BaseInput id="plugin-name" v-model="name" placeholder="实例名称" :disabled="busy" /></label>
           <BaseSelect v-model="digest" aria-label="插件制品版本" :options="options" :disabled="busy" placeholder="选择已上传制品" />
+          <p v-if="editing && digest !== editing.artifact.sha256" class="m-0 text-cp-sm text-cp-text-secondary">
+            升级成功后会清理未被其他实例使用的旧制品。
+          </p>
           <p v-if="artifact?.versionWarning" class="text-amber-600">
             {{ artifact.versionWarning }}
           </p>

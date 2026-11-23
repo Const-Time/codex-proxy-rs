@@ -293,10 +293,10 @@ function injectFrameBoundary(document: Document, bridgeScript: string) {
   const bridge = document.createElement('script')
   bridge.textContent = bridgeScript
   const layout = document.createElement('style')
-  // 宿主统一提供最小高度与整页滚动；flow-root 包含子元素外边距与浮动。
+  // 宿主负责整页滚动，flow-root 让正文测量包含子元素的外边距与浮动。
   layout.textContent = `
     html { overflow: hidden; }
-    body { margin: 0; display: flow-root; box-sizing: border-box; min-height: var(--cp-plugin-viewport-height, 0px); }
+    body { margin: 0; display: flow-root; box-sizing: border-box; }
   `
   head.append(layout)
   head.prepend(bridge)

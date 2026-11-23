@@ -8,7 +8,7 @@ pub mod service;
 mod upstream_adapter;
 pub mod websocket;
 use crate::{
-    model::{AdminError, MutationContext, plugins::*},
+    model::{AdminError, AdminErrorKind, MutationContext, plugins::*},
     ports::plugins::*,
 };
 use async_trait::async_trait;
@@ -16,6 +16,7 @@ use futures::{
     FutureExt,
     future::{BoxFuture, Shared},
 };
+use semver::Version;
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -24,6 +25,20 @@ use tokio::sync::Mutex;
 
 type ActivePlugins = BTreeMap<String, (u64, Arc<dyn PluginProcess>)>;
 type Shutdown = Shared<BoxFuture<'static, ()>>;
+
+fn replaced_release<'a>(
+    previous: &'a PluginArtifactInfo,
+    current: &PluginArtifactInfo,
+) -> Option<&'a str> {
+    if previous.plugin_id != current.plugin_id || previous.sha256 == current.sha256 {
+        return None;
+    }
+    let from = Version::parse(&previous.version).ok()?;
+    let to = Version::parse(&current.version).ok()?;
+    to.cmp_precedence(&from)
+        .is_gt()
+        .then_some(previous.sha256.as_str())
+}
 
 #[derive(Clone)]
 struct AuthenticationEntry {
@@ -737,7 +752,16 @@ impl PluginService for PluginManager {
         if let Some((_, old)) = old {
             self.retire(old);
         }
-        self.view(record).await
+        let view = self.view(record).await?;
+        if let Some(digest) = old_artifact
+            .as_ref()
+            .and_then(|old| replaced_release(old, &view.artifact))
+            && let Err(error) = self.store.delete_artifact(digest, actor).await
+            && error.kind() != AdminErrorKind::Conflict
+        {
+            tracing::warn!(instance_id = %view.id, %digest, %error, "旧插件制品清理失败");
+        }
+        Ok(view)
     }
     async fn delete(
         &self,
