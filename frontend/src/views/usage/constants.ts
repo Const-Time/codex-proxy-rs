@@ -37,7 +37,7 @@ export const usageRecordColumns = defineTableColumns<UsageDisplayRecord>([
 ])
 
 export const opsErrorColumns = defineTableColumns<OpsErrorRow>([
-  { key: 'message', label: '错误', kind: 'custom', size: '2xl', mobileSize: 'md', sticky: 'left', fill: true, hideable: false },
+  { key: 'message', label: '错误', kind: 'custom', size: '2xl', sticky: 'left', fill: true, hideable: false, mobileFullWidth: true },
   { key: 'createdAtDisplay', label: '时间', kind: 'datetime', size: 'md', sticky: 'left', hideable: false },
   { key: 'clientApiKeyId', label: '密钥 ID', kind: 'mono', size: 'lg', defaultHidden: true },
   { key: 'userEmail', label: '用户', kind: 'custom', size: 'lg', defaultHidden: true },

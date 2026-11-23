@@ -52,8 +52,6 @@ const outcomeLabels: Record<string, string> = {
   <BaseTable
     :key="personal ? 'personal' : 'admin'"
     :table-id="personal ? 'personal-usage-records' : 'usage-records'"
-    density="compact"
-    horizontal-on-mobile
     :columns="columns"
     :rows="rows"
     :loading="loading"

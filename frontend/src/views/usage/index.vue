@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import type { UsageErrorOrigin, UsageRecordFilters } from '@/api'
-import { Eye, Search } from '@lucide/vue'
+import { Eye } from '@lucide/vue'
 import { computed, nextTick, provide, ref, shallowRef, useTemplateRef, watch } from 'vue'
 
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
@@ -56,12 +55,7 @@ const recordViewOptions = [
   { label: '错误', value: 'errors' },
   { label: '全部', value: 'all' },
 ]
-const accountSearch = shallowRef('')
 const errorOrigin = shallowRef<UsageErrorOrigin | ''>('')
-const errorFilters = computed(() => ({
-  ...recordFilterParams.value,
-  accountSearch: props.personal ? undefined : accountSearch.value.trim() || undefined,
-}))
 const errorOrigins: UsageErrorOrigin[] = ['upstream', 'proxy', 'connection', 'unknown']
 const errorOriginOptions = [
   { label: '全部来源', value: '' },
@@ -95,7 +89,6 @@ const {
   refreshTimeRangeEnd,
   recordFilters: recordFilterParams,
   recordView,
-  accountSearch,
   personal: props.personal,
 })
 
@@ -139,7 +132,7 @@ watch([timeRange, customDates], () => {
     </UsageInsightsGrid>
 
     <BaseCard
-      class="mt-5 flex flex-col"
+      class="mt-5 min-w-0"
     >
       <template #header>
         <h2 class="m-0 text-xl leading-[1.15] font-heavy text-cp-text">
@@ -148,10 +141,10 @@ watch([timeRange, customDates], () => {
       </template>
 
       <template #body>
-        <UsageRecordFiltersBar v-model="recordFilters" class="mb-2" />
+        <UsageRecordFiltersBar v-model="recordFilters" class="mb-4" />
         <div
           v-if="recordView !== 'errors'"
-          class="flex min-h-130 min-w-0 flex-1 flex-col"
+          class="usage-record-list flex min-w-0 flex-col"
         >
           <div class="flex min-h-0 min-w-0 flex-1 flex-col">
             <UsageRecordsTable
@@ -162,13 +155,6 @@ watch([timeRange, customDates], () => {
               :loading="loading"
               empty-text="没有匹配的请求记录"
             >
-              <template v-if="!personal" #toolbar>
-                <BaseInput v-model="accountSearch" clearable class="w-full lg:max-w-64" aria-label="按历史账号搜索" placeholder="账号名称或邮箱">
-                  <template #prefix>
-                    <Search class="size-4" aria-hidden="true" />
-                  </template>
-                </BaseInput>
-              </template>
               <template #toolbar-actions>
                 <BaseSegmented ref="tableModeControl" :model-value="recordView" label="请求明细类型" :options="recordViewOptions" class="w-34 shrink-0 [&>button]:px-1.5" @update:model-value="setRecordView" />
                 <UsageFilters
@@ -199,29 +185,31 @@ watch([timeRange, customDates], () => {
           </div>
         </div>
 
-        <OpsErrorPanel
-          v-else
-          :time-range-params="timeRangeParams"
-          :record-filters="errorFilters"
-          :provider="providerQuery"
-          :error-origin="personal ? undefined : errorOrigin || undefined"
-        >
-          <template v-if="!personal" #toolbar>
-            <BaseInput v-model="accountSearch" clearable class="w-full lg:max-w-64" aria-label="按历史账号搜索" placeholder="账号名称或邮箱">
-              <template #prefix>
-                <Search class="size-4" aria-hidden="true" />
-              </template>
-            </BaseInput>
-          </template>
-          <template #toolbar-actions="{ loading: errorsLoading, refreshing, refresh }">
-            <BaseSelect v-if="!personal" v-model="errorOrigin" :options="errorOriginOptions" aria-label="错误来源" class="w-30" />
-            <BaseSegmented ref="tableModeControl" :model-value="recordView" label="请求明细类型" :options="recordViewOptions" class="w-34 shrink-0 [&>button]:px-1.5" @update:model-value="setRecordView" />
-            <UsageFilters :loading="errorsLoading" :refreshing="refreshing" label="刷新错误明细" @refresh="refresh" />
-          </template>
-        </OpsErrorPanel>
+        <div v-else class="usage-record-list min-w-0">
+          <OpsErrorPanel
+            :time-range-params="timeRangeParams"
+            :record-filters="recordFilterParams"
+            :provider="providerQuery"
+            :error-origin="personal ? undefined : errorOrigin || undefined"
+          >
+            <template #toolbar-actions="{ loading: errorsLoading, refreshing, refresh }">
+              <BaseSelect v-if="!personal" v-model="errorOrigin" :options="errorOriginOptions" aria-label="错误来源" class="w-30" />
+              <BaseSegmented ref="tableModeControl" :model-value="recordView" label="请求明细类型" :options="recordViewOptions" class="w-34 shrink-0 [&>button]:px-1.5" @update:model-value="setRecordView" />
+              <UsageFilters :loading="errorsLoading" :refreshing="refreshing" label="刷新错误明细" @refresh="refresh" />
+            </template>
+          </OpsErrorPanel>
+        </div>
       </template>
     </BaseCard>
 
     <UsageRecordDetailModal v-model="showDetailModal" :record="selectedUsageRecord" />
   </div>
 </template>
+
+<style scoped>
+@media (min-width: 640px) {
+  .usage-record-list {
+    height: clamp(30rem, 68dvh, 44rem);
+  }
+}
+</style>

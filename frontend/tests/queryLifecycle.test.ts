@@ -89,7 +89,7 @@ test('superseded usage requests and component disposal abort network work withou
   const fixture = load<{ useUsageRecordsTable: typeof import('../src/views/usage/composables/useUsageRecordsTable.ts').useUsageRecordsTable }>('../src/views/usage/composables/useUsageRecordsTable.ts', {
     '@/api': { getUsageRecords: pending, getUsageRecordSummary: pending, getUsageRecordInsightCard: pending, getUsageRecordInsightsDiagnostics: pending },
   })
-  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, accountSearch: { value: '' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
+  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
   const first = view.loadUsageRecords()
   assert.equal(signals.length, 6)
   const second = view.loadUsageRecords()
@@ -111,7 +111,7 @@ test('slow or failed diagnostics do not delay or discard successful usage panels
       getUsageRecordInsightsDiagnostics: () => new Promise((_resolve, reject) => { rejectDiagnostics = reject }),
     },
   })
-  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, accountSearch: { value: '' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
+  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {} })
   const request = view.loadUsageRecords()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(view.summary.value.totalRequests, '42')
@@ -175,7 +175,7 @@ test('usage cards cache selected metrics independently and never share another f
     },
   })
   const filters = { value: { userId: 'first' } }
-  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, accountSearch: { value: '' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {}, recordFilters: filters })
+  const view = fixture.module.useUsageRecordsTable({ recordView: { value: 'success' }, timeRangeParams: { value: { startTime: '2026-10-15', endTime: '2026-10-16' } }, refreshTimeRangeEnd: () => {}, recordFilters: filters })
   await view.loadUsageRecords()
   assert.deepEqual(calls.map(c => c.card), ['health', 'cost', 'performance'])
   assert.equal(calls[2]?.metric, 'total')

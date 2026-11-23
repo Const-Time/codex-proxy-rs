@@ -80,15 +80,13 @@ function upstreamSendStateText(value: string | null | undefined) {
 </script>
 
 <template>
-  <div class="flex min-h-130 min-w-0 w-full flex-1 flex-col">
+  <div class="flex h-full min-w-0 w-full flex-col">
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <BaseTable
         class="min-h-0 flex-1"
         :columns="columns"
         :table-id="personal ? 'personal-usage-errors' : 'usage-errors'"
         :row-key="row => `${row.kind}:${row.id}`"
-        density="compact"
-        horizontal-on-mobile
         :rows="records"
         :loading="loading"
         empty-text="当前时段没有错误"
