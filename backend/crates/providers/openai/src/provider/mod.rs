@@ -581,10 +581,7 @@ impl Provider for CodexProvider {
         {
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
-        if upstream_request
-            .downstream_websocket_connection_id
-            .is_some()
-            && upstream_request.previous_response_id().is_some()
+        if upstream_request.previous_response_id().is_some()
             && upstream_request.generate()
             && previous_session.as_ref().is_some_and(|state| {
                 state.continuation_scope == OpenAiContinuationScope::ReplayRequired

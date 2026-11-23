@@ -34,6 +34,7 @@ impl DefaultAccountsService {
             };
             let cycle_start = query.range.start;
             let reset_at = query.range.end;
+            let window_duration = reset_at - cycle_start;
             query.range.start = cycle_start.max(item.account.created_at);
             if query.range.start >= observed
                 || observed > now
@@ -50,13 +51,23 @@ impl DefaultAccountsService {
                 .await
                 .map_err(|error| map_store_error(error, "forecast paired usage"))?;
             let mut points = Vec::new();
-            let mut interrupted = false;
+            let mut plan_changed = false;
             for point in history.points {
                 let Some(fact) =
                     provider.quota_forecast_observation(&point.provider_observation, window)
                 else {
                     continue;
                 };
+                let Some(start) = fact.reset_at.checked_sub_signed(window_duration) else {
+                    continue;
+                };
+                if point.completed_at >= observed
+                    || point.started_at < query.range.start
+                    || point.completed_at < start
+                    || point.completed_at >= fact.reset_at
+                {
+                    continue;
+                }
                 // 响应头中的套餐字段是可选的；缺失不代表发生套餐变更。
                 // 只有两端都明确报告套餐且不同，才切断配对样本。
                 let changed_plan = quota
@@ -64,13 +75,15 @@ impl DefaultAccountsService {
                     .as_deref()
                     .zip(fact.plan_type.as_deref())
                     .is_some_and(|(current, previous)| !current.eq_ignore_ascii_case(previous));
-                if changed_plan || (fact.reset_at - reset_at).abs() > Duration::seconds(2) {
+                if changed_plan {
                     points.clear();
-                    interrupted = true;
+                    plan_changed = true;
                     continue;
                 }
                 points.push(QuotaForecastPoint {
+                    started_at: point.started_at,
                     observed_at: point.completed_at,
+                    reset_at: fact.reset_at,
                     used_percent: fact.used_percent,
                     usage: point.usage,
                 });
@@ -79,16 +92,18 @@ impl DefaultAccountsService {
                 window.key.clone(),
                 query.range.start,
                 QuotaForecastPoint {
+                    started_at: observed,
                     observed_at: observed,
+                    reset_at,
                     used_percent: percent,
                     usage: history.usage,
                 },
                 points,
                 history.pending_request_count,
-                interrupted,
+                plan_changed,
             );
             let cycle_based = sample.method == QuotaForecastMethod::Cumulative;
-            if sample.discontinuous || (interrupted && cycle_based) {
+            if sample.discontinuous || (plan_changed && cycle_based) {
                 window.estimate_hint = Some("额度或套餐发生变化，正在重新积累配对样本".to_owned());
                 continue;
             }

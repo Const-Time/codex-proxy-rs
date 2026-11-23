@@ -3065,28 +3065,38 @@ async fn quota_forecast_uses_paired_blocks_and_preserves_independent_cost_covera
         }
     }
     provider.set_quota(quota.clone());
-    // Changing the reset boundary invalidates old paired points; a mid-cycle import must wait.
-    history.points[0].provider_observation = ProviderDocument::new(OpaqueProviderData::new(
-        json!({"percent": 36.0, "resetAt": observed + TimeDelta::days(4), "plan": "pro"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    ));
-    *store.forecast_history.lock().unwrap() = history;
-    let page = services
-        .accounts()
-        .list(AccountListQuery {
-            page: 1,
-            page_size: gateway_admin::model::PageSize::new(20).unwrap(),
-            provider_kind: None,
-            group_filter: None,
-            search: None,
-            status: None,
-            sort: None,
-        })
-        .await
-        .unwrap();
-    assert!(page.items[0].quota.windows[0].estimated_quota.is_none());
+    // A different unexpired reset time can still provide a paired sample.
+    // An expired observation cannot anchor an estimate for a mid-cycle import.
+    for (offset, expected_tokens) in [
+        (TimeDelta::days(4), Some(228_000)),
+        (TimeDelta::hours(-1), None),
+    ] {
+        history.points[0].provider_observation = ProviderDocument::new(OpaqueProviderData::new(
+            json!({"percent": 36.0, "resetAt": observed + offset, "plan": "pro"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ));
+        *store.forecast_history.lock().unwrap() = history.clone();
+        let page = services
+            .accounts()
+            .list(AccountListQuery {
+                page: 1,
+                page_size: gateway_admin::model::PageSize::new(20).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: None,
+                sort: None,
+            })
+            .await
+            .unwrap();
+        let estimated_tokens = page.items[0].quota.windows[0]
+            .estimated_quota
+            .as_ref()
+            .and_then(|estimate| estimate.estimated_tokens);
+        assert_eq!(estimated_tokens, expected_tokens);
+    }
 }
 
 #[tokio::test]

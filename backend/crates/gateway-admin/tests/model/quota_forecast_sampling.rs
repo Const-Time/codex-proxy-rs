@@ -10,7 +10,9 @@ fn time(minutes: i64) -> DateTime<Utc> {
 
 fn point(minute: i64, percent: f64, tokens: u64) -> QuotaForecastPoint {
     QuotaForecastPoint {
+        started_at: time(minute) - Duration::seconds(1),
         observed_at: time(minute),
+        reset_at: time(7 * 24 * 60),
         used_percent: percent,
         usage: QuotaForecastUsage {
             request_count: minute as u64,
@@ -78,7 +80,7 @@ fn large_percentage_reversal_restarts_sampling_without_crossing_old_consumption(
     );
     assert_eq!(sample.baseline_percent, 1.0);
     assert_eq!(sample.usage.tokens, 70);
-    assert_eq!(sample.cycle_usage.tokens, 70);
+    assert_eq!(sample.cycle_usage.tokens, 280);
     assert_eq!(sample.sampled_percent, 7.0);
     assert!(!sample.discontinuous);
     let waiting = select(
@@ -126,12 +128,12 @@ fn counter_regressions_fail_closed_and_future_points_are_not_used() {
 }
 
 #[test]
-fn exhausted_history_is_retained_to_detect_a_reset_with_an_unchanged_deadline() {
+fn exhausted_reading_does_not_prove_a_reset_before_the_deadline() {
     let sample = select(
         vec![point(1, 100.0, 10_000), point(2, 0.0, 10_000)],
         point(3, 10.0, 10_100),
     );
-    assert_eq!(sample.cycle_usage.tokens, 100);
+    assert_eq!(sample.cycle_usage.tokens, 10_100);
     assert_eq!(sample.usage.tokens, 100);
     assert_eq!(sample.sampled_percent, 10.0);
     assert!(!sample.discontinuous);
@@ -161,4 +163,29 @@ fn changed_window_restarts_cycle_totals_at_first_matching_observation() {
     );
     assert_eq!(waiting.cycle_usage.tokens, 0);
     assert!(waiting.discontinuous);
+}
+
+#[test]
+fn expiry_and_an_independent_low_reading_confirm_the_new_cycle() {
+    let mut older = point(1, 75.0, 100);
+    older.reset_at = time(3);
+    let mut previous = point(2, 85.0, 200);
+    previous.reset_at = time(3) + Duration::seconds(4);
+    let first = point(4, 5.0, 300);
+    let independent = point(5, 20.0, 400);
+    let mut overlapping = independent.clone();
+    overlapping.started_at = first.started_at;
+    let current = point(6, 40.0, 900);
+
+    for confirmation in [None, Some(overlapping)] {
+        let mut points = vec![older.clone(), previous.clone(), first.clone()];
+        points.extend(confirmation);
+        let sample = select(points, current.clone());
+        assert_eq!(sample.cycle_usage.tokens, 900);
+        assert!(sample.discontinuous);
+    }
+    let sample = select(vec![older, previous, first, independent], current);
+    assert_eq!(sample.cycle_usage.tokens, 600);
+    assert_eq!(sample.usage.tokens, 600);
+    assert!(!sample.discontinuous);
 }
