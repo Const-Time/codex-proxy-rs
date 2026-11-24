@@ -76,7 +76,7 @@ export function useAccountGroups() {
   const disabling = disablingAction.loading
   const updatingStatusGroupIds = updatingStatusGroups.ids
   const referencedKeyNames = computed(() => {
-    const groupId = pendingDisableGroup.value?.id ?? pendingDeleteGroup.value?.id
+    const groupId = pendingDisableGroup.value?.id
     if (!groupId)
       return []
     return referenceKeyNamesFor(groupId)
@@ -300,8 +300,8 @@ export function useAccountGroups() {
   onMounted(() => {
     void query.execute()
   })
-  watch([showDeleteModal, showDisableModal], ([deleting, disabling]) => {
-    if (deleting || disabling)
+  watch(showDisableModal, (disabling) => {
+    if (disabling)
       void loadReferenceKeys()
   })
 

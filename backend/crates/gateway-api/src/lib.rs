@@ -171,6 +171,7 @@ pub fn initialize(
         admin,
         openai,
         health: HealthStatus::new(probes, worker_health),
+        t3_usage: config.t3_usage.take().map(Arc::new),
     };
     let index = config.asset_directory.join("index.html");
     let static_files = Router::new()
@@ -186,10 +187,8 @@ pub fn initialize(
         .merge(openai::router::router())
         .merge(admin::router::<ApiState>())
         .merge(admin::plugin_models::router())
+        .merge(t3_usage::router())
         .merge(static_files);
-    if let Some(t3_usage) = config.t3_usage.take() {
-        router = router.merge(t3_usage::router(t3_usage, state.admin.clone()));
-    }
     if !config.cors_allowed_origins.is_empty() {
         let origins = config
             .cors_allowed_origins
@@ -271,6 +270,7 @@ pub(crate) struct ApiState {
     admin: AdminServices,
     openai: OpenAiService,
     health: HealthStatus,
+    t3_usage: Option<Arc<T3UsageConfig>>,
 }
 
 impl ApiState {

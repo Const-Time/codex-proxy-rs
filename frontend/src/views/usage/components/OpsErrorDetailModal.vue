@@ -6,6 +6,7 @@ import { computed, inject } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import { entryRejected, failureClassText } from '../utils/opsErrorPresentation'
+import { usageUserDisplay } from '../utils/user'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
@@ -33,6 +34,7 @@ const accountLabel = computed(() => props.record?.accountEmail
   || props.record?.accountName
   || props.record?.metadata.accountLabel
   || props.record?.accountId)
+const userLabel = computed(() => !personal?.value && props.record ? usageUserDisplay(props.record).label : null)
 
 const errorFields = computed(() => visibleFields([
   {
@@ -49,6 +51,8 @@ const errorFields = computed(() => visibleFields([
 ]))
 
 const requestFields = computed(() => visibleFields([
+  { label: '用户', value: userLabel.value },
+  { label: '用户邮箱', value: userLabel.value && userLabel.value !== props.record?.userEmail ? props.record?.userEmail : null, mono: true },
   { label: '账号', value: accountLabel.value, mono: true },
   { label: '请求时间（UTC+8）', value: props.record?.createdAtDisplay, mono: true },
   { label: '请求 ID', value: props.record?.requestId, mono: true },

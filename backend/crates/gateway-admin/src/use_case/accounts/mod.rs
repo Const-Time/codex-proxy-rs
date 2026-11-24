@@ -94,11 +94,16 @@ pub trait AccountsService: Send + Sync {
         refresh: bool,
     ) -> Result<AccountDirectoryItem, AdminError>;
 
-    /// Read an enabled Codex OAuth account without running the directory's usage aggregation.
+    /// Select enabled Codex OAuth accounts from the caller's authorized candidates.
+    async fn codex_usage_account_ids(
+        &self,
+        account_ids: &[ProviderAccountId],
+    ) -> Result<Vec<String>, AdminError>;
+
+    /// Read a stored quota for an enabled Codex OAuth account.
     async fn codex_usage_account(
         &self,
         account_id: &ProviderAccountId,
-        include_quota: bool,
     ) -> Result<Option<CodexUsageAccount>, AdminError>;
 
     async fn profile_statistics(
@@ -899,10 +904,26 @@ impl AccountsService for DefaultAccountsService {
         self.load_directory_item(account_id, refresh).await
     }
 
+    async fn codex_usage_account_ids(
+        &self,
+        account_ids: &[ProviderAccountId],
+    ) -> Result<Vec<String>, AdminError> {
+        if account_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let account_ids = account_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        self.accounts
+            .codex_usage_account_ids(&account_ids)
+            .await
+            .map_err(|error| map_store_error(error, "Codex usage accounts"))
+    }
+
     async fn codex_usage_account(
         &self,
         account_id: &ProviderAccountId,
-        include_quota: bool,
     ) -> Result<Option<CodexUsageAccount>, AdminError> {
         let Some(item) = self
             .accounts
@@ -919,27 +940,20 @@ impl AccountsService for DefaultAccountsService {
         {
             return Ok(None);
         }
-        let quota = if include_quota {
-            let provider = self
-                .providers
-                .require(&account.provider_kind)
-                .map_err(|error| map_provider_error(error, "Codex usage provider"))?;
-            let mut results = provider
-                .read_quotas(&[ProviderQuotaReadRequest {
-                    account: &account,
-                    rolling_usage: None,
-                }])
-                .await
-                .into_iter();
-            Some(
-                results
-                    .next()
-                    .ok_or_else(|| AdminError::internal("Codex quota read returned no result"))?
-                    .map_err(|error| map_provider_error(error, "Codex usage snapshot"))?,
-            )
-        } else {
-            None
-        };
+        let provider = self
+            .providers
+            .require(&account.provider_kind)
+            .map_err(|error| map_provider_error(error, "Codex usage provider"))?;
+        let quota = provider
+            .read_quotas(&[ProviderQuotaReadRequest {
+                account: &account,
+                rolling_usage: None,
+            }])
+            .await
+            .into_iter()
+            .next()
+            .ok_or_else(|| AdminError::internal("Codex quota read returned no result"))?
+            .map_err(|error| map_provider_error(error, "Codex usage snapshot"))?;
         Ok(Some(CodexUsageAccount {
             plan_type: account.plan_type,
             quota,

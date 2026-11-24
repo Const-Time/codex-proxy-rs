@@ -567,6 +567,13 @@ pub trait ExecutionService: Send + Sync {
         &self,
         plaintext: &str,
     ) -> Result<AuthenticatedClient, ClientAuthenticationError>;
+    /// Authenticate a native Key without recording model activity.
+    fn authenticate_read_only(
+        &self,
+        _plaintext: &str,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        Err(ClientAuthenticationError::InvalidKey)
+    }
     /// Keep the exact plaintext-authenticated policy while adding host revocation.
     /// Registering access rechecks that policy; never resolve a newer policy by Key ID here.
     fn authenticate_revocable(
@@ -1650,6 +1657,16 @@ impl ExecutionService for DefaultExecutionService {
         &self,
         plaintext: &str,
     ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        let client = self.authenticate_read_only(plaintext)?;
+        self.client_api_key_usage
+            .record_used(client.policy().key_id());
+        Ok(client)
+    }
+
+    fn authenticate_read_only(
+        &self,
+        plaintext: &str,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
         let snapshot = self
             .snapshots
             .acquire()
@@ -1662,7 +1679,6 @@ impl ExecutionService for DefaultExecutionService {
             .find(|policy| policy.authorize().is_ok())
             .cloned()
             .ok_or(ClientAuthenticationError::InvalidKey)?;
-        self.client_api_key_usage.record_used(policy.key_id());
         Ok(AuthenticatedClient {
             model_catalog: None,
             snapshot,

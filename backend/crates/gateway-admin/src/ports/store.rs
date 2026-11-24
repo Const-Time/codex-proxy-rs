@@ -163,6 +163,17 @@ pub trait AccountStore:
         runtime: AccountRuntimeSnapshot,
     ) -> AdminStoreResult<Option<AccountPageItem>>;
 
+    async fn codex_usage_account_ids(
+        &self,
+        _account_ids: &[String],
+    ) -> AdminStoreResult<Vec<String>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "Codex usage accounts",
+            "not configured",
+        ))
+    }
+
     async fn load_account_usage(
         &self,
         range: TimeRange,

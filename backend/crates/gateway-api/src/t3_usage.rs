@@ -9,20 +9,24 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use futures::{StreamExt as _, TryStreamExt as _, stream};
-use gateway_admin::{
-    AdminServices,
-    model::{
-        accounts::CodexUsageAccount,
-        provider_credentials::{ProviderQuotaWindowRole, QuotaLocalUsageAttribution},
-    },
+use gateway_admin::model::{
+    AdminError,
+    accounts::CodexUsageAccount,
+    provider_credentials::{ProviderQuotaWindowRole, QuotaLocalUsageAttribution},
 };
-use gateway_core::account::ProviderAccountId;
+use gateway_core::{
+    account::ProviderAccountId,
+    routing::{FrozenAccountScope, ProviderKind},
+    runtime::ClientAccessGuard,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 
-use crate::{ApiConfigError, ApiState};
+use crate::{
+    ApiConfigError, ApiState,
+    openai::auth::{ClientApiKeyAuthError, bearer_client_api_key},
+};
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const MAX_ACCOUNTS: usize = 128;
@@ -64,31 +68,27 @@ impl T3UsageConfig {
     }
 }
 
-#[derive(Clone)]
-struct UsageState {
-    config: Arc<T3UsageConfig>,
-    admin: AdminServices,
-}
-
-pub(crate) fn router(config: T3UsageConfig, admin: AdminServices) -> Router<ApiState> {
+pub(crate) fn router() -> Router<ApiState> {
     Router::new()
         .route("/v0/management/auth-files", get(auth_files))
         .route("/v0/management/api-call", post(api_call))
         .layer(DefaultBodyLimit::max(4096))
-        .with_state(UsageState {
-            config: Arc::new(config),
-            admin,
-        })
 }
 
-struct UsageAuth;
+enum UsageAuth {
+    Dedicated(Arc<T3UsageConfig>),
+    Client {
+        scope: Arc<FrozenAccountScope>,
+        access: ClientAccessGuard,
+    },
+}
 
-impl FromRequestParts<UsageState> for UsageAuth {
+impl FromRequestParts<ApiState> for UsageAuth {
     type Rejection = StatusCode;
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &UsageState,
+        state: &ApiState,
     ) -> Result<Self, Self::Rejection> {
         let mut values = parts.headers.get_all(header::AUTHORIZATION).iter();
         let (scheme, key) = values
@@ -96,38 +96,74 @@ impl FromRequestParts<UsageState> for UsageAuth {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split_once(' '))
             .ok_or(StatusCode::UNAUTHORIZED)?;
-        if values.next().is_some()
-            || !scheme.eq_ignore_ascii_case("bearer")
-            || !(32..=256).contains(&key.len())
-            || key.bytes().any(|byte| !byte.is_ascii_graphic())
-        {
+        if values.next().is_some() || !scheme.eq_ignore_ascii_case("bearer") {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        let digest = hex::encode(Sha256::digest(key.as_bytes()));
-        if bool::from(digest.as_bytes().ct_eq(state.config.key_sha256.as_bytes())) {
-            Ok(Self)
-        } else {
-            Err(StatusCode::UNAUTHORIZED)
+        if let Some(config) = &state.t3_usage
+            && (32..=256).contains(&key.len())
+            && key.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            let digest = hex::encode(Sha256::digest(key.as_bytes()));
+            if bool::from(digest.as_bytes().ct_eq(config.key_sha256.as_bytes())) {
+                return Ok(Self::Dedicated(config.clone()));
+            }
+        }
+        let key = bearer_client_api_key(&parts.headers).map_err(|_| StatusCode::UNAUTHORIZED)?;
+        let service = state.openai();
+        let client = service
+            .authenticate_read_only(key)
+            .map_err(|error| match error {
+                ClientApiKeyAuthError::RuntimeUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::UNAUTHORIZED,
+            })?;
+        let access = service
+            .client_access(&client)
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let auth = Self::Client {
+            scope: client.policy().account_scope().clone(),
+            access,
+        };
+        auth.check_current()?;
+        Ok(auth)
+    }
+}
+
+impl UsageAuth {
+    fn candidates(&self) -> Vec<ProviderAccountId> {
+        match self {
+            Self::Dedicated(config) => config
+                .account_ids
+                .iter()
+                .map(|id| {
+                    ProviderAccountId::new(id.as_str()).expect("validated Codex usage account")
+                })
+                .collect(),
+            Self::Client { scope, .. } => {
+                scope.account_ids(&ProviderKind::new("openai").expect("valid provider"))
+            }
+        }
+    }
+
+    fn allows(&self, account: &ProviderAccountId) -> bool {
+        match self {
+            Self::Dedicated(config) => config.account_ids.contains(account.as_str()),
+            Self::Client { scope, .. } => scope.allows(account),
+        }
+    }
+
+    fn check_current(&self) -> Result<(), StatusCode> {
+        match self {
+            Self::Client { access, .. } if access.cancellation().is_cancelled() => {
+                Err(StatusCode::UNAUTHORIZED)
+            }
+            _ => Ok(()),
         }
     }
 }
 
-impl UsageState {
-    async fn account(
-        &self,
-        id: &str,
-        include_quota: bool,
-    ) -> Result<Option<CodexUsageAccount>, StatusCode> {
-        let account_id = ProviderAccountId::new(id).map_err(|_| StatusCode::NOT_FOUND)?;
-        self.admin
-            .accounts()
-            .codex_usage_account(&account_id, include_quota)
-            .await
-            .map_err(|error| {
-                tracing::warn!(kind = ?error.kind(), "T3 Codex usage snapshot unavailable");
-                StatusCode::SERVICE_UNAVAILABLE
-            })
-    }
+fn quota_unavailable(error: AdminError) -> StatusCode {
+    tracing::warn!(kind = ?error.kind(), "T3 Codex usage snapshot unavailable");
+    StatusCode::SERVICE_UNAVAILABLE
 }
 
 #[derive(Serialize)]
@@ -143,22 +179,23 @@ struct AuthFile {
 }
 
 async fn auth_files(
-    _auth: UsageAuth,
-    State(state): State<UsageState>,
+    auth: UsageAuth,
+    State(state): State<ApiState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let state = &state;
-    let files = stream::iter(state.config.account_ids.iter().cloned())
-        .map(|id| async move {
-            Ok::<_, StatusCode>(state.account(&id, false).await?.map(|_| AuthFile {
-                auth_index: id.clone(),
-                id,
-                provider: "codex",
-            }))
+    let files = state
+        .admin
+        .accounts()
+        .codex_usage_account_ids(&auth.candidates())
+        .await
+        .map_err(quota_unavailable)?
+        .into_iter()
+        .map(|id| AuthFile {
+            auth_index: id.clone(),
+            id,
+            provider: "codex",
         })
-        .buffered(8)
-        .try_filter_map(|account| async { Ok(account) })
-        .try_collect()
-        .await?;
+        .collect();
+    auth.check_current()?;
     Ok((NO_STORE, Json(AuthFiles { files })))
 }
 
@@ -177,8 +214,8 @@ struct ApiCallResult {
 }
 
 async fn api_call(
-    _auth: UsageAuth,
-    State(state): State<UsageState>,
+    auth: UsageAuth,
+    State(state): State<ApiState>,
     Json(call): Json<ApiCall>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // The nested URL is a protocol selector. No caller URL, headers or token
@@ -186,13 +223,18 @@ async fn api_call(
     if call.method != "GET" || call.url != CODEX_USAGE_URL || call.data.is_some() {
         return Err(StatusCode::FORBIDDEN);
     }
-    if !state.config.account_ids.contains(&call.auth_index) {
+    let account_id = ProviderAccountId::new(call.auth_index).map_err(|_| StatusCode::NOT_FOUND)?;
+    if !auth.allows(&account_id) {
         return Err(StatusCode::NOT_FOUND);
     }
     let account = state
-        .account(&call.auth_index, true)
-        .await?
+        .admin
+        .accounts()
+        .codex_usage_account(&account_id)
+        .await
+        .map_err(quota_unavailable)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    auth.check_current()?;
     let body = serde_json::to_string(&CodexUsage::from(account))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((
@@ -227,14 +269,10 @@ struct CodexWindow {
 
 impl From<CodexUsageAccount> for CodexUsage {
     fn from(account: CodexUsageAccount) -> Self {
-        let plan_type = account
-            .quota
-            .as_ref()
-            .and_then(|quota| quota.plan_type.clone())
-            .or(account.plan_type);
-        let rate_limit = account.quota.and_then(|quota| {
+        let plan_type = account.quota.plan_type.or(account.plan_type);
+        let rate_limit = {
             let window = |role| {
-                quota.windows.iter().find_map(|window| {
+                account.quota.windows.iter().find_map(|window| {
                     if window.role != Some(role)
                         || window.local_usage_attribution != QuotaLocalUsageAttribution::AccountWide
                     {
@@ -253,7 +291,7 @@ impl From<CodexUsageAccount> for CodexUsage {
                 primary_window,
                 secondary_window,
             })
-        });
+        };
         Self {
             plan_type,
             rate_limit,

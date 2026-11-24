@@ -105,6 +105,15 @@ impl OpenAiService {
         self.bind_model_catalog(client)
     }
 
+    pub(crate) fn authenticate_read_only(
+        &self,
+        plaintext: &str,
+    ) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
+        self.execution
+            .authenticate_read_only(plaintext)
+            .map_err(map_authentication_error)
+    }
+
     fn bind_model_catalog(
         &self,
         client: AuthenticatedClient,

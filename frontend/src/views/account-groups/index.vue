@@ -178,14 +178,14 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
     <BaseConfirmModal
       v-model="showBatchDeleteModal"
       title="确认删除"
-      description="删除后这些分组将立即失效，此操作不可撤销"
+      description="所选分组及其绑定的 API 密钥将一并删除，此操作不可撤销"
       destructive
       confirm-text="确认删除"
       :loading="batchDeleting"
       @confirm="confirmBatchDelete"
     >
       <p class="m-0">
-        确定删除选中的 {{ selectedIds.size }} 个分组吗？账号本身不会被删除。
+        确定删除选中的 {{ selectedIds.size }} 个分组吗？账号和历史消费记录会保留。
       </p>
     </BaseConfirmModal>
 
@@ -211,7 +211,7 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
     <BaseConfirmModal
       v-model="showDeleteModal"
       title="删除账号分组"
-      description="删除后该分组将立即失效，此操作不可撤销"
+      description="该分组及其绑定的 API 密钥将一并删除，此操作不可撤销"
       destructive
       confirm-text="确认删除"
       :loading="deleting"
@@ -219,6 +219,9 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
     >
       <p class="m-0">
         确定删除“{{ pendingDeleteGroup?.name || '该分组' }}”吗？账号本身和历史消费记录会保留，分组授权及账号关联会移除。
+      </p>
+      <p v-if="pendingDeleteGroup?.clientKeyCount" class="mt-2 mb-0 text-cp-warning-text">
+        当前绑定 {{ pendingDeleteGroup.clientKeyCount }} 个 API 密钥。
       </p>
     </BaseConfirmModal>
   </div>

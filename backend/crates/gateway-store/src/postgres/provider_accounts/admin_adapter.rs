@@ -646,6 +646,22 @@ impl AccountStore for PgAdminAccountStore {
         }))
     }
 
+    async fn codex_usage_account_ids(
+        &self,
+        account_ids: &[String],
+    ) -> AdminStoreResult<Vec<String>> {
+        sqlx::query_scalar(
+            "select id from provider_accounts
+             where id = any($1) and enabled and provider_kind = 'openai'
+               and authentication_kind = 'oauth'
+             order by id",
+        )
+        .bind(account_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| admin_store_error(ENTITY, postgres_unavailable("list Codex usage accounts")))
+    }
+
     async fn load_account_usage(
         &self,
         range: TimeRange,

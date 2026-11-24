@@ -1040,6 +1040,26 @@ impl AccountStore for UnusedStore {
         Err(unavailable("account"))
     }
 
+    async fn codex_usage_account_ids(
+        &self,
+        candidates: &[String],
+    ) -> AdminStoreResult<Vec<String>> {
+        Ok(self
+            .account
+            .lock()
+            .expect("account")
+            .iter()
+            .map(|item| &item.account)
+            .filter(|account| {
+                account.enabled
+                    && account.provider_kind.as_str() == "openai"
+                    && account.authentication_kind == "oauth"
+                    && candidates.contains(&account.id)
+            })
+            .map(|account| account.id.clone())
+            .collect())
+    }
+
     async fn load_account_usage(
         &self,
         _: TimeRange,

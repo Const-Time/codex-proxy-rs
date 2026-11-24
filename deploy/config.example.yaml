@@ -60,8 +60,8 @@ api:
   cors_allowed_origins: []
   request_timeout_seconds: null
   request_id_header: 'x-request-id'
-  # 可选：T3 Code「用量数据提供方」的只读 Codex 额度接入。省略即关闭。
-  # 参见 deploy/README.md。这里只填写独立密钥的 SHA-256 与获准读取的账号 ID。
+  # T3 Code 可直接使用网关 API 密钥并沿用账号分组权限，无需配置。
+  # 仅在额外发放专用只读密钥时，填写独立密钥的 SHA-256 与获准读取的账号 ID。
   # t3_usage:
   #   key_sha256: '<64 位小写十六进制摘要>'
   #   account_ids: ['acct_example']

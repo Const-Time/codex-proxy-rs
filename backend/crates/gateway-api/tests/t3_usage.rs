@@ -1,4 +1,11 @@
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    num::NonZeroU32,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     Router,
@@ -18,7 +25,16 @@ use gateway_admin::model::{
     },
 };
 use gateway_api::{ApiConfig, T3UsageConfig};
-use gateway_core::routing::ProviderKind;
+use gateway_core::{
+    account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy},
+    engine::execution::{ClientApiKeyUsageSink, ExecutionService},
+    policy::{ClientApiKeyId, ClientPolicy, PlaintextClientApiKey, RateLimits},
+    routing::{
+        AccountGroupId, ClientRoutingScope, ConfigRevision, FrozenAccountScope, ProviderKind,
+        RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory, RuntimeSnapshot,
+    },
+    runtime::RuntimeSnapshotHandle,
+};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tower::ServiceExt as _;
@@ -26,11 +42,13 @@ use tower::ServiceExt as _;
 use crate::{
     admin::AdminTestFixture,
     health::UnusedExecution,
-    openai::{EmptyWorkerHealth, TestLifecycle},
+    openai::{EmptyWorkerHealth, TestLifecycle, execution_for_snapshot},
 };
 
 const ACCOUNT: &str = "acct_t3_fixture";
 const KEY: &str = "t3-local-test-only-credential-000001";
+const CLIENT_KEY: &str = "sk_t3_local_test_00000000000000000000000000000001";
+const OTHER_KEY: &str = "sk_t3_local_test_00000000000000000000000000000002";
 const URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const LIST: &str = "/v0/management/auth-files";
 const CALL: &str = "/v0/management/api-call";
@@ -157,21 +175,120 @@ async fn t3_access_is_scoped_to_the_read_only_key_and_eligible_allowlisted_accou
 }
 
 #[tokio::test]
-async fn t3_routes_are_opt_in_and_require_a_digest_and_explicit_account_scope() {
+async fn t3_accepts_native_keys_without_configuration_and_enforces_their_live_scope() {
     let fixture = fixture().await;
-    let router = router(&fixture, None);
+    let usage = Arc::new(KeyUsage::default());
+    let snapshots = RuntimeSnapshotHandle::new(client_snapshot(1, true));
+    let execution = Arc::new(execution_for_snapshot(snapshots.clone(), usage.clone()));
+    let router = initialize(&fixture, None, execution).unwrap().router();
+    let listed = request(&router, LIST, Some(CLIENT_KEY), None).await;
+    assert_eq!(listed.status(), StatusCode::OK);
     assert_eq!(
-        request(&router, LIST, Some(KEY), None).await.status(),
+        body(listed).await,
+        json!({"files": [{"id": ACCOUNT, "auth_index": ACCOUNT, "provider": "codex"}]})
+    );
+    let response = request(
+        &router,
+        CALL,
+        Some(CLIENT_KEY),
+        Some(call(ACCOUNT, "GET", URL)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = body(response).await;
+    let quota: Value = serde_json::from_str(result["body"].as_str().unwrap()).unwrap();
+    assert_eq!(quota["rate_limit"]["primary_window"]["used_percent"], 12.5);
+    assert_eq!(usage.0.load(Ordering::Relaxed), 0);
+
+    let listed = request(&router, LIST, Some(OTHER_KEY), None).await;
+    assert_eq!(listed.status(), StatusCode::OK);
+    assert_eq!(body(listed).await, json!({"files": []}));
+    assert_eq!(
+        request(
+            &router,
+            CALL,
+            Some(OTHER_KEY),
+            Some(call(ACCOUNT, "GET", URL))
+        )
+        .await
+        .status(),
         StatusCode::NOT_FOUND
     );
+    snapshots.publish(client_snapshot(2, false));
+    assert_eq!(
+        request(&router, LIST, Some(CLIENT_KEY), None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn t3_optional_dedicated_key_requires_a_digest_and_explicit_scope() {
+    let fixture = fixture().await;
     let mut config = config();
     config.account_ids.clear();
     assert!(matches!(
-        initialize(&fixture, Some(config)),
+        initialize(&fixture, Some(config), Arc::new(UnusedExecution)),
         Err(gateway_api::ApiError::Config(
             gateway_api::ApiConfigError::InvalidT3Usage
         ))
     ));
+}
+
+#[derive(Default)]
+struct KeyUsage(AtomicUsize);
+
+impl ClientApiKeyUsageSink for KeyUsage {
+    fn record_used(&self, _: &ClientApiKeyId) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn client_snapshot(revision: u64, enabled: bool) -> RuntimeSnapshot {
+    let provider = ProviderKind::new("openai").unwrap();
+    let allowed_group = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
+    let other_group = AccountGroupId::new("grp_00000000000000000000000000000002").unwrap();
+    let accounts = Arc::new(RuntimeAccountDirectory::new(
+        [(
+            ProviderAccountId::new(ACCOUNT).unwrap(),
+            RuntimeAccount::new(provider.clone(), [allowed_group.clone()].into()),
+        )]
+        .into(),
+    ));
+    let policies = [
+        ("key_t3_client", CLIENT_KEY, allowed_group, enabled),
+        ("key_t3_other", OTHER_KEY, other_group, true),
+    ]
+    .into_iter()
+    .map(|(id, secret, group, enabled)| {
+        let scope = ClientRoutingScope::restricted(
+            vec![RoutingGroupSnapshot::new(
+                group.clone(),
+                "fixture group".into(),
+            )],
+            [group].into(),
+            [provider.clone()].into(),
+        )
+        .unwrap();
+        ClientPolicy::new(
+            ClientApiKeyId::new(id).unwrap(),
+            PlaintextClientApiKey::new(secret).unwrap(),
+            Arc::new(FrozenAccountScope::new(accounts.clone(), scope)),
+            enabled,
+            RateLimits::unlimited(),
+        )
+    })
+    .collect();
+    RuntimeSnapshot::new(
+        ConfigRevision::new(revision).unwrap(),
+        AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::MIN, Duration::ZERO),
+        vec![provider],
+        Vec::new(),
+        policies,
+    )
+    .unwrap()
+    .with_account_directory(accounts)
 }
 
 fn config() -> T3UsageConfig {
@@ -184,6 +301,7 @@ fn config() -> T3UsageConfig {
 fn initialize(
     fixture: &AdminTestFixture,
     t3_usage: Option<T3UsageConfig>,
+    execution: Arc<dyn ExecutionService>,
 ) -> Result<gateway_api::ApiBundle, gateway_api::ApiError> {
     gateway_api::initialize(
         ApiConfig {
@@ -194,7 +312,7 @@ fn initialize(
             request_id_header: "x-request-id".into(),
             t3_usage,
         },
-        Arc::new(UnusedExecution),
+        execution,
         fixture.services.clone(),
         Vec::new(),
         Arc::new(EmptyWorkerHealth),
@@ -203,7 +321,9 @@ fn initialize(
 }
 
 fn router(fixture: &AdminTestFixture, t3_usage: Option<T3UsageConfig>) -> Router {
-    initialize(fixture, t3_usage).unwrap().router()
+    initialize(fixture, t3_usage, Arc::new(UnusedExecution))
+        .unwrap()
+        .router()
 }
 
 async fn request(router: &Router, path: &str, key: Option<&str>, value: Option<Value>) -> Response {

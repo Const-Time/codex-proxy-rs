@@ -105,15 +105,22 @@ pub(crate) fn bound_client(
     key: &ClientApiKeyId,
     revocation: gateway_core::lifecycle::CancellationToken,
 ) -> Result<AuthenticatedClient, gateway_core::engine::execution::ClientAuthenticationError> {
+    execution_for_snapshot(snapshots, Arc::new(IgnoredClientApiKeyUsage))
+        .authenticate_bound_key(key, revocation)
+}
+
+pub(super) fn execution_for_snapshot(
+    snapshots: RuntimeSnapshotHandle,
+    key_usage: Arc<dyn ClientApiKeyUsageSink>,
+) -> DefaultExecutionService {
     DefaultExecutionService::new(
         snapshots,
         Arc::new(UnusedExecutionStore),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
         Arc::new(UnusedContinuation),
-        Arc::new(IgnoredClientApiKeyUsage),
+        key_usage,
     )
-    .authenticate_bound_key(key, revocation)
 }
 
 pub(super) fn authenticated_client_for_provider(

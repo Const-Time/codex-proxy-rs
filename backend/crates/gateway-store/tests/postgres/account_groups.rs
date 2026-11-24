@@ -418,8 +418,8 @@ async fn group_deletion_preserves_budget_history_without_blocking_removal() {
 }
 
 #[tokio::test]
-async fn unreferenced_group_deletion_removes_memberships_but_preserves_accounts() {
-    let Some(database) = TestDatabase::create("group_delete_empty").await else {
+async fn group_deletion_removes_bound_keys_and_memberships_but_preserves_history() {
+    let Some(database) = TestDatabase::create("group_delete_keys").await else {
         return;
     };
     let groups = PgAccountGroupRepository::new(database.pool.clone());
@@ -428,12 +428,12 @@ async fn unreferenced_group_deletion_removes_memberships_but_preserves_accounts(
             NewAccountGroup {
                 model_multipliers: Default::default(),
                 id: group_id(EMPTY_GROUP),
-                name: "Unused group".into(),
+                name: "Deleted group".into(),
                 description: None,
                 color: group_color("#2563EBFF"),
                 budget: Default::default(),
             },
-            &context("create-unused-group"),
+            &context("create-delete-group"),
         )
         .await
         .expect("create group");
@@ -452,24 +452,96 @@ async fn unreferenced_group_deletion_removes_memberships_but_preserves_accounts(
     .execute(&database.pool)
     .await
     .expect("grant group");
+
+    let keys = PgAdminClientKeyStore::new(database.pool.clone());
+    for id in ["key_active", "key_disabled"] {
+        keys.create_client_key(new_key(id, vec![group_id(EMPTY_GROUP)]), &context(id))
+            .await
+            .expect("create bound client key");
+    }
+    sqlx::raw_sql(
+        "insert into users(id, username, password_hash, created_at, updated_at)
+          values ('test-user', 'test-user', 'unused', now(), now());
+         update client_api_keys set owner_user_id = 'test-user', enabled = false
+          where id = 'key_disabled';",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    seed_group_cost_snapshot(
+        &database.pool,
+        "request-before-group-delete",
+        "acct_group_delete",
+        EMPTY_GROUP,
+        "1.5",
+    )
+    .await;
+    sqlx::query(
+        "update model_requests set client_api_key_id = 'key_active', client_api_key_ref = 'key_active'
+         where id = 'request-before-group-delete'",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+
     let revision = current_revision(&database.pool).await;
     let audits = audit_count(&database.pool).await;
-    let result = groups
-        .delete_account_group(
-            DeleteAccountGroup {
-                id: group_id(EMPTY_GROUP),
-            },
-            &context("delete-unused-group"),
-        )
+    sqlx::query(
+        "alter table admin_audit_events add constraint reject_test_delete_audit
+         check (admin_request_id <> 'fail-group-delete' or entity_kind <> 'account_group')",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let command = DeleteAccountGroup {
+        id: group_id(EMPTY_GROUP),
+    };
+    let error = groups
+        .delete_account_group(command.clone(), &context("fail-group-delete"))
         .await
-        .expect("delete unreferenced group");
+        .expect_err("failed audit must roll back group and key deletion");
+    assert_eq!(error.kind(), AdminStoreErrorKind::Unavailable);
+    let retained: (i64, i64, i64) = sqlx::query_as(
+        "select (select count(*) from account_groups),
+                (select count(*) from client_api_keys),
+                (select count(*) from client_api_key_groups)",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained, (1, 2, 2));
+    assert_eq!(current_revision(&database.pool).await, revision);
+    assert_eq!(audit_count(&database.pool).await, audits);
+
+    let result = groups
+        .delete_account_group(command, &context("delete-bound-group"))
+        .await
+        .expect("delete the group and its bound keys");
     assert!(result.record.is_none());
     assert_eq!(current_revision(&database.pool).await, revision + 1);
-    assert_eq!(audit_count(&database.pool).await, audits + 1);
+    let deleted: Vec<(String, String)> = sqlx::query_as(
+        "select entity_kind, entity_ref from admin_audit_events
+         where admin_request_id = 'delete-bound-group' and action = 'delete' and config_revision = $1
+         order by entity_kind, entity_ref",
+    )
+    .bind(i64::try_from(revision + 1).unwrap())
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        deleted,
+        [
+            ("account_group".into(), EMPTY_GROUP.into()),
+            ("client_api_key".into(), "key_active".into()),
+            ("client_api_key".into(), "key_disabled".into()),
+        ]
+    );
     for table in [
         "account_groups",
         "user_account_groups",
         "account_group_accounts",
+        "client_api_keys",
+        "client_api_key_groups",
     ] {
         let count: i64 =
             sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
@@ -483,6 +555,17 @@ async fn unreferenced_group_deletion_removes_memberships_but_preserves_accounts(
         .await
         .expect("account count");
     assert_eq!(accounts, 1);
+    let history: (Option<String>, String, Vec<String>) = sqlx::query_as(
+        "select client_api_key_id, client_api_key_ref, routing_group_refs from model_requests
+         where id = 'request-before-group-delete'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        history,
+        (None, "key_active".into(), vec![EMPTY_GROUP.into()])
+    );
     database.close().await;
 }
 
@@ -661,22 +744,6 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
         current_revision(&database.pool).await,
         restricted_revision.get()
     );
-
-    let revision_before_delete = current_revision(&database.pool).await;
-    let audit_before_delete = audit_count(&database.pool).await;
-    let error = groups
-        .delete_account_group(
-            DeleteAccountGroup { id: mixed_group },
-            &context("delete-referenced"),
-        )
-        .await
-        .expect_err("referenced group must not be deleted");
-    assert_eq!(error.kind(), AdminStoreErrorKind::Conflict);
-    assert_eq!(
-        current_revision(&database.pool).await,
-        revision_before_delete
-    );
-    assert_eq!(audit_count(&database.pool).await, audit_before_delete);
 
     database.close().await;
 }

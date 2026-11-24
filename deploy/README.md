@@ -271,9 +271,9 @@ Codex App 的速度选择还受登录方式限制；本地核对的 26.903.9818.
 
 ### T3 Code 账号额度
 
-在部署配置的 `api` 中添加 `t3_usage`，重启服务后可在 T3 Code 的「用量数据提供方 → 添加中转站」读取指定 Codex OAuth 账号的套餐额度。
+在 T3 Code 的「用量数据提供方 → 添加中转站」填入网关根地址（例如 `https://proxy.example.com`）和网关颁发的 API 密钥。网关按该密钥的账号分组权限显示已启用 Codex OAuth 账号的短周期和周额度及重置时间。用量轮询读取最近保存的快照，未取得快照的账号显示无数据。
 
-用 `openssl rand -hex 32` 生成一条独立随机密钥并保存。用 `printf '%s' "$T3_USAGE_KEY" | sha256sum` 计算它的 SHA-256，其中 `T3_USAGE_KEY` 是当前 Shell 中保存的原始密钥，计算时不要附加换行。配置文件只填摘要和允许访问的本地账号 ID，账号 ID 可在管理接口 `GET /api/admin/accounts` 的 `data.items[].id` 中取得。
+需要单独发放只读密钥时，可在部署配置的 `api` 中添加 `t3_usage`。用 `openssl rand -hex 32` 生成独立密钥并保存在 `T3_USAGE_KEY` 中，用 `printf '%s' "$T3_USAGE_KEY" | sha256sum` 计算摘要。账号 ID 可从管理接口 `GET /api/admin/accounts` 的 `data.items[].id` 中取得。
 
 ```yaml
 api:
@@ -283,7 +283,7 @@ api:
     account_ids: ['acct_example']
 ```
 
-在 T3 中填入网关地址（例如 `https://proxy.example.com`）和这条**原始密钥**。模型调用仍由 T3 的 Codex 提供方单独配置。该接入显示上游账号最近一次保存的主、次额度窗口（常见为 5 小时和一周）及重置时间。轮询只读取快照，未取得额度的账号显示无数据。轮换密钥或修改账号范围后需重启网关。
+启用或修改这项专用配置后重启网关。在 T3 中填入原始密钥，账号范围由配置的 ID 列表限定。
 
 ## 优雅关停
 

@@ -711,7 +711,7 @@ OAuth start 使用：
 | `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, dailyLimitUsd, weeklyLimitUsd, modelMultipliers? }` | 更新名称、描述、颜色、日/周额度和模型倍率 |
 | `POST` | `/api/admin/account-groups/enable` | `{ id }` | 启用 |
 | `POST` | `/api/admin/account-groups/disable` | `{ id }` | 禁用；已绑定 Key 保持受限，不回退到全部账号 |
-| `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除没有 Client Key 绑定的分组；仍有 Key 时返回 409。保留历史额度、计费账本和账号本身，移除账号关联及用户授权，在途请求仍按原归属结算 |
+| `POST` | `/api/admin/account-groups/delete` | `{ id }` | 在同一事务中删除分组及绑定的 API 密钥，并记录各项删除的审计。保留历史额度、计费账本和账号本身，移除账号关联及用户授权。在途请求仍按原归属结算 |
 
 列表数据为 `{ items, page, configRevision }`，其中 item 返回 `memberCount`、按 Provider 聚合的
 `providerCounts` 和 `clientKeyCount`。查询分组成员使用账号列表的 `groupId` 筛选，
@@ -984,11 +984,11 @@ Flex 保留独立档位；请求 `auto`、未知档位或缺少对应 Standard �
 
 ### T3 Code 只读额度兼容
 
-设置 `api.t3_usage` 后启用 CLIProxyAPI 的 Codex 额度子集。两条路由接受专用的 `Authorization: Bearer <key>`，账号范围由配置中的 ID 白名单决定。成功响应禁用缓存。
+CLIProxyAPI 的 Codex 额度子集默认接受网关客户端 API 密钥（`Authorization: Bearer <key>`），沿用该密钥的有效账号分组权限。也可通过 `api.t3_usage` 发放独立只读密钥，其范围由配置中的账号 ID 白名单决定。成功响应禁用缓存，轮询不更新密钥最后使用时间。
 
 | 方法 | 路由 | 说明 |
 | --- | --- | --- |
-| `GET` | `/v0/management/auth-files` | 返回 `{files:[{id,auth_index,provider:"codex"}]}`。仅包含在白名单中的已启用 OpenAI OAuth 账号，标识使用本地账号 ID。 |
+| `GET` | `/v0/management/auth-files` | 返回 `{files:[{id,auth_index,provider:"codex"}]}`。仅包含当前密钥可访问的已启用 OpenAI OAuth 账号，标识使用本地账号 ID。 |
 | `POST` | `/v0/management/api-call` | 只接受 `auth_index`、嵌套 `method: "GET"` 及 `url: "https://chatgpt.com/backend-api/wham/usage"` 的额度查询。返回 `{status_code:200,body:"…"}`，其中 `body` 是包含 `plan_type` 与 `rate_limit` 的 JSON 字符串。 |
 
 只使用已保存的账号级主、次窗口，重置时间单位是 Unix 秒。未知用量窗口省略，没有可用窗口时 `rate_limit` 为 `null`。嵌套 URL 只用于识别操作，调用方提供的头不会被传给上游。模型目录、重置卡消费及用户日/周美元预算不属于此只读接口。

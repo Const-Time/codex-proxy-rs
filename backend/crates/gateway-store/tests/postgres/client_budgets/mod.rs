@@ -1854,7 +1854,7 @@ async fn multiple_keys_share_the_user_group_budget_but_other_users_do_not() {
 }
 
 #[tokio::test]
-async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
+async fn reassigning_keys_and_deleting_their_group_cannot_erase_or_move_charges() {
     let Some(db) = TestDatabase::create("frozen_budget_scope").await else {
         return;
     };
@@ -1881,10 +1881,13 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
             .is_err(),
         "stale routing scope must be rejected"
     );
-    sqlx::query("delete from client_api_keys where id = 'first'")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "update client_api_key_groups set account_group_id = $1 where client_api_key_id = 'first'",
+    )
+    .bind(group_id("first").as_str())
+    .execute(&db.pool)
+    .await
+    .unwrap();
     let charge = ClientBudgetCharge {
         components_usd: [gateway_core::metering::Decimal::ZERO; 4],
         scope: Some(scope),
@@ -1901,7 +1904,13 @@ async fn deleting_or_reassigning_keys_cannot_erase_or_move_charges() {
             },
         )
         .await
-        .expect("group with no keys can be removed while a request is in flight");
+        .expect("group and bound key can be removed while a request is in flight");
+    let remaining_keys: Vec<String> =
+        sqlx::query_scalar("select id from client_api_keys order by id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining_keys, ["other"]);
     store.settle(charge.clone()).await.unwrap();
     PgClientBudgetStore::open(db.pool.clone(), db.budget_directory.path().to_owned())
         .await

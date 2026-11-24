@@ -94,6 +94,35 @@ fn postgres_provider_account_adapter_implements_core_port() {
 }
 
 #[tokio::test]
+async fn codex_usage_catalog_filters_authorized_enabled_oauth_accounts() {
+    let Some(database) = TestDatabase::create("codex_usage_catalog").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let mut disabled = account("acct_disabled", "user-disabled");
+    disabled.enabled = false;
+    let mut xai = account("acct_xai", "user-xai");
+    xai.provider_kind = "xai".to_owned();
+    let mut api_key = account("acct_api_key", "user-api-key");
+    api_key.authentication_kind = "api_key".to_owned();
+    let mut authorized = Vec::new();
+    for candidate in [account("acct_codex", "user-codex"), disabled, xai, api_key] {
+        authorized.push(candidate.id.clone());
+        repository.insert_provider_account(candidate).await.unwrap();
+    }
+    repository
+        .insert_provider_account(account("acct_other_group", "user-other-group"))
+        .await
+        .unwrap();
+    let store = admin_account_store(&database.pool);
+    assert_eq!(
+        store.codex_usage_account_ids(&authorized).await.unwrap(),
+        ["acct_codex"]
+    );
+    database.close().await;
+}
+
+#[tokio::test]
 async fn refresh_candidates_should_filter_order_and_bound_in_one_query() {
     let Some(database) = TestDatabase::create("provider_refresh_candidates").await else {
         return;

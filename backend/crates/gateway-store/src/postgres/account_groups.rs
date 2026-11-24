@@ -21,8 +21,8 @@ use gateway_core::{account::AccountStatusFacts, routing::AccountGroupId};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as _, Transaction};
 
 use crate::{
-    ConflictKind, StoreError, StoreResult, admin_revision, admin_store_error, mutation_audit,
-    postgres_unavailable,
+    ConflictKind, Revision, StoreError, StoreResult, admin_revision, admin_store_error,
+    mutation_audit, postgres_unavailable,
 };
 
 use super::plugins::{lock_plugin_resource, plugin_current_revision};
@@ -77,7 +77,10 @@ impl PgAccountGroupRepository {
         mutation: F,
     ) -> AdminStoreResult<gateway_admin::model::Revision>
     where
-        F: for<'a> FnOnce(&'a mut Transaction<'_, Postgres>) -> BoxFuture<'a, StoreResult<()>>,
+        F: for<'a> FnOnce(
+            &'a mut Transaction<'_, Postgres>,
+            Revision,
+        ) -> BoxFuture<'a, StoreResult<()>>,
     {
         let mut transaction =
             self.pool.begin().await.map_err(|_| {
@@ -85,7 +88,7 @@ impl PgAccountGroupRepository {
             })?;
         let result = async {
             let revision = bump_config_revision_in_transaction(&mut transaction).await?;
-            mutation(&mut transaction).await?;
+            mutation(&mut transaction, revision).await?;
             append_admin_audit_event_in_transaction(&mut transaction, audit, revision).await?;
             Ok(revision)
         }
@@ -509,7 +512,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             ],
         );
         let revision = self
-            .mutate(audit, |transaction| {
+            .mutate(audit, |transaction, _| {
                 Box::pin(async move {
                     insert_group(transaction, &command).await?;
                     Ok(())
@@ -552,7 +555,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             ],
         );
         let revision = self
-            .mutate(audit, |transaction| {
+            .mutate(audit, |transaction, _| {
                 Box::pin(async move {
                     let result = sqlx::query(
                         "update account_groups
@@ -594,7 +597,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             vec!["enabled".to_owned()],
         );
         let revision = self
-            .mutate(audit, |transaction| {
+            .mutate(audit, |transaction, _| {
                 Box::pin(async move {
                     let result = sqlx::query(
                         "update account_groups set enabled = $2, updated_at = now() where id = $1",
@@ -622,46 +625,52 @@ impl AccountGroupStore for PgAccountGroupRepository {
     ) -> AdminStoreResult<AccountGroupMutation> {
         let id = command.id.clone();
         let audit = mutation_audit(context, "delete", "account_group", id.as_str(), Vec::new());
+        let context = context.clone();
         let revision = self
-            .mutate(audit, |transaction| {
+            .mutate(audit, |transaction, revision| {
                 Box::pin(async move {
-                    let result = sqlx::query(
-                        "delete from account_groups g
-                         where g.id = $1
-                           and not exists (
-                             select 1 from client_api_key_groups k where k.account_group_id = g.id
-                           )",
+                    let group_id = command.id.as_str();
+                    // Fence new foreign-key references before removing the existing ones.
+                    sqlx::query_scalar::<_, String>(
+                        "select id from account_groups where id = $1 for update",
                     )
-                    .bind(command.id.as_str())
-                    .execute(&mut **transaction)
+                    .bind(group_id)
+                    .fetch_optional(&mut **transaction)
                     .await
-                    .map_err(|error| {
-                        // Concurrent references can appear after the statement snapshot.
-                        // Keep the foreign-key guard and report a conflict, not an outage.
-                        if error
-                            .as_database_error()
-                            .is_some_and(|error| error.is_foreign_key_violation())
-                        {
-                            conflict(command.id.as_str())
-                        } else {
-                            unavailable("delete account group")
-                        }
-                    })?;
-                    if result.rows_affected() == 1 {
-                        return Ok(());
-                    }
-                    let exists = sqlx::query_scalar::<_, bool>(
-                        "select exists(select 1 from account_groups where id = $1)",
+                    .map_err(|_| unavailable("lock account group for deletion"))?
+                    .ok_or_else(|| not_found_store(group_id))?;
+
+                    let deleted_keys = sqlx::query_scalar::<_, String>(
+                        "delete from client_api_keys k
+                         using client_api_key_groups kg
+                         where k.id = kg.client_api_key_id and kg.account_group_id = $1
+                         returning k.id",
                     )
-                    .bind(command.id.as_str())
-                    .fetch_one(&mut **transaction)
+                    .bind(group_id)
+                    .fetch_all(&mut **transaction)
                     .await
-                    .map_err(|_| unavailable("check account group delete conflict"))?;
-                    if exists {
-                        Err(conflict(command.id.as_str()))
-                    } else {
-                        Err(not_found_store(command.id.as_str()))
+                    .map_err(|_| unavailable("delete account group client keys"))?;
+                    for key_id in deleted_keys {
+                        append_admin_audit_event_in_transaction(
+                            transaction,
+                            mutation_audit(
+                                &context,
+                                "delete",
+                                "client_api_key",
+                                &key_id,
+                                Vec::new(),
+                            ),
+                            revision,
+                        )
+                        .await?;
                     }
+
+                    let result = sqlx::query("delete from account_groups where id = $1")
+                        .bind(group_id)
+                        .execute(&mut **transaction)
+                        .await
+                        .map_err(|_| unavailable("delete account group"))?;
+                    require_one(result.rows_affected(), group_id)
                 })
             })
             .await?;
