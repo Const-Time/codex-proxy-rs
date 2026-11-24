@@ -336,6 +336,7 @@ impl Fixture {
                 cors_allowed_origins: Vec::new(),
                 request_timeout_seconds: None,
                 request_id_header: "x-request-id".into(),
+                t3_usage: None,
             },
             Arc::new(Execution {
                 client,

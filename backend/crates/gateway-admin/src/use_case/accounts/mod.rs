@@ -22,7 +22,7 @@ use crate::{
         accounts::{
             AccountConnectionTestEvent, AccountConnectionTestEventStream, AccountListQuery,
             AccountPageItem, AccountUpdateResult, AccountUsage, AccountUsageWindowQuery,
-            AccountsUpdateResult, BatchUpdateAccounts, UpdateAccount,
+            AccountsUpdateResult, BatchUpdateAccounts, CodexUsageAccount, UpdateAccount,
         },
         observability::TimeRange,
         provider_credentials::{
@@ -93,6 +93,13 @@ pub trait AccountsService: Send + Sync {
         account_id: &ProviderAccountId,
         refresh: bool,
     ) -> Result<AccountDirectoryItem, AdminError>;
+
+    /// Read an enabled Codex OAuth account without running the directory's usage aggregation.
+    async fn codex_usage_account(
+        &self,
+        account_id: &ProviderAccountId,
+        include_quota: bool,
+    ) -> Result<Option<CodexUsageAccount>, AdminError>;
 
     async fn profile_statistics(
         &self,
@@ -890,6 +897,53 @@ impl AccountsService for DefaultAccountsService {
         refresh: bool,
     ) -> Result<AccountDirectoryItem, AdminError> {
         self.load_directory_item(account_id, refresh).await
+    }
+
+    async fn codex_usage_account(
+        &self,
+        account_id: &ProviderAccountId,
+        include_quota: bool,
+    ) -> Result<Option<CodexUsageAccount>, AdminError> {
+        let Some(item) = self
+            .accounts
+            .load_account(account_id.as_str(), Default::default())
+            .await
+            .map_err(|error| map_store_error(error, "Codex usage account"))?
+        else {
+            return Ok(None);
+        };
+        let account = item.account;
+        if !account.enabled
+            || account.provider_kind.as_str() != "openai"
+            || account.authentication_kind != "oauth"
+        {
+            return Ok(None);
+        }
+        let quota = if include_quota {
+            let provider = self
+                .providers
+                .require(&account.provider_kind)
+                .map_err(|error| map_provider_error(error, "Codex usage provider"))?;
+            let mut results = provider
+                .read_quotas(&[ProviderQuotaReadRequest {
+                    account: &account,
+                    rolling_usage: None,
+                }])
+                .await
+                .into_iter();
+            Some(
+                results
+                    .next()
+                    .ok_or_else(|| AdminError::internal("Codex quota read returned no result"))?
+                    .map_err(|error| map_provider_error(error, "Codex usage snapshot"))?,
+            )
+        } else {
+            None
+        };
+        Ok(Some(CodexUsageAccount {
+            plan_type: account.plan_type,
+            quota,
+        }))
     }
 
     async fn profile_statistics(

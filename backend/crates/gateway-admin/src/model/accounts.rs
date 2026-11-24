@@ -207,6 +207,12 @@ pub struct AccountPageItem {
     pub projection: AccountStatusProjection,
 }
 
+/// Passive Codex subscription facts for an explicitly selected account.
+pub struct CodexUsageAccount {
+    pub plan_type: Option<String>,
+    pub quota: Option<super::provider_credentials::ProviderQuota>,
+}
+
 /// 统一账号目录的全局状态计数，不受当前筛选和分页影响。
 ///
 /// 计数与 [`AccountStatus`] 一一对应，由 store 按派生状态聚合。

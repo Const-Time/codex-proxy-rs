@@ -102,7 +102,7 @@ fn worker_snapshot(kind: WorkerKind, state: WorkerRuntimeState) -> WorkerHealthS
     }
 }
 
-struct UnusedExecution;
+pub(crate) struct UnusedExecution;
 
 impl ExecutionService for UnusedExecution {
     fn authenticate(&self, _: &str) -> Result<AuthenticatedClient, ClientAuthenticationError> {

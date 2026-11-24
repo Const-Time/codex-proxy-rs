@@ -104,6 +104,7 @@ pub(super) struct AdminTestFixture {
     pub dashboard_summary_range: Arc<Mutex<Option<TimeRange>>>,
     pub provider_error: Arc<Mutex<Option<ProviderAdminError>>>,
     pub account: Arc<Mutex<Option<AccountPageItem>>>,
+    pub stored_quota: Arc<Mutex<Option<ProviderQuota>>>,
 }
 
 impl AdminTestFixture {
@@ -125,6 +126,7 @@ impl AdminTestFixture {
         let dashboard_summary_range = Arc::new(Mutex::new(None));
         let provider_error = Arc::new(Mutex::new(None));
         let account = Arc::new(Mutex::new(None));
+        let stored_quota = Arc::new(Mutex::new(None));
         let unused = Arc::new(UnusedStore {
             usage_records: Arc::clone(&usage_records),
             usage_detail: Arc::clone(&usage_detail),
@@ -148,8 +150,16 @@ impl AdminTestFixture {
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
         );
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
-            Arc::new(UnusedProvider::new("openai", Arc::clone(&provider_error))),
-            Arc::new(UnusedProvider::new("xai", Arc::clone(&provider_error))),
+            Arc::new(UnusedProvider::new(
+                "openai",
+                Arc::clone(&provider_error),
+                Arc::clone(&stored_quota),
+            )),
+            Arc::new(UnusedProvider::new(
+                "xai",
+                Arc::clone(&provider_error),
+                Arc::clone(&stored_quota),
+            )),
         ];
         let bundle = gateway_admin::initialize(
             AdminConfig {
@@ -182,6 +192,7 @@ impl AdminTestFixture {
             dashboard_summary_range,
             provider_error,
             account,
+            stored_quota,
         }
     }
 
@@ -1273,13 +1284,19 @@ impl ObservabilityStore for UnusedStore {
 struct UnusedProvider {
     kind: ProviderKind,
     error: Arc<Mutex<Option<ProviderAdminError>>>,
+    stored_quota: Arc<Mutex<Option<ProviderQuota>>>,
 }
 
 impl UnusedProvider {
-    fn new(kind: &str, error: Arc<Mutex<Option<ProviderAdminError>>>) -> Self {
+    fn new(
+        kind: &str,
+        error: Arc<Mutex<Option<ProviderAdminError>>>,
+        stored_quota: Arc<Mutex<Option<ProviderQuota>>>,
+    ) -> Self {
         Self {
             kind: ProviderKind::new(kind).expect("provider kind"),
             error,
+            stored_quota,
         }
     }
 }
@@ -1363,8 +1380,13 @@ impl ProviderAdmin for UnusedProvider {
 
     async fn quota(
         &self,
-        _: gateway_admin::model::provider_credentials::ProviderQuotaRequest,
+        request: gateway_admin::model::provider_credentials::ProviderQuotaRequest,
     ) -> Result<ProviderQuota, ProviderAdminError> {
+        if let Some(quota) = self.stored_quota.lock().expect("stored quota").clone() {
+            assert!(!request.refresh);
+            assert!(request.rolling_usage.is_none());
+            return Ok(quota);
+        }
         Err(self
             .error
             .lock()

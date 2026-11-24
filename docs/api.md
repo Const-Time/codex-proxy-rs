@@ -982,6 +982,17 @@ Flex 保留独立档位；请求 `auto`、未知档位或缺少对应 Standard �
 上游返回档位独立保留为诊断事实，原始响应不改写。这里的 Fast 表示发送档位，不证明上游实际加速，
 本地费用估算不能替代官方账单。新口径仅作用于新请求，不回填历史档位或重算已存储费用。
 
+### T3 Code 只读额度兼容
+
+设置 `api.t3_usage` 后启用 CLIProxyAPI 的 Codex 额度子集。两条路由接受专用的 `Authorization: Bearer <key>`，账号范围由配置中的 ID 白名单决定。成功响应禁用缓存。
+
+| 方法 | 路由 | 说明 |
+| --- | --- | --- |
+| `GET` | `/v0/management/auth-files` | 返回 `{files:[{id,auth_index,provider:"codex"}]}`。仅包含在白名单中的已启用 OpenAI OAuth 账号，标识使用本地账号 ID。 |
+| `POST` | `/v0/management/api-call` | 只接受 `auth_index`、嵌套 `method: "GET"` 及 `url: "https://chatgpt.com/backend-api/wham/usage"` 的额度查询。返回 `{status_code:200,body:"…"}`，其中 `body` 是包含 `plan_type` 与 `rate_limit` 的 JSON 字符串。 |
+
+只使用已保存的账号级主、次窗口，重置时间单位是 Unix 秒。未知用量窗口省略，没有可用窗口时 `rate_limit` 为 `null`。嵌套 URL 只用于识别操作，调用方提供的头不会被传给上游。模型目录、重置卡消费及用户日/周美元预算不属于此只读接口。
+
 ## 11. 版本、更新与重启
 
 | 方法 | 路由 | 主要 query/body | 说明 |

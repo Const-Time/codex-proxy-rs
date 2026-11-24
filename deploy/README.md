@@ -269,6 +269,22 @@ Codex App 的速度选择还受登录方式限制；本地核对的 26.903.9818.
 其他客户端使用 Responses API、`/v1` Base URL 和代理密钥即可，不需要 Actor 标记。
 路由与请求格式见 [API 参考](../docs/api.md#3-openai-数据面与模型目录)。
 
+### T3 Code 账号额度
+
+在部署配置的 `api` 中添加 `t3_usage`，重启服务后可在 T3 Code 的「用量数据提供方 → 添加中转站」读取指定 Codex OAuth 账号的套餐额度。
+
+用 `openssl rand -hex 32` 生成一条独立随机密钥并保存。用 `printf '%s' "$T3_USAGE_KEY" | sha256sum` 计算它的 SHA-256，其中 `T3_USAGE_KEY` 是当前 Shell 中保存的原始密钥，计算时不要附加换行。配置文件只填摘要和允许访问的本地账号 ID，账号 ID 可在管理接口 `GET /api/admin/accounts` 的 `data.items[].id` 中取得。
+
+```yaml
+api:
+  # 保留已有的 api 配置，在其下添加此节。
+  t3_usage:
+    key_sha256: '<64 位小写十六进制摘要>'
+    account_ids: ['acct_example']
+```
+
+在 T3 中填入网关地址（例如 `https://proxy.example.com`）和这条**原始密钥**。模型调用仍由 T3 的 Codex 提供方单独配置。该接入显示上游账号最近一次保存的主、次额度窗口（常见为 5 小时和一周）及重置时间。轮询只读取快照，未取得额度的账号显示无数据。轮换密钥或修改账号范围后需重启网关。
+
 ## 优雅关停
 
 收到停止信号后，应用先停止接收新连接并 drain 存量连接；整个 drain 共享一个从停止信号

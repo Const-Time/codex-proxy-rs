@@ -32,6 +32,8 @@ mod health;
 mod middleware;
 pub mod openai;
 pub use openai::ingress::IngressConfig;
+mod t3_usage;
+pub use t3_usage::T3UsageConfig;
 
 /// API-owned HTTP 与静态资源配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -42,6 +44,8 @@ pub struct ApiConfig {
     pub cors_allowed_origins: Vec<String>,
     pub request_timeout_seconds: Option<u64>,
     pub request_id_header: String,
+    #[serde(default)]
+    pub t3_usage: Option<T3UsageConfig>,
 }
 
 impl ApiConfig {
@@ -78,6 +82,9 @@ impl ApiConfig {
         if self.request_timeout_seconds == Some(0) {
             return Err(ApiConfigError::InvalidRequestTimeout);
         }
+        if let Some(t3_usage) = &self.t3_usage {
+            t3_usage.validate()?;
+        }
         let header = HeaderName::from_str(&self.request_id_header)
             .map_err(|_| ApiConfigError::InvalidRequestIdHeader)?;
         self.request_id_header = header.as_str().to_owned();
@@ -111,6 +118,8 @@ pub enum ApiConfigError {
     InvalidRequestTimeout,
     #[error("API request ID header is invalid")]
     InvalidRequestIdHeader,
+    #[error("API T3 usage configuration is invalid")]
+    InvalidT3Usage,
 }
 
 /// 完成组装的唯一 API router。
@@ -178,6 +187,9 @@ pub fn initialize(
         .merge(admin::router::<ApiState>())
         .merge(admin::plugin_models::router())
         .merge(static_files);
+    if let Some(t3_usage) = config.t3_usage.take() {
+        router = router.merge(t3_usage::router(t3_usage, state.admin.clone()));
+    }
     if !config.cors_allowed_origins.is_empty() {
         let origins = config
             .cors_allowed_origins

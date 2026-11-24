@@ -84,6 +84,7 @@ async fn api_router_with_origins_and_worker_health(
             cors_allowed_origins,
             request_timeout_seconds: None,
             request_id_header: "x-request-id".to_owned(),
+            t3_usage: None,
         },
         execution,
         admin.services,
@@ -448,6 +449,7 @@ async fn api_should_serve_resolved_assets_with_relative_environment_override() {
         cors_allowed_origins: Vec::new(),
         request_timeout_seconds: None,
         request_id_header: "x-request-id".to_owned(),
+        t3_usage: None,
     };
     config
         .resolve_and_validate(&std::path::Path::new(&directory).join("deploy"))

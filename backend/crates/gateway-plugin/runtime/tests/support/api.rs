@@ -32,6 +32,7 @@ impl ApiServer {
                 cors_allowed_origins: vec![],
                 request_timeout_seconds,
                 request_id_header: "x-request-id".into(),
+                t3_usage: None,
             },
             env.core.execution_service(),
             env.admin.services().with_plugins(manager),

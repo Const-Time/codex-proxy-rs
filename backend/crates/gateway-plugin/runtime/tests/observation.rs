@@ -1095,6 +1095,7 @@ async fn original_api_core_sdk_observer_persists_one_native_terminal_in_postgres
             cors_allowed_origins: vec![],
             request_timeout_seconds: None,
             request_id_header: "x-request-id".into(),
+            t3_usage: None,
         },
         native.execution.clone(),
         environment.admin.services().with_plugins(manager.clone()),

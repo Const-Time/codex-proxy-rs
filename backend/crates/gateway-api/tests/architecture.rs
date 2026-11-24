@@ -62,6 +62,7 @@ fn source_tree_should_match_frozen_machine_manifest() {
         "src/health.rs",
         "src/request_context.rs",
         "src/lib.rs",
+        "src/t3_usage.rs",
         "src/middleware/mod.rs",
         "src/middleware/dispatcher.rs",
         "src/middleware/websocket.rs",
@@ -179,6 +180,7 @@ fn test_tree_should_match_frozen_rust_mirror() {
         "tests/openai/responses/websocket/protocol.rs",
         "tests/openai/router.rs",
         "tests/openai/search/mod.rs",
+        "tests/t3_usage.rs",
     ];
     expected.sort_unstable();
 

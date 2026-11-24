@@ -60,6 +60,11 @@ api:
   cors_allowed_origins: []
   request_timeout_seconds: null
   request_id_header: 'x-request-id'
+  # 可选：T3 Code「用量数据提供方」的只读 Codex 额度接入。省略即关闭。
+  # 参见 deploy/README.md。这里只填写独立密钥的 SHA-256 与获准读取的账号 ID。
+  # t3_usage:
+  #   key_sha256: '<64 位小写十六进制摘要>'
+  #   account_ids: ['acct_example']
   # HTTP 正文在鉴权后读取；预算覆盖并行上传缓冲和拼接副本，不限制 SSE 生成时长。
   ingress:
     memory_budget_mib: 128
