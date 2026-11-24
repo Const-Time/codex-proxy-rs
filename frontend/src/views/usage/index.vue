@@ -29,6 +29,8 @@ const props = defineProps<{ personal?: boolean }>()
 provide('personalUsage', computed(() => Boolean(props.personal)))
 const recordView = shallowRef('success')
 const tableModeControl = useTemplateRef<InstanceType<typeof BaseSegmented>>('tableModeControl')
+const recordToolbar = useTemplateRef<HTMLDivElement>('recordToolbar')
+const recordScrollMaxHeight = 'calc(clamp(56rem, 82dvh, 64rem) - 3.5rem)'
 
 async function setRecordView(view: string) {
   const group = tableModeControl.value?.$el
@@ -141,7 +143,9 @@ watch([timeRange, customDates], () => {
       </template>
 
       <template #body>
-        <UsageRecordFiltersBar v-model="recordFilters" class="mb-4" />
+        <UsageRecordFiltersBar v-model="recordFilters" class="mb-3">
+          <div ref="recordToolbar" class="ml-auto min-w-0 max-w-full" />
+        </UsageRecordFiltersBar>
         <div
           v-if="recordView !== 'errors'"
           class="usage-record-list flex min-w-0 flex-col"
@@ -153,6 +157,8 @@ watch([timeRange, customDates], () => {
               :rows="records"
               :all="recordView === 'all'"
               :loading="loading"
+              :toolbar-target="recordToolbar"
+              :scroll-max-height="recordScrollMaxHeight"
               empty-text="没有匹配的请求记录"
             >
               <template #toolbar-actions>
@@ -191,6 +197,8 @@ watch([timeRange, customDates], () => {
             :record-filters="recordFilterParams"
             :provider="providerQuery"
             :error-origin="personal ? undefined : errorOrigin || undefined"
+            :toolbar-target="recordToolbar"
+            :scroll-max-height="recordScrollMaxHeight"
           >
             <template #toolbar-actions="{ loading: errorsLoading, refreshing, refresh }">
               <BaseSelect v-if="!personal" v-model="errorOrigin" :options="errorOriginOptions" aria-label="错误来源" class="w-30" />
@@ -205,11 +213,3 @@ watch([timeRange, customDates], () => {
     <UsageRecordDetailModal v-model="showDetailModal" :record="selectedUsageRecord" />
   </div>
 </template>
-
-<style scoped>
-@media (min-width: 640px) {
-  .usage-record-list {
-    height: clamp(56rem, 82dvh, 64rem);
-  }
-}
-</style>

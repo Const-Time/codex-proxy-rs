@@ -224,17 +224,19 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
 
 <template>
   <div class="cp-data-table isolate flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden">
-    <div v-if="tableId || $slots.toolbar || $slots['toolbar-actions']" class="cp-table-toolbar mb-3 flex min-w-0 shrink-0 flex-wrap items-end gap-2" role="group" aria-label="表格筛选与操作">
-      <div v-if="$slots.toolbar" class="min-w-0 basis-full lg:flex-[1_1_20rem]">
-        <slot name="toolbar" />
-      </div>
-      <div class="ml-auto flex max-w-full items-end justify-end gap-2">
-        <div v-if="$slots['toolbar-actions']" class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-          <slot name="toolbar-actions" />
+    <Teleport :to="toolbarTarget || 'body'" :disabled="!toolbarTarget">
+      <div v-if="tableId || $slots.toolbar || $slots['toolbar-actions']" class="cp-table-toolbar flex min-w-0 shrink-0 flex-wrap items-end gap-2" :class="{ 'mb-3': !toolbarTarget }" role="group" aria-label="表格筛选与操作">
+        <div v-if="$slots.toolbar" class="min-w-0 basis-full lg:flex-[1_1_20rem]">
+          <slot name="toolbar" />
         </div>
-        <BaseTableColumnSettings v-if="tableId" :options="columnOptions" @change="setColumnVisible" @reorder="setColumnOrder" @reset="resetColumns" />
+        <div class="ml-auto flex max-w-full items-end justify-end gap-2">
+          <div v-if="$slots['toolbar-actions']" class="flex min-w-0 flex-wrap items-center justify-end gap-2">
+            <slot name="toolbar-actions" />
+          </div>
+          <BaseTableColumnSettings v-if="tableId" :options="columnOptions" @change="setColumnVisible" @reorder="setColumnOrder" @reset="resetColumns" />
+        </div>
       </div>
-    </div>
+    </Teleport>
     <div v-loading="loading" class="cp-data-table-body relative flex min-h-0 max-w-full flex-1 overflow-hidden">
       <div v-if="mobile && !horizontalOnMobile && hasRows" class="w-full min-w-0">
         <div v-if="computedColumns.some(column => column.sortable || column.kind === 'selection')" class="mb-3 flex flex-wrap items-center gap-3">
@@ -291,6 +293,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
             : '[--cp-scrollbar-track-inset-block-start:2.75rem]',
         ]"
         :always-visible="scrollbarAlwaysVisible"
+        :max-height="scrollMaxHeight"
         horizontal
         @scroll="handleTableScroll"
       >

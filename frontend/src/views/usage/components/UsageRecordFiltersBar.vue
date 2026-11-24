@@ -83,32 +83,40 @@ onMounted(() => void load())
 </script>
 
 <template>
-  <div class="space-y-2" role="group" aria-label="请求明细筛选">
-    <div class="grid grid-cols-2 items-end gap-2 sm:gap-3 lg:grid-cols-4 2xl:grid-cols-[repeat(7,minmax(0,1fr))_auto]">
-      <FormItem label="分组">
-        <BaseSelect v-model="filters.groupId" class="w-full" aria-label="筛选分组" :disabled="pending.groups" :options="[{ label: '全部分组', value: '' }, ...groups]" />
-      </FormItem>
-      <FormItem v-if="!personal" label="账号">
-        <BaseSelect v-model="filters.accountId" class="w-full" aria-label="筛选账号" :disabled="pending.accounts" :options="[{ label: '全部账号', value: '' }, ...accounts]" />
-      </FormItem>
-      <FormItem v-if="!personal" label="邮箱">
-        <BaseSelect v-model="filters.userId" class="w-full" aria-label="按邮箱筛选" :disabled="pending.users" :options="[{ label: '全部邮箱', value: '' }, ...users]" />
-      </FormItem>
-      <FormItem v-if="!personal" label="用户名">
-        <BaseSelect v-model="filters.userId" class="w-full" aria-label="按用户名筛选" :disabled="pending.users" :options="[{ label: '全部用户名', value: '' }, ...usernames]" />
-      </FormItem>
-      <FormItem label="密钥">
-        <BaseSelect v-model="filters.clientApiKeyId" class="w-full" aria-label="按密钥筛选" :disabled="pending.keys" :options="[{ label: '全部密钥', value: '' }, ...keys]" />
-      </FormItem>
-      <FormItem label="模型">
-        <BaseInput v-model="filters.model" class="w-full" :class="personal ? 'sm:max-w-75' : undefined" aria-label="筛选模型" placeholder="模型名称（精确匹配）" :maxlength="128" clearable />
-      </FormItem>
-      <FormItem label="接入类型">
-        <BaseSelect v-model="filters.clientTransport" class="w-full" aria-label="筛选接入类型" :options="transports" />
-      </FormItem>
-      <BaseButton :disabled="!active" @click="reset">
-        重置筛选
-      </BaseButton>
+  <div class="@container space-y-2" role="group" aria-label="请求明细筛选">
+    <div class="flex min-w-0 flex-wrap items-end gap-2">
+      <div
+        class="grid min-w-0 flex-[1_1_100%] grid-cols-2 items-end gap-2 @min-[34rem]:grid-cols-4"
+        :class="personal
+          ? '@min-[36rem]:flex-[1_1_36rem] @min-[36rem]:grid-cols-[repeat(4,minmax(0,1fr))_auto]'
+          : '@min-[55rem]:flex-[1_1_55rem] @min-[55rem]:grid-cols-[repeat(5,minmax(0,1fr))_minmax(9rem,1.4fr)_minmax(8rem,1fr)_auto]'"
+      >
+        <FormItem label="分组">
+          <BaseSelect v-model="filters.groupId" class="w-full" aria-label="筛选分组" :disabled="pending.groups" :options="[{ label: '全部分组', value: '' }, ...groups]" />
+        </FormItem>
+        <FormItem v-if="!personal" label="账号">
+          <BaseSelect v-model="filters.accountId" class="w-full" aria-label="筛选账号" :disabled="pending.accounts" :options="[{ label: '全部账号', value: '' }, ...accounts]" />
+        </FormItem>
+        <FormItem v-if="!personal" label="邮箱">
+          <BaseSelect v-model="filters.userId" class="w-full" aria-label="按邮箱筛选" :disabled="pending.users" :options="[{ label: '全部邮箱', value: '' }, ...users]" />
+        </FormItem>
+        <FormItem v-if="!personal" label="用户名">
+          <BaseSelect v-model="filters.userId" class="w-full" aria-label="按用户名筛选" :disabled="pending.users" :options="[{ label: '全部用户名', value: '' }, ...usernames]" />
+        </FormItem>
+        <FormItem label="密钥">
+          <BaseSelect v-model="filters.clientApiKeyId" class="w-full" aria-label="按密钥筛选" :disabled="pending.keys" :options="[{ label: '全部密钥', value: '' }, ...keys]" />
+        </FormItem>
+        <FormItem label="模型">
+          <BaseInput v-model="filters.model" class="w-full" :class="personal ? 'sm:max-w-75' : undefined" aria-label="筛选模型" placeholder="模型名称（精确匹配）" :maxlength="128" clearable />
+        </FormItem>
+        <FormItem label="接入类型">
+          <BaseSelect v-model="filters.clientTransport" class="w-full" aria-label="筛选接入类型" :options="transports" />
+        </FormItem>
+        <BaseButton :disabled="!active" @click="reset">
+          重置筛选
+        </BaseButton>
+      </div>
+      <slot />
     </div>
     <p v-if="error" role="alert" class="m-0 flex items-center gap-2 text-cp-xs text-cp-error">
       {{ error }} <BaseButton size="sm" :loading="loading" @click="load">

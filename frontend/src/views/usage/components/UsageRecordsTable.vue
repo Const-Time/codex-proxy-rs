@@ -28,6 +28,8 @@ withDefaults(
   defineProps<{
     columns: BaseTableColumn<UsageDisplayRecord>[]
     rows: UsageDisplayRecord[]
+    toolbarTarget?: HTMLElement | null
+    scrollMaxHeight?: string
     loading?: boolean
     emptyText?: string
     all?: boolean
@@ -52,6 +54,8 @@ const outcomeLabels: Record<string, string> = {
   <BaseTable
     :key="personal ? 'personal' : 'admin'"
     :table-id="personal ? 'personal-usage-records' : 'usage-records'"
+    :toolbar-target="toolbarTarget"
+    :scroll-max-height="scrollMaxHeight"
     :columns="columns"
     :rows="rows"
     :loading="loading"

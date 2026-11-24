@@ -24,6 +24,8 @@ const props = defineProps<{
   recordFilters?: Record<string, string | undefined>
   provider?: string
   errorOrigin?: OpsError['errorOrigin']
+  toolbarTarget?: HTMLElement | null
+  scrollMaxHeight?: string
 }>()
 
 const {
@@ -86,6 +88,8 @@ function upstreamSendStateText(value: string | null | undefined) {
         class="min-h-0 flex-1"
         :columns="columns"
         :table-id="personal ? 'personal-usage-errors' : 'usage-errors'"
+        :toolbar-target="toolbarTarget"
+        :scroll-max-height="scrollMaxHeight"
         :row-key="row => `${row.kind}:${row.id}`"
         :rows="records"
         :loading="loading"

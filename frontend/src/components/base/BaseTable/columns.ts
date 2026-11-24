@@ -43,6 +43,7 @@ export interface BaseTableSort {
 
 export interface BaseTableProps<Row extends TableRow> {
   tableId?: string
+  toolbarTarget?: HTMLElement | null
   mobileActionsFirst?: boolean
   horizontalOnMobile?: boolean
   columns: BaseTableColumn<Row>[]
@@ -55,6 +56,7 @@ export interface BaseTableProps<Row extends TableRow> {
   emptyText?: string
   showHeaderWhenEmpty?: boolean
   scrollbarAlwaysVisible?: boolean
+  scrollMaxHeight?: string
   sort?: BaseTableSort
 }
 
