@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { dashboardSnapshotView } from '../composables/useDashboard'
-import { Key, LinkAlt, Openai, Xai } from '@boxicons/vue'
+import { KeyRound, Link2 } from '@lucide/vue'
 import { computed } from 'vue'
 
+import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { formatProviderLabel } from '@/utils/providers'
 import AccountPlanBadge from '@/views/accounts/components/AccountPlanBadge.vue'
 import { stablePresetVisualToneClass } from '@/views/accounts/utils/visualTone'
@@ -43,8 +44,8 @@ const avatarToneClass = computed(() =>
         :class="avatarToneClass"
         :title="providerLabel"
       >
-        <Openai v-if="normalizedProvider === 'openai'" class="size-3.5" />
-        <Xai v-else-if="normalizedProvider === 'xai'" class="size-3.5" />
+        <OpenaiIcon v-if="normalizedProvider === 'openai'" class="size-3.5" />
+        <XaiIcon v-else-if="normalizedProvider === 'xai'" class="size-3.5" />
         <span v-else class="text-cp-xs font-heavy">?</span>
         <span class="sr-only">{{ providerLabel }}</span>
       </span>
@@ -53,8 +54,8 @@ const avatarToneClass = computed(() =>
         class="absolute -right-1 -bottom-1 inline-flex size-4 items-center justify-center rounded-[5px] bg-cp-bg-container text-cp-text shadow-cp-tertiary"
         :title="authenticationLabel"
       >
-        <LinkAlt v-if="normalizedAuthenticationKind === 'oauth'" class="size-2.5" />
-        <Key v-else-if="normalizedAuthenticationKind === 'api_key'" class="size-2.5" />
+        <Link2 v-if="normalizedAuthenticationKind === 'oauth'" class="size-2.5" />
+        <KeyRound v-else-if="normalizedAuthenticationKind === 'api_key'" class="size-2.5" />
         <span v-else class="text-[8px] font-heavy text-cp-text-quaternary">?</span>
         <span class="sr-only">{{ authenticationLabel }}</span>
       </span>

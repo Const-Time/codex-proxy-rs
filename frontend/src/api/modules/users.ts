@@ -24,7 +24,16 @@ export interface UserGroup extends AccountGroupRef {
   weeklyResetsAt: string | null
 }
 
-export const getUsers = () => request<User[]>({ url: '/api/admin/users', method: 'GET' })
+let inFlightUsersRequest: Promise<User[]> | undefined
+
+export function getUsers() {
+  if (!inFlightUsersRequest) {
+    inFlightUsersRequest = request<User[]>({ url: '/api/admin/users', method: 'GET' }).finally(() => {
+      inFlightUsersRequest = undefined
+    })
+  }
+  return inFlightUsersRequest
+}
 export const createUser = (data: { email: string, username?: string, password: string, groupIds: string[], maxConcurrency: number, requestsPerMinute: number }) => request<User>({ url: '/api/admin/users/create', method: 'POST', data })
 export const updateUser = (data: { id: string, email?: string, username?: string, quotaMultipliers?: Record<string, string>, enabled: boolean, groupIds: string[], maxConcurrency: number, requestsPerMinute: number }) => request<User>({ url: '/api/admin/users/update', method: 'POST', data })
 export const changePassword = (data: { currentPassword: string, newPassword: string }) => request<void>({ url: '/api/profile/password', method: 'POST', data })

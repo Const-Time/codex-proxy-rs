@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { AccountExportFormat } from './utils/codexAuthExport'
 import { ChevronDown, Grid2X2 } from '@lucide/vue'
-import { ref } from 'vue'
+import { defineAsyncComponent, ref, shallowRef, watch } from 'vue'
 
 import AccountGroupMarks from '@/components/AccountGroupMarks.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -14,11 +14,6 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
-import AccountBatchEditModal from './components/AccountBatchEditModal.vue'
-import AccountConnectionTestModal from './components/AccountConnectionTestModal.vue'
-import AccountCreateModal from './components/AccountCreateModal/index.vue'
-import AccountEditModal from './components/AccountEditModal.vue'
-import AccountExportModal from './components/AccountExportModal.vue'
 import AccountFilters from './components/AccountFilters.vue'
 import AccountIdentityCell from './components/AccountIdentityCell.vue'
 import AccountOverviewCards from './components/AccountOverviewCards.vue'
@@ -37,8 +32,19 @@ import { useAccountsQuery } from './composables/useAccountsQuery'
 import { useAccountsTable } from './composables/useAccountsTable'
 import { accountColumns, derivedAccountStatus } from './constants'
 
+const AccountBatchEditModal = defineAsyncComponent(() => import('./components/AccountBatchEditModal.vue'))
+const AccountConnectionTestModal = defineAsyncComponent(() => import('./components/AccountConnectionTestModal.vue'))
+const AccountCreateModal = defineAsyncComponent(() => import('./components/AccountCreateModal/index.vue'))
+const AccountEditModal = defineAsyncComponent(() => import('./components/AccountEditModal.vue'))
+const AccountExportModal = defineAsyncComponent(() => import('./components/AccountExportModal.vue'))
+
 const selectedIds = ref<Set<string>>(new Set())
 const showExportModal = ref(false)
+const connectionTestModalLoaded = shallowRef(false)
+const exportModalLoaded = shallowRef(false)
+const createModalLoaded = shallowRef(false)
+const editModalLoaded = shallowRef(false)
+const batchEditModalLoaded = shallowRef(false)
 const {
   loading,
   hasLoaded,
@@ -177,6 +183,27 @@ const {
   accounts,
   reloadAccounts: loadAccounts,
   reloadGroups: loadGroups,
+})
+
+watch(showConnectionTestModal, (open) => {
+  if (open)
+    connectionTestModalLoaded.value = true
+})
+watch(showExportModal, (open) => {
+  if (open)
+    exportModalLoaded.value = true
+})
+watch(showCreateModal, (open) => {
+  if (open)
+    createModalLoaded.value = true
+})
+watch(showEditModal, (open) => {
+  if (open)
+    editModalLoaded.value = true
+})
+watch(showBatchEditModal, (open) => {
+  if (open)
+    batchEditModalLoaded.value = true
 })
 </script>
 
@@ -360,6 +387,7 @@ const {
     </BaseCard>
 
     <AccountConnectionTestModal
+      v-if="connectionTestModalLoaded"
       v-model="showConnectionTestModal"
       v-model:selected-model="connectionTestSelectedModel"
       :account="testingAccount"
@@ -379,6 +407,7 @@ const {
     />
 
     <AccountExportModal
+      v-if="exportModalLoaded"
       v-model="showExportModal"
       :selected-count="selectedIds.size"
       :loading="exportingAccounts"
@@ -386,6 +415,7 @@ const {
     />
 
     <AccountCreateModal
+      v-if="createModalLoaded"
       v-model="showCreateModal"
       v-model:form="createForm"
       :account="reauthorizingAccount"
@@ -399,6 +429,7 @@ const {
     />
 
     <AccountEditModal
+      v-if="editModalLoaded"
       v-model="showEditModal"
       v-model:api-key="editingApiKey"
       v-model:enabled="schedulingEnabled"
@@ -419,6 +450,7 @@ const {
     />
 
     <AccountBatchEditModal
+      v-if="batchEditModalLoaded"
       v-model="showBatchEditModal"
       v-model:enabled="batchSchedulingEnabled"
       v-model:concurrency-limit="batchConcurrencyLimit"

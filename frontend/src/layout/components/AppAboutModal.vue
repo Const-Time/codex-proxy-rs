@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { Github } from '@boxicons/vue'
 import { ExternalLink } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
 
 import BaseModal from '@/components/base/BaseModal/index.vue'
+import { GithubIcon } from '@/components/icons/BrandIcons'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 
 const open = defineModel<boolean>({ default: false })
@@ -43,7 +43,7 @@ const linkItems = [
     label: 'GitHub',
     value: 'codex-proxy-rs',
     href: githubUrl,
-    icon: Github,
+    icon: GithubIcon,
   },
 ]
 </script>

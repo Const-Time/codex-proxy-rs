@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { OperationLog } from '@/api/modules/operations'
 import { Eye, RefreshCw, Search } from '@lucide/vue'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onScopeDispose, reactive, ref, shallowRef } from 'vue'
 import { getOperationLogs } from '@/api/modules/operations'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -17,7 +17,8 @@ import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import { errorMessage } from '@/utils/async'
 import { formatDateTime as date } from '@/utils/date'
-import OperationLogDetailModal from './OperationLogDetailModal.vue'
+
+const OperationLogDetailModal = defineAsyncComponent(() => import('./OperationLogDetailModal.vue'))
 
 const defaultFilters = { email: '', action: '', ip: '', method: '', authMethod: '', result: '', days: '7' }
 const filters = reactive({ ...defaultFilters })
@@ -38,11 +39,19 @@ const loading = ref(false)
 const error = ref('')
 const detail = ref<OperationLog | null>(null)
 const detailOpen = ref(false)
+const detailLoaded = shallowRef(false)
 type AuditQuery = Parameters<typeof getOperationLogs>[0]
 let applied: AuditQuery = {}
 let revision = 0
+let abortController: AbortController | undefined
 const authName = (method: string) => ({ session: '登录会话', api_key: '管理密钥', anonymous: '未认证' }[method] ?? method)
 let appliedDays = Number(defaultFilters.days)
+
+function openDetail(item: OperationLog) {
+  detailLoaded.value = true
+  detail.value = item
+  detailOpen.value = true
+}
 
 function timeRange(days: number) {
   const now = Date.now()
@@ -54,10 +63,12 @@ function timeRange(days: number) {
 
 async function load(targetPage: number, query = applied, days = appliedDays) {
   const current = ++revision
+  abortController?.abort()
+  abortController = new AbortController()
   loading.value = true
   error.value = ''
   try {
-    const data = await getOperationLogs({ ...query, page: targetPage })
+    const data = await getOperationLogs({ ...query, page: targetPage }, abortController.signal)
     if (current !== revision)
       return
     applied = query
@@ -92,6 +103,10 @@ function changePage(value: number) {
   void load(value)
 }
 onMounted(search)
+onScopeDispose(() => {
+  revision += 1
+  abortController?.abort()
+})
 </script>
 
 <template>
@@ -182,7 +197,7 @@ onMounted(search)
         </template>
         <template #actions="{ row: item }">
           <div class="flex min-w-0 max-sm:justify-end">
-            <BaseIconButton size="sm" label="查看操作详情" @click="detail = item; detailOpen = true">
+            <BaseIconButton size="sm" label="查看操作详情" @click="openDetail(item)">
               <Eye class="size-3.5 text-cp-link" />
             </BaseIconButton>
           </div>
@@ -190,6 +205,6 @@ onMounted(search)
       </BaseTable>
       <BaseTablePagination :pagination="{ currentPage: page, pageSize: 50, total, pageSizes: [50] }" :loading="loading" @page-change="changePage" />
     </BaseCard>
-    <OperationLogDetailModal v-model="detailOpen" :detail="detail" :authentication-label="detail ? authName(detail.authMethod) : ''" />
+    <OperationLogDetailModal v-if="detailLoaded" v-model="detailOpen" :detail="detail" :authentication-label="detail ? authName(detail.authMethod) : ''" />
   </div>
 </template>

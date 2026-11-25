@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import type { EChartsOption, LineSeriesOption } from 'echarts'
 import type { TokenUsagePoint } from './tokenUsage'
-import { usePreferredReducedMotion } from '@vueuse/core'
 import { computed, ref } from 'vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import { useChartPalette } from '@/composables/useChartPalette'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 import { formatCompactNumber as compact } from '@/utils/number'
 import BaseChart from './BaseChart.vue'
 import { tokenCacheHitRate, tokenUsageTotals } from './tokenUsage'
@@ -12,7 +12,7 @@ import { chartTooltipStyle, tooltipIndex } from './tooltip'
 
 const props = withDefaults(defineProps<{ points: TokenUsagePoint[], loading?: boolean }>(), { loading: false })
 const { palette } = useChartPalette()
-const reducedMotion = usePreferredReducedMotion()
+const reducedMotion = useSharedReducedMotion()
 const selected = ref('')
 const totals = computed(() => tokenUsageTotals(props.points))
 const percent = (value: number | null) => value == null ? '—' : `${(value * 100).toFixed(1)}%`

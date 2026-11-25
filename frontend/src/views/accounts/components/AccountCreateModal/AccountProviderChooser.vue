@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { AccountCreateProvider } from './model'
-import { Openai, Xai } from '@boxicons/vue'
 import { LayoutGrid } from '@lucide/vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { PROVIDER_DISPLAY_NAMES } from '@/utils/providers'
 
 withDefaults(
@@ -28,12 +28,12 @@ const providers = [
   {
     value: 'openai' as const,
     label: PROVIDER_DISPLAY_NAMES.openai,
-    icon: Openai,
+    icon: OpenaiIcon,
   },
   {
     value: 'xai' as const,
     label: PROVIDER_DISPLAY_NAMES.xai,
-    icon: Xai,
+    icon: XaiIcon,
   },
 ]
 

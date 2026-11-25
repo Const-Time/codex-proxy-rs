@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { Openai, Xai } from '@boxicons/vue'
 import { CircleAlert, Download, Percent, Plus, RotateCcw, Search, X } from '@lucide/vue'
 import { computed, shallowRef, useId } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -8,6 +7,7 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BasePopover from '@/components/base/BasePopover.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
+import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { PROVIDER_DISPLAY_NAMES } from '@/utils/providers'
 import { sourceLabels } from './model'
 
@@ -26,8 +26,8 @@ const syncInfoOpen = shallowRef(false)
 const syncInfoId = useId()
 const syncTime = computed(() => props.syncedAt ? new Date(props.syncedAt).toLocaleString() : '尚未同步')
 const providerOptions = [
-  { label: PROVIDER_DISPLAY_NAMES.openai, value: 'openai', icon: Openai },
-  { label: PROVIDER_DISPLAY_NAMES.xai, value: 'xai', icon: Xai },
+  { label: PROVIDER_DISPLAY_NAMES.openai, value: 'openai', icon: OpenaiIcon },
+  { label: PROVIDER_DISPLAY_NAMES.xai, value: 'xai', icon: XaiIcon },
 ]
 </script>
 

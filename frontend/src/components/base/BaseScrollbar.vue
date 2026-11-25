@@ -11,6 +11,7 @@ const props = withDefaults(
     horizontal?: boolean
     vertical?: boolean
     alwaysVisible?: boolean
+    focusable?: boolean
   }>(),
   {
     wrapClass: undefined,
@@ -19,6 +20,7 @@ const props = withDefaults(
     horizontal: false,
     vertical: true,
     alwaysVisible: false,
+    focusable: false,
   },
 )
 
@@ -59,6 +61,7 @@ let horizontalDragStartScrollLeft = 0
 let scrollTopPosition = 0
 let scrollLeftPosition = 0
 let scrollFrameId: number | undefined
+let updateFrameId: number | undefined
 const { start: startHideTimer, stop: stopHideTimer } = useTimeoutFn(hideScrollbar, 1600, {
   immediate: false,
 })
@@ -152,9 +155,23 @@ function update() {
     return
   }
 
-  measureVerticalScrollbar(wrap)
-  measureHorizontalScrollbar(wrap)
+  // 先集中读取布局尺寸，再执行必要的滚动重置，避免读写交错触发强制回流。
+  const resetVertical = measureVerticalScrollbar(wrap)
+  const resetHorizontal = measureHorizontalScrollbar(wrap)
+  if (resetVertical && wrap.scrollTop !== 0)
+    wrap.scrollTop = 0
+  if (resetHorizontal && wrap.scrollLeft !== 0)
+    wrap.scrollLeft = 0
   syncScrollbarPosition(wrap, true)
+}
+
+function scheduleUpdate() {
+  if (updateFrameId !== undefined)
+    return
+  updateFrameId = requestAnimationFrame(() => {
+    updateFrameId = undefined
+    update()
+  })
 }
 
 function measureVerticalScrollbar(wrap: HTMLElement) {
@@ -162,7 +179,7 @@ function measureVerticalScrollbar(wrap: HTMLElement) {
     verticalMetrics.scrollRange = 0
     verticalMetrics.thumbRange = 0
     thumbHeight.value = 0
-    return
+    return false
   }
 
   const clientHeight = wrap.clientHeight
@@ -170,11 +187,10 @@ function measureVerticalScrollbar(wrap: HTMLElement) {
   const scrollRange = clamp(scrollHeight - clientHeight, 0, Number.POSITIVE_INFINITY)
   const availableTrackHeight = trackLength(verticalTrackRef.value, clientHeight, 'top', 'bottom')
   if (scrollRange <= overflowTolerance || availableTrackHeight <= 0) {
-    wrap.scrollTop = 0
     verticalMetrics.scrollRange = 0
     verticalMetrics.thumbRange = 0
     thumbHeight.value = 0
-    return
+    return true
   }
 
   const ratio = clientHeight / scrollHeight
@@ -182,6 +198,7 @@ function measureVerticalScrollbar(wrap: HTMLElement) {
   verticalMetrics.scrollRange = scrollRange
   verticalMetrics.thumbRange = availableTrackHeight - nextThumbHeight
   thumbHeight.value = nextThumbHeight
+  return false
 }
 
 function measureHorizontalScrollbar(wrap: HTMLElement) {
@@ -189,7 +206,7 @@ function measureHorizontalScrollbar(wrap: HTMLElement) {
     horizontalMetrics.scrollRange = 0
     horizontalMetrics.thumbRange = 0
     horizontalThumbWidth.value = 0
-    return
+    return false
   }
 
   const clientWidth = wrap.clientWidth
@@ -197,11 +214,10 @@ function measureHorizontalScrollbar(wrap: HTMLElement) {
   const scrollRange = clamp(scrollWidth - clientWidth, 0, Number.POSITIVE_INFINITY)
   const availableTrackWidth = trackLength(horizontalTrackRef.value, clientWidth, 'left', 'right')
   if (scrollRange <= overflowTolerance || availableTrackWidth <= 0) {
-    wrap.scrollLeft = 0
     horizontalMetrics.scrollRange = 0
     horizontalMetrics.thumbRange = 0
     horizontalThumbWidth.value = 0
-    return
+    return true
   }
 
   const ratio = clientWidth / scrollWidth
@@ -209,6 +225,7 @@ function measureHorizontalScrollbar(wrap: HTMLElement) {
   horizontalMetrics.scrollRange = scrollRange
   horizontalMetrics.thumbRange = availableTrackWidth - nextThumbWidth
   horizontalThumbWidth.value = nextThumbWidth
+  return false
 }
 
 function trackLength(
@@ -439,14 +456,16 @@ onBeforeUnmount(() => {
   if (scrollFrameId !== undefined) {
     cancelAnimationFrame(scrollFrameId)
   }
+  if (updateFrameId !== undefined) {
+    cancelAnimationFrame(updateFrameId)
+  }
 })
 
-useResizeObserver([wrapRef, viewRef], update)
+useResizeObserver([wrapRef, viewRef], scheduleUpdate)
 useEventListener(wrapRef, 'scroll', handleScroll, { passive: true })
 useEventListener(dragDocument, 'pointermove', handleDocumentPointerMove)
 useEventListener(dragDocument, ['pointerup', 'pointercancel'], handleDocumentPointerUp)
 useEventListener(rootRef, 'mouseenter', handleRootMouseEnter)
-useEventListener(rootRef, 'mousemove', activateScrollbar, { passive: true })
 useEventListener(rootRef, 'mouseleave', handleRootMouseLeave)
 useEventListener(verticalTrackRef, 'mouseenter', () => handleTrackMouseEnter('vertical'))
 useEventListener(verticalTrackRef, 'mouseleave', () => handleTrackMouseLeave('vertical'))
@@ -465,7 +484,7 @@ defineExpose({
 
 <template>
   <div ref="root" :class="rootClasses" :style="{ maxHeight, height }">
-    <div ref="wrap" :class="wrapClasses" tabindex="0">
+    <div ref="wrap" :class="wrapClasses" :tabindex="focusable && (canScrollY || canScrollX) ? 0 : undefined">
       <div ref="view">
         <slot />
       </div>

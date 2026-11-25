@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { Key, LinkAlt, Openai, Xai } from '@boxicons/vue'
+import { KeyRound, Link2 } from '@lucide/vue'
 import { computed } from 'vue'
+import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { formatProviderLabel } from '@/utils/providers'
 
 const props = withDefaults(
@@ -51,8 +52,8 @@ const authenticationLabel = computed(() => {
       :class="iconContainerClass"
       :title="providerLabel"
     >
-      <Openai v-if="normalizedProvider === 'openai'" :class="iconClass" />
-      <Xai v-else-if="normalizedProvider === 'xai'" :class="iconClass" />
+      <OpenaiIcon v-if="normalizedProvider === 'openai'" :class="iconClass" />
+      <XaiIcon v-else-if="normalizedProvider === 'xai'" :class="iconClass" />
       <span v-else class="text-[10px] font-heavy text-cp-text-quaternary">?</span>
     </span>
 
@@ -62,8 +63,8 @@ const authenticationLabel = computed(() => {
       :class="iconContainerClass"
       :title="authenticationLabel"
     >
-      <LinkAlt v-if="normalizedAuthenticationKind === 'oauth'" :class="iconClass" />
-      <Key v-else-if="normalizedAuthenticationKind === 'api_key'" :class="iconClass" />
+      <Link2 v-if="normalizedAuthenticationKind === 'oauth'" :class="iconClass" />
+      <KeyRound v-else-if="normalizedAuthenticationKind === 'api_key'" :class="iconClass" />
       <span v-else class="text-[10px] font-heavy text-cp-text-quaternary">?</span>
     </span>
 

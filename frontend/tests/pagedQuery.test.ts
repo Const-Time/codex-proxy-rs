@@ -5,14 +5,18 @@ import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 
-function query(load: (pagination: { page: number, pageSize: number }) => Promise<unknown>) {
+function query(load: (pagination: { page: number, pageSize: number }, signal?: AbortSignal) => Promise<unknown>) {
+  const disposals: Array<() => void> = []
   const modules: Record<string, unknown> = {
-    'vue': { shallowRef: (value: unknown) => ({ value }), onScopeDispose: () => {} },
+    'vue': {
+      shallowRef: (value: unknown) => ({ value }),
+      onScopeDispose: (dispose: () => void) => disposals.push(dispose),
+    },
     'es-toolkit': { clamp: (value: number, min: number, max: number) => Math.min(max, Math.max(min, value)) },
     '@/utils/async': { errorMessage: String },
   }
   function compile(file: string) {
-    const context = { exports: {}, require: (name: string) => {
+    const context = { exports: {}, AbortController, require: (name: string) => {
       assert(name in modules, `unexpected import: ${name}`)
       return modules[name]
     } }
@@ -29,12 +33,15 @@ function query(load: (pagination: { page: number, pageSize: number }) => Promise
     reloadFromStart: () => Promise<boolean>
     invalidate: () => void
   } }
-  return module.usePagedQuery({ initialPageSize: 20, load })
+  return {
+    view: module.usePagedQuery({ initialPageSize: 20, load }),
+    dispose: () => disposals.forEach(dispose => dispose()),
+  }
 }
 
 test('failed navigation restores the page and size of the displayed result', async () => {
   let fail = false
-  const view = query(async ({ page, pageSize }) => {
+  const { view } = query(async ({ page, pageSize }) => {
     if (fail)
       throw new Error('offline')
     return { items: ['first'], page: { page, pageSize, total: 60, totalPages: 3 } }
@@ -54,7 +61,7 @@ test('failed navigation restores the page and size of the displayed result', asy
 
 test('a stale failed page cannot roll back a newer successful request', async () => {
   let reject: (error: Error) => void = () => {}
-  const view = query(({ page, pageSize }) => page === 2
+  const { view } = query(({ page, pageSize }) => page === 2
     ? new Promise((_, fail) => { reject = fail })
     : Promise.resolve({ items: [page], page: { page, pageSize, total: 60, totalPages: 3 } }))
   await view.execute()
@@ -66,4 +73,23 @@ test('a stale failed page cannot roll back a newer successful request', async ()
   await stale
   assert.equal(view.page.value, 3)
   assert.equal(view.items.value[0], 3)
+})
+
+test('superseded and disposed paged queries abort in-flight requests', async () => {
+  const signals: AbortSignal[] = []
+  const { view, dispose } = query((_pagination, signal) => {
+    assert(signal)
+    signals.push(signal)
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+  })
+  const first = view.execute()
+  assert.equal(signals[0]?.aborted, false)
+  const second = view.execute()
+  assert.equal(signals[0]?.aborted, true)
+  assert.equal(signals[1]?.aborted, false)
+  dispose()
+  await Promise.all([first, second])
+  assert.equal(signals[1]?.aborted, true)
 })

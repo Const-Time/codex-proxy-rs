@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { UsageErrorOrigin, UsageRecordFilters } from '@/api'
 import { Eye } from '@lucide/vue'
-import { computed, nextTick, provide, ref, shallowRef, useTemplateRef, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, provide, ref, shallowRef, useTemplateRef, watch } from 'vue'
 
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
@@ -10,11 +10,9 @@ import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import ProviderFilterSegmented from '@/components/ProviderFilterSegmented.vue'
-import OpsErrorPanel from './components/OpsErrorPanel.vue'
 import UsageDateRangePicker from './components/UsageDateRangePicker.vue'
 import UsageFilters from './components/UsageFilters.vue'
 import UsageInsightsGrid from './components/UsageInsightsGrid.vue'
-import UsageRecordDetailModal from './components/UsageRecordDetailModal.vue'
 import UsageRecordFiltersBar from './components/UsageRecordFiltersBar.vue'
 import UsageRecordsTable from './components/UsageRecordsTable.vue'
 import UsageSummaryCards from './components/UsageSummaryCards.vue'
@@ -26,6 +24,8 @@ import { usageRecordColumns } from './constants'
 import { errorOriginText } from './utils/opsErrorPresentation'
 
 const props = defineProps<{ personal?: boolean }>()
+const OpsErrorPanel = defineAsyncComponent(() => import('./components/OpsErrorPanel.vue'))
+const UsageRecordDetailModal = defineAsyncComponent(() => import('./components/UsageRecordDetailModal.vue'))
 provide('personalUsage', computed(() => Boolean(props.personal)))
 const recordView = shallowRef('success')
 const tableModeControl = useTemplateRef<InstanceType<typeof BaseSegmented>>('tableModeControl')
@@ -95,6 +95,11 @@ const {
 })
 
 const { showDetailModal, selectedUsageRecord, handleViewDetail } = useUsageRecordDetail(Boolean(props.personal))
+const detailModalLoaded = shallowRef(false)
+watch(showDetailModal, (open) => {
+  if (open)
+    detailModalLoaded.value = true
+})
 
 watch([timeRange, customDates], () => {
   refreshTimeRangeEnd()
@@ -210,6 +215,6 @@ watch([timeRange, customDates], () => {
       </template>
     </BaseCard>
 
-    <UsageRecordDetailModal v-model="showDetailModal" :record="selectedUsageRecord" />
+    <UsageRecordDetailModal v-if="detailModalLoaded" v-model="showDetailModal" :record="selectedUsageRecord" />
   </div>
 </template>

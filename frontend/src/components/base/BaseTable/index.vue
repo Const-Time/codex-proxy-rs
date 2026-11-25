@@ -2,8 +2,9 @@
 import type { BaseTableProps, BaseTableSort, ResolvedTableColumn } from './columns'
 
 import { Triangle } from '@lucide/vue'
-import { useMediaQuery, useResizeObserver } from '@vueuse/core'
+import { useResizeObserver } from '@vueuse/core'
 import { computed, nextTick, onMounted, shallowRef, useSlots, useTemplateRef, watch } from 'vue'
+import { useIsMobile } from '@/composables/useSharedMedia'
 import BaseEmpty from '../BaseEmpty.vue'
 import BaseScrollbar from '../BaseScrollbar.vue'
 import BaseSelect from '../BaseSelect.vue'
@@ -38,7 +39,7 @@ const emit = defineEmits<{
   sortChange: [sort: BaseTableSort | undefined]
 }>()
 const slots = useSlots()
-const mobile = useMediaQuery('(max-width: 639px)')
+const mobile = useIsMobile()
 const { visibleColumns: computedColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(
   () => mobile.value && props.horizontalOnMobile
     ? props.columns.map(column => column.mobileSize ? { ...column, size: column.mobileSize } : column)
@@ -143,6 +144,9 @@ const bodyCellContentClass = computed(() =>
     : 'min-h-[calc(var(--cp-table-row-height)-6px)]',
 )
 
+const selectedRowKeySet = computed(() => new Set(props.selectedRowKeys))
+const expandedRowKeySet = computed(() => new Set(props.expandedRowKeys))
+
 function getRowKey(row: Row, index: number) {
   if (typeof props.rowKey === 'function')
     return props.rowKey(row, index)
@@ -150,21 +154,21 @@ function getRowKey(row: Row, index: number) {
   return typeof value === 'string' || typeof value === 'number' ? value : index
 }
 
-function isRowSelected(row: Row, index: number) {
-  return props.selectedRowKeys.includes(getRowKey(row, index))
-}
-
-function isRowExpanded(row: Row, index: number) {
-  return props.expandedRowKeys.includes(getRowKey(row, index))
-}
-
-function rowBackgroundClass(row: Row, index: number) {
-  if (isRowSelected(row, index))
-    return 'bg-(--cp-table-row-selected-bg)'
-  if (index % 2 === 1)
-    return 'bg-(--cp-table-row-stripe-bg)'
-  return 'bg-(--cp-table-row-bg)'
-}
+const displayRowEntries = computed(() => {
+  const selectedKeys = selectedRowKeySet.value
+  const expandedKeys = expandedRowKeySet.value
+  return displayRows.value.map((row, index) => {
+    const key = getRowKey(row, index)
+    const selected = selectedKeys.has(key)
+    const expanded = expandedKeys.has(key)
+    const backgroundClass = selected
+      ? 'bg-(--cp-table-row-selected-bg)'
+      : index % 2 === 1
+        ? 'bg-(--cp-table-row-stripe-bg)'
+        : 'bg-(--cp-table-row-bg)'
+    return { row, index, key, selected, expanded, backgroundClass }
+  })
+})
 
 function rowClass() {
   return [bodyRowClass.value, 'hover:[&>td]:bg-(--cp-table-row-hover-bg)']
@@ -237,7 +241,7 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
         </div>
       </div>
     </Teleport>
-    <div v-loading="loading" class="cp-data-table-body relative flex min-h-0 max-w-full flex-1 overflow-hidden">
+    <div v-loading="loading && (hasRows || !showHeaderWhenEmpty)" class="cp-data-table-body relative flex min-h-0 max-w-full flex-1 overflow-hidden">
       <div v-if="mobile && !horizontalOnMobile && hasRows" class="w-full min-w-0">
         <div v-if="computedColumns.some(column => column.sortable || column.kind === 'selection')" class="mb-3 flex flex-wrap items-center gap-3">
           <div v-for="column in computedColumns.filter(column => column.kind === 'selection')" :key="column.key" class="flex items-center gap-2">
@@ -248,10 +252,10 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
         </div>
         <div class="grid gap-3">
           <article
-            v-for="(row, index) in displayRows"
-            :key="getRowKey(row, index)"
+            v-for="entry in displayRowEntries"
+            :key="entry.key"
             class="cp-record-card min-w-0 rounded-cp-card bg-(--cp-table-row-bg) p-4 ring-1 ring-inset ring-cp-border-secondary"
-            :class="isRowSelected(row, index) ? 'ring-cp-primary' : ''"
+            :class="entry.selected ? 'ring-cp-primary' : ''"
           >
             <dl class="m-0 grid min-w-0 gap-3">
               <div
@@ -271,14 +275,14 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
                   </slot>
                 </dt>
                 <dd class="cp-record-value m-0 min-w-0 text-cp-sm" :class="column.kind === 'numeric' ? 'font-mono tabular-nums' : ''">
-                  <slot :name="column.key" :row="row" :value="cellValue(row, column.key)" :display-value="cellDisplayValue(column, row)" :index="index">
-                    {{ cellDisplayValue(column, row) }}
+                  <slot :name="column.key" :row="entry.row" :value="cellValue(entry.row, column.key)" :display-value="cellDisplayValue(column, entry.row)" :index="entry.index">
+                    {{ cellDisplayValue(column, entry.row) }}
                   </slot>
                 </dd>
               </div>
             </dl>
-            <div v-if="isRowExpanded(row, index)" class="mt-4 min-w-0 border-t border-cp-border pt-4">
-              <slot name="expanded" :row="row" :index="index" />
+            <div v-if="entry.expanded" class="mt-4 min-w-0 border-t border-cp-border pt-4">
+              <slot name="expanded" :row="entry.row" :index="entry.index" />
             </div>
           </article>
         </div>
@@ -357,8 +361,8 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
             </tr>
           </thead>
           <tbody>
-            <template v-for="(row, index) in displayRows" :key="getRowKey(row, index)">
-              <tr :class="rowClass()" :aria-selected="isRowSelected(row, index) || undefined">
+            <template v-for="entry in displayRowEntries" :key="entry.key">
+              <tr :class="rowClass()" :aria-selected="entry.selected || undefined">
                 <td
                   v-for="(column, columnIndex) in computedColumns"
                   :key="column.key"
@@ -370,36 +374,36 @@ function sortButtonLabel(column: ResolvedTableColumn<Row>) {
                     bodyCellFrameClass,
                     column.contentClass,
                     alignClass(column),
-                    index === 0 ? firstRowTopGapClass : undefined,
+                    entry.index === 0 ? firstRowTopGapClass : undefined,
                     columnIndex === 0 ? 'rounded-l-cp' : undefined,
                     columnIndex === computedColumns.length - 1 ? 'rounded-r-cp pr-6' : undefined,
                     stickyClass(column),
-                    rowBackgroundClass(row, index),
+                    entry.backgroundClass,
                   ]"
                   :style="stickyStyle(column)"
                 >
                   <div class="grid content-center" :class="bodyCellContentClass">
-                    <div :class="cellContentClass(column)" :title="bodyCellTitle(column, row)">
+                    <div :class="cellContentClass(column)" :title="bodyCellTitle(column, entry.row)">
                       <slot
                         :name="column.key"
-                        :row="row"
-                        :value="cellValue(row, column.key)"
-                        :display-value="cellDisplayValue(column, row)"
-                        :index="index"
+                        :row="entry.row"
+                        :value="cellValue(entry.row, column.key)"
+                        :display-value="cellDisplayValue(column, entry.row)"
+                        :index="entry.index"
                       >
-                        {{ cellDisplayValue(column, row) }}
+                        {{ cellDisplayValue(column, entry.row) }}
                       </slot>
                     </div>
                   </div>
                 </td>
               </tr>
-              <tr v-if="isRowExpanded(row, index)">
+              <tr v-if="entry.expanded">
                 <td
                   :colspan="computedColumns.length"
                   class="rounded-cp border-y-transparent bg-cp-fill-quaternary bg-clip-padding p-0"
                   :class="bodyCellFrameClass"
                 >
-                  <slot name="expanded" :row="row" :index="index" />
+                  <slot name="expanded" :row="entry.row" :index="entry.index" />
                 </td>
               </tr>
             </template>

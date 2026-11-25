@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import type { HealthTimeline, HealthTimelinePoint } from '../constants'
-import { usePreferredReducedMotion } from '@vueuse/core'
-import { gsap } from 'gsap'
 
 import { computed, onBeforeUnmount, shallowRef, useTemplateRef, watch } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BasePopover from '@/components/base/BasePopover.vue'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 import { formatHealthCount, healthLegend, healthReliabilityValueClass, healthStatusMeta } from '../constants'
 import HealthTimelinePointPopover from './HealthTimelinePointPopover.vue'
 
@@ -18,8 +17,11 @@ const healthPopoverArrowSurfaceClasses = {
   bottom: 'bg-cp-bg-elevated',
 }
 
+const EASE_BACK = 'cubic-bezier(0.34, 1.45, 0.64, 1)'
+const EASE_OUT = 'cubic-bezier(0.22, 1, 0.36, 1)'
+
 const timelineGrid = useTemplateRef<HTMLElement>('timelineGrid')
-const preferredMotion = usePreferredReducedMotion()
+const preferredMotion = useSharedReducedMotion()
 const points = computed(() => props.timeline.points)
 
 const activePoint = shallowRef<HealthTimelinePoint>()
@@ -27,6 +29,9 @@ const activeAnchor = shallowRef<HTMLElement | null>(null)
 const popoverOpen = shallowRef(false)
 const highlightedPointTime = shallowRef<string>()
 let wavedCellIndexes = new Set<number>()
+let cachedButtons: HTMLButtonElement[] = []
+let cachedCells: Array<HTMLElement | null> = []
+const cellAnimations = new Map<HTMLElement, Animation>()
 
 function observedRequests(point: HealthTimelinePoint) {
   return point.successRequests + point.failedRequests + point.cancelledRequests + point.callerErrorRequests
@@ -67,17 +72,59 @@ function resetPointInteraction() {
   releasePointWave()
 }
 
-function timelineButtons() {
-  return Array.from(timelineGrid.value?.querySelectorAll<HTMLButtonElement>('[data-health-timeline-point]') ?? [])
+function ensureCachedElements() {
+  if (cachedButtons.length === points.value.length && cachedButtons[0]?.isConnected)
+    return
+  cachedButtons = Array.from(timelineGrid.value?.querySelectorAll<HTMLButtonElement>('[data-health-timeline-point]') ?? [])
+  cachedCells = cachedButtons.map(button => button.querySelector<HTMLElement>('[data-health-timeline-cell]'))
 }
 
-function timelineCell(button?: HTMLButtonElement) {
-  return button?.querySelector<HTMLElement>('[data-health-timeline-cell]')
+function clearCellAnimation(cell: HTMLElement) {
+  cellAnimations.get(cell)?.cancel()
+  cellAnimations.delete(cell)
+  cell.style.willChange = ''
+  cell.style.transform = ''
+}
+
+function playCellWave(cell: HTMLElement, y: number, scaleY: number, duration: number, easing: string) {
+  const from = getComputedStyle(cell).transform
+  cellAnimations.get(cell)?.cancel()
+  cell.style.willChange = 'transform'
+  const animation = cell.animate(
+    [
+      { transform: from && from !== 'none' ? from : 'translate3d(0, 0, 0) scaleY(1)' },
+      { transform: `translate3d(0, ${y}px, 0) scaleY(${scaleY})` },
+    ],
+    { duration, easing, fill: 'forwards' },
+  )
+  cellAnimations.set(cell, animation)
+}
+
+function settleCell(cell: HTMLElement) {
+  const from = getComputedStyle(cell).transform
+  cellAnimations.get(cell)?.cancel()
+  const animation = cell.animate(
+    [
+      { transform: from && from !== 'none' ? from : 'translate3d(0, 0, 0) scaleY(1)' },
+      { transform: 'translate3d(0, 0, 0) scaleY(1)' },
+    ],
+    { duration: 420, easing: EASE_OUT },
+  )
+  cellAnimations.set(cell, animation)
+  void animation.finished
+    .then(() => {
+      if (cellAnimations.get(cell) === animation) {
+        cellAnimations.delete(cell)
+        cell.style.willChange = ''
+        cell.style.transform = ''
+      }
+    })
+    .catch(() => undefined)
 }
 
 function animatePointWave(centerIndex: number) {
-  const buttons = timelineButtons()
-  const centerButton = buttons[centerIndex]
+  ensureCachedElements()
+  const centerButton = cachedButtons[centerIndex]
   if (!centerButton)
     return
 
@@ -89,9 +136,9 @@ function animatePointWave(centerIndex: number) {
     const candidateIndexes = distance === 0 ? [centerIndex] : [centerIndex - distance, centerIndex + distance]
 
     for (const index of candidateIndexes) {
-      const button = buttons[index]
+      const button = cachedButtons[index]
       const point = points.value[index]
-      const cell = timelineCell(button)
+      const cell = cachedCells[index]
       if (!button || !point || !cell || button.offsetTop !== centerRow || !isInteractivePoint(point)) {
         continue
       }
@@ -103,62 +150,40 @@ function animatePointWave(centerIndex: number) {
 
   const cellsToRelease = [...wavedCellIndexes]
     .filter(index => !nextCellIndexes.has(index))
-    .map(index => timelineCell(buttons[index]))
+    .map(index => cachedCells[index])
     .filter((cell): cell is HTMLElement => Boolean(cell))
 
   if (preferredMotion.value === 'reduce') {
-    const cells = cellsByDistance.flat()
-    gsap.set([...cells, ...cellsToRelease], { clearProps: 'transform,willChange' })
+    for (const cell of [...cellsByDistance.flat(), ...cellsToRelease])
+      clearCellAnimation(cell)
     wavedCellIndexes = nextCellIndexes
     return
   }
 
-  animateWaveCells(cellsByDistance[0] ?? [], -6, 1.16, 0.26, 'back.out(1.45)')
-  animateWaveCells(cellsByDistance[1] ?? [], -3.25, 1.08, 0.34, 'power3.out')
-  animateWaveCells(cellsByDistance[2] ?? [], -1.25, 1.03, 0.42, 'power3.out')
-  settleWaveCells(cellsToRelease)
+  for (const cell of cellsByDistance[0] ?? [])
+    playCellWave(cell, -6, 1.16, 260, EASE_BACK)
+  for (const cell of cellsByDistance[1] ?? [])
+    playCellWave(cell, -3.25, 1.08, 340, EASE_OUT)
+  for (const cell of cellsByDistance[2] ?? [])
+    playCellWave(cell, -1.25, 1.03, 420, EASE_OUT)
+  for (const cell of cellsToRelease)
+    settleCell(cell)
   wavedCellIndexes = nextCellIndexes
 }
 
-function animateWaveCells(cells: HTMLElement[], y: number, scaleY: number, duration: number, ease: string) {
-  if (cells.length === 0)
-    return
-
-  gsap.set(cells, { willChange: 'transform' })
-  gsap.to(cells, {
-    y,
-    scaleY,
-    duration,
-    ease,
-    overwrite: 'auto',
-  })
-}
-
-function settleWaveCells(cells: HTMLElement[]) {
-  if (cells.length === 0)
-    return
-
-  gsap.to(cells, {
-    y: 0,
-    scaleY: 1,
-    duration: 0.5,
-    ease: 'power3.out',
-    overwrite: 'auto',
-    clearProps: 'transform,willChange',
-  })
-}
-
 function releasePointWave() {
-  const buttons = timelineButtons()
+  ensureCachedElements()
   const cells = [...wavedCellIndexes]
-    .map(index => timelineCell(buttons[index]))
+    .map(index => cachedCells[index])
     .filter((cell): cell is HTMLElement => Boolean(cell))
 
   if (preferredMotion.value === 'reduce') {
-    gsap.set(cells, { clearProps: 'transform,willChange' })
+    for (const cell of cells)
+      clearCellAnimation(cell)
   }
   else {
-    settleWaveCells(cells)
+    for (const cell of cells)
+      settleCell(cell)
   }
   wavedCellIndexes = new Set<number>()
 }
@@ -168,6 +193,11 @@ function pointAccessibilityLabel(point: HealthTimelinePoint) {
   return `${point.time}，${healthStatusMeta[point.status].label}，有效请求 ${formatHealthCount(eligibleRequests)}，可用性 ${point.reliabilityDisplay}`
 }
 
+watch(points, () => {
+  cachedButtons = []
+  cachedCells = []
+})
+
 watch(popoverOpen, (open) => {
   if (open)
     return
@@ -176,10 +206,9 @@ watch(popoverOpen, (open) => {
 })
 
 onBeforeUnmount(() => {
-  const cells = timelineButtons()
-    .map(button => timelineCell(button))
-    .filter((cell): cell is HTMLElement => Boolean(cell))
-  gsap.killTweensOf(cells)
+  for (const animation of cellAnimations.values())
+    animation.cancel()
+  cellAnimations.clear()
 })
 </script>
 

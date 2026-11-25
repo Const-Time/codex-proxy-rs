@@ -48,9 +48,17 @@ const { pause: pausePendingInit, resume: resumePendingInit } = useRafFn(
   { immediate: false, once: true },
 )
 
+const { pause: pausePendingResize, resume: resumePendingResize } = useRafFn(
+  () => {
+    chart.value?.resize()
+  },
+  { immediate: false, once: true },
+)
+
 function cancelPendingInit() {
   pendingInitElement.value = undefined
   pausePendingInit()
+  pausePendingResize()
 }
 
 function scheduleInit(element: HTMLElement) {
@@ -59,7 +67,9 @@ function scheduleInit(element: HTMLElement) {
 }
 
 function resize() {
-  chart.value?.resize()
+  if (!chart.value)
+    return
+  resumePendingResize()
 }
 
 function applyOption(option: EChartsOption) {

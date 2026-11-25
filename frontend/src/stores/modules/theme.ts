@@ -7,9 +7,10 @@ import type {
   ThemeMode,
 } from '@/theme'
 
-import { usePreferredDark, usePreferredReducedMotion, useTimeoutFn } from '@vueuse/core'
+import { usePreferredDark, useTimeoutFn } from '@vueuse/core'
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 
 import {
   applyResolvedTheme,
@@ -55,7 +56,7 @@ export const useThemeStore = defineStore(
     const themeRevision = shallowRef(0)
     const themeTransitioning = shallowRef(false)
     const preferredDark = usePreferredDark()
-    const preferredMotion = usePreferredReducedMotion()
+    const preferredMotion = useSharedReducedMotion()
     let appliedThemeSignature: string | undefined
     let themeTransitionOrigin: ThemeTransitionOrigin | undefined
     let themeTransitionRequested = false

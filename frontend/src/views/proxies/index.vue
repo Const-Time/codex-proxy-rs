@@ -2,7 +2,7 @@
 import type { OutboundProxyRecord, ProxyLocationPolicy } from '@/api'
 import { Activity, LockKeyhole, Pencil, Plus, RefreshCw, Search, Trash2, Users, Wifi } from '@lucide/vue'
 import { watchDebounced } from '@vueuse/core'
-import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { createProxy, deleteProxy, getProxies, testProxy, updateProxy } from '@/api'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -18,16 +18,18 @@ import { toast } from '@/components/base/BaseToast'
 import RowActionMenu from '@/components/RowActionMenu.vue'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { usePagedQuery } from '@/composables/usePagedQuery'
+import { invalidateProxyCatalogCache } from '@/composables/useProxyCatalog'
 import { errorMessage } from '@/utils/async'
 import { formatDateTime } from '@/utils/date'
-import ProxyAccountsModal from './components/ProxyAccountsModal.vue'
-import ProxyFormModal from './components/ProxyFormModal.vue'
-import ProxyQualityModal from './components/ProxyQualityModal.vue'
+
+const ProxyAccountsModal = defineAsyncComponent(() => import('./components/ProxyAccountsModal.vue'))
+const ProxyFormModal = defineAsyncComponent(() => import('./components/ProxyFormModal.vue'))
+const ProxyQualityModal = defineAsyncComponent(() => import('./components/ProxyQualityModal.vue'))
 
 const search = shallowRef('')
 const query = usePagedQuery({
   initialPageSize: 20,
-  load: pagination => getProxies({ ...pagination, search: search.value.trim() || undefined }),
+  load: (pagination, signal) => getProxies({ ...pagination, search: search.value.trim() || undefined }, signal),
   onError: error => toast.error(errorMessage(error, '代理列表加载失败')),
 })
 const { items: proxies, loading } = query
@@ -42,6 +44,7 @@ const columns = defineTableColumns<OutboundProxyRecord>([
   { key: 'actions', label: '操作', kind: 'actions' },
 ])
 const showForm = shallowRef(false)
+const formLoaded = shallowRef(false)
 const editing = shallowRef<OutboundProxyRecord | null>(null)
 const form = reactive({ maxWebsocketConnections: 0, name: '', proxyUrl: '', locationPolicy: { mode: 'auto' } as ProxyLocationPolicy })
 const saveAction = useAsyncAction()
@@ -52,11 +55,14 @@ const showDelete = shallowRef(false)
 const pendingDelete = shallowRef<OutboundProxyRecord | null>(null)
 const testingIds = ref(new Set<string>())
 const showQuality = shallowRef(false)
+const qualityLoaded = shallowRef(false)
 const qualityProxy = shallowRef<OutboundProxyRecord | null>(null)
 const showAccounts = shallowRef(false)
+const accountsLoaded = shallowRef(false)
 const inspected = shallowRef<OutboundProxyRecord | null>(null)
 
 function openForm(proxy: OutboundProxyRecord | null = null) {
+  formLoaded.value = true
   editing.value = proxy
   form.name = proxy?.name ?? ''
   form.proxyUrl = ''
@@ -102,6 +108,7 @@ async function save(testAfter: boolean) {
     const result = editing.value
       ? await updateProxy({ id: editing.value.id, revision: editing.value.revision, name, proxyUrl: proxyUrl || undefined, locationPolicy: form.locationPolicy, maxWebsocketConnections: form.maxWebsocketConnections })
       : await createProxy({ name, proxyUrl, locationPolicy: form.locationPolicy, maxWebsocketConnections: form.maxWebsocketConnections })
+    invalidateProxyCatalogCache()
     showForm.value = false
     form.proxyUrl = ''
     toast.success('代理已保存')
@@ -124,6 +131,7 @@ async function confirmDelete() {
     return
   await deleteAction.run(async () => {
     await deleteProxy({ id: proxy.id, revision: proxy.revision })
+    invalidateProxyCatalogCache()
     showDelete.value = false
     await query.execute()
     toast.success('代理已删除')
@@ -144,6 +152,14 @@ watch(showForm, (open) => {
   if (!open) {
     form.proxyUrl = ''
   }
+})
+watch(showQuality, (open) => {
+  if (open)
+    qualityLoaded.value = true
+})
+watch(showAccounts, (open) => {
+  if (open)
+    accountsLoaded.value = true
 })
 watchDebounced(search, () => setPage(1), { debounce: 300 })
 onMounted(() => void query.execute())
@@ -250,6 +266,7 @@ onMounted(() => void query.execute())
     </BaseCard>
 
     <ProxyFormModal
+      v-if="formLoaded"
       v-model="showForm"
       v-model:name="form.name"
       v-model:proxy-url="form.proxyUrl"
@@ -264,7 +281,7 @@ onMounted(() => void query.execute())
         确定删除“{{ pendingDelete?.name }}”吗？
       </p>
     </BaseConfirmModal>
-    <ProxyQualityModal v-model="showQuality" :proxy="qualityProxy" @tested="query.execute({ silent: true })" />
-    <ProxyAccountsModal v-model="showAccounts" :proxy="inspected" @changed="query.execute({ silent: true })" />
+    <ProxyQualityModal v-if="qualityLoaded" v-model="showQuality" :proxy="qualityProxy" @tested="query.execute({ silent: true })" />
+    <ProxyAccountsModal v-if="accountsLoaded" v-model="showAccounts" :proxy="inspected" @changed="query.execute({ silent: true })" />
   </div>
 </template>

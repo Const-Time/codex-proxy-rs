@@ -61,9 +61,9 @@ const hoverOpenTimer = shallowRef<number>()
 const viewportTarget = computed(() => (open.value && typeof window !== 'undefined' ? window : null))
 
 const popoverClasses = computed(() => [
-  'fixed z-50 overflow-visible rounded-cp-lg border-0 bg-cp-bg-elevated text-left text-cp-text shadow-cp',
+  'fixed top-0 left-0 z-50 overflow-visible rounded-cp-lg border-0 bg-cp-bg-elevated text-left text-cp-text shadow-cp',
   props.animatePosition
-    ? 'transition-[left,top] duration-150 ease-out motion-reduce:transition-none'
+    ? 'transition-transform duration-150 ease-out motion-reduce:transition-none'
     : undefined,
 ])
 const popoverArrowSurfaceClass = computed(() => {
@@ -98,8 +98,7 @@ function updatePopoverPosition() {
   const top = clamp(position.point.top, viewportPadding, maxTop)
 
   popoverStyle.value = {
-    left: `${left}px`,
-    top: `${top}px`,
+    transform: `translate3d(${Math.round(left)}px, ${Math.round(top)}px, 0)`,
     maxWidth: `calc(100vw - ${viewportPadding * 2}px)`,
   }
   popoverArrowStyle.value = popoverArrowPosition({
@@ -242,18 +241,18 @@ function popoverArrowPosition(options: {
 
   if (side === 'top' || side === 'bottom') {
     const arrowLeft = clamp(centerX - arrowHalf, arrowPadding, panelWidth - arrowPadding)
+    const arrowTop = side === 'bottom' ? -arrowHalf : panelHeight - arrowHalf
 
     return {
-      left: `${arrowLeft}px`,
-      top: side === 'bottom' ? `${-arrowHalf}px` : `${panelHeight - arrowHalf}px`,
+      transform: `translate3d(${Math.round(arrowLeft)}px, ${Math.round(arrowTop)}px, 0) rotate(45deg)`,
     }
   }
 
   const arrowTop = clamp(centerY - arrowHalf, arrowPadding, panelHeight - arrowPadding)
+  const arrowLeft = side === 'right' ? -arrowHalf : panelWidth - arrowHalf
 
   return {
-    left: side === 'right' ? `${-arrowHalf}px` : `${panelWidth - arrowHalf}px`,
-    top: `${arrowTop}px`,
+    transform: `translate3d(${Math.round(arrowLeft)}px, ${Math.round(arrowTop)}px, 0) rotate(45deg)`,
   }
 }
 
@@ -399,11 +398,11 @@ onBeforeUnmount(() => {
           :style="popoverStyle"
         >
           <span
-            class="pointer-events-none absolute size-2 rotate-45"
+            class="pointer-events-none absolute top-0 left-0 size-2"
             :class="[
               popoverArrowSurfaceClass,
               props.animatePosition
-                ? 'transition-[left,top] duration-150 ease-out motion-reduce:transition-none'
+                ? 'transition-transform duration-150 ease-out motion-reduce:transition-none'
                 : undefined,
             ]"
             :style="popoverArrowStyle"

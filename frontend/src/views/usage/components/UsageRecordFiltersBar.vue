@@ -92,19 +92,19 @@ onMounted(() => void load())
           : '@min-[55rem]:flex-[1_1_55rem] @min-[55rem]:grid-cols-[repeat(5,minmax(0,1fr))_minmax(9rem,1.4fr)_minmax(8rem,1fr)_auto]'"
       >
         <FormItem label="分组">
-          <BaseSelect v-model="filters.groupId" class="w-full" aria-label="筛选分组" :disabled="pending.groups" :options="[{ label: '全部分组', value: '' }, ...groups]" />
+          <BaseSelect v-model="filters.groupId" searchable class="w-full" aria-label="筛选分组" :disabled="pending.groups" :options="[{ label: '全部分组', value: '' }, ...groups]" />
         </FormItem>
         <FormItem v-if="!personal" label="账号">
-          <BaseSelect v-model="filters.accountId" class="w-full" aria-label="筛选账号" :disabled="pending.accounts" :options="[{ label: '全部账号', value: '' }, ...accounts]" />
+          <BaseSelect v-model="filters.accountId" searchable class="w-full" aria-label="筛选账号" :disabled="pending.accounts" :options="[{ label: '全部账号', value: '' }, ...accounts]" />
         </FormItem>
         <FormItem v-if="!personal" label="邮箱">
-          <BaseSelect v-model="filters.userId" class="w-full" aria-label="按邮箱筛选" :disabled="pending.users" :options="[{ label: '全部邮箱', value: '' }, ...users]" />
+          <BaseSelect v-model="filters.userId" searchable class="w-full" aria-label="按邮箱筛选" :disabled="pending.users" :options="[{ label: '全部邮箱', value: '' }, ...users]" />
         </FormItem>
         <FormItem v-if="!personal" label="用户名">
-          <BaseSelect v-model="filters.userId" class="w-full" aria-label="按用户名筛选" :disabled="pending.users" :options="[{ label: '全部用户名', value: '' }, ...usernames]" />
+          <BaseSelect v-model="filters.userId" searchable class="w-full" aria-label="按用户名筛选" :disabled="pending.users" :options="[{ label: '全部用户名', value: '' }, ...usernames]" />
         </FormItem>
         <FormItem label="密钥">
-          <BaseSelect v-model="filters.clientApiKeyId" class="w-full" aria-label="按密钥筛选" :disabled="pending.keys" :options="[{ label: '全部密钥', value: '' }, ...keys]" />
+          <BaseSelect v-model="filters.clientApiKeyId" searchable class="w-full" aria-label="按密钥筛选" :disabled="pending.keys" :options="[{ label: '全部密钥', value: '' }, ...keys]" />
         </FormItem>
         <FormItem label="模型">
           <BaseInput v-model="filters.model" class="w-full" :class="personal ? 'sm:max-w-75' : undefined" aria-label="筛选模型" placeholder="模型名称（精确匹配）" :maxlength="128" clearable />

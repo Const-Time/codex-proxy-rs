@@ -15,11 +15,11 @@ export function useProxyAccounts(options: {
   const removeAction = useAsyncAction()
   const query = usePagedQuery({
     initialPageSize: 20,
-    load: pagination => getProxyAccounts({
+    load: (pagination, signal) => getProxyAccounts({
       ...pagination,
       proxyId: options.proxyId() ?? '',
       search: search.value.trim() || undefined,
-    }),
+    }, signal),
     onError: error => toast.error(errorMessage(error, '关联账号加载失败')),
   })
   const pagination = computed(() => ({

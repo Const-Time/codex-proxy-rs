@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { TransitionPresets, usePreferredReducedMotion, useTransition } from '@vueuse/core'
+import { TransitionPresets, useTransition } from '@vueuse/core'
 import { computed } from 'vue'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 
 type MetricValueFormatter = (value: number) => string
 
@@ -17,7 +18,7 @@ const props = withDefaults(
   },
 )
 
-const preferredMotion = usePreferredReducedMotion()
+const preferredMotion = useSharedReducedMotion()
 const hasAnimatedValue = computed(
   () =>
     typeof props.rawValue === 'number'

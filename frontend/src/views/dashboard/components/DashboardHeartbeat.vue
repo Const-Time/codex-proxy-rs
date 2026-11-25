@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { usePreferredReducedMotion } from '@vueuse/core'
-import { gsap } from 'gsap'
 import { computed, nextTick, onBeforeUnmount, useTemplateRef, watch } from 'vue'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 
 const props = withDefaults(
   defineProps<{
@@ -12,12 +11,20 @@ const props = withDefaults(
   },
 )
 
-const preferredMotion = usePreferredReducedMotion()
+const preferredMotion = useSharedReducedMotion()
 const heartbeatDot = useTemplateRef<HTMLElement>('heartbeatDot')
 const heartbeatRing = useTemplateRef<HTMLElement>('heartbeatRing')
 const statusLabel = computed(() =>
   props.updatedAt ? `自动刷新 30s，最近刷新 ${props.updatedAt}` : '自动刷新 30s，等待首次刷新',
 )
+
+let activeAnimations: Animation[] = []
+
+function cancelPulse() {
+  for (const animation of activeAnimations)
+    animation.cancel()
+  activeAnimations = []
+}
 
 function pulse() {
   const dot = heartbeatDot.value
@@ -25,29 +32,23 @@ function pulse() {
   if (!dot || !ring || preferredMotion.value === 'reduce')
     return
 
-  gsap.killTweensOf([dot, ring])
-  gsap.fromTo(
-    dot,
-    { scale: 0.72, opacity: 0.55 },
-    {
-      scale: 1,
-      opacity: 1,
-      duration: 0.42,
-      ease: 'back.out(2.2)',
-      clearProps: 'transform,opacity',
-    },
-  )
-  gsap.fromTo(
-    ring,
-    { scale: 0.55, opacity: 0.34 },
-    {
-      scale: 2.65,
-      opacity: 0,
-      duration: 0.65,
-      ease: 'power2.out',
-      clearProps: 'transform,opacity',
-    },
-  )
+  cancelPulse()
+  activeAnimations = [
+    dot.animate(
+      [
+        { transform: 'scale(0.72)', opacity: 0.55 },
+        { transform: 'scale(1)', opacity: 1 },
+      ],
+      { duration: 420, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)' },
+    ),
+    ring.animate(
+      [
+        { transform: 'scale(0.55)', opacity: 0.34 },
+        { transform: 'scale(2.65)', opacity: 0 },
+      ],
+      { duration: 650, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+    ),
+  ]
 }
 
 watch(
@@ -60,9 +61,7 @@ watch(
   },
 )
 
-onBeforeUnmount(() => {
-  gsap.killTweensOf([heartbeatDot.value, heartbeatRing.value])
-})
+onBeforeUnmount(cancelPulse)
 </script>
 
 <template>

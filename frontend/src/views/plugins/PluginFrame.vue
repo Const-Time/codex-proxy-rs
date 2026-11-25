@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import type { PluginInstance, PluginManagementPage } from '@/api/modules/plugins'
+import { useEventListener } from '@vueuse/core'
+import { storeToRefs } from 'pinia'
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { API_BASE_URL } from '@/api/constants'
 import { callPluginModel, callPluginRoute, getPluginCallbackTicket } from '@/api/modules/plugins'
-import { PLUGIN_MANAGEMENT_BRIDGE, PLUGIN_MANAGEMENT_BRIDGE_VERSION } from './management/bridge-contract'
+import { useThemeStore } from '@/stores/modules/theme'
+import {
+  MAXIMUM_MANAGEMENT_BODY_BYTES,
+  MAXIMUM_MANAGEMENT_IN_FLIGHT,
+  MAXIMUM_MANAGEMENT_QUERY_BYTES,
+  PLUGIN_MANAGEMENT_BRIDGE,
+  PLUGIN_MANAGEMENT_BRIDGE_VERSION,
+} from './management/bridge-contract'
 import { callbackTicketInput, pluginCallbackUrl } from './management/callbacks'
 import { assemblePluginManagementPage, readPluginFrameTheme } from './management/frame'
 import { PluginModelBridge } from './management/models'
@@ -13,6 +22,10 @@ const props = defineProps<{
   plugin: PluginInstance
   page: PluginManagementPage
 }>()
+
+const themeStore = useThemeStore()
+const { themeRevision } = storeToRefs(themeStore)
+
 const frame = ref<HTMLIFrameElement>()
 const source = ref('')
 const failure = ref('')
@@ -24,12 +37,34 @@ let session = ''
 let inFlight = 0
 let lastId = 0
 let models: PluginModelBridge | undefined
+
+function postToFrame(type: string, payload?: unknown) {
+  if (!source.value || controller.signal.aborted)
+    return
+  frame.value?.contentWindow?.postMessage(
+    {
+      target: PLUGIN_MANAGEMENT_BRIDGE,
+      version: PLUGIN_MANAGEMENT_BRIDGE_VERSION,
+      channel,
+      session,
+      type,
+      payload,
+    },
+    '*',
+  )
+}
+
+function syncThemeToFrame() {
+  postToFrame('theme', readPluginFrameTheme())
+}
+
 function dispose() {
   models?.dispose()
   models = undefined
   controller.abort()
   source.value = ''
 }
+
 async function load() {
   dispose()
   controller = new AbortController()
@@ -42,12 +77,36 @@ async function load() {
   height.value = initialHeight
   const currentChannel = channel
   const currentSession = session
-  models = new PluginModelBridge(props.clientKeyId, (input, signal) => callPluginModel({ instanceId: props.plugin.id, revision: props.plugin.revision }, input, signal), (packet) => {
-    if (!current.signal.aborted)
-      frame.value?.contentWindow?.postMessage({ target: PLUGIN_MANAGEMENT_BRIDGE, version: PLUGIN_MANAGEMENT_BRIDGE_VERSION, channel: currentChannel, session: currentSession, ...packet }, '*')
-  })
+  models = new PluginModelBridge(
+    props.clientKeyId,
+    (input, signal) => callPluginModel({ instanceId: props.plugin.id, revision: props.plugin.revision }, input, signal),
+    (packet) => {
+      if (!current.signal.aborted) {
+        frame.value?.contentWindow?.postMessage(
+          {
+            target: PLUGIN_MANAGEMENT_BRIDGE,
+            version: PLUGIN_MANAGEMENT_BRIDGE_VERSION,
+            channel: currentChannel,
+            session: currentSession,
+            ...packet,
+          },
+          '*',
+        )
+      }
+    },
+  )
   try {
-    const result = await assemblePluginManagementPage({ ...props.plugin, target: { instanceId: props.plugin.id, revision: props.plugin.revision } }, props.page, channel, session, location.origin, readPluginFrameTheme(), initialHeight, current.signal, props.clientKeyId)
+    const result = await assemblePluginManagementPage(
+      { ...props.plugin, target: { instanceId: props.plugin.id, revision: props.plugin.revision } },
+      props.page,
+      channel,
+      session,
+      location.origin,
+      readPluginFrameTheme(),
+      initialHeight,
+      current.signal,
+      props.clientKeyId,
+    )
     if (!current.signal.aborted)
       source.value = result.srcdoc
   }
@@ -56,6 +115,7 @@ async function load() {
       failure.value = error instanceof Error ? error.message : '插件页面加载失败'
   }
 }
+
 async function receive(event: MessageEvent) {
   const message = event.data
   if (event.source !== frame.value?.contentWindow || event.origin !== 'null' || !message || typeof message !== 'object'
@@ -82,8 +142,22 @@ async function receive(event: MessageEvent) {
   const currentChannel = channel
   const currentSession = session
   const reply = (ok: boolean, payload?: unknown, error?: string) => {
-    if (!current.signal.aborted)
-      frame.value?.contentWindow?.postMessage({ target: PLUGIN_MANAGEMENT_BRIDGE, version: 2, channel: currentChannel, session: currentSession, id: message.id, type: message.type === 'models-request' ? 'models-error' : 'result', ok, payload, error }, '*')
+    if (!current.signal.aborted) {
+      frame.value?.contentWindow?.postMessage(
+        {
+          target: PLUGIN_MANAGEMENT_BRIDGE,
+          version: PLUGIN_MANAGEMENT_BRIDGE_VERSION,
+          channel: currentChannel,
+          session: currentSession,
+          id: message.id,
+          type: message.type === 'models-request' ? 'models-error' : 'result',
+          ok,
+          payload,
+          error,
+        },
+        '*',
+      )
+    }
   }
   if (message.type === 'resize') {
     const value = message.payload?.height
@@ -93,7 +167,7 @@ async function receive(event: MessageEvent) {
   }
   if (message.type === 'callback-ticket') {
     const p = callbackTicketInput(message.payload)
-    if (!p || inFlight >= 8) {
+    if (!p || inFlight >= MAXIMUM_MANAGEMENT_IN_FLIGHT) {
       reply(false, undefined, '插件回调路径、期限无效或并发已满')
       return
     }
@@ -118,9 +192,10 @@ async function receive(event: MessageEvent) {
   }
   const p = message.payload
   if (!p || typeof p.method !== 'string' || typeof p.path !== 'string' || p.path.length > 512
-    || (p.query != null && (typeof p.query !== 'string' || new TextEncoder().encode(p.query).length > 8192))
+    || (p.query != null && (typeof p.query !== 'string' || new TextEncoder().encode(p.query).length > MAXIMUM_MANAGEMENT_QUERY_BYTES))
     || (p.contentType != null && typeof p.contentType !== 'string')
-    || (p.body != null && (!(p.body instanceof ArrayBuffer) || p.body.byteLength > 1024 * 1024)) || inFlight >= 8) {
+    || (p.body != null && (!(p.body instanceof ArrayBuffer) || p.body.byteLength > MAXIMUM_MANAGEMENT_BODY_BYTES))
+    || inFlight >= MAXIMUM_MANAGEMENT_IN_FLIGHT) {
     reply(false, undefined, '插件请求无效或并发已满')
     return
   }
@@ -136,20 +211,28 @@ async function receive(event: MessageEvent) {
       inFlight--
   }
 }
+
 watch(() => [props.plugin.id, props.plugin.revision, props.page.id, props.clientKeyId], load, { immediate: true })
-window.addEventListener('message', receive)
-onBeforeUnmount(() => {
-  dispose()
-  window.removeEventListener('message', receive)
-})
+watch(themeRevision, syncThemeToFrame)
+useEventListener(window, 'message', receive)
+onBeforeUnmount(dispose)
 </script>
 
 <template>
-  <p v-if="failure" role="alert" class="text-red-600">
+  <p v-if="failure" role="alert" class="m-0 rounded-cp bg-cp-error-container px-3 py-2 text-cp-sm text-cp-error-on-container">
     {{ failure }}
   </p>
-  <iframe v-else-if="source" ref="frame" :srcdoc="source" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" :title="page.title" :style="{ height: `${height}px` }" class="block w-full border-0" />
-  <p v-else class="text-cp-text-secondary">
+  <iframe
+    v-else-if="source"
+    ref="frame"
+    :srcdoc="source"
+    sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+    :title="page.title"
+    :style="{ height: `${height}px` }"
+    class="block w-full border-0"
+    @load="syncThemeToFrame"
+  />
+  <p v-else class="m-0 text-cp-sm text-cp-text-secondary">
     正在加载插件页面…
   </p>
 </template>

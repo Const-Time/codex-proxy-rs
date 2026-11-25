@@ -1,10 +1,6 @@
 import type { ShallowRef } from 'vue'
 import { useResizeObserver } from '@vueuse/core'
-import { gsap } from 'gsap'
-import { Draggable } from 'gsap/Draggable'
 import { computed, nextTick, onBeforeUnmount, onMounted, readonly, shallowRef } from 'vue'
-
-gsap.registerPlugin(Draggable)
 
 interface ThemePreviewCanvasOptions {
   viewport: ShallowRef<HTMLElement | null>
@@ -26,7 +22,12 @@ export function useThemePreviewCanvas(options: ThemePreviewCanvasOptions) {
   const ready = shallowRef(false)
   const fitted = shallowRef(true)
   const dragging = shallowRef(false)
-  let draggable: Draggable | undefined
+
+  let activePointerId: number | null = null
+  let dragStartClientX = 0
+  let dragStartClientY = 0
+  let dragOriginX = 0
+  let dragOriginY = 0
 
   const scalePercent = computed(() => Math.round(scale.value * 100))
   const canZoomOut = computed(() => scale.value > minimumScale)
@@ -42,13 +43,7 @@ export function useThemePreviewCanvas(options: ThemePreviewCanvasOptions) {
     if (!stage)
       return
 
-    gsap.killTweensOf(stage)
-    gsap.set(stage, {
-      left: x.value,
-      top: y.value,
-      clearProps: 'transform',
-    })
-    draggable?.update()
+    stage.style.transform = `translate3d(${Math.round(x.value)}px, ${Math.round(y.value)}px, 0)`
   }
 
   function viewportCenter() {
@@ -143,39 +138,42 @@ export function useThemePreviewCanvas(options: ThemePreviewCanvasOptions) {
     fitToViewport()
   }
 
-  function createDraggable() {
+  function handlePointerDown(event: PointerEvent) {
+    if (event.button !== 0 || activePointerId !== null)
+      return
     const viewport = options.viewport.value
-    const stage = options.stage.value
-    if (!viewport || !stage)
+    if (!viewport)
+      return
+    if (event.target instanceof Element && event.target.closest('[data-canvas-control], button, a, input, select, textarea'))
       return
 
-    draggable = Draggable.create(stage, {
-      type: 'left,top',
-      trigger: viewport,
-      cursor: 'grab',
-      activeCursor: 'grabbing',
-      dragClickables: false,
-      zIndexBoost: false,
-      liveSnap: {
-        x: value => Math.round(value),
-        y: value => Math.round(value),
-      },
-      onPress() {
-        dragging.value = true
-        fitted.value = false
-        gsap.killTweensOf(stage)
-      },
-      onDrag() {
-        x.value = Math.round(this.x)
-        y.value = Math.round(this.y)
-      },
-      onRelease() {
-        dragging.value = false
-      },
-      onDragEnd() {
-        dragging.value = false
-      },
-    })[0]
+    activePointerId = event.pointerId
+    dragStartClientX = event.clientX
+    dragStartClientY = event.clientY
+    dragOriginX = x.value
+    dragOriginY = y.value
+    dragging.value = true
+    fitted.value = false
+    viewport.setPointerCapture?.(event.pointerId)
+  }
+
+  function handlePointerMove(event: PointerEvent) {
+    if (activePointerId !== event.pointerId || !dragging.value)
+      return
+
+    x.value = Math.round(dragOriginX + (event.clientX - dragStartClientX))
+    y.value = Math.round(dragOriginY + (event.clientY - dragStartClientY))
+    applyPosition()
+  }
+
+  function endDrag(event: PointerEvent) {
+    if (activePointerId !== event.pointerId)
+      return
+    const viewport = options.viewport.value
+    if (viewport?.hasPointerCapture?.(event.pointerId))
+      viewport.releasePointerCapture(event.pointerId)
+    activePointerId = null
+    dragging.value = false
   }
 
   useResizeObserver(options.viewport, () => {
@@ -185,21 +183,29 @@ export function useThemePreviewCanvas(options: ThemePreviewCanvasOptions) {
 
   onMounted(async () => {
     await nextTick()
-    options.viewport.value?.addEventListener('wheel', handleWheel, { passive: false })
-    options.viewport.value?.addEventListener('keydown', handleKeydown)
-    options.viewport.value?.addEventListener('dblclick', handleDoubleClick)
-    createDraggable()
+    const viewport = options.viewport.value
+    viewport?.addEventListener('wheel', handleWheel, { passive: false })
+    viewport?.addEventListener('keydown', handleKeydown)
+    viewport?.addEventListener('dblclick', handleDoubleClick)
+    viewport?.addEventListener('pointerdown', handlePointerDown)
+    viewport?.addEventListener('pointermove', handlePointerMove)
+    viewport?.addEventListener('pointerup', endDrag)
+    viewport?.addEventListener('pointercancel', endDrag)
     fitToViewport()
     ready.value = true
   })
 
   onBeforeUnmount(() => {
-    draggable?.kill()
-    options.viewport.value?.removeEventListener('wheel', handleWheel)
-    options.viewport.value?.removeEventListener('keydown', handleKeydown)
-    options.viewport.value?.removeEventListener('dblclick', handleDoubleClick)
-    if (options.stage.value)
-      gsap.killTweensOf(options.stage.value)
+    const viewport = options.viewport.value
+    viewport?.removeEventListener('wheel', handleWheel)
+    viewport?.removeEventListener('keydown', handleKeydown)
+    viewport?.removeEventListener('dblclick', handleDoubleClick)
+    viewport?.removeEventListener('pointerdown', handlePointerDown)
+    viewport?.removeEventListener('pointermove', handlePointerMove)
+    viewport?.removeEventListener('pointerup', endDrag)
+    viewport?.removeEventListener('pointercancel', endDrag)
+    activePointerId = null
+    dragging.value = false
   })
 
   return {

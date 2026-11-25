@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import type { BarSeriesOption, EChartsOption, LineSeriesOption } from 'echarts'
 import type { getUsageRecordInsightsOverview } from '@/api'
-import { BarChart } from 'echarts/charts'
-import { use } from 'echarts/core'
 
 import { computed, ref } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -57,8 +55,6 @@ const tokenPoints = computed(() => {
     cost: point.estimatedCost,
   }))
 })
-
-use([BarChart])
 
 const { palette } = useChartPalette()
 const points = computed<HealthPoint[]>(() => props.health.points)

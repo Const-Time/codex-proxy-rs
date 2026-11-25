@@ -6,9 +6,7 @@ import { authPlugin } from './plugins/auth'
 import { router } from './router'
 import { pinia } from './stores'
 import { useThemeStore } from './stores/modules/theme'
-import '@fontsource-variable/inter'
-import '@fontsource-variable/jetbrains-mono'
-
+import './styles/fonts.css'
 import './styles/index.css'
 
 const app = createApp(App)

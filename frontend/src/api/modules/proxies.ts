@@ -55,11 +55,12 @@ interface ProxyAccountPage {
   page: ProxyPage['page']
 }
 
-export function getProxyAccounts(params: { proxyId: string, page: number, pageSize: number, search?: string }) {
+export function getProxyAccounts(params: { proxyId: string, page: number, pageSize: number, search?: string }, signal?: AbortSignal) {
   return request<ProxyAccountPage>({
     url: '/api/admin/proxies/accounts',
     method: 'GET',
     params,
+    signal,
   })
 }
 
@@ -76,11 +77,12 @@ interface ProxyMutation {
   configRevision: number
 }
 
-export function getProxies(params: { page: number, pageSize: number, search?: string }) {
+export function getProxies(params: { page: number, pageSize: number, search?: string }, signal?: AbortSignal) {
   return request<ProxyPage>({
     url: '/api/admin/proxies',
     method: 'GET',
     params,
+    signal,
   })
 }
 

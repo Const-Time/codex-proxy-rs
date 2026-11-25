@@ -1,12 +1,12 @@
 import type { MaybeRefOrGetter } from 'vue'
-import { usePreferredReducedMotion } from '@vueuse/core'
 import { nextTick, toValue, watch } from 'vue'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 
 export function useTableColumnMotion(
   table: MaybeRefOrGetter<HTMLTableElement | null>,
   columnKeys: () => string[],
 ) {
-  const preferredMotion = usePreferredReducedMotion()
+  const preferredMotion = useSharedReducedMotion()
 
   watch([columnKeys, preferredMotion], async ([keys, motion], [previousKeys], onCleanup) => {
     const root = toValue(table)

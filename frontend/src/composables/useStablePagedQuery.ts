@@ -1,4 +1,4 @@
-import { shallowRef } from 'vue'
+import { onScopeDispose, shallowRef } from 'vue'
 
 import { useRequestState } from './useRequestState'
 
@@ -16,7 +16,7 @@ interface PageRequest {
 
 export function useStablePagedQuery<Result extends PageResult>(options: {
   initialPageSize: number
-  load: (pagination: PageRequest) => Promise<Result>
+  load: (pagination: PageRequest, signal?: AbortSignal) => Promise<Result>
   onSuccess?: (result: Result) => void
   onError?: (error: unknown) => void
 }) {
@@ -25,16 +25,33 @@ export function useStablePagedQuery<Result extends PageResult>(options: {
   const total = shallowRef(0)
   const items = shallowRef<Result['items'][number][]>([])
   const request = useRequestState(options.onError)
-  const { loading, error, invalidate } = request
+  const { loading, error } = request
+  let controller: AbortController | undefined
+
+  function abortInFlight() {
+    controller?.abort()
+    controller = undefined
+  }
+
+  function invalidate() {
+    abortInFlight()
+    request.invalidate()
+  }
 
   async function execute(targetPage = currentPage.value, execution: { silent?: boolean } = {}) {
+    abortInFlight()
+    const currentController = typeof AbortController !== 'undefined' ? new AbortController() : undefined
+    controller = currentController
     const requestId = request.start(execution.silent)
 
     try {
-      const result = await options.load({
-        currentPage: Math.max(1, targetPage),
-        pageSize: pageSize.value,
-      })
+      const result = await options.load(
+        {
+          currentPage: Math.max(1, targetPage),
+          pageSize: pageSize.value,
+        },
+        currentController?.signal,
+      )
       if (!request.isCurrent(requestId))
         return false
 
@@ -50,6 +67,8 @@ export function useStablePagedQuery<Result extends PageResult>(options: {
       return false
     }
     finally {
+      if (controller === currentController)
+        controller = undefined
       request.finish(requestId)
     }
   }
@@ -59,6 +78,8 @@ export function useStablePagedQuery<Result extends PageResult>(options: {
     total.value = 0
     return execute(1, execution)
   }
+
+  onScopeDispose(abortInFlight)
 
   return {
     currentPage,

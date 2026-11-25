@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { ChevronDown, SlidersHorizontal } from '@lucide/vue'
-import { useMediaQuery } from '@vueuse/core'
 import { ref, useId } from 'vue'
+import { useIsMobile } from '@/composables/useSharedMedia'
 import BaseButton from './BaseButton.vue'
 
 withDefaults(defineProps<{ label?: string, activeCount?: number, collapsible?: boolean }>(), { label: '筛选条件', activeCount: 0 })
-const mobile = useMediaQuery('(max-width: 639px)')
+const mobile = useIsMobile()
 const expanded = ref(false)
 const panelId = useId()
 </script>

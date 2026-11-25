@@ -21,20 +21,19 @@ import {
   UserRound,
   Users,
 } from '@lucide/vue'
-import { usePreferredReducedMotion, useTimeoutFn } from '@vueuse/core'
-import { gsap } from 'gsap'
+import { useResizeObserver, useTimeoutFn } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
-import { isNavigationFailure, NavigationFailureType, useRoute, useRouter } from 'vue-router'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 import { useAuthStore } from '@/stores/modules/auth'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { useThemeStore } from '@/stores/modules/theme'
-import MySubscriptionsModal from './MySubscriptionsModal.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -53,7 +52,9 @@ const emit = defineEmits<{
   openSystemUpdate: []
   toggle: []
 }>()
+const MySubscriptionsModal = defineAsyncComponent(() => import('./MySubscriptionsModal.vue'))
 const subscriptionsOpen = ref(false)
+const subscriptionsLoaded = shallowRef(false)
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
@@ -62,7 +63,7 @@ const themeStore = useThemeStore()
 const { version, hasUpdate } = storeToRefs(systemUpdateStore)
 const { effectiveTheme } = storeToRefs(themeStore)
 const { toggleTheme } = themeStore
-const preferredMotion = usePreferredReducedMotion()
+const preferredMotion = useSharedReducedMotion()
 
 const adminNavItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
@@ -96,17 +97,25 @@ function sectionLabel(index: number) {
 function isActive(path: string) {
   if (path === '/')
     return route.path === '/'
-  return route.path.startsWith(path)
+  return route.path === path || route.path.startsWith(`${path}/`)
 }
 
+const navEl = useTemplateRef<HTMLElement>('nav')
+const navSignalEl = useTemplateRef<HTMLElement>('navSignal')
 const activeNavIndex = computed(() => {
   const index = navItems.value.findIndex(item => isActive(item.path))
   return Math.max(0, index)
 })
-const activeNavIndicatorStyle = computed(() => ({
-  transform: `translate3d(0, ${activeNavIndex.value * 48 + (authStore.isAdmin && activeNavIndex.value >= adminNavItems.length ? 72 : 36)}px, 0)`,
-}))
+const activeIndicatorTop = shallowRef<number | null>(null)
+const activeNavIndicatorStyle = computed(() => {
+  const fallbackTop = activeNavIndex.value * 48 + (authStore.isAdmin && activeNavIndex.value >= adminNavItems.length ? 72 : 36)
+  return {
+    transform: `translate3d(0, ${activeIndicatorTop.value ?? fallbackTop}px, 0)`,
+  }
+})
 const navFeedbackMuted = shallowRef(false)
+let navSignalAnimation: Animation | undefined
+
 const { start: restoreNavFeedback, stop: stopNavFeedbackRestore } = useTimeoutFn(
   () => {
     navFeedbackMuted.value = false
@@ -121,11 +130,24 @@ function muteNavFeedbackDuringMove() {
   restoreNavFeedback()
 }
 
-async function navigate(path: string) {
+function syncActiveIndicator() {
+  const links = navEl.value?.querySelectorAll<HTMLElement>('[data-nav-item]')
+  const activeElement = links?.[activeNavIndex.value]
+  if (activeElement)
+    activeIndicatorTop.value = activeElement.offsetTop
+}
+
+function handleNavClick(event: MouseEvent) {
+  // 允许用户通过中键或组合键在新标签页打开，仅普通点击收起移动侧边栏。
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)
+    return
   muteNavFeedbackDuringMove()
-  const failure = await router.push(path)
-  if (!failure || isNavigationFailure(failure, NavigationFailureType.duplicated))
-    emit('navigate')
+  emit('navigate')
+}
+
+function openSubscriptions() {
+  subscriptionsLoaded.value = true
+  subscriptionsOpen.value = true
 }
 
 function openSystemUpdate() {
@@ -140,182 +162,50 @@ async function handleLogout() {
   emit('navigate')
 }
 
-const sidebarEl = ref<HTMLElement | null>(null)
-const brandLabelEl = ref<HTMLElement | null>(null)
-const navSignalEl = useTemplateRef<HTMLElement>('navSignal')
 const isCollapsed = computed(() => !props.mobile && Boolean(props.collapsed))
-const collapsedSidebarWidth = 76
-const expandedSidebarWidth = 232
-const sidebarWidth = computed(() => (isCollapsed.value ? collapsedSidebarWidth : expandedSidebarWidth))
-const brandLabelVisible = shallowRef(!isCollapsed.value)
 const themeToggleLabel = computed(() => (effectiveTheme.value === 'dark' ? '切换浅色模式' : '切换暗黑模式'))
 const versionText = computed(() => version.value?.version.trim() ?? '')
 const hasVersionLabel = computed(() => versionText.value.length > 0)
 const versionLabel = computed(() => `v${versionText.value}`)
 const updateButtonLabel = computed(() => (hasUpdate.value ? '发现新版本，打开系统更新' : '打开系统更新'))
 
-function prefersReducedMotion() {
-  return preferredMotion.value === 'reduce'
-}
-
-function animateSidebarLabels(collapsed: boolean) {
-  const labels = sidebarEl.value?.querySelectorAll<HTMLElement>('.sidebar-label')
-
-  if (!labels?.length) {
-    return
-  }
-
-  if (prefersReducedMotion()) {
-    gsap.set(labels, {
-      opacity: collapsed ? 0 : 1,
-      x: collapsed ? -6 : 0,
-    })
-    return
-  }
-
-  gsap.to(labels, {
-    opacity: collapsed ? 0 : 1,
-    x: collapsed ? -6 : 0,
-    duration: collapsed ? 0.16 : 0.2,
-    ease: collapsed ? 'power2.in' : 'power3.out',
-    stagger: collapsed ? 0 : 0.018,
-    overwrite: true,
-  })
-}
-
-function hideBrandLabel() {
-  const label = brandLabelEl.value
-
-  if (label) {
-    gsap.killTweensOf(label)
-    gsap.set(label, {
-      opacity: 0,
-      x: -6,
-    })
-  }
-
-  brandLabelVisible.value = false
-}
-
-function animateBrandLabelEnter() {
-  const label = brandLabelEl.value
-
-  if (!label) {
-    return
-  }
-
-  if (prefersReducedMotion()) {
-    gsap.set(label, {
-      opacity: 1,
-      x: 0,
-    })
-    return
-  }
-
-  gsap.fromTo(
-    label,
-    {
-      opacity: 0,
-      x: -6,
-    },
-    {
-      opacity: 1,
-      x: 0,
-      duration: 0.2,
-      ease: 'power3.out',
-      overwrite: true,
-    },
-  )
-}
-
-function animateSidebarWidth(collapsed: boolean) {
-  if (!sidebarEl.value) {
-    return
-  }
-
-  const targetWidth = collapsed ? collapsedSidebarWidth : expandedSidebarWidth
-  const currentWidth = sidebarEl.value.getBoundingClientRect().width
-
-  if (prefersReducedMotion()) {
-    gsap.set(sidebarEl.value, {
-      width: targetWidth,
-      flexBasis: targetWidth,
-    })
-    return
-  }
-
-  gsap.set(sidebarEl.value, {
-    width: currentWidth,
-    flexBasis: currentWidth,
-  })
-
-  gsap.to(sidebarEl.value, {
-    width: targetWidth,
-    flexBasis: targetWidth,
-    duration: 0.34,
-    ease: 'power3.out',
-    overwrite: true,
-  })
-}
-
 function animateNavSignal() {
   const signal = navSignalEl.value
   if (!signal)
     return
 
-  gsap.killTweensOf(signal)
-  if (prefersReducedMotion()) {
-    gsap.set(signal, { opacity: 0, xPercent: -70 })
+  navSignalAnimation?.cancel()
+  if (preferredMotion.value === 'reduce') {
+    signal.style.opacity = '0'
     return
   }
 
-  gsap.fromTo(
-    signal,
-    { opacity: 0.48, xPercent: -70 },
+  navSignalAnimation = signal.animate(
+    [
+      { opacity: 0.48, transform: 'translate3d(-70%, 0, 0)' },
+      { opacity: 0, transform: 'translate3d(120%, 0, 0)' },
+    ],
     {
-      opacity: 0,
-      xPercent: 120,
-      duration: 0.52,
-      ease: 'power2.out',
-      overwrite: true,
+      duration: 520,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
     },
   )
 }
 
-onMounted(() => {
-  gsap.set(sidebarEl.value, {
-    width: sidebarWidth.value,
-    flexBasis: sidebarWidth.value,
-  })
-  if (isCollapsed.value) {
-    hideBrandLabel()
-  }
-  else {
-    gsap.set(brandLabelEl.value, {
-      opacity: 1,
-      x: 0,
-    })
-  }
-  animateSidebarLabels(isCollapsed.value)
-  gsap.set(navSignalEl.value, { opacity: 0, xPercent: -70 })
+useResizeObserver(navEl, syncActiveIndicator)
+
+onMounted(async () => {
+  await nextTick()
+  syncActiveIndicator()
 })
 
 watch(
-  () => isCollapsed.value,
-  async (collapsed) => {
-    if (collapsed) {
-      hideBrandLabel()
-    }
-    else {
-      brandLabelVisible.value = true
-    }
-    animateSidebarLabels(Boolean(collapsed))
-    animateSidebarWidth(Boolean(collapsed))
+  [activeNavIndex, isCollapsed, () => authStore.isAdmin],
+  async () => {
     await nextTick()
-    if (!collapsed) {
-      animateBrandLabelEnter()
-    }
+    syncActiveIndicator()
   },
+  { flush: 'post' },
 )
 
 watch(
@@ -325,6 +215,7 @@ watch(
       return
     muteNavFeedbackDuringMove()
     await nextTick()
+    syncActiveIndicator()
     animateNavSignal()
   },
   { flush: 'post' },
@@ -332,25 +223,16 @@ watch(
 
 onBeforeUnmount(() => {
   stopNavFeedbackRestore()
-  const targets = [sidebarEl.value, brandLabelEl.value, navSignalEl.value].filter((target): target is HTMLElement =>
-    Boolean(target),
-  )
-  gsap.killTweensOf(targets)
-
-  const labels = sidebarEl.value?.querySelectorAll<HTMLElement>('.sidebar-label')
-  if (labels?.length) {
-    gsap.killTweensOf(labels)
-  }
+  navSignalAnimation?.cancel()
 })
 </script>
 
 <template>
   <aside
-    ref="sidebarEl"
-    class="z-20 h-dvh shrink-0 flex-col overflow-hidden bg-(--cp-layout-sider-bg) shadow-cp-layout-sider"
+    class="z-20 h-dvh shrink-0 flex-col overflow-hidden bg-(--cp-layout-sider-bg) shadow-cp-layout-sider transition-[width,flex-basis] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
     :class="[
       mobile ? 'flex' : 'hidden min-[961px]:flex',
-      isCollapsed ? 'w-22 basis-22 items-center' : 'w-62.75 basis-62.75',
+      isCollapsed ? 'w-19 basis-19 items-center' : 'w-58 basis-58',
     ]"
   >
     <div
@@ -363,7 +245,11 @@ onBeforeUnmount(() => {
       >
         <AppBrandMark class="block size-11 select-none" />
       </BaseMotionIcon>
-      <span v-show="brandLabelVisible" ref="brandLabelEl" class="grid min-w-33 content-center overflow-hidden">
+      <span
+        v-show="!isCollapsed"
+        class="grid min-w-33 content-center overflow-hidden transition-[opacity,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+        :class="isCollapsed ? 'pointer-events-none -translate-x-1.5 opacity-0' : 'translate-x-0 opacity-100'"
+      >
         <strong class="text-base leading-[1.1] font-heavy text-cp-text"> Codex Proxy </strong>
         <span class="mt-1.5 flex h-4.5 min-w-0 items-center gap-2">
           <span class="shrink-0 text-xs leading-none font-emphasis text-cp-text-secondary"> Rust build </span>
@@ -388,24 +274,28 @@ onBeforeUnmount(() => {
 
     <BaseScrollbar class="my-4 w-full flex-1">
       <div class="px-4">
-        <nav class="relative grid gap-2" :class="isCollapsed ? 'mx-auto w-10' : 'w-full'" aria-label="主导航">
+        <nav ref="nav" class="relative grid gap-2" :class="isCollapsed ? 'mx-auto w-10' : 'w-full'" aria-label="主导航">
           <span
             class="pointer-events-none absolute inset-x-0 top-0 h-10 overflow-hidden rounded-cp bg-cp-menu-item-selected-bg transition-transform duration-260 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
             :style="activeNavIndicatorStyle"
           >
             <span
               ref="navSignal"
-              class="absolute inset-y-0 left-0 w-2/3 [background:linear-gradient(90deg,transparent,color-mix(in_srgb,var(--cp-color-info)_9%,transparent),transparent)]"
+              class="absolute inset-y-0 left-0 w-2/3 opacity-0 [background:linear-gradient(90deg,transparent,color-mix(in_srgb,var(--cp-color-info)_9%,transparent),transparent)]"
             />
           </span>
           <template v-for="(item, index) in navItems" :key="item.path">
             <div v-if="sectionLabel(index)" class="flex h-7 items-end px-3 pb-1 text-xs font-semibold text-cp-text-quaternary">
-              <span :class="isCollapsed ? 'sr-only' : 'sidebar-label whitespace-nowrap'">{{ sectionLabel(index) }}</span>
+              <span :class="isCollapsed ? 'sr-only' : 'whitespace-nowrap'">{{ sectionLabel(index) }}</span>
               <span v-if="isCollapsed" class="h-px w-full bg-cp-fill-tertiary" aria-hidden="true" />
             </div>
-            <button
-              type="button"
-              class="relative z-10 inline-flex h-10 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container"
+            <RouterLink
+              :to="item.path"
+              data-nav-item
+              :aria-current="isActive(item.path) ? 'page' : undefined"
+              :aria-label="isCollapsed ? item.label : undefined"
+              :title="isCollapsed ? item.label : undefined"
+              class="relative z-10 inline-flex h-10 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] no-underline outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline focus-visible:ring-offset-2 focus-visible:ring-offset-cp-bg-container"
               :class="[
                 isCollapsed ? 'w-10 justify-center' : 'w-full gap-2.5 px-3',
                 isActive(item.path)
@@ -416,25 +306,22 @@ onBeforeUnmount(() => {
                     ? 'bg-transparent font-semibold text-cp-text-secondary transition-none'
                     : 'bg-transparent font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
               ]"
-              :aria-current="isActive(item.path) ? 'page' : undefined"
-              :aria-label="isCollapsed ? item.label : undefined"
-              :title="isCollapsed ? item.label : undefined"
-              @click="navigate(item.path)"
+              @click="handleNavClick"
             >
-              <component :is="item.icon" class="shrink-0" :size="18" />
+              <component :is="item.icon" class="shrink-0" :size="18" aria-hidden="true" />
               <span
-                class="sidebar-label overflow-hidden whitespace-nowrap transition-[opacity,transform] duration-200"
-                :class="isCollapsed ? 'pointer-events-none w-0' : 'w-auto'"
+                class="overflow-hidden whitespace-nowrap transition-[opacity,transform] duration-200 motion-reduce:transition-none"
+                :class="isCollapsed ? 'pointer-events-none w-0 -translate-x-1.5 opacity-0' : 'w-auto translate-x-0 opacity-100'"
               >
                 {{ item.label }}
               </span>
-            </button>
+            </RouterLink>
           </template>
         </nav>
       </div>
     </BaseScrollbar>
 
-    <MySubscriptionsModal v-model="subscriptionsOpen" />
+    <MySubscriptionsModal v-if="subscriptionsLoaded" v-model="subscriptionsOpen" />
     <div class="mb-6 max-w-[calc(100%-2rem)] shrink-0 self-center" :class="isCollapsed ? 'w-11' : 'w-50'">
       <div
         class="bg-cp-fill-quaternary"
@@ -476,7 +363,7 @@ onBeforeUnmount(() => {
             <LogOut :size="19" />
           </BaseIconButton>
 
-          <BaseIconButton variant="ghost" :size="isCollapsed ? 'md' : 'sm'" label="我的订阅" :pressed="subscriptionsOpen" @click="subscriptionsOpen = true">
+          <BaseIconButton variant="ghost" :size="isCollapsed ? 'md' : 'sm'" label="我的订阅" :pressed="subscriptionsOpen" @click="openSubscriptions">
             <CreditCard :size="isCollapsed ? 19 : 18" />
           </BaseIconButton>
 

@@ -1,5 +1,5 @@
 import { clamp } from 'es-toolkit'
-import { shallowRef } from 'vue'
+import { onScopeDispose, shallowRef } from 'vue'
 
 import { useRequestState } from './useRequestState'
 
@@ -15,7 +15,7 @@ interface PageResult {
 
 export function usePagedQuery<Result extends PageResult>(options: {
   initialPageSize: number
-  load: (pagination: { page: number, pageSize: number }) => Promise<Result>
+  load: (pagination: { page: number, pageSize: number }, signal?: AbortSignal) => Promise<Result>
   onSuccess?: (result: Result) => void
   onError?: (error: unknown) => void
 }) {
@@ -26,6 +26,12 @@ export function usePagedQuery<Result extends PageResult>(options: {
   const request = useRequestState(options.onError)
   const { loading, error } = request
   let confirmed = { page: page.value, pageSize: pageSize.value }
+  let controller: AbortController | undefined
+
+  function abortInFlight() {
+    controller?.abort()
+    controller = undefined
+  }
 
   function restorePagination() {
     page.value = confirmed.page
@@ -33,18 +39,25 @@ export function usePagedQuery<Result extends PageResult>(options: {
   }
 
   function invalidate() {
+    abortInFlight()
     request.invalidate()
     restorePagination()
   }
 
   async function execute(execution: { silent?: boolean } = {}) {
+    abortInFlight()
+    const currentController = typeof AbortController !== 'undefined' ? new AbortController() : undefined
+    controller = currentController
     const requestId = request.start(execution.silent)
 
     try {
-      const result = await options.load({
-        page: page.value,
-        pageSize: pageSize.value,
-      })
+      const result = await options.load(
+        {
+          page: page.value,
+          pageSize: pageSize.value,
+        },
+        currentController?.signal,
+      )
       if (!request.isCurrent(requestId))
         return false
 
@@ -68,6 +81,8 @@ export function usePagedQuery<Result extends PageResult>(options: {
       return false
     }
     finally {
+      if (controller === currentController)
+        controller = undefined
       request.finish(requestId)
     }
   }
@@ -79,6 +94,8 @@ export function usePagedQuery<Result extends PageResult>(options: {
     restorePagination()
     return execute()
   }
+
+  onScopeDispose(abortInFlight)
 
   return {
     page,

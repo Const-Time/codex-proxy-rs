@@ -1,12 +1,13 @@
 import type { BarSeriesOption, EChartsOption, LineSeriesOption } from 'echarts'
 import type { Ref } from 'vue'
 import type { dashboardTrendView, normalizeDashboardTrendKind } from './useDashboard'
-import { usePreferredReducedMotion } from '@vueuse/core'
 import { computed, shallowRef, watch } from 'vue'
 
 import { sampleGapBridgeSeries } from '@/components/charts/timeSeriesGap'
 import { chartTooltipStyle, tooltipIndex } from '@/components/charts/tooltip'
 import { useChartPalette } from '@/composables/useChartPalette'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
+import { colorWithAlpha } from '@/utils/color'
 
 type TrendKind = ReturnType<typeof normalizeDashboardTrendKind>
 type TrendView = ReturnType<typeof dashboardTrendView>
@@ -15,8 +16,8 @@ type TrendSummaryItem = TrendView['summary'][number]
 
 interface LineSeriesOptions {
   area?: boolean
-  areaStartAlpha?: string
-  areaEndAlpha?: string
+  areaStartAlpha?: number
+  areaEndAlpha?: number
   lineType?: 'solid' | 'dashed' | 'dotted'
   smooth?: boolean | number
   stack?: string
@@ -53,7 +54,7 @@ export function useRequestTrendChart(options: {
 }) {
   const { points, summary, activeKind } = options
   const { color: themeColor, palette } = useChartPalette()
-  const preferredMotion = usePreferredReducedMotion()
+  const preferredMotion = useSharedReducedMotion()
   const pinnedSummaryLabel = shallowRef<string>()
 
   const hasSamples = computed(() =>
@@ -250,8 +251,8 @@ export function useRequestTrendChart(options: {
       return [
         lineSeries('缓存', seriesValues('cachedTokensValue'), cacheColor, {
           area: true,
-          areaStartAlpha: '30',
-          areaEndAlpha: '08',
+          areaStartAlpha: 0.19,
+          areaEndAlpha: 0.03,
           lineType: 'dashed',
           smooth: 0.26,
           stack: 'input-composition',
@@ -260,8 +261,8 @@ export function useRequestTrendChart(options: {
         }),
         lineSeries('输入', seriesValues('uncachedInputTokensValue'), inputColor, {
           area: true,
-          areaStartAlpha: '2A',
-          areaEndAlpha: '05',
+          areaStartAlpha: 0.16,
+          areaEndAlpha: 0.02,
           smooth: 0.26,
           stack: 'input-composition',
           width: 2.3,
@@ -369,8 +370,8 @@ export function useRequestTrendChart(options: {
               x2: 0,
               y2: 1,
               colorStops: [
-                { offset: 0, color: `${color}${lineOptions.areaStartAlpha ?? '18'}` },
-                { offset: 1, color: `${color}${lineOptions.areaEndAlpha ?? '02'}` },
+                { offset: 0, color: colorWithAlpha(color, lineOptions.areaStartAlpha ?? 0.1) },
+                { offset: 1, color: colorWithAlpha(color, lineOptions.areaEndAlpha ?? 0.01) },
               ],
             },
           }

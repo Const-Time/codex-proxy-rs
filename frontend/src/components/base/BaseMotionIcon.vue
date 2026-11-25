@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import { usePreferredReducedMotion } from '@vueuse/core'
-import { gsap } from 'gsap'
 import { onBeforeUnmount, useTemplateRef, watch } from 'vue'
+import { useSharedReducedMotion } from '@/composables/useSharedMedia'
 
 type MotionIconVariant = 'random' | 'brand'
 type MotionPhase = 'enter' | 'leave'
-type MotionTimeline = ReturnType<typeof gsap.timeline>
-type ReactionBuilder = (root: HTMLElement, glyph: HTMLElement) => MotionTimeline
+type ReactionBuilder = (root: HTMLElement, glyph: HTMLElement) => Animation[]
 
 interface MotionReaction {
   enter: ReactionBuilder
@@ -24,9 +22,13 @@ const props = withDefaults(
   },
 )
 
-const preferredMotion = usePreferredReducedMotion()
+const preferredMotion = useSharedReducedMotion()
 const icon = useTemplateRef<HTMLElement>('icon')
 const glyph = useTemplateRef<HTMLElement>('glyph')
+const EASE_OUT = 'cubic-bezier(0.22, 1, 0.36, 1)'
+const EASE_BACK = 'cubic-bezier(0.34, 1.56, 0.64, 1)'
+const EASE_IN_OUT = 'cubic-bezier(0.45, 0, 0.55, 1)'
+
 const randomReactions: MotionReaction[] = [
   { enter: liftAndBloomEnter, leave: liftAndBloomLeave },
   { enter: lookAroundEnter, leave: lookAroundLeave },
@@ -38,9 +40,11 @@ const brandReaction: MotionReaction = {
   enter: brandGreetingEnter,
   leave: brandGreetingLeave,
 }
+
 let previousReactionIndex = -1
 let activeReaction: MotionReaction | undefined
-let activeTimeline: MotionTimeline | undefined
+let activeAnimations: Animation[] = []
+let animationRunId = 0
 let isPointerInside = false
 
 function motionTargets() {
@@ -48,45 +52,59 @@ function motionTargets() {
 }
 
 function clearMotionStyles(element: HTMLElement) {
-  gsap.set(element, { clearProps: 'transform,transformOrigin,willChange' })
+  element.style.willChange = ''
+  element.style.transform = ''
 }
 
-function stopActiveTimeline(targets: HTMLElement[]) {
-  activeTimeline?.kill()
-  activeTimeline = undefined
-  gsap.killTweensOf(targets)
+function stopActiveAnimations() {
+  animationRunId += 1
+  for (const animation of activeAnimations)
+    animation.cancel()
+  activeAnimations = []
 }
 
 function resetMotion() {
-  const targets = motionTargets()
-  stopActiveTimeline(targets)
+  stopActiveAnimations()
   activeReaction = undefined
-  for (const target of targets) clearMotionStyles(target)
+  for (const target of motionTargets())
+    clearMotionStyles(target)
 }
 
-function createMotionTimeline(root: HTMLElement, glyphElement: HTMLElement, phase: MotionPhase) {
+function runMotion(
+  root: HTMLElement,
+  glyphElement: HTMLElement,
+  phase: MotionPhase,
+  build: () => Animation[],
+) {
   const targets = [root, glyphElement]
-  stopActiveTimeline(targets)
-  gsap.set(targets, { willChange: 'transform' })
+  stopActiveAnimations()
+  const runId = animationRunId
+  for (const target of targets)
+    target.style.willChange = 'transform'
 
-  const timeline = gsap.timeline({
-    defaults: { ease: 'power2.out' },
-    onComplete: () => {
-      if (activeTimeline !== timeline)
-        return
-      activeTimeline = undefined
-
-      if (phase === 'leave' && !isPointerInside) {
-        activeReaction = undefined
-        for (const target of targets) clearMotionStyles(target)
-        return
-      }
-
-      gsap.set(targets, { clearProps: 'willChange' })
-    },
+  const animations = build()
+  activeAnimations = animations
+  void Promise.allSettled(animations.map(animation => animation.finished)).then(() => {
+    if (runId !== animationRunId)
+      return
+    if (phase === 'leave' && !isPointerInside) {
+      activeReaction = undefined
+      for (const animation of animations)
+        animation.cancel()
+      activeAnimations = []
+      for (const target of targets)
+        clearMotionStyles(target)
+      return
+    }
+    for (const target of targets)
+      target.style.willChange = ''
   })
-  activeTimeline = timeline
-  return timeline
+  return animations
+}
+
+function currentTransform(element: HTMLElement) {
+  const value = getComputedStyle(element).transform
+  return value && value !== 'none' ? value : 'translate3d(0, 0, 0) scale(1) rotate(0deg)'
 }
 
 function nextRandomReaction() {
@@ -100,153 +118,196 @@ function nextRandomReaction() {
 }
 
 function liftAndBloomEnter(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'enter')
-  timeline
-    .to(root, { y: -3, scale: 1.055, duration: 0.22 }, 0)
-    .to(
-      glyphElement,
-      { y: -0.5, rotation: -4, scale: 1.13, duration: 0.26, ease: 'back.out(2.1)' },
-      0.02,
-    )
-  return timeline
+  return runMotion(root, glyphElement, 'enter', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root) },
+        { transform: 'translate3d(0, -3px, 0) scale(1.055)' },
+      ],
+      { duration: 220, easing: EASE_OUT, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement) },
+        { transform: 'translate3d(0, -0.5px, 0) rotate(-4deg) scale(1.13)' },
+      ],
+      { duration: 260, delay: 20, easing: EASE_BACK, fill: 'forwards' },
+    ),
+  ])
 }
 
 function liftAndBloomLeave(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'leave')
-  timeline
-    .to(glyphElement, { y: 0, rotation: 0, scale: 1, duration: 0.24, ease: 'back.out(1.6)' }, 0)
-    .to(root, { y: 0, scale: 1, duration: 0.22, ease: 'power3.out' }, 0.02)
-  return timeline
+  return runMotion(root, glyphElement, 'leave', () => [
+    glyphElement.animate(
+      [{ transform: currentTransform(glyphElement) }, { transform: 'translate3d(0, 0, 0) rotate(0deg) scale(1)' }],
+      { duration: 240, easing: EASE_BACK, fill: 'forwards' },
+    ),
+    root.animate(
+      [{ transform: currentTransform(root) }, { transform: 'translate3d(0, 0, 0) scale(1)' }],
+      { duration: 220, delay: 20, easing: EASE_OUT, fill: 'forwards' },
+    ),
+  ])
 }
 
 function lookAroundEnter(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'enter')
-  timeline
-    .to(root, { y: -1, scale: 1.025, duration: 0.2 }, 0)
-    .to(glyphElement, { x: -2.5, rotation: -7, duration: 0.13 }, 0)
-    .to(glyphElement, { x: 2.5, rotation: 7, duration: 0.17, ease: 'power2.inOut' }, 0.13)
-    .to(
-      glyphElement,
-      { x: 1, rotation: 3, scale: 1.06, duration: 0.16, ease: 'back.out(1.7)' },
-      0.3,
-    )
-  return timeline
+  return runMotion(root, glyphElement, 'enter', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root) },
+        { transform: 'translate3d(0, -1px, 0) scale(1.025)' },
+      ],
+      { duration: 200, easing: EASE_OUT, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement), offset: 0 },
+        { transform: 'translate3d(-2.5px, 0, 0) rotate(-7deg)', offset: 0.28 },
+        { transform: 'translate3d(2.5px, 0, 0) rotate(7deg)', offset: 0.65 },
+        { transform: 'translate3d(1px, 0, 0) rotate(3deg) scale(1.06)', offset: 1 },
+      ],
+      { duration: 460, easing: EASE_IN_OUT, fill: 'forwards' },
+    ),
+  ])
 }
 
 function lookAroundLeave(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'leave')
-  timeline
-    .to(glyphElement, { x: 0, rotation: 0, scale: 1, duration: 0.24, ease: 'back.out(1.7)' }, 0)
-    .to(root, { y: 0, scale: 1, duration: 0.22, ease: 'power3.out' }, 0.02)
-  return timeline
+  return liftAndBloomLeave(root, glyphElement)
 }
 
 function doubleTapEnter(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'enter')
-  timeline
-    .to(root, { y: 1, scale: 0.965, duration: 0.09, ease: 'power2.in' }, 0)
-    .to(glyphElement, { y: 1.5, scale: 0.92, duration: 0.09, ease: 'power2.in' }, 0)
-    .to(root, { y: -3, scale: 1.055, duration: 0.17, ease: 'back.out(2.2)' }, 0.09)
-    .to(glyphElement, { y: -2, scale: 1.12, duration: 0.19, ease: 'back.out(2.4)' }, 0.09)
-  return timeline
+  return runMotion(root, glyphElement, 'enter', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root), offset: 0 },
+        { transform: 'translate3d(0, 1px, 0) scale(0.965)', offset: 0.34 },
+        { transform: 'translate3d(0, -3px, 0) scale(1.055)', offset: 1 },
+      ],
+      { duration: 260, easing: EASE_BACK, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement), offset: 0 },
+        { transform: 'translate3d(0, 1.5px, 0) scale(0.92)', offset: 0.32 },
+        { transform: 'translate3d(0, -2px, 0) scale(1.12)', offset: 1 },
+      ],
+      { duration: 280, easing: EASE_BACK, fill: 'forwards' },
+    ),
+  ])
 }
 
 function doubleTapLeave(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'leave')
-  timeline
-    .to(root, { y: 0.5, scale: 0.985, duration: 0.1, ease: 'power2.in' }, 0)
-    .to(glyphElement, { y: 0.75, scale: 0.97, duration: 0.1, ease: 'power2.in' }, 0)
-    .to(root, { y: 0, scale: 1, duration: 0.17, ease: 'back.out(1.8)' }, 0.1)
-    .to(glyphElement, { y: 0, scale: 1, duration: 0.18, ease: 'back.out(1.9)' }, 0.1)
-  return timeline
+  return runMotion(root, glyphElement, 'leave', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root), offset: 0 },
+        { transform: 'translate3d(0, 0.5px, 0) scale(0.985)', offset: 0.37 },
+        { transform: 'translate3d(0, 0, 0) scale(1)', offset: 1 },
+      ],
+      { duration: 270, easing: EASE_BACK, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement), offset: 0 },
+        { transform: 'translate3d(0, 0.75px, 0) scale(0.97)', offset: 0.35 },
+        { transform: 'translate3d(0, 0, 0) scale(1)', offset: 1 },
+      ],
+      { duration: 280, easing: EASE_BACK, fill: 'forwards' },
+    ),
+  ])
 }
 
 function counterSwingEnter(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'enter')
-  timeline
-    .to(root, { x: -1.5, y: -1.5, rotation: -4, scale: 1.035, duration: 0.14 }, 0)
-    .to(glyphElement, { x: 2, rotation: 8, duration: 0.14 }, 0)
-    .to(root, { x: 1, y: -1, rotation: 2, duration: 0.15, ease: 'power2.inOut' }, 0.14)
-    .to(glyphElement, { x: -1, rotation: -5, duration: 0.15, ease: 'power2.inOut' }, 0.14)
-  return timeline
+  return runMotion(root, glyphElement, 'enter', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root), offset: 0 },
+        { transform: 'translate3d(-1.5px, -1.5px, 0) rotate(-4deg) scale(1.035)', offset: 0.48 },
+        { transform: 'translate3d(1px, -1px, 0) rotate(2deg) scale(1.035)', offset: 1 },
+      ],
+      { duration: 290, easing: EASE_IN_OUT, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement), offset: 0 },
+        { transform: 'translate3d(2px, 0, 0) rotate(8deg)', offset: 0.48 },
+        { transform: 'translate3d(-1px, 0, 0) rotate(-5deg)', offset: 1 },
+      ],
+      { duration: 290, easing: EASE_IN_OUT, fill: 'forwards' },
+    ),
+  ])
 }
 
 function counterSwingLeave(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'leave')
-  timeline
-    .to(root, { x: 0, y: 0, rotation: 0, scale: 1, duration: 0.23, ease: 'back.out(1.6)' }, 0)
-    .to(glyphElement, { x: 0, rotation: 0, duration: 0.21, ease: 'back.out(1.8)' }, 0.02)
-  return timeline
+  return liftAndBloomLeave(root, glyphElement)
 }
 
 function shortOrbitEnter(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'enter')
-  timeline
-    .to(root, { y: -1.5, scale: 1.025, duration: 0.18 }, 0)
-    .to(glyphElement, { x: 2.5, y: -2, rotation: 5, duration: 0.13 }, 0)
-    .to(glyphElement, { x: -2, y: -0.5, rotation: -5, duration: 0.15 }, 0.13)
-    .to(
-      glyphElement,
-      { x: 0.75, y: -1, rotation: 2, scale: 1.08, duration: 0.18, ease: 'back.out(1.8)' },
-      0.28,
-    )
-  return timeline
+  return runMotion(root, glyphElement, 'enter', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root) },
+        { transform: 'translate3d(0, -1.5px, 0) scale(1.025)' },
+      ],
+      { duration: 180, easing: EASE_OUT, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement), offset: 0 },
+        { transform: 'translate3d(2.5px, -2px, 0) rotate(5deg)', offset: 0.28 },
+        { transform: 'translate3d(-2px, -0.5px, 0) rotate(-5deg)', offset: 0.6 },
+        { transform: 'translate3d(0.75px, -1px, 0) rotate(2deg) scale(1.08)', offset: 1 },
+      ],
+      { duration: 460, easing: EASE_OUT, fill: 'forwards' },
+    ),
+  ])
 }
 
 function shortOrbitLeave(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'leave')
-  timeline
-    .to(glyphElement, {
-      x: 0,
-      y: 0,
-      rotation: 0,
-      scale: 1,
-      duration: 0.24,
-      ease: 'back.out(1.7)',
-    })
-    .to(root, { y: 0, scale: 1, duration: 0.22, ease: 'power3.out' }, 0.02)
-  return timeline
+  return liftAndBloomLeave(root, glyphElement)
 }
 
 function brandGreetingEnter(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'enter')
-  timeline
-    .to(root, { scale: 0.965, duration: 0.09, ease: 'power2.in' }, 0)
-    .to(glyphElement, { y: 1, scale: 0.92, duration: 0.09, ease: 'power2.in' }, 0)
-    .to(root, { scale: 1, duration: 0.18, ease: 'back.out(2.4)' }, 0.09)
-    .to(
-      glyphElement,
-      { y: -1.5, rotation: -5, scale: 1.28, duration: 0.22, ease: 'back.out(3)' },
-      0.08,
-    )
-    .to(glyphElement, { x: 1, rotation: 4, scale: 1.2, duration: 0.13, ease: 'power1.inOut' }, 0.3)
-    .to(
-      glyphElement,
-      { x: -0.5, rotation: -2, scale: 1.24, duration: 0.11, ease: 'power1.inOut' },
-      0.43,
-    )
-  return timeline
+  return runMotion(root, glyphElement, 'enter', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root), offset: 0 },
+        { transform: 'scale(0.965)', offset: 0.33 },
+        { transform: 'scale(1)', offset: 1 },
+      ],
+      { duration: 270, easing: EASE_BACK, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement), offset: 0 },
+        { transform: 'translate3d(0, 1px, 0) scale(0.92)', offset: 0.16 },
+        { transform: 'translate3d(0, -1.5px, 0) rotate(-5deg) scale(1.28)', offset: 0.55 },
+        { transform: 'translate3d(1px, -1.5px, 0) rotate(4deg) scale(1.2)', offset: 0.8 },
+        { transform: 'translate3d(-0.5px, -1.5px, 0) rotate(-2deg) scale(1.24)', offset: 1 },
+      ],
+      { duration: 540, easing: EASE_IN_OUT, fill: 'forwards' },
+    ),
+  ])
 }
 
 function brandGreetingLeave(root: HTMLElement, glyphElement: HTMLElement) {
-  const timeline = createMotionTimeline(root, glyphElement, 'leave')
-  timeline
-    .to(glyphElement, {
-      x: 0.35,
-      y: -0.5,
-      rotation: 1,
-      scale: 1.08,
-      duration: 0.14,
-      ease: 'power2.in',
-    })
-    .to(root, { scale: 0.985, duration: 0.14, ease: 'power2.in' }, 0)
-    .to(
-      glyphElement,
-      { x: 0, y: 0, rotation: 0, scale: 1, duration: 0.2, ease: 'back.out(1.8)' },
-      0.12,
-    )
-    .to(root, { scale: 1, duration: 0.2, ease: 'back.out(1.7)' }, 0.12)
-  return timeline
+  return runMotion(root, glyphElement, 'leave', () => [
+    root.animate(
+      [
+        { transform: currentTransform(root), offset: 0 },
+        { transform: 'scale(0.985)', offset: 0.42 },
+        { transform: 'scale(1)', offset: 1 },
+      ],
+      { duration: 320, easing: EASE_BACK, fill: 'forwards' },
+    ),
+    glyphElement.animate(
+      [
+        { transform: currentTransform(glyphElement), offset: 0 },
+        { transform: 'translate3d(0.35px, -0.5px, 0) rotate(1deg) scale(1.08)', offset: 0.4 },
+        { transform: 'translate3d(0, 0, 0) rotate(0deg) scale(1)', offset: 1 },
+      ],
+      { duration: 320, easing: EASE_BACK, fill: 'forwards' },
+    ),
+  ])
 }
 
 function playEnterReaction() {

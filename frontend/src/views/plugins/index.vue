@@ -1,12 +1,21 @@
 <script setup lang="ts">
-import type { PluginAccountSchedulerBinding, PluginArtifact, PluginInstance, PluginManagementPage, PluginMiddlewareBinding, PluginModelRouterBinding, PluginObserverBinding, PluginOnlineRelease, PluginRetryPolicyBinding, PluginUpstreamAdapterBinding } from '@/api/modules/plugins'
+import type { PluginFormState } from './bindings'
+import type { PluginArtifact, PluginInstance, PluginManagementPage, PluginOnlineRelease } from '@/api/modules/plugins'
 import { PackageOpen, Plus, RefreshCw, Upload } from '@lucide/vue'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref, shallowRef, watch } from 'vue'
 import { getApiKeys } from '@/api/modules/api-keys'
-import { checkPluginUpdate, getPluginArtifacts, getPlugins, installPluginUpdate, removePluginArtifact, savePlugin, uninstallPlugin, uploadPlugin } from '@/api/modules/plugins'
+import {
+  checkPluginUpdate,
+  getPluginArtifacts,
+  getPlugins,
+  installPluginUpdate,
+  removePluginArtifact,
+  savePlugin,
+  uninstallPlugin,
+  uploadPlugin,
+} from '@/api/modules/plugins'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
@@ -16,16 +25,33 @@ import BaseModal from '@/components/base/BaseModal/index.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
-import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import RowActionMenu from '@/components/RowActionMenu.vue'
-import PluginFrame from './PluginFrame.vue'
+import { useIdSet } from '@/composables/useIdSet'
+import { errorMessage } from '@/utils/async'
+import { createPluginFormState, parsePluginPayload } from './bindings'
+
+const PluginFrame = defineAsyncComponent(() => import('./PluginFrame.vue'))
+const PluginEditorModal = defineAsyncComponent(() => import('./PluginEditorModal.vue'))
+
+const ONLINE_UPDATABLE_PLUGINS = new Set(['local.model-health', 'cpr.shared-budget-manager'])
 
 const instances = ref<PluginInstance[]>([])
 const artifacts = ref<PluginArtifact[]>([])
-const busy = ref(false)
-const failure = ref('')
-const view = ref('installed')
-const search = ref('')
+const refreshing = shallowRef(false)
+const uploading = shallowRef(false)
+const saving = shallowRef(false)
+const mutating = shallowRef(false)
+const keySearching = shallowRef(false)
+const checkingPlugins = useIdSet<string>()
+const failure = shallowRef('')
+const editorError = shallowRef('')
+const keyError = shallowRef('')
+const view = shallowRef('installed')
+const search = shallowRef('')
+const fileInput = ref<HTMLInputElement>()
+const notices = ref<Record<string, string>>({})
+const onlineUpdates = ref<Record<string, { revision: number, release: PluginOnlineRelease }>>({})
+
 const tabs = computed(() => [
   { label: `已安装 (${instances.value.length})`, value: 'installed' },
   { label: `已上传制品 (${artifacts.value.length})`, value: 'artifacts' },
@@ -42,27 +68,107 @@ const statusLabels: Record<string, string> = {
   disabled: '已停用',
   failed: '启动失败',
 }
-const fileInput = ref<HTMLInputElement>()
-const notices = ref<Record<string, string>>({})
-const onlineUpdates = ref<Record<string, { revision: number, release: PluginOnlineRelease }>>({})
-const confirmUpdate = ref(false)
-const updating = ref<PluginInstance>()
+
+const confirmUpdate = shallowRef(false)
+const updating = shallowRef<PluginInstance>()
+const editing = shallowRef<PluginInstance>()
+const editOpen = shallowRef(false)
+const editorLoaded = shallowRef(false)
+const form = ref<PluginFormState>(createPluginFormState())
+
+const inferenceKey = shallowRef('')
+const keySearch = shallowRef('')
+const keyOptions = ref<{ label: string, value: string }[]>([])
+const selected = ref<{ plugin: PluginInstance, page: PluginManagementPage }>()
+const managementOpen = computed({
+  get: () => Boolean(selected.value),
+  set(open) {
+    if (!open)
+      selected.value = undefined
+  },
+})
+const removing = shallowRef<PluginInstance>()
+const confirmDelete = shallowRef(false)
+const removingArtifact = shallowRef('')
+const confirmArtifactDelete = shallowRef(false)
+
+const busy = computed(() => refreshing.value || uploading.value || saving.value || mutating.value)
 const updateDescription = computed(() => {
   const item = updating.value
   const release = item && onlineUpdates.value[item.id]?.release
-  return item && release ? `从已配置的发布源下载并更新至 ${release.version}，保留当前实例的配置、密钥、定时计划和检测历史。更新会中断正在运行的插件调用，请先暂停检测。升级成功后会清理未被其他实例使用的旧制品。` : ''
+  return item && release
+    ? `从已配置的发布源下载并更新至 ${release.version}，保留当前实例的配置、密钥、定时计划和检测历史。更新会中断正在运行的插件调用，请先暂停检测。升级成功后会清理未被其他实例使用的旧制品。`
+    : ''
 })
+
+watch(() => [selected.value?.plugin.id, selected.value?.plugin.revision], () => {
+  inferenceKey.value = ''
+  keyError.value = ''
+}, { flush: 'sync' })
+
+async function refresh() {
+  refreshing.value = true
+  try {
+    const [items, packages] = await Promise.all([getPlugins(), getPluginArtifacts()])
+    instances.value = items
+    artifacts.value = packages
+    if (selected.value) {
+      const item = items.find(
+        p => p.id === selected.value?.plugin.id && p.revision === selected.value?.plugin.revision && p.status === 'ready',
+      )
+      if (!item)
+        selected.value = undefined
+    }
+  }
+  catch (error) {
+    failure.value = errorMessage(error, '插件列表加载失败，请刷新重试')
+  }
+  finally {
+    refreshing.value = false
+  }
+}
+
+async function searchKeys() {
+  if (keySearching.value)
+    return
+  keySearching.value = true
+  keyError.value = ''
+  try {
+    const result = await getApiKeys({ limit: 100, search: keySearch.value.trim() || undefined })
+    keyOptions.value = result.items
+      .filter(key => key.enabled)
+      .map(key => ({ label: `${key.name} · ${key.prefix}`, value: key.id }))
+  }
+  catch (error) {
+    keyError.value = errorMessage(error, '查询推理 Key 失败')
+  }
+  finally {
+    keySearching.value = false
+  }
+}
+
 async function checkOnline(item: PluginInstance) {
-  await perform(async () => {
-    delete onlineUpdates.value[item.id]
-    const release = await checkPluginUpdate(item)
-    notices.value[item.id] = release ? `发现新版本 ${release.version}` : '当前平台没有可用的新版本'
-    if (release)
-      onlineUpdates.value[item.id] = { revision: item.revision, release }
+  await checkingPlugins.run(item.id, async () => {
+    failure.value = ''
+    try {
+      delete onlineUpdates.value[item.id]
+      const release = await checkPluginUpdate(item)
+      notices.value[item.id] = release ? `发现新版本 ${release.version}` : '当前平台没有可用的新版本'
+      if (release)
+        onlineUpdates.value[item.id] = { revision: item.revision, release }
+    }
+    catch (error) {
+      failure.value = errorMessage(error, '检查插件更新失败')
+    }
   })
 }
+
 async function applyOnline() {
-  await perform(async () => {
+  if (mutating.value)
+    return
+  mutating.value = true
+  failure.value = ''
+  try {
     const item = updating.value
     const pending = item && onlineUpdates.value[item.id]
     if (!item || !pending || pending.revision !== item.revision)
@@ -71,308 +177,170 @@ async function applyOnline() {
     delete onlineUpdates.value[item.id]
     notices.value[item.id] = '更新成功，已保留原实例配置和历史'
     confirmUpdate.value = false
-  })
-}
-const editing = ref<PluginInstance>()
-const editOpen = ref(false)
-const editSection = ref('configuration')
-const editSections = [
-  { label: '基本配置', value: 'configuration' },
-  { label: '密钥', value: 'secrets' },
-  { label: '能力绑定', value: 'bindings' },
-]
-const name = ref('')
-const inferenceKey = ref('')
-const keySearch = ref('')
-const keyOptions = ref<{ label: string, value: string }[]>([])
-async function searchKeys() {
-  await perform(async () => {
-    const result = await getApiKeys({ limit: 100, search: keySearch.value })
-    keyOptions.value = result.items.filter(key => key.enabled).map(key => ({ label: `${key.name} · ${key.prefix}`, value: key.id }))
-  })
-}
-const digest = ref('')
-const configuration = ref('{}')
-const routerEnabled = ref(false)
-const routerOrder = ref('0')
-const routerScope = ref<'all' | 'keys' | 'groups'>('all')
-const routerIds = ref('')
-const routerFailure = ref<'reject' | 'delegate'>('reject')
-function routerBinding(): PluginModelRouterBinding | null {
-  if (!routerEnabled.value)
-    return null
-  const order = Number(routerOrder.value)
-  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
-    throw new Error('模型路由顺序必须是 -10000 到 10000 的整数')
-  const ids = routerIds.value.split(/\s+/u).filter(Boolean)
-  if (routerScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
-    throw new Error('请填写不重复的路由作用范围 ID，最多 256 个')
-  return { order, failurePolicy: routerFailure.value, scope: routerScope.value === 'all' ? { kind: 'all' } : { kind: routerScope.value, ids } }
-}
-const upstreamEnabled = ref(false)
-const upstreamScope = ref<'all' | 'keys' | 'groups'>('all')
-const upstreamIds = ref('')
-function upstreamBinding(): PluginUpstreamAdapterBinding | null {
-  if (!upstreamEnabled.value)
-    return null
-  const ids = upstreamIds.value.split(/\s+/u).filter(Boolean)
-  if (upstreamScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
-    throw new Error('请填写不重复的适配器作用范围 ID，最多 256 个')
-  return { scope: upstreamScope.value === 'all' ? { kind: 'all' } : { kind: upstreamScope.value, ids } }
-}
-const observerEnabled = ref(false)
-const observerOrder = ref('0')
-const observerCompleted = ref(true)
-const observerWebSocket = ref(false)
-const observerCompletedScope = ref<'all' | 'keys' | 'groups'>('all')
-const observerWebSocketScope = ref<'all' | 'keys' | 'groups'>('all')
-const observerCompletedIds = ref('')
-const observerWebSocketIds = ref('')
-function observationScope(kind: 'all' | 'keys' | 'groups', input: string): PluginMiddlewareBinding['scope'] {
-  const ids = input.split(/\s+/u).filter(Boolean)
-  if (kind !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
-    throw new Error('请填写不重复的观察作用范围 ID，最多 256 个')
-  return kind === 'all' ? { kind: 'all' } : { kind, ids }
-}
-function observerBinding(): PluginObserverBinding | null {
-  if (!observerEnabled.value)
-    return null
-  const order = Number(observerOrder.value)
-  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
-    throw new Error('观察顺序必须是 -10000 到 10000 的整数')
-  if (!observerCompleted.value && !observerWebSocket.value)
-    throw new Error('请至少选择一种观察事件')
-  return {
-    order,
-    requestCompleted: observerCompleted.value ? observationScope(observerCompletedScope.value, observerCompletedIds.value) : null,
-    websocketResponse: observerWebSocket.value ? observationScope(observerWebSocketScope.value, observerWebSocketIds.value) : null,
-  }
-}
-const retryEnabled = ref(false)
-const retryOrder = ref('0')
-const retryScope = ref<'all' | 'keys' | 'groups'>('all')
-const retryIds = ref('')
-function retryBinding(): PluginRetryPolicyBinding | null {
-  if (!retryEnabled.value)
-    return null
-  const order = Number(retryOrder.value)
-  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
-    throw new Error('重试策略顺序必须是 -10000 到 10000 的整数')
-  const ids = retryIds.value.split(/\s+/u).filter(Boolean)
-  if (retryScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
-    throw new Error('请填写不重复的重试作用范围 ID，最多 256 个')
-  return { order, scope: retryScope.value === 'all' ? { kind: 'all' } : { kind: retryScope.value, ids } }
-}
-const schedulerEnabled = ref(false)
-const schedulerOrder = ref('0')
-const schedulerScope = ref<'all' | 'keys' | 'groups'>('all')
-const schedulerIds = ref('')
-const schedulerFailure = ref<'reject' | 'delegate'>('reject')
-function schedulerBinding(): PluginAccountSchedulerBinding | null {
-  if (!schedulerEnabled.value)
-    return null
-  const order = Number(schedulerOrder.value)
-  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
-    throw new Error('账号调度顺序必须是 -10000 到 10000 的整数')
-  const ids = schedulerIds.value.split(/\s+/u).filter(Boolean)
-  if (schedulerScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
-    throw new Error('请填写不重复的调度作用范围 ID，最多 256 个')
-  return { order, failurePolicy: schedulerFailure.value, scope: schedulerScope.value === 'all' ? { kind: 'all' } : { kind: schedulerScope.value, ids } }
-}
-const middlewareEnabled = ref(false)
-const middlewareOrder = ref('0')
-const middlewareHttp = ref(false)
-const middlewareWebSocket = ref(false)
-const middlewareService = ref(false)
-const middlewareRequest = ref(true)
-const middlewareAttempt = ref(false)
-const middlewareScope = ref<'all' | 'keys' | 'groups'>('all')
-const middlewareIds = ref('')
-function middlewareBinding(): PluginMiddlewareBinding | null {
-  if (!middlewareEnabled.value)
-    return null
-  const order = Number(middlewareOrder.value)
-  if (!Number.isInteger(order) || order < -10_000 || order > 10_000)
-    throw new Error('中间件顺序必须是 -10000 到 10000 的整数')
-  const mounts: PluginMiddlewareBinding['mounts'] = []
-  if (middlewareHttp.value)
-    mounts.push('http')
-  if (middlewareWebSocket.value)
-    mounts.push('websocket')
-  if (middlewareService.value)
-    mounts.push('service')
-  if (middlewareRequest.value)
-    mounts.push('request')
-  if (middlewareAttempt.value)
-    mounts.push('attempt')
-  if (!mounts.length)
-    throw new Error('请选择中间件挂载位置')
-  if ((middlewareHttp.value || middlewareWebSocket.value || middlewareService.value) && middlewareScope.value !== 'all')
-    throw new Error('HTTP、WebSocket 会话与宿主服务中间件需选择全部请求')
-  const ids = middlewareIds.value.split(/\s+/u).filter(Boolean)
-  if (middlewareScope.value !== 'all' && (!ids.length || ids.length > 256 || new Set(ids).size !== ids.length))
-    throw new Error('作用范围需填写 1～256 个不重复的 ID')
-  return { order, mounts, scope: middlewareScope.value === 'all' ? { kind: 'all' } : { kind: middlewareScope.value, ids } }
-}
-const authenticationEnabled = ref(false)
-const authenticationPolicy = ref<'reject' | 'delegate'>('reject')
-const authenticationIdentities = ref('{}')
-const secrets = ref<Record<string, string>>({})
-const removeSecrets = ref<Record<string, boolean>>({})
-const trust = ref(false)
-const selected = ref<{
-  plugin: PluginInstance
-  page: PluginManagementPage
-}>()
-const managementOpen = computed({
-  get: () => !!selected.value,
-  set(open) {
-    if (!open)
-      selected.value = undefined
-  },
-})
-watch(editOpen, (open) => {
-  if (!open) {
-    secrets.value = {}
-    removeSecrets.value = {}
-    trust.value = false
-  }
-})
-watch(() => [selected.value?.plugin.id, selected.value?.plugin.revision], () => {
-  inferenceKey.value = ''
-}, { flush: 'sync' })
-const removing = ref<PluginInstance>()
-const confirmDelete = ref(false)
-const removingArtifact = ref('')
-const confirmArtifactDelete = ref(false)
-const artifact = computed(() => artifacts.value.find(a => a.sha256 === digest.value))
-const secretFields = computed(() => [...new Set([...(artifact.value?.manifest.secretFields ?? []), ...(editing.value?.configuredSecrets ?? [])])])
-watch(digest, () => {
-  trust.value = false
-})
-const options = computed(() => artifacts.value.filter(a => !editing.value || a.pluginId === editing.value.artifact.pluginId).map(a => ({ label: `${a.displayName} · ${a.version} · ${a.sha256.slice(0, 8)}`, value: a.sha256 })))
-async function refresh() {
-  const [items, packages] = await Promise.all([getPlugins(), getPluginArtifacts()])
-  instances.value = items
-  artifacts.value = packages
-  if (selected.value) {
-    const item = items.find(p => p.id === selected.value?.plugin.id && p.revision === selected.value?.plugin.revision && p.status === 'ready')
-    if (!item)
-      selected.value = undefined
-  }
-}
-async function perform(work: () => Promise<void>) {
-  if (busy.value)
-    return
-  busy.value = true
-  failure.value = ''
-  try {
-    await work()
     await refresh()
   }
   catch (error) {
-    failure.value = error instanceof Error ? error.message : '插件操作失败，请刷新核实状态'
+    failure.value = errorMessage(error, '在线更新插件失败')
   }
   finally {
-    busy.value = false
+    mutating.value = false
   }
 }
-function edit(item?: PluginInstance, pkg?: PluginArtifact) {
+
+function openEditor(item?: PluginInstance, pkg?: PluginArtifact) {
+  editorLoaded.value = true
+  editorError.value = ''
   failure.value = ''
-  editSection.value = 'configuration'
   selected.value = undefined
   editing.value = item
+  form.value = createPluginFormState(item, artifacts.value, pkg)
   editOpen.value = true
-  name.value = item?.name ?? pkg?.displayName ?? ''
-  digest.value = pkg?.sha256 ?? item?.artifact.sha256 ?? artifacts.value[0]?.sha256 ?? ''
-  configuration.value = JSON.stringify(item?.configuration ?? {}, null, 2)
-  routerEnabled.value = !!item?.modelRouter
-  routerOrder.value = String(item?.modelRouter?.order ?? 0)
-  routerScope.value = item?.modelRouter?.scope.kind ?? 'all'
-  routerIds.value = item?.modelRouter && item.modelRouter.scope.kind !== 'all' ? item.modelRouter.scope.ids.join('\n') : ''
-  routerFailure.value = item?.modelRouter?.failurePolicy ?? 'reject'
-  upstreamEnabled.value = !!item?.upstreamAdapter
-  upstreamScope.value = item?.upstreamAdapter?.scope.kind ?? 'all'
-  upstreamIds.value = item?.upstreamAdapter && item.upstreamAdapter.scope.kind !== 'all' ? item.upstreamAdapter.scope.ids.join('\n') : ''
-  observerEnabled.value = !!item?.observer
-  observerOrder.value = String(item?.observer?.order ?? 0)
-  observerCompleted.value = item?.observer ? !!item.observer.requestCompleted : true
-  observerWebSocket.value = !!item?.observer?.websocketResponse
-  observerCompletedScope.value = item?.observer?.requestCompleted?.kind ?? 'all'
-  observerWebSocketScope.value = item?.observer?.websocketResponse?.kind ?? 'all'
-  observerCompletedIds.value = item?.observer?.requestCompleted && item.observer.requestCompleted.kind !== 'all' ? item.observer.requestCompleted.ids.join('\n') : ''
-  observerWebSocketIds.value = item?.observer?.websocketResponse && item.observer.websocketResponse.kind !== 'all' ? item.observer.websocketResponse.ids.join('\n') : ''
-  retryEnabled.value = !!item?.retryPolicy
-  retryOrder.value = String(item?.retryPolicy?.order ?? 0)
-  retryScope.value = item?.retryPolicy?.scope.kind ?? 'all'
-  retryIds.value = item?.retryPolicy && item.retryPolicy.scope.kind !== 'all' ? item.retryPolicy.scope.ids.join('\n') : ''
-  schedulerEnabled.value = !!item?.accountScheduler
-  schedulerOrder.value = String(item?.accountScheduler?.order ?? 0)
-  schedulerScope.value = item?.accountScheduler?.scope.kind ?? 'all'
-  schedulerIds.value = item?.accountScheduler && item.accountScheduler.scope.kind !== 'all' ? item.accountScheduler.scope.ids.join('\n') : ''
-  schedulerFailure.value = item?.accountScheduler?.failurePolicy ?? 'reject'
-  middlewareEnabled.value = !!item?.middleware
-  middlewareOrder.value = String(item?.middleware?.order ?? 0)
-  middlewareHttp.value = item?.middleware?.mounts.includes('http') ?? false
-  middlewareWebSocket.value = item?.middleware?.mounts.includes('websocket') ?? false
-  middlewareService.value = item?.middleware?.mounts.includes('service') ?? false
-  middlewareRequest.value = item?.middleware?.mounts.includes('request') ?? true
-  middlewareAttempt.value = item?.middleware?.mounts.includes('attempt') ?? false
-  middlewareScope.value = item?.middleware?.scope.kind ?? 'all'
-  middlewareIds.value = item?.middleware && item.middleware.scope.kind !== 'all' ? item.middleware.scope.ids.join('\n') : ''
-  authenticationEnabled.value = !!item?.frontendAuthentication
-  authenticationPolicy.value = item?.frontendAuthentication?.failurePolicy ?? 'reject'
-  authenticationIdentities.value = JSON.stringify(item?.frontendAuthentication?.identities ?? {}, null, 2)
-  secrets.value = {}
-  removeSecrets.value = {}
-  trust.value = false
 }
+
 async function upload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
-  if (!file)
+  if (!file || uploading.value)
     return
-  await perform(async () => {
+  uploading.value = true
+  failure.value = ''
+  try {
     if (file.size > 32 * 1024 * 1024)
       throw new Error('插件包不能超过 32 MiB')
     const result = await uploadPlugin(file)
     await refresh()
     const matches = instances.value.filter(item => item.artifact.pluginId === result.pluginId)
     if (matches.length === 1) {
-      edit(matches[0])
-      digest.value = result.sha256
+      openEditor(matches[0])
+      form.value.digest = result.sha256
     }
     else if (matches.length > 1) {
       editOpen.value = false
-      throw new Error('新版已上传。存在多个同名插件实例，请在要升级的实例中点击“配置”，配置和历史会保留。')
+      failure.value = '新版已上传。存在多个同名插件实例，请在要升级的实例中点击“配置”，配置和历史会保留。'
     }
     else {
-      edit(undefined, result)
+      openEditor(undefined, result)
     }
-  })
-  input.value = ''
+  }
+  catch (error) {
+    failure.value = errorMessage(error, '上传插件包失败')
+  }
+  finally {
+    uploading.value = false
+    input.value = ''
+  }
 }
+
 async function save(enabled: boolean) {
-  await perform(async () => {
-    const values: Record<string, string | null> = {}
-    for (const key of secretFields.value) {
-      if (removeSecrets.value[key])
-        values[key] = null
-      else if (secrets.value[key])
-        values[key] = secrets.value[key]!
-    }
-    await savePlugin(editing.value?.id, { observer: observerBinding(), upstreamAdapter: upstreamBinding(), retryPolicy: retryBinding(), accountScheduler: schedulerBinding(), modelRouter: routerBinding(), middleware: middlewareBinding(), frontendAuthentication: authenticationEnabled.value ? { failurePolicy: authenticationPolicy.value, identities: JSON.parse(authenticationIdentities.value) } : null, revision: editing.value?.revision ?? 0, name: name.value, artifactSha256: digest.value, configuration: JSON.parse(configuration.value), secrets: values, enabled, trustedProcess: trust.value })
+  if (saving.value)
+    return
+  editorError.value = ''
+  failure.value = ''
+  const selectedArtifact = artifacts.value.find(item => item.sha256 === form.value.digest)
+  const secretFields = [
+    ...new Set([
+      ...(selectedArtifact?.manifest.secretFields ?? []),
+      ...(editing.value?.configuredSecrets ?? []),
+    ]),
+  ]
+  let payload: ReturnType<typeof parsePluginPayload>
+  try {
+    payload = parsePluginPayload(form.value, secretFields, editing.value?.revision ?? 0, enabled)
+  }
+  catch (error) {
+    editorError.value = errorMessage(error, '插件配置校验失败')
+    return
+  }
+
+  saving.value = true
+  try {
+    await savePlugin(editing.value?.id, payload)
     editOpen.value = false
-    secrets.value = {}
-  })
+    form.value.secrets = {}
+    await refresh()
+  }
+  catch (error) {
+    editorError.value = errorMessage(error, '保存插件配置失败')
+  }
+  finally {
+    saving.value = false
+  }
 }
+
 async function disable(item: PluginInstance) {
-  selected.value = undefined
-  await perform(async () => {
-    await savePlugin(item.id, { observer: item.observer ?? null, upstreamAdapter: item.upstreamAdapter ?? null, retryPolicy: item.retryPolicy ?? null, accountScheduler: item.accountScheduler ?? null, modelRouter: item.modelRouter ?? null, middleware: item.middleware ?? null, frontendAuthentication: item.frontendAuthentication ?? null, revision: item.revision, name: item.name, artifactSha256: item.artifact.sha256, configuration: item.configuration, secrets: {}, enabled: false, trustedProcess: false })
-  })
+  if (mutating.value)
+    return
+  mutating.value = true
+  failure.value = ''
+  try {
+    await savePlugin(item.id, {
+      observer: item.observer ?? null,
+      upstreamAdapter: item.upstreamAdapter ?? null,
+      retryPolicy: item.retryPolicy ?? null,
+      accountScheduler: item.accountScheduler ?? null,
+      modelRouter: item.modelRouter ?? null,
+      middleware: item.middleware ?? null,
+      frontendAuthentication: item.frontendAuthentication ?? null,
+      revision: item.revision,
+      name: item.name,
+      artifactSha256: item.artifact.sha256,
+      configuration: item.configuration,
+      secrets: {},
+      enabled: false,
+      trustedProcess: false,
+    })
+    if (selected.value?.plugin.id === item.id)
+      selected.value = undefined
+    await refresh()
+  }
+  catch (error) {
+    failure.value = errorMessage(error, '停用插件失败')
+  }
+  finally {
+    mutating.value = false
+  }
 }
-onMounted(() => perform(async () => { }))
+
+async function confirmRemoveArtifact() {
+  if (mutating.value || !removingArtifact.value)
+    return
+  mutating.value = true
+  failure.value = ''
+  try {
+    await removePluginArtifact(removingArtifact.value)
+    confirmArtifactDelete.value = false
+    await refresh()
+  }
+  catch (error) {
+    failure.value = errorMessage(error, '删除制品失败')
+  }
+  finally {
+    mutating.value = false
+  }
+}
+
+async function confirmUninstall() {
+  if (mutating.value || !removing.value)
+    return
+  mutating.value = true
+  failure.value = ''
+  try {
+    const target = removing.value
+    await uninstallPlugin(target)
+    if (selected.value?.plugin.id === target.id)
+      selected.value = undefined
+    confirmDelete.value = false
+    await refresh()
+  }
+  catch (error) {
+    failure.value = errorMessage(error, '卸载插件失败')
+  }
+  finally {
+    mutating.value = false
+  }
+}
+
+onMounted(() => void refresh())
 </script>
 
 <template>
@@ -380,13 +348,13 @@ onMounted(() => perform(async () => { }))
     <BasePageHeader title="插件" description="安装和管理网关插件。">
       <template #actions>
         <input ref="fileInput" type="file" aria-label="上传插件包" accept=".gz,.tgz" hidden :disabled="busy" @change="upload">
-        <BaseButton variant="secondary" :disabled="busy" @click="fileInput?.click()">
+        <BaseButton variant="secondary" :loading="uploading" :disabled="busy" @click="fileInput?.click()">
           <template #icon>
             <Upload class="size-4" />
           </template>
           上传插件包
         </BaseButton>
-        <BaseButton :disabled="busy || !artifacts.length" @click="edit()">
+        <BaseButton :disabled="busy || !artifacts.length" @click="openEditor()">
           <template #icon>
             <Plus class="size-4" />
           </template>
@@ -394,227 +362,56 @@ onMounted(() => perform(async () => { }))
         </BaseButton>
       </template>
     </BasePageHeader>
+
     <div class="flex flex-wrap items-center justify-between gap-3">
       <BaseSegmented v-model="view" :options="tabs" label="插件列表" />
       <div class="flex max-w-full items-center gap-2">
         <BaseInput v-model="search" clearable aria-label="搜索插件" placeholder="搜索名称、标识或版本" />
-        <BaseIconButton label="刷新插件列表" :loading="busy" @click="perform(async () => {})">
+        <BaseIconButton label="刷新插件列表" :loading="refreshing" :disabled="busy" @click="refresh">
           <RefreshCw class="size-4" />
         </BaseIconButton>
       </div>
     </div>
-    <p v-if="failure && !editOpen && !managementOpen" role="alert" class="text-cp-error">
+
+    <p v-if="failure && !editOpen && !managementOpen" role="alert" class="m-0 rounded-cp bg-cp-error-container px-4 py-3 text-cp-sm text-cp-error-on-container">
       {{ failure }}
     </p>
-    <BaseModal v-model="editOpen" :title="editing ? '配置插件' : '安装插件'" size="lg" :dismissible="!busy">
-      <div class="space-y-4">
-        <BaseSegmented v-model="editSection" :options="editSections" label="插件配置分区" />
-        <p v-if="failure" role="alert" class="text-cp-error">
-          {{ failure }}
-        </p>
-        <div v-show="editSection === 'configuration'" class="space-y-4">
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-name" class="block">实例名称<BaseInput id="plugin-name" v-model="name" placeholder="实例名称" :disabled="busy" /></label>
-          <BaseSelect v-model="digest" aria-label="插件制品版本" :options="options" :disabled="busy" placeholder="选择已上传制品" />
-          <p v-if="editing && digest !== editing.artifact.sha256" class="m-0 text-cp-sm text-cp-text-secondary">
-            升级成功后会清理未被其他实例使用的旧制品。
-          </p>
-          <p v-if="artifact?.versionWarning" class="text-amber-600">
-            {{ artifact.versionWarning }}
-          </p>
-          <p v-if="artifact?.unsupportedCapabilities.length" class="text-amber-600">
-            尚未支持：{{ artifact.unsupportedCapabilities.join('、') }}。可以保存配置，暂不能启用。
-          </p>
-          <!-- The shared field component forwards id to its native control. -->
-          <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-          <label for="plugin-configuration" class="block">配置（JSON）<BaseTextarea id="plugin-configuration" v-model="configuration" :rows="8" :disabled="busy" /></label>
-          <details><summary>查看配置要求</summary><pre class="overflow-auto text-sm">{{ JSON.stringify(artifact?.manifest.configurationSchema, null, 2) }}</pre></details>
-        </div>
-        <div v-show="editSection === 'secrets'" class="space-y-4">
-          <BaseEmpty v-if="!secretFields.length" title="这个版本没有密钥配置" size="sm" />
-          <div v-for="field in secretFields" :key="field" class="space-y-2">
-            <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-            <label :for="`plugin-secret-${field}`" class="block">{{ field }}</label>
-            <div class="flex items-center gap-2">
-              <BaseInput :id="`plugin-secret-${field}`" v-model="secrets[field]" type="password" autocomplete="new-password" :placeholder="removeSecrets[field] ? '保存时清除' : editing?.configuredSecrets.includes(field) ? '已配置，留空保留' : '填写密钥'" :disabled="busy || removeSecrets[field] || !artifact?.manifest.secretFields.includes(field)" />
-              <BaseButton v-if="editing?.configuredSecrets.includes(field)" size="sm" variant="secondary" :disabled="busy" @click="removeSecrets[field] = !removeSecrets[field]">
-                {{ removeSecrets[field] ? '撤销清除' : '清除' }}
-              </BaseButton>
-            </div>
-          </div>
-        </div>
-        <div v-show="editSection === 'bindings'" class="space-y-3">
-          <details class="space-y-3">
-            <summary>模型路由</summary>
-            <BaseCheckbox v-model="routerEnabled" show-label label="使用此插件选择模型和 Provider" :disabled="busy" />
-            <template v-if="routerEnabled">
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label for="plugin-router-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-router-order" v-model="routerOrder" type="number" :disabled="busy" /></label>
-              <BaseSelect v-model="routerScope" aria-label="模型路由作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label v-if="routerScope !== 'all'" for="plugin-router-ids" class="block">{{ routerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-router-ids" v-model="routerIds" :rows="3" :disabled="busy" /></label>
-              <BaseSelect v-model="routerFailure" aria-label="路由插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '委托后续路由策略', value: 'delegate' }]" :disabled="busy" />
-              <p class="text-sm text-cp-text-secondary">
-                路由选择仍受 Key 权限、模型能力和续接约束。首个明确决定生效；明确拒绝不会继续委托。插件变更或停用会撤销旧请求。
-              </p>
-            </template>
-          </details>
-          <details class="space-y-3">
-            <summary>账号调度</summary>
-            <BaseCheckbox v-model="schedulerEnabled" show-label label="使用此插件选择上游账号" :disabled="busy" />
-            <template v-if="schedulerEnabled">
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label for="plugin-scheduler-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-scheduler-order" v-model="schedulerOrder" type="number" :disabled="busy" /></label>
-              <BaseSelect v-model="schedulerScope" aria-label="账号调度作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label v-if="schedulerScope !== 'all'" for="plugin-scheduler-ids" class="block">{{ schedulerScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-scheduler-ids" v-model="schedulerIds" :rows="3" :disabled="busy" /></label>
-              <BaseSelect v-model="schedulerFailure" aria-label="调度插件故障行为" :options="[{ label: '拒绝请求', value: 'reject' }, { label: '使用宿主账号调度', value: 'delegate' }]" :disabled="busy" />
-              <p class="text-sm text-cp-text-secondary">
-                按顺序只调用首个匹配的调度插件，委托时使用宿主选号。账号选择仍受 Key 权限、续接绑定和可用容量约束。明确拒绝会终止请求；插件变更或停用会撤销旧请求。
-              </p>
-            </template>
-          </details>
-          <details class="space-y-3">
-            <summary>上游适配器</summary>
-            <BaseCheckbox v-model="upstreamEnabled" show-label label="使用此插件适配上游请求" :disabled="busy" />
-            <template v-if="upstreamEnabled">
-              <BaseSelect v-model="upstreamScope" aria-label="上游适配器作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label v-if="upstreamScope !== 'all'" for="plugin-upstream-ids" class="block">{{ upstreamScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-upstream-ids" v-model="upstreamIds" :rows="3" :disabled="busy" /></label>
-              <p class="text-sm text-cp-text-secondary">
-                使用插件声明的 Provider 和公开模型范围，重叠绑定会被拒绝。账号权限、选择和计费仍由网关管理；匹配的适配器不可用时请求会失败。当前可保存绑定，启用支持以制品提示为准。
-              </p>
-            </template>
-          </details>
-          <details class="space-y-3">
-            <summary>重试策略</summary>
-            <BaseCheckbox v-model="retryEnabled" show-label label="由此插件决定是否继续恢复请求" :disabled="busy" />
-            <template v-if="retryEnabled">
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label for="plugin-retry-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-retry-order" v-model="retryOrder" type="number" :disabled="busy" /></label>
-              <BaseSelect v-model="retryScope" aria-label="重试策略作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label v-if="retryScope !== 'all'" for="plugin-retry-ids" class="block">{{ retryScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-retry-ids" v-model="retryIds" :rows="3" :disabled="busy" /></label>
-              <p class="text-sm text-cp-text-secondary">
-                依次咨询匹配的策略，插件委托或故障时交给后续策略处理。明确停止会保留原始失败。整条链最多等待两秒；插件不能增加重试次数、缩短退避或绕过安全恢复条件。
-              </p>
-            </template>
-          </details>
-          <details class="space-y-3 rounded-lg border border-cp-border p-3">
-            <summary>观察订阅</summary>
-            <p class="text-sm text-cp-text-secondary">
-              观察插件可读取请求终态、用量和费用，以及实际上游 WebSocket 的原始响应内容。请选择需要共享的事件和作用范围。
-            </p>
-            <BaseCheckbox v-model="observerEnabled" show-label label="向此插件投递观察事件" :disabled="busy" />
-            <template v-if="observerEnabled">
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label for="plugin-observer-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-observer-order" v-model="observerOrder" type="number" :disabled="busy" /></label>
-              <BaseCheckbox v-model="observerCompleted" show-label label="请求完成事件" :disabled="busy" />
-              <template v-if="observerCompleted">
-                <BaseSelect v-model="observerCompletedScope" aria-label="请求完成观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-                <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-                <label v-if="observerCompletedScope !== 'all'" for="plugin-observer-completed-ids" class="block">{{ observerCompletedScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-completed-ids" v-model="observerCompletedIds" :rows="3" :disabled="busy" /></label>
-              </template>
-              <BaseCheckbox v-model="observerWebSocket" show-label label="实际上游 WebSocket 响应帧" :disabled="busy" />
-              <template v-if="observerWebSocket">
-                <BaseSelect v-model="observerWebSocketScope" aria-label="WebSocket 观察范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-                <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-                <label v-if="observerWebSocketScope !== 'all'" for="plugin-observer-websocket-ids" class="block">{{ observerWebSocketScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-observer-websocket-ids" v-model="observerWebSocketIds" :rows="3" :disabled="busy" /></label>
-              </template>
-              <p class="text-sm text-cp-text-secondary">
-                观察失败或停用不会改变请求结果。投递有容量和时间限制，繁忙时可能跳过事件；插件可用事件 ID 自行去重。
-              </p>
-            </template>
-          </details>
-          <details class="space-y-3">
-            <summary>中间件绑定</summary>
-            <p class="text-sm text-cp-text-secondary">
-              仅用于声明中间件能力的插件。当前可保存绑定，待请求入口接入后才能启用；是否支持以制品上方的提示为准。
-            </p>
-            <BaseCheckbox v-model="middlewareEnabled" show-label label="配置中间件的顺序与作用范围" :disabled="busy" />
-            <template v-if="middlewareEnabled">
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label for="plugin-middleware-order" class="block">执行顺序（较小的先执行）<BaseInput id="plugin-middleware-order" v-model="middlewareOrder" type="number" :disabled="busy" /></label>
-              <div class="flex flex-wrap gap-4">
-                <BaseCheckbox v-model="middlewareHttp" show-label label="HTTP 入口" :disabled="busy" />
-                <BaseCheckbox v-model="middlewareWebSocket" show-label label="WebSocket 会话" :disabled="busy" />
-                <BaseCheckbox v-model="middlewareService" show-label label="宿主服务调用" :disabled="busy" />
-                <BaseCheckbox v-model="middlewareRequest" show-label label="每个逻辑请求" :disabled="busy" />
-                <BaseCheckbox v-model="middlewareAttempt" show-label label="每次上游尝试" :disabled="busy" />
-              </div>
-              <BaseSelect v-model="middlewareScope" aria-label="中间件作用范围" :options="[{ label: '全部请求', value: 'all' }, { label: '指定 Key', value: 'keys' }, { label: '指定分组', value: 'groups' }]" :disabled="busy" />
-              <p v-if="middlewareHttp || middlewareWebSocket || middlewareService" class="text-sm text-cp-text-secondary">
-                HTTP、WebSocket 会话与宿主服务调用需选择全部请求。指定 Key 或分组仅适用于逻辑请求与上游尝试。
-              </p>
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label v-if="middlewareScope !== 'all'" for="plugin-middleware-ids" class="block">{{ middlewareScope === 'keys' ? 'Key ID' : '分组 ID' }}（每行一个）<BaseTextarea id="plugin-middleware-ids" v-model="middlewareIds" :rows="3" :disabled="busy" /></label>
-              <p class="text-sm text-cp-text-secondary">
-                范围只决定哪些请求调用插件，不增加 Key 权限。同序号按实例 ID 排序；修改或停用会撤销旧调用。升级准备失败仍使用旧版本。
-              </p>
-            </template>
-          </details>
-          <details class="space-y-3">
-            <summary>外部认证</summary>
-            <p class="text-sm text-cp-text-secondary">
-              仅用于声明入口认证能力的插件。同一时间只能启用一个认证器；此配置不会发送给插件。变更或停用会撤销旧授权。
-            </p>
-            <BaseCheckbox v-model="authenticationEnabled" show-label label="使用此插件认证客户端请求" :disabled="busy" />
-            <template v-if="authenticationEnabled">
-              <BaseSelect v-model="authenticationPolicy" aria-label="不匹配时的认证行为" :options="[{ label: '拒绝所有未匹配请求', value: 'reject' }, { label: '仅对明确未匹配的请求尝试普通 Key', value: 'delegate' }]" :disabled="busy" />
-              <!-- eslint-disable-next-line vue-a11y/label-has-for -->
-              <label for="plugin-auth-identities" class="block">外部身份到本地 Key 的映射（JSON）<BaseTextarea id="plugin-auth-identities" v-model="authenticationIdentities" :rows="5" :disabled="busy" placeholder="{&quot;external-user&quot;: &quot;key_id&quot;}" /></label>
-              <p class="text-sm text-cp-text-secondary">
-                填写 Key ID，不要填写密钥。映射身份将使用该 Key 所属用户的分组权限、倍率与共享额度。认证器超时、拒绝或返回未知身份时不会回退。
-              </p>
-            </template>
-          </details>
-        </div>
-      </div>
-      <template #footer>
-        <div class="w-full space-y-3">
-          <p class="text-sm text-cp-text-secondary">
-            插件进程以网关的系统身份运行，可访问主机文件、凭据和网络。仅安装可信来源的插件。
-          </p>
-          <BaseCheckbox v-model="trust" show-label label="我信任此插件及所选版本，允许它在网关上运行" :disabled="busy" />
-          <div class="flex flex-wrap justify-end gap-2">
-            <BaseButton variant="secondary" :disabled="busy" @click="editOpen = false">
-              取消
-            </BaseButton>
-            <BaseButton variant="secondary" :disabled="busy || !artifact" @click="save(false)">
-              保存并停用
-            </BaseButton>
-            <BaseButton :disabled="busy || !trust || !artifact || !!artifact.unsupportedCapabilities.length" @click="save(true)">
-              保存并启用
-            </BaseButton>
-          </div>
-        </div>
-      </template>
-    </BaseModal>
 
     <div v-if="view === 'installed'" class="grid gap-3">
-      <BaseEmpty v-if="!filteredInstances.length && !busy" :icon="PackageOpen" :title="query ? '没有匹配的插件' : '还没有安装插件'" />
+      <BaseEmpty v-if="!filteredInstances.length && !refreshing" :icon="PackageOpen" :title="query ? '没有匹配的插件' : '还没有安装插件'" />
       <BaseCard v-for="item in filteredInstances" :key="item.id" class="space-y-3 p-4">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
-              <h2 class="font-semibold break-all">
+              <h2 class="m-0 font-semibold break-all text-cp-text">
                 {{ item.name }}
               </h2>
-              <span class="rounded-full bg-cp-fill-alter px-2 py-0.5 text-cp-xs font-medium" :class="item.status === 'ready' ? 'text-cp-success' : item.status === 'failed' ? 'text-cp-error' : 'text-cp-text-secondary'">{{ statusLabels[item.status] ?? item.status }}</span>
+              <span
+                class="rounded-full bg-cp-fill-alter px-2 py-0.5 text-cp-xs font-medium"
+                :class="item.status === 'ready' ? 'text-cp-success' : item.status === 'failed' ? 'text-cp-error' : 'text-cp-text-secondary'"
+              >
+                {{ statusLabels[item.status] ?? item.status }}
+              </span>
             </div>
-            <p class="mt-1 text-cp-xs break-all text-cp-text-secondary">
+            <p class="mt-1 mb-0 text-cp-xs break-all text-cp-text-secondary">
               {{ item.artifact.pluginId }} · {{ item.artifact.version }}
             </p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
-            <BaseButton v-for="page in item.status === 'ready' ? item.pages : []" :key="page.id" size="sm" variant="secondary" @click="failure = ''; selected = { plugin: item, page }">
+            <BaseButton
+              v-for="page in item.status === 'ready' ? item.pages : []"
+              :key="page.id"
+              size="sm"
+              variant="secondary"
+              @click="failure = ''; selected = { plugin: item, page }"
+            >
               {{ page.title }}
             </BaseButton>
-            <BaseButton size="sm" variant="secondary" :disabled="busy" @click="edit(item)">
+            <BaseButton size="sm" variant="secondary" :disabled="busy" @click="openEditor(item)">
               配置
             </BaseButton>
-            <RowActionMenu v-slot="{ select }" :label="`${item.name}的更多操作`" :loading="busy">
-              <BaseMenuItem v-if="['local.model-health', 'cpr.shared-budget-manager'].includes(item.artifact.pluginId)" role="menuitem" tabindex="-1" @click="select(() => checkOnline(item))">
+            <RowActionMenu v-slot="{ select }" :label="`${item.name}的更多操作`" :loading="busy || checkingPlugins.ids.value.has(item.id)">
+              <BaseMenuItem v-if="ONLINE_UPDATABLE_PLUGINS.has(item.artifact.pluginId)" role="menuitem" tabindex="-1" @click="select(() => checkOnline(item))">
                 检查更新
               </BaseMenuItem>
               <BaseMenuItem v-if="onlineUpdates[item.id]?.revision === item.revision" role="menuitem" tabindex="-1" @click="select(() => { updating = item; confirmUpdate = true })">
@@ -629,28 +426,29 @@ onMounted(() => perform(async () => { }))
             </RowActionMenu>
           </div>
         </div>
-        <p v-if="notices[item.id]" class="text-sm text-cp-text-secondary">
+        <p v-if="notices[item.id]" class="m-0 text-sm text-cp-text-secondary">
           {{ notices[item.id] }}
-          <a v-if="onlineUpdates[item.id]" :href="onlineUpdates[item.id]!.release.releaseUrl" target="_blank" rel="noopener noreferrer" class="underline">查看发布说明</a>
+          <a v-if="onlineUpdates[item.id]" :href="onlineUpdates[item.id]!.release.releaseUrl" target="_blank" rel="noopener noreferrer" class="text-cp-link underline hover:text-cp-link-hover">查看发布说明</a>
         </p>
-        <p v-if="item.runtimeLoad" class="text-xs text-cp-text-secondary" title="实时采样，各项可能重叠；刷新列表更新">
+        <p v-if="item.runtimeLoad" class="m-0 text-xs text-cp-text-secondary" title="实时采样，各项可能重叠；刷新列表更新">
           在途 {{ item.runtimeLoad.activeCalls }} · 执行 {{ item.runtimeLoad.executingCalls }} · 排队 {{ item.runtimeLoad.queuedCalls }} · 等待恢复 {{ item.runtimeLoad.resumingCalls }} · 回调 {{ item.runtimeLoad.pendingCallbacks }} · 流 {{ item.runtimeLoad.activeStreams }}
         </p>
       </BaseCard>
     </div>
+
     <div v-else class="grid gap-3">
-      <BaseEmpty v-if="!filteredArtifacts.length && !busy" :icon="PackageOpen" :title="query ? '没有匹配的制品' : '还没有上传制品'" />
+      <BaseEmpty v-if="!filteredArtifacts.length && !refreshing" :icon="PackageOpen" :title="query ? '没有匹配的制品' : '还没有上传制品'" />
       <BaseCard v-for="pkg in filteredArtifacts" :key="pkg.sha256" class="flex flex-wrap items-center justify-between gap-3 p-4">
         <div class="min-w-0">
-          <h2 class="font-semibold break-all">
+          <h2 class="m-0 font-semibold break-all text-cp-text">
             {{ pkg.displayName }}
           </h2>
-          <p class="mt-1 text-cp-xs break-all text-cp-text-secondary">
+          <p class="mt-1 mb-0 text-cp-xs break-all text-cp-text-secondary">
             {{ pkg.pluginId }} · {{ pkg.version }} · {{ pkg.sha256.slice(0, 8) }}
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
-          <BaseButton variant="secondary" size="sm" :disabled="busy" @click="edit(undefined, pkg)">
+          <BaseButton variant="secondary" size="sm" :disabled="busy" @click="openEditor(undefined, pkg)">
             创建实例
           </BaseButton>
           <BaseButton variant="secondary" size="sm" :disabled="busy || instances.some(item => item.artifact.sha256 === pkg.sha256)" @click="removingArtifact = pkg.sha256; confirmArtifactDelete = true">
@@ -659,26 +457,46 @@ onMounted(() => perform(async () => { }))
         </div>
       </BaseCard>
     </div>
+
     <BaseModal v-model="managementOpen" :title="selected?.page.title ?? '插件管理'" size="xl">
       <div v-if="selected" class="space-y-3">
-        <p class="text-sm text-cp-text-secondary">
+        <p class="m-0 text-sm text-cp-text-secondary">
           推理使用本人 Key 的权限与额度，按现有倍率计费。更换 Key 或关闭页面会取消页面直接发起的推理；已启动的后台检测不受影响，请在插件内暂停或结束。
         </p>
         <div class="flex flex-wrap items-center gap-2">
           <BaseInput v-model="keySearch" aria-label="搜索本人推理 Key" placeholder="搜索本人 Key" class="max-w-xs" @keydown.enter="searchKeys" />
-          <BaseButton variant="secondary" :disabled="busy" @click="searchKeys">
+          <BaseButton variant="secondary" :loading="keySearching" :disabled="keySearching" @click="searchKeys">
             查询 Key
           </BaseButton>
-          <BaseSelect v-model="inferenceKey" aria-label="选择推理 Key" :options="keyOptions" placeholder="选择本人 Key 后允许推理" class="max-w-sm" />
+          <BaseSelect
+            v-model="inferenceKey"
+            searchable
+            aria-label="选择推理 Key"
+            :options="keyOptions"
+            placeholder="选择本人 Key 后允许推理"
+            class="min-w-56 max-w-sm"
+          />
         </div>
-        <p v-if="failure" role="alert" class="text-cp-error">
-          {{ failure }}
+        <p v-if="keyError" role="alert" class="m-0 text-cp-xs text-cp-error">
+          {{ keyError }}
         </p>
         <PluginFrame :key="[selected.plugin.id, selected.plugin.revision, selected.page.id].join('/')" :plugin="selected.plugin" :page="selected.page" :client-key-id="inferenceKey" />
       </div>
     </BaseModal>
-    <BaseConfirmModal v-model="confirmUpdate" title="在线更新插件" :description="updateDescription" :loading="busy" @confirm="applyOnline" />
-    <BaseConfirmModal v-model="confirmArtifactDelete" title="删除制品" description="仅能删除没有实例使用的制品。删除后需要重新上传才能安装该版本。" destructive :loading="busy" @confirm="perform(async () => { await removePluginArtifact(removingArtifact); confirmArtifactDelete = false })" />
-    <BaseConfirmModal v-model="confirmDelete" title="卸载插件" description="将停止该插件并删除实例配置和私有状态，进行中的调用会被取消。已上传制品保留，重新安装不会恢复旧状态。" destructive :loading="busy" @confirm="perform(async () => { if (removing) await uninstallPlugin(removing); confirmDelete = false })" />
+
+    <PluginEditorModal
+      v-if="editorLoaded"
+      v-model="editOpen"
+      v-model:form="form"
+      :editing="editing"
+      :artifacts="artifacts"
+      :saving="saving"
+      :error="editorError"
+      @save="save"
+    />
+
+    <BaseConfirmModal v-model="confirmUpdate" title="在线更新插件" :description="updateDescription" :loading="mutating" @confirm="applyOnline" />
+    <BaseConfirmModal v-model="confirmArtifactDelete" title="删除制品" description="仅能删除没有实例使用的制品。删除后需要重新上传才能安装该版本。" destructive :loading="mutating" @confirm="confirmRemoveArtifact" />
+    <BaseConfirmModal v-model="confirmDelete" title="卸载插件" description="将停止该插件并删除实例配置和私有状态，进行中的调用会被取消。已上传制品保留，重新安装不会恢复旧状态。" destructive :loading="mutating" @confirm="confirmUninstall" />
   </div>
 </template>

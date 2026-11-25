@@ -2,12 +2,11 @@
 import type { AccountRow } from '../../constants'
 import { RefreshCw, UserRound } from '@lucide/vue'
 
-import { computed, shallowRef } from 'vue'
+import { computed, defineAsyncComponent, shallowRef } from 'vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import { groupedAccountQuotaWindows, orderedPanelQuotaWindows } from '../../constants'
 import AccountPlanBadge from '../AccountPlanBadge.vue'
-import AccountProfileModal from '../AccountProfileModal/index.vue'
 import AccountQuotaPanelEntry from './Entry.vue'
 import AccountResetCredits from './ResetCredits.vue'
 import UsageCap from './UsageCap.vue'
@@ -22,10 +21,18 @@ const emit = defineEmits<{
   accountUpdated: [account: AccountRow]
 }>()
 
+const AccountProfileModal = defineAsyncComponent(() => import('../AccountProfileModal/index.vue'))
+
 const quotaEntries = computed(() => groupedAccountQuotaWindows(
   orderedPanelQuotaWindows(props.account.quota.windows),
 ))
 const profileOpen = shallowRef(false)
+const profileLoaded = shallowRef(false)
+
+function openProfile() {
+  profileLoaded.value = true
+  profileOpen.value = true
+}
 </script>
 
 <template>
@@ -55,7 +62,7 @@ const profileOpen = shallowRef(false)
           size="sm"
           variant="ghost"
           :pressed="profileOpen"
-          @click="profileOpen = true"
+          @click="openProfile"
         >
           <UserRound class="size-3.5" />
         </BaseIconButton>
@@ -98,7 +105,7 @@ const profileOpen = shallowRef(false)
   </section>
 
   <AccountProfileModal
-    v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'"
+    v-if="profileLoaded && account.provider === 'openai' && account.authenticationKind === 'oauth'"
     v-model="profileOpen"
     :account="account"
   />

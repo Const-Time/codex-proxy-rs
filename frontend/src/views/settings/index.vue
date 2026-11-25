@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Save, Undo2 } from '@lucide/vue'
 import { useEventListener } from '@vueuse/core'
-import { computed, nextTick, onScopeDispose, reactive, ref, useTemplateRef, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onScopeDispose, reactive, ref, useTemplateRef, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -15,7 +15,6 @@ import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import { useAuthStore } from '@/stores/modules/auth'
 
 import AdminApiKeyCard from './components/AdminApiKeyCard.vue'
-import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
 import ClientVersionSettings from './components/client-version/index.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import ResetCreditCard from './components/ResetCreditCard.vue'
@@ -24,7 +23,9 @@ import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
 import { useAdminApiKey } from './composables/useAdminApiKey'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { rotationOptions } from './constants'
-import PricingSection from './pricing/index.vue'
+
+const SettingsBackupSection = defineAsyncComponent(() => import('./components/backup/SettingsBackupSection.vue'))
+const PricingSection = defineAsyncComponent(() => import('./pricing/index.vue'))
 
 const route = useRoute()
 const router = useRouter()

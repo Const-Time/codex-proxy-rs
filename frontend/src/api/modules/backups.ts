@@ -125,11 +125,12 @@ export function updateBackupSchedule(data: UpdateBackupSchedulePayload) {
   })
 }
 
-export function getBackupRecords(params: BackupRecordsParams) {
+export function getBackupRecords(params: BackupRecordsParams, signal?: AbortSignal) {
   return request<BackupRecordPage>({
     url: '/api/admin/settings/backups/records',
     method: 'GET',
     params,
+    signal,
   })
 }
 

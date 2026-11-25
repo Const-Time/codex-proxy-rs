@@ -1,18 +1,20 @@
 <script setup lang="ts">
-import { onKeyStroke, useMediaQuery } from '@vueuse/core'
+import { onKeyStroke } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
-import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
 import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
+import { useIsDesktop } from '@/composables/useSharedMedia'
 
 import { useAuthStore } from '@/stores/modules/auth'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { useUiStore } from '@/stores/modules/ui'
 
-import AppAboutModal from './components/AppAboutModal.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import FloatingSidebarToggle from './components/FloatingSidebarToggle.vue'
-import SystemUpdateModal from './components/SystemUpdateModal/index.vue'
+
+const AppAboutModal = defineAsyncComponent(() => import('./components/AppAboutModal.vue'))
+const SystemUpdateModal = defineAsyncComponent(() => import('./components/SystemUpdateModal/index.vue'))
 
 const uiStore = useUiStore()
 const systemUpdateStore = useSystemUpdateStore()
@@ -23,11 +25,18 @@ const route = useRoute()
 const pageScrollbarRef = ref<InstanceType<typeof BaseScrollbar> | null>(null)
 const mobileSidebarOpen = shallowRef(false)
 const mobileSidebar = ref<HTMLElement | null>(null)
-const desktop = useMediaQuery('(min-width: 961px)')
+const desktop = useIsDesktop()
 let sidebarTrigger: HTMLElement | null = null
 const aboutOpen = shallowRef(false)
+const aboutLoaded = shallowRef(false)
 const systemUpdateOpen = shallowRef(false)
+const systemUpdateLoaded = shallowRef(false)
 const systemUpdateOpening = shallowRef(false)
+
+function openAbout() {
+  aboutLoaded.value = true
+  aboutOpen.value = true
+}
 
 async function openMobileSidebar() {
   sidebarTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -78,6 +87,7 @@ async function openSystemUpdate() {
   if (systemUpdateOpen.value || systemUpdateOpening.value)
     return
 
+  systemUpdateLoaded.value = true
   systemUpdateOpening.value = true
   try {
     if (!loadedOnce.value)
@@ -117,7 +127,7 @@ watch(
     <AppSidebar
       :collapsed="sidebarCollapsed"
       @toggle="toggleSidebar"
-      @open-about="aboutOpen = true"
+      @open-about="openAbout"
       @open-system-update="openSystemUpdate"
     />
     <FloatingSidebarToggle v-show="!mobileSidebarOpen" @open="openMobileSidebar" />
@@ -146,7 +156,7 @@ watch(
               mobile
               @close="closeMobileSidebar"
               @navigate="closeMobileSidebar"
-              @open-about="closeMobileSidebar(); aboutOpen = true"
+              @open-about="closeMobileSidebar(); openAbout()"
               @open-system-update="closeMobileSidebar(); openSystemUpdate()"
             />
           </div>
@@ -154,8 +164,8 @@ watch(
       </Transition>
     </Teleport>
 
-    <AppAboutModal v-model="aboutOpen" />
-    <SystemUpdateModal v-model="systemUpdateOpen" />
+    <AppAboutModal v-if="aboutLoaded" v-model="aboutOpen" />
+    <SystemUpdateModal v-if="systemUpdateLoaded" v-model="systemUpdateOpen" />
   </div>
 </template>
 

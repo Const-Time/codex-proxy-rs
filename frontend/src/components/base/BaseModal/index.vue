@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from '@lucide/vue'
-import { useMediaQuery, useResizeObserver } from '@vueuse/core'
+import { useResizeObserver } from '@vueuse/core'
 import { nextTick, onBeforeUnmount, useId, useTemplateRef, watch } from 'vue'
+import { useIsMobile } from '@/composables/useSharedMedia'
 
 import BaseIconButton from '../BaseIconButton.vue'
 import BaseScrollbar from '../BaseScrollbar.vue'
@@ -35,7 +36,7 @@ const open = defineModel<boolean>({ default: false })
 const panel = useTemplateRef<HTMLElement>('panel')
 const titleId = useId()
 const descriptionId = useId()
-const mobile = useMediaQuery('(max-width: 639px)')
+const mobile = useIsMobile()
 const { cancelDrag, constrainPosition, handlePointerDown, isDragging, resetPosition } = useModalDrag(
   panel,
   () => props.draggable && !mobile.value,
@@ -104,7 +105,7 @@ function closeModal() {
 
 function focusableElements() {
   return Array.from(panel.value?.querySelectorAll<HTMLElement>(focusableSelector) ?? []).filter(
-    element => !element.hidden,
+    element => !element.hidden && element.getClientRects().length > 0,
   )
 }
 

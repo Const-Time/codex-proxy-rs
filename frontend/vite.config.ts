@@ -2,7 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
-import { pluginBridge } from './build/plugin-bridge'
+import { pluginBridge } from './build/plugin-bridge.ts'
 
 export default defineConfig({
   base: '/',
@@ -32,14 +32,44 @@ export default defineConfig({
       },
       output: {
         codeSplitting: {
+          minSize: 16_384,
           groups: [
             {
-              name: 'echarts',
-              test: /node_modules\/echarts/,
+              name: 'zrender',
+              priority: 30,
+              test: /[\\/]node_modules[\\/](?:.*[/\\])?zrender[\\/]/,
             },
             {
-              name: 'zrender',
-              test: /node_modules\/zrender/,
+              name: 'echarts',
+              priority: 20,
+              test: /[\\/]node_modules[\\/](?:.*[/\\])?echarts[\\/]/,
+            },
+            {
+              name: 'plugin-sandbox',
+              priority: 20,
+              test: /[\\/]node_modules[\\/](?:.*[/\\])?css-tree[\\/]/,
+            },
+            {
+              name: 'icons',
+              priority: 15,
+              test: /[\\/]node_modules[\\/](?:.*[/\\])?@lucide[\\/]vue[\\/]/,
+            },
+            {
+              name: 'vendor',
+              priority: 10,
+              test: /[\\/]node_modules[\\/](?:.*[/\\])?(?:vue|@vue|vue-router|pinia|pinia-plugin-persistedstate|@vueuse|axios)[\\/]/,
+            },
+            {
+              name: 'base-ui',
+              priority: 8,
+              minShareCount: 2,
+              test: /[\\/]src[\\/]components[\\/](?:base[\\/](?!BaseTable[\\/]BaseTableColumnSettingsPanel|BaseColorPicker)|icons[\\/])/,
+            },
+            {
+              name: 'app-shared',
+              priority: 5,
+              minShareCount: 2,
+              test: /[\\/]src[\\/](?:composables|utils|api)[\\/]/,
             },
           ],
         },

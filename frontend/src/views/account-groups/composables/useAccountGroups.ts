@@ -51,13 +51,13 @@ export function useAccountGroups() {
 
   const query = usePagedQuery({
     initialPageSize: 20,
-    load: ({ page, pageSize }) =>
+    load: ({ page, pageSize }, signal) =>
       getAccountGroups({
         page,
         pageSize,
         search: searchQuery.value.trim() || undefined,
         enabled: statusQuery.value ? statusQuery.value === 'enabled' : undefined,
-      }),
+      }, signal),
     onError: error => toast.error(errorMessage(error, '账号分组加载失败')),
   })
 

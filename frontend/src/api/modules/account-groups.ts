@@ -89,16 +89,17 @@ interface AccountGroupIdParam {
   id: string
 }
 
-export function getAccountGroups(data: AccountGroupListParams) {
+export function getAccountGroups(data: AccountGroupListParams, signal?: AbortSignal) {
   return request<AccountGroupListResponse>({
     url: '/api/admin/account-groups',
     method: 'GET',
     params: data,
+    signal,
   })
 }
 
-export function getAccountGroupCatalog(data: AccountGroupListParams) {
-  return request<AccountGroupRef[]>({ url: '/api/admin/account-groups/catalog', method: 'GET', params: data })
+export function getAccountGroupCatalog(data: AccountGroupListParams, signal?: AbortSignal) {
+  return request<AccountGroupRef[]>({ url: '/api/admin/account-groups/catalog', method: 'GET', params: data, signal })
 }
 
 export function createAccountGroup(data: AccountGroupCreateParam) {

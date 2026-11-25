@@ -37,7 +37,7 @@ export function useAccountsQuery() {
 
   const query = usePagedQuery({
     initialPageSize: 20,
-    load: ({ page, pageSize }) =>
+    load: ({ page, pageSize }, signal) =>
       getAccounts({
         page,
         pageSize,
@@ -47,7 +47,7 @@ export function useAccountsQuery() {
         groupId: groupQuery.value || undefined,
         sortBy: sort.value?.key,
         sortDirection: sort.value?.direction,
-      }),
+      }, signal),
     onSuccess: (result) => {
       accountSummary.value = result.summary
       hasLoaded.value = true

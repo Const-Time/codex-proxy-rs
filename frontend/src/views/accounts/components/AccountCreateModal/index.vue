@@ -2,12 +2,12 @@
 import type { AccountRow } from '../../constants'
 import type { AccountCreateForm, AccountImportMode } from './model'
 import type { AccountGroupRef } from '@/api'
-import { Openai, Xai } from '@boxicons/vue'
 import { LayoutGrid, Settings2 } from '@lucide/vue'
 import { computed } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { accountModelAccessError } from '../../utils/modelAccess'
 import { parseAccountSchedulingForm } from '../../utils/schedulingForm'
 import AccountApiKeyFields from '../AccountApiKeyFields.vue'
@@ -73,8 +73,8 @@ function continueToImport() {
     <template #icon>
       <Settings2 v-if="view.configuring" class="text-cp-text" :size="20" aria-hidden="true" />
       <LayoutGrid v-else-if="view.isBatch" class="text-cp-text" :size="20" aria-hidden="true" />
-      <Xai v-else-if="view.isXai" class="text-cp-text" :width="20" :height="20" aria-hidden="true" />
-      <Openai v-else class="text-cp-text" :width="20" :height="20" aria-hidden="true" />
+      <XaiIcon v-else-if="view.isXai" class="text-cp-text" :width="20" :height="20" aria-hidden="true" />
+      <OpenaiIcon v-else class="text-cp-text" :width="20" :height="20" aria-hidden="true" />
     </template>
 
     <div class="grid gap-4">

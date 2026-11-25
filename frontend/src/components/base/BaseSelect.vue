@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import type { CSSProperties } from 'vue'
 
-import { Check, ChevronDown } from '@lucide/vue'
+import { Check, ChevronDown, Search } from '@lucide/vue'
 import { onClickOutside, useEventListener, useThrottleFn, whenever } from '@vueuse/core'
 import { clamp } from 'es-toolkit'
-import { computed, inject, nextTick, ref, useAttrs, useId, watch } from 'vue'
+import { computed, inject, nextTick, ref, shallowRef, useAttrs, useId, watch } from 'vue'
 import { formFieldKey } from './BaseForm/context'
 
 type SelectSize = 'sm' | 'md' | 'lg'
@@ -27,12 +27,16 @@ const props = withDefaults(
     disabled?: boolean
     placeholder?: string
     emptyText?: string
+    searchable?: boolean
+    searchPlaceholder?: string
   }>(),
   {
     size: 'md',
     disabled: false,
     placeholder: '请选择',
     emptyText: '暂无选项',
+    searchable: false,
+    searchPlaceholder: '搜索选项…',
   },
 )
 
@@ -43,9 +47,22 @@ const field = inject(formFieldKey, null)
 const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLButtonElement | null>(null)
 const popoverRef = ref<HTMLElement | null>(null)
+const searchInputRef = ref<HTMLInputElement | null>(null)
 const open = ref(false)
 const activeIndex = ref(-1)
+const filterQuery = shallowRef('')
 const popoverStyle = ref<CSSProperties>({})
+const filteredOptions = computed(() => {
+  if (!props.searchable)
+    return props.options
+  const needle = filterQuery.value.trim().toLowerCase()
+  if (!needle)
+    return props.options
+  return props.options.filter(option =>
+    option.label.toLowerCase().includes(needle)
+    || (option.description?.toLowerCase().includes(needle) ?? false),
+  )
+})
 const selectId = `base-select-${useId()}`
 const controlId = computed(() => (typeof attrs.id === 'string' ? attrs.id : (field?.controlId.value ?? selectId)))
 const invalid = computed(() =>
@@ -111,7 +128,7 @@ const triggerClasses = computed(() => [
 
 const popoverClasses = computed(() => [
   'fixed z-50 flex flex-col gap-1 rounded-cp-lg border-0 bg-cp-bg-elevated p-1 shadow-cp',
-  props.options.length > 6 ? 'cp-scrollbar overflow-y-auto' : 'overflow-visible',
+  props.searchable || filteredOptions.value.length > 6 ? 'overflow-hidden' : 'overflow-visible',
 ])
 
 function optionId(index: number) {
@@ -119,21 +136,28 @@ function optionId(index: number) {
 }
 
 function enabledIndexes() {
-  return props.options.flatMap((option, index) => (option.disabled ? [] : [index]))
+  return filteredOptions.value.flatMap((option, index) => (option.disabled ? [] : [index]))
 }
 
 function selectedIndex() {
-  return props.options.findIndex(option => option.value === model.value)
+  return filteredOptions.value.findIndex(option => option.value === model.value)
 }
 
 function setActiveToSelected() {
   const selected = selectedIndex()
-  if (selected >= 0 && !props.options[selected]?.disabled) {
+  if (selected >= 0 && !filteredOptions.value[selected]?.disabled) {
     activeIndex.value = selected
     return
   }
 
   activeIndex.value = enabledIndexes()[0] ?? -1
+}
+
+function scrollActiveOptionIntoView() {
+  if (!open.value || activeIndex.value < 0)
+    return
+  const optionEl = popoverRef.value?.querySelector<HTMLElement>(`[id="${optionId(activeIndex.value)}"]`)
+  optionEl?.scrollIntoView({ block: 'nearest' })
 }
 
 function updatePopoverPosition() {
@@ -142,7 +166,8 @@ function updatePopoverPosition() {
 
   const rect = triggerRef.value.getBoundingClientRect()
   const gap = 6
-  const estimatedMenuHeight = clamp(props.options.length * 34 + 8, 42, 244)
+  const searchHeaderHeight = props.searchable ? 40 : 0
+  const estimatedMenuHeight = clamp(filteredOptions.value.length * 34 + 8 + searchHeaderHeight, 42 + searchHeaderHeight, 244 + searchHeaderHeight)
   const belowSpace = window.innerHeight - rect.bottom - gap
   const aboveSpace = rect.top - gap
   const placeAbove = belowSpace < estimatedMenuHeight && aboveSpace > belowSpace
@@ -167,14 +192,19 @@ async function openMenu() {
   if (props.disabled || open.value)
     return
 
+  filterQuery.value = ''
   open.value = true
   setActiveToSelected()
   await nextTick()
   updatePopoverPosition()
+  scrollActiveOptionIntoView()
+  if (props.searchable)
+    searchInputRef.value?.focus({ preventScroll: true })
 }
 
 function closeMenu() {
   open.value = false
+  filterQuery.value = ''
 }
 
 function toggleMenu() {
@@ -194,6 +224,7 @@ function moveActive(delta: number) {
   const current = indexes.indexOf(activeIndex.value)
   const next = current === -1 ? (delta > 0 ? 0 : indexes.length - 1) : current + delta
   activeIndex.value = indexes[(next + indexes.length) % indexes.length]
+  void nextTick(scrollActiveOptionIntoView)
 }
 
 function chooseOption(option: SelectOption, index: number) {
@@ -203,14 +234,35 @@ function chooseOption(option: SelectOption, index: number) {
   model.value = option.value
   activeIndex.value = index
   closeMenu()
+  triggerRef.value?.focus({ preventScroll: true })
 }
 
 function chooseActive() {
-  const option = props.options[activeIndex.value]
+  const option = filteredOptions.value[activeIndex.value]
   if (!option)
     return
 
   chooseOption(option, activeIndex.value)
+}
+
+function handleSearchKeydown(event: KeyboardEvent) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    moveActive(1)
+  }
+  else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    moveActive(-1)
+  }
+  else if (event.key === 'Enter') {
+    event.preventDefault()
+    chooseActive()
+  }
+  else if (event.key === 'Escape') {
+    event.preventDefault()
+    closeMenu()
+    triggerRef.value?.focus({ preventScroll: true })
+  }
 }
 
 function handleTriggerKeydown(event: KeyboardEvent) {
@@ -272,11 +324,12 @@ whenever(open, async () => {
 })
 
 watch(
-  () => [props.options, model.value],
+  () => [filteredOptions.value, model.value],
   () => {
     if (!open.value)
       return
     setActiveToSelected()
+    void nextTick(updatePopoverPosition)
   },
 )
 
@@ -346,44 +399,58 @@ useEventListener(viewportTarget, 'scroll', updatePopoverPositionThrottled, { cap
           role="listbox"
           :aria-labelledby="controlId"
         >
-          <div
-            v-if="options.length === 0"
-            class="flex h-8.5 items-center rounded-cp-sm px-3 text-cp leading-none font-emphasis text-cp-text-quaternary"
-          >
-            {{ emptyText }}
-          </div>
-
-          <template v-else>
-            <button
-              v-for="(option, index) in options"
-              :id="optionId(index)"
-              :key="option.value"
-              type="button"
-              role="option"
-              :aria-selected="option.value === model"
-              :disabled="option.disabled"
-              :class="optionClasses(option, index)"
-              @mouseenter="activeIndex = option.disabled ? activeIndex : index"
-              @focus="activeIndex = option.disabled ? activeIndex : index"
-              @mousedown.prevent
-              @click="chooseOption(option, index)"
+          <div v-if="searchable" class="relative shrink-0 px-1 pt-0.5 pb-1">
+            <Search class="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-cp-text-quaternary" aria-hidden="true" />
+            <input
+              ref="searchInputRef"
+              v-model="filterQuery"
+              type="search"
+              :placeholder="searchPlaceholder"
+              :aria-label="searchPlaceholder"
+              class="h-8 w-full rounded-cp-sm border-0 bg-(--cp-input-bg) pr-2.5 pl-7.5 text-cp-sm text-cp-text outline-none placeholder:text-cp-text-quaternary focus:bg-(--cp-input-active-bg)"
+              @keydown="handleSearchKeydown"
             >
-              <span class="min-w-0 truncate" :class="option.description ? 'max-w-1/2 shrink-0' : 'flex-1'">{{ option.label }}</span>
-              <span
-                v-if="option.description"
-                :title="option.description"
-                class="min-w-0 flex-1 truncate text-xs font-normal"
-                :class="option.disabled ? 'text-cp-text-disabled' : 'text-cp-text-tertiary'"
+          </div>
+          <div class="flex min-h-0 flex-1 flex-col gap-1" :class="filteredOptions.length > 6 ? 'cp-scrollbar overflow-y-auto' : 'overflow-visible'">
+            <div
+              v-if="filteredOptions.length === 0"
+              class="flex h-8.5 items-center rounded-cp-sm px-3 text-cp leading-none font-emphasis text-cp-text-quaternary"
+            >
+              {{ emptyText }}
+            </div>
+
+            <template v-else>
+              <button
+                v-for="(option, index) in filteredOptions"
+                :id="optionId(index)"
+                :key="option.value"
+                type="button"
+                role="option"
+                :aria-selected="option.value === model"
+                :disabled="option.disabled"
+                :class="optionClasses(option, index)"
+                @mouseenter="activeIndex = option.disabled ? activeIndex : index"
+                @focus="activeIndex = option.disabled ? activeIndex : index"
+                @mousedown.prevent
+                @click="chooseOption(option, index)"
               >
-                {{ option.description }}
-              </span>
-              <Check
-                v-if="option.value === model"
-                class="shrink-0 text-cp-primary-text"
-                :size="size === 'sm' ? 13 : size === 'lg' ? 17 : 15"
-              />
-            </button>
-          </template>
+                <span class="min-w-0 truncate" :class="option.description ? 'max-w-1/2 shrink-0' : 'flex-1'">{{ option.label }}</span>
+                <span
+                  v-if="option.description"
+                  :title="option.description"
+                  class="min-w-0 flex-1 truncate text-xs font-normal"
+                  :class="option.disabled ? 'text-cp-text-disabled' : 'text-cp-text-tertiary'"
+                >
+                  {{ option.description }}
+                </span>
+                <Check
+                  v-if="option.value === model"
+                  class="shrink-0 text-cp-primary-text"
+                  :size="size === 'sm' ? 13 : size === 'lg' ? 17 : 15"
+                />
+              </button>
+            </template>
+          </div>
         </div>
       </Transition>
     </Teleport>

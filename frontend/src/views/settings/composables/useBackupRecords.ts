@@ -31,8 +31,8 @@ export function useBackupRecords() {
     page: { page: number, pageSize: number, total: number, totalPages: number }
   }>({
     initialPageSize: 10,
-    load: ({ page, pageSize }) =>
-      getBackupRecords({ page, pageSize }),
+    load: ({ page, pageSize }, signal) =>
+      getBackupRecords({ page, pageSize }, signal),
     onError: () => undefined,
   })
 

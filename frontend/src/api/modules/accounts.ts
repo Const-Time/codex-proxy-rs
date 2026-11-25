@@ -389,11 +389,12 @@ interface AccountExportParam {
   confirm: string
 }
 
-export function getAccounts(data: AccountListParams) {
+export function getAccounts(data: AccountListParams, signal?: AbortSignal) {
   return request<AccountListResponse>({
     url: '/api/admin/accounts',
     method: 'GET',
     params: data,
+    signal,
   })
 }
 

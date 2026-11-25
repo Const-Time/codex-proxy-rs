@@ -16,7 +16,7 @@ export interface OperationLog {
   requestId: string
   changes: { action: string, entityKind: string, entityRef: string, changedFields: string[] }[]
 }
-export const getOperationLogs = (params: Record<string, string | number | undefined>) => request<{ items: OperationLog[], total: number }>({ url: '/api/admin/operation-logs', method: 'GET', params })
+export const getOperationLogs = (params: Record<string, string | number | undefined>, signal?: AbortSignal) => request<{ items: OperationLog[], total: number }>({ url: '/api/admin/operation-logs', method: 'GET', params, signal })
 export const getUsageKeyOptions = (personal: boolean) => request<{ id: string, name: string, userId: string | null }[]>({ url: '/api/admin/usage/key-options', method: 'GET', params: { personal } })
 
 export const getUsageCatalogOptions = (kind: 'groups' | 'accounts', personal: boolean) => request<{ id: string, name: string }[]>({ url: '/api/admin/usage/catalog-options', method: 'GET', params: { kind, personal } })
