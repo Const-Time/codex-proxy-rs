@@ -28,7 +28,7 @@ use crate::{
 
 use super::{
     control::WEBSOCKET_SEND_TIMEOUT,
-    error::CodexWebSocketExchangeError,
+    error::{CodexWebSocketExchangeError, CodexWebSocketUpstreamError},
     model::{CodexWebSocketConnection, CodexWebSocketRequest, WebSocketContinuationRequirement},
     pool::CodexWebSocketConnectionMetadata,
     pump::{PumpLogContext, PumpedWebSocket, RawWsStream},
@@ -433,11 +433,11 @@ fn websocket_opening_error(response: &WsResponse<Option<Vec<u8>>>) -> CodexWebSo
         .and_then(|value| value.to_str().ok())
         .and_then(gateway_protocol::openai::parse_retry_after_seconds)
         .or_else(|| events::retry_after_seconds_from_body(&body));
-    CodexWebSocketExchangeError::upstream(
+    CodexWebSocketExchangeError::Upstream(Box::new(CodexWebSocketUpstreamError {
         status_code,
         retry_after_seconds,
         body,
-        reqwest::StatusCode::from_u16(status_code)
+        client_response: reqwest::StatusCode::from_u16(status_code)
             .ok()
             .map(|status| {
                 Box::new(CodexClientVisibleUpstreamResponse::new(
@@ -447,10 +447,11 @@ fn websocket_opening_error(response: &WsResponse<Option<Vec<u8>>>) -> CodexWebSo
                     raw_body,
                 ))
             }),
-        response_meta::set_cookie_headers(response.headers()),
-        response_meta::diagnostics(Some(status_code), response.headers()),
-        CodexUpstreamSendPhase::BeforePayload,
-    )
+        set_cookie_headers: response_meta::set_cookie_headers(response.headers()),
+        rate_limit_headers: response_meta::rate_limit_headers(response.headers()),
+        diagnostics: response_meta::diagnostics(Some(status_code), response.headers()),
+        send_phase: CodexUpstreamSendPhase::BeforePayload,
+    }))
 }
 
 fn websocket_host_header(endpoint: &str) -> Option<String> {

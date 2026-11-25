@@ -124,6 +124,16 @@ pub struct CodexAccountQuotaSnapshot {
 }
 
 impl CodexAccountQuotaSnapshot {
+    pub(super) fn denied_window(&self, state: QuotaState) -> Option<&CodexQuotaWindow> {
+        let seconds = u64::from(state.limit_window_minutes()?) * 60;
+        let mut windows = self
+            .windows
+            .iter()
+            .filter(|window| window.is_account_wide() && window.window_seconds() == Some(seconds));
+        let window = windows.next()?;
+        windows.next().is_none().then_some(window)
+    }
+
     #[must_use]
     pub const fn account_id(&self) -> &ProviderAccountId {
         &self.account_id

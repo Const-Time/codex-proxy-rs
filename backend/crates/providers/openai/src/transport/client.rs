@@ -368,7 +368,7 @@ impl CodexClientError {
                     &upstream.diagnostics,
                     upstream.client_response.as_deref(),
                     &upstream.set_cookie_headers,
-                    &[],
+                    &upstream.rate_limit_headers,
                     upstream.send_phase,
                 ))
             }
@@ -991,7 +991,7 @@ pub(super) fn websocket_exchange_error_to_client_error(
                 retry_after_seconds: upstream.retry_after_seconds,
                 diagnostics: Box::new(upstream.diagnostics),
                 set_cookie_headers: upstream.set_cookie_headers,
-                rate_limit_headers: Vec::new(),
+                rate_limit_headers: upstream.rate_limit_headers,
                 transport: CodexBackendTransport::WebSocket,
                 transport_metrics: Box::default(),
                 send_phase: upstream.send_phase,

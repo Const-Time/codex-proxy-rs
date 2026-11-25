@@ -211,7 +211,7 @@ fn usage_window_should_not_use_daily_rolling_usage_for_weekly_statistics() {
 }
 
 #[test]
-fn exhausted_quota_should_project_full_usage_to_only_the_representative_window() {
+fn exhausted_quota_without_a_window_preserves_measured_usage() {
     let mut quota = ProviderQuota {
         credits: None,
         plan_type: None,
@@ -227,14 +227,14 @@ fn exhausted_quota_should_project_full_usage_to_only_the_representative_window()
         provider_data: None,
     };
 
-    assert_eq!(quota.representative_used_percent(), Some(100.0));
+    assert_eq!(quota.representative_used_percent(), Some(95.0));
     quota.apply_limit_reached_display();
 
     assert_eq!(quota.windows[0].used_percent, Some(99.0));
     assert_eq!(quota.windows[1].used_percent, Some(80.0));
     assert_eq!(quota.windows[2].used_percent, Some(30.0));
-    assert_eq!(quota.windows[3].used_percent, Some(100.0));
-    assert!(quota.windows[3].limit_reached);
+    assert_eq!(quota.windows[3].used_percent, Some(95.0));
+    assert!(!quota.windows[3].limit_reached);
 }
 
 #[test]

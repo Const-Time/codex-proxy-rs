@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::transport::diagnostics::is_capacity_error;
-use crate::transport::protocol::responses::is_replaceable_response_prelude;
+use crate::transport::protocol::responses::{UsageLimitWindow, is_replaceable_response_prelude};
 
 /// OpenAI 失败对 Smart 账号分数的结构化 reason 闭集。
 ///
@@ -349,7 +349,11 @@ pub(super) async fn apply_failure(
     .await;
     let needs_authoritative_quota_refresh = matches!(
         failure.account_failure,
-        Some(CodexAccountFailure::QuotaExhausted | CodexAccountFailure::UsageLimitExhausted { .. })
+        Some(
+            CodexAccountFailure::QuotaExhausted
+                | CodexAccountFailure::SpendLimitExceeded
+                | CodexAccountFailure::UsageLimitExhausted { .. }
+        )
     );
     if failure.cyber_policy_failure {
         context
@@ -404,6 +408,9 @@ pub(super) fn schedule_authoritative_quota_refresh_after_failure(
     // 限额错误可以确认账号状态，但 Responses 事件中的 used_percent 可能仍停在上一结算点。
     // usage 快照在后台补齐展示基线，不得撤销同一轮真实失败，也不能阻塞原始响应。
     // 先等待 2 秒让上游结算，再查询；5 秒仅限制实际查询自身。
+    if account.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH {
+        return;
+    }
     let quota = Arc::clone(quota);
     let account_id = account.id().clone();
     drop(tokio::spawn(async move {
@@ -1308,6 +1315,7 @@ pub(super) fn map_upstream_failure(
         category,
         CodexFailureCategory::FlexUnavailable
             | CodexFailureCategory::TurnRateLimited
+            | CodexFailureCategory::SpendLimitExceeded
             | CodexFailureCategory::InvalidRequest
     ) {
         error = error.with_retry_prohibited();
@@ -1393,7 +1401,7 @@ pub(super) fn map_upstream_failure(
         account_failure: account_failure(
             category,
             failure.retry_after_seconds,
-            failure.usage_limit_resets_at,
+            failure.account_usage_limit(),
         ),
         error_message: failure.client_message,
         cyber_policy_failure,
@@ -1428,11 +1436,12 @@ pub(super) const fn provider_error_kind(category: CodexFailureCategory) -> Provi
         CodexFailureCategory::IdentityVerificationRequired | CodexFailureCategory::Banned => {
             ProviderErrorKind::PermissionDenied
         }
-        CodexFailureCategory::UsageLimitExhausted => ProviderErrorKind::QuotaExhausted,
+        CodexFailureCategory::UsageLimitExhausted
+        | CodexFailureCategory::QuotaExhausted
+        | CodexFailureCategory::SpendLimitExceeded => ProviderErrorKind::QuotaExhausted,
         CodexFailureCategory::RateLimited | CodexFailureCategory::TurnRateLimited => {
             ProviderErrorKind::RateLimited
         }
-        CodexFailureCategory::QuotaExhausted => ProviderErrorKind::QuotaExhausted,
         CodexFailureCategory::CloudflareChallenge
         | CodexFailureCategory::CloudflarePathBlocked
         | CodexFailureCategory::FlexUnavailable
@@ -1456,7 +1465,7 @@ pub(super) const fn upstream_send_state(phase: CodexUpstreamSendPhase) -> Upstre
 pub(super) fn account_failure(
     category: CodexFailureCategory,
     retry_after_seconds: Option<u64>,
-    usage_limit_resets_at: Option<i64>,
+    usage_limit: UsageLimitWindow,
 ) -> Option<CodexAccountFailure> {
     match category {
         CodexFailureCategory::CredentialExpired => Some(CodexAccountFailure::CredentialExpired),
@@ -1466,17 +1475,15 @@ pub(super) fn account_failure(
         CodexFailureCategory::Banned => Some(CodexAccountFailure::Banned),
         CodexFailureCategory::UsageLimitExhausted => {
             Some(CodexAccountFailure::UsageLimitExhausted {
-                reset_at: usage_limit_resets_at
-                    .and_then(|seconds| u64::try_from(seconds).ok())
-                    .and_then(|seconds| {
-                        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
-                    }),
+                reset_at: usage_limit.reset_at,
+                limit_window_minutes: usage_limit.minutes,
             })
         }
         CodexFailureCategory::RateLimited => Some(CodexAccountFailure::RateLimited {
             retry_after: retry_after_seconds.map(Duration::from_secs),
         }),
         CodexFailureCategory::QuotaExhausted => Some(CodexAccountFailure::QuotaExhausted),
+        CodexFailureCategory::SpendLimitExceeded => Some(CodexAccountFailure::SpendLimitExceeded),
         CodexFailureCategory::CloudflareChallenge => {
             Some(CodexAccountFailure::CloudflareChallenge {
                 retry_after: retry_after_seconds.map(Duration::from_secs),

@@ -961,9 +961,9 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "cookie"
-version = "0.18.2"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "percent-encoding",
  "time",
@@ -4697,7 +4697,7 @@ dependencies = [
 [[package]]
 name = "tokio-tungstenite"
 version = "0.28.0"
-source = "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=7447c427513cfe685f236e1ac0513c4ea3dd9c0b#7447c427513cfe685f236e1ac0513c4ea3dd9c0b"
+source = "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=7a920470d62138955446b64220c7609e46ad770e#7a920470d62138955446b64220c7609e46ad770e"
 dependencies = [
  "futures-util",
  "log",
@@ -4905,7 +4905,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "tungstenite"
 version = "0.27.0"
-source = "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=bc589d684755a8c02da0fc7e58d0861cbfc306f1#bc589d684755a8c02da0fc7e58d0861cbfc306f1"
+source = "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=e19950ef7828cb311e6d51a6bedcebf0192e055c#e19950ef7828cb311e6d51a6bedcebf0192e055c"
 dependencies = [
  "bytes",
  "data-encoding",

@@ -97,6 +97,10 @@ impl CodexProvider {
             .selector
             .select_for_provider_endpoint(&SelectCodexProviderEndpointCredential {
                 model: requested_model.as_deref(),
+                image: matches!(
+                    request.endpoint_path,
+                    CODEX_IMAGE_GENERATIONS_PATH | CODEX_IMAGE_EDITS_PATH
+                ),
                 request_url: &request.response_origin,
                 attempt: &context,
                 session_affinity: request.session_affinity.as_ref(),
@@ -475,7 +479,10 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             }
         };
 
-        if allows_account_state_mutation && let Some(key) = request.session_affinity_key.as_ref() {
+        if allows_account_state_mutation
+            && !request.lease.preserves_session_binding()
+            && let Some(key) = request.session_affinity_key.as_ref()
+        {
             // JSON 已完整接收；在首个 yield 前提交亲和迁移，避免下游取消漏掉更新。
             request.selector.update_session_affinity(
                 key,

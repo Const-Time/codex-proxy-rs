@@ -138,6 +138,9 @@ WebSocket `response.create` 省略该字段时仍按流式交付。缺省值只�
 Codex 的 review 等子代理请求仍使用 `/v1/responses`，并通过 `x-openai-subagent` 请求头携带子代理类型；
 网关不提供独立的子代理请求路径。
 
+图片生成和编辑可以借用当前授权范围内支持该请求的账号。当原会话账号受图片模型或认证方式限制时，
+图片请求不会迁移 Responses 的根会话或子线程绑定。
+
 `POST /v1/responses` 在鉴权后按 `Content-Encoding` 解压，再解析 JSON；支持单一 `gzip`、
 `deflate`（zlib 封装）和 `zstd`，缺省、空值或 `identity` 直接使用原始正文。gzip 多成员与 zstd
 多帧连续解码，整体展开结果最多 64 MiB，超限在继续展开前返回 `400 request_too_large`；zstd
@@ -561,7 +564,8 @@ OAuth start 使用：
 
 重新授权已有账号时，start 请求仍携带 `provider` 和展示用 `name`，只额外提供目标 `accountId`；
 客户端不得提交 `credentialRevision`、旧 token 身份或其他并发控制字段。complete 请求也不重复提交
-`accountId`，后端通过 `flowId` 中保存的目标绑定完成授权。
+`accountId`，后端通过 `flowId` 中保存的目标绑定完成授权。上游用户及账号身份相同时，保留额度快照和额度状态。
+若凭据轮换更换了上游身份，旧身份的额度快照和状态会清除。
 
 ### OpenAI 身份、额度与状态
 
@@ -594,8 +598,10 @@ OAuth start 使用：
 - OpenAI 已耗尽账号每 30 分钟主动复核一次，也会在最早未恢复窗口的 `resetAt + 2 分钟` 到期后
   提前复核。后台每 30 秒检查触发条件；同一重置边界复核后仍未恢复时回到 30 分钟重试，
   避免旧 reset 持续触发请求。各窗口独立确认恢复，时间到期本身不会直接解除账号耗尽。
-  重置时间前进且用量低于 10% 可解除对应窗口；重置时间未变时，需要连续两次上游查询明确报告
-  用量低于 100% 且未触顶。缺失百分比、缺失或更旧的重置时间不会构成同窗口恢复证据。
+  HTTP、WebSocket 和流内的 `usage_limit_reached` 会保留上游提供的重置时间和账号级窗口时长。
+  上游指出具体窗口时，恢复须同时取得账号放行和该窗口实测值。重置时间无法对应窗口时，须等到该时间，
+  再确认上游放行且已知账号级窗口均有实测值、均未触顶。连续两次明确放行且对应窗口均未触顶时，
+  可以确认恢复，即使两次返回的重置时间不同。窗口的重置时间前进且用量低于 10% 时，可直接确认换窗，上游明确指定窗口时还要求账号放行。账号级耗尽状态独立显示，窗口比例按上游实测值展示。
 - `POST /accounts/recover` 是管理员对本地事实的强制恢复：它清除 Redis cooldown 和已保存的额度/错误，
   把账号重新启用并恢复为可调度 credential；它不验证上游账号是否已经恢复，下一次真实请求仍可重新写入
   失败事实。
@@ -1069,6 +1075,9 @@ CLIProxyAPI 的 Codex 额度子集默认接受网关客户端 API 密钥（`Auth
 - OpenAI 的空 `response.created` / `response.in_progress` 和响应元数据即时交付；只有这些可替换前导事件时，仍允许 Provider 已证明安全且在原预算内的恢复。正文、推理、工具调用或未知业务事件一旦交付，不再自动重放；插件改写事件也按不可重放处理。
 - 已通过准入的 SSE 请求在首个上游事件前每 15 秒发送注释保活；鉴权与准入失败保留原 HTTP 错误。心跳只提交 HTTP 状态，不伪造业务输出或用量。心跳后的失败使用 `response.failed` 和 `[DONE]`，保留实际 HTTP 200 及失败审计。
 - `turn_rate_limit_exceeded` 仅拒绝当前请求：保留上游错误和重试建议，不自动重放、不将账号标记为冷却。
+- 上游 HTTP 429、WebSocket 握手 429 或流内错误返回 `api_key_spend_limit_exceeded`、
+  `project_spend_limit_exceeded` 或 `organization_spend_limit_exceeded` 时，保留原始错误码并终止本次请求。
+  仅记录本次选中账号的额度耗尽，`Retry-After` 不触发代理重试或临时冷却。
 - 下游提供的账号路由覆盖、FedRAMP、认证、组织/项目与安装身份字段不能覆盖代理选择的账号身份。
   parent_response_id 只按当前账号 owner 保留，不递归删除业务工具结果中的同名扩展字段。
 - 模型列表、详情及模型画像只显示当前 Key 范围内来源账号允许的模型；别名使用映射后的模型 ID 判断。

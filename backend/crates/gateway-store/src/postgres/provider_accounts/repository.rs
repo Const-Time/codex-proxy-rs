@@ -314,6 +314,10 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                    when $7::timestamptz is not null
                      and (quota_access_observed_at is null or quota_access_observed_at <= $7)
                    then $8 else quota_reset_at end,
+                 quota_limit_window_minutes = case
+                   when $7::timestamptz is not null
+                     and (quota_access_observed_at is null or quota_access_observed_at <= $7)
+                   then $10 else quota_limit_window_minutes end,
                  updated_at = greatest(now(), updated_at, $4, $7)
              where id = $1 and credential_revision = $2
                and (quota_observed_at is null or quota_observed_at <= $4)",
@@ -327,6 +331,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         .bind(access_observed_at)
         .bind(state.reset_at().map(DateTime::<Utc>::from))
         .bind(plan_type)
+        .bind(state.limit_window_minutes().map(i32::from))
         .execute(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("compare and swap provider quota"))?;
@@ -347,7 +352,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         let result = sqlx::query(
             "update provider_accounts
              set quota_access_observed_at = $3, quota_access_state = $4,
-                 quota_evidence = $5, quota_reset_at = $6,
+                 quota_evidence = $5, quota_reset_at = $6, quota_limit_window_minutes = $7,
                  updated_at = greatest(now(), updated_at, $3)
              where id = $1 and credential_revision = $2
                and (quota_access_observed_at is null or quota_access_observed_at <= $3)",
@@ -358,6 +363,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         .bind(state.access().as_str())
         .bind(state.evidence().map(QuotaEvidence::as_str))
         .bind(state.reset_at().map(DateTime::<Utc>::from))
+        .bind(state.limit_window_minutes().map(i32::from))
         .execute(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("apply provider quota access"))?;
@@ -669,6 +675,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                      quota_evidence = null,
                      quota_access_observed_at = now(),
                      quota_reset_at = null,
+                     quota_limit_window_minutes = null,
                      last_error_reason = null,
                      last_error_message = null,
                      updated_at = greatest(now(), updated_at)
@@ -823,6 +830,7 @@ pub(crate) async fn upsert_provider_account_in_transaction(
            quota_evidence = null,
            quota_access_observed_at = null,
            quota_reset_at = null,
+           quota_limit_window_minutes = null,
            credential_observed_at = excluded.credential_observed_at,
            quota_observed_at = null,
            last_error_reason = null,
@@ -901,6 +909,13 @@ pub(crate) async fn rotate_provider_account_in_transaction(
              next_refresh_at = $10,
              upstream_user_id = case when $11::boolean then $12::text else upstream_user_id end,
              upstream_account_id = case when $11::boolean then $13::text else upstream_account_id end,
+             provider_quota_json = case when $11 then null else provider_quota_json end,
+             quota_observed_at = case when $11 then null else quota_observed_at end,
+             quota_access_state = case when $11 then 'unknown' else quota_access_state end,
+             quota_evidence = case when $11 then null else quota_evidence end,
+             quota_access_observed_at = case when $11 then null else quota_access_observed_at end,
+             quota_reset_at = case when $11 then null else quota_reset_at end,
+             quota_limit_window_minutes = case when $11 then null else quota_limit_window_minutes end,
              credential_state = case
                  when $11::boolean or credential_state <> 'unknown' then 'ready'
                  else 'unknown'
@@ -1139,7 +1154,7 @@ impl PgProviderAccountRepository {
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, dispatch_hours, quota_short_term_percent, quota_weekly_percent, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
-                    quota_access_observed_at, quota_reset_at,
+                    quota_access_observed_at, quota_reset_at, quota_limit_window_minutes,
                     quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
              from provider_accounts
              where ($1::text is null or provider_kind = $1) and ($2 or enabled) and ($3::text[] is null or id = any($3))

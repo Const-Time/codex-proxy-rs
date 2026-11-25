@@ -1185,6 +1185,7 @@ async fn usage_limit_exhaustion_marks_quota_exhausted_without_usage_probe() {
         .record_failure(
             &account,
             CodexAccountFailure::UsageLimitExhausted {
+                limit_window_minutes: None,
                 reset_at: Some(SystemTime::now() + Duration::from_secs(30)),
             },
             None,

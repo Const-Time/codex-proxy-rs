@@ -1,6 +1,6 @@
 //! 将耗尽窗口的恢复基准与最新用量分开持久化，允许各窗口分批恢复。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -18,25 +18,72 @@ pub(super) struct QuotaRecovery {
     // 绑定本次耗尽事实，避免真实推理成功后再次耗尽时复用上次的恢复进度。
     exhausted_at_micros: i64,
     pending: BTreeMap<String, Option<DateTime<Utc>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unmatched: Option<UnmatchedQuotaReset>,
     // 已连续观测到"未触顶"的待解除窗口；第二次确认后解除。旧文档没有该
     // 字段时反序列化为空集；旧版 null 候选仍可读取，但需重新确认 reset。
     // 记录候选的 reset，防止不同窗口的两次观测被误当作连续确认。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     candidates: BTreeMap<String, Option<DateTime<Utc>>>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    allowed_candidates: BTreeSet<String>,
+}
+
+// A rejection supplied a review deadline but its window could not be identified.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct UnmatchedQuotaReset {
+    reset_at: DateTime<Utc>,
+    window_keys: BTreeSet<String>,
+}
+
+impl UnmatchedQuotaReset {
+    fn recovered(&self, refreshed: &CodexAccountQuotaSnapshot) -> bool {
+        let windows = refreshed.windows().iter().filter(|w| w.is_account_wide());
+        SystemTime::from(self.reset_at) <= refreshed.observed_at()
+            && refreshed.quota().access() == QuotaAccessState::Allowed
+            && windows.clone().next().is_some()
+            && windows
+                .clone()
+                .all(|w| w.used_percent().is_some() && !w.limit_reached())
+            && self
+                .window_keys
+                .iter()
+                .all(|key| windows.clone().any(|w| w.key() == key))
+    }
 }
 
 impl QuotaRecovery {
     fn new(state: QuotaState, baseline: &CodexAccountQuotaSnapshot) -> Self {
+        let windows = || baseline.windows().iter().filter(|w| w.is_account_wide());
         let mut pending = BTreeMap::new();
-        for window in baseline.windows().iter().filter(|w| w.is_account_wide()) {
+        for window in windows() {
             if window.limit_reached() {
                 pending.insert(window.key().to_owned(), window.reset_at());
             }
         }
         // 旧版从 primary 派生的账号 reset 不能覆盖明确的周窗口耗尽事实。
         // 真实 usage_limit_reached 错误则可以补充尚未反映到百分比的耗尽窗口。
-        if pending.is_empty() || state.evidence() == Some(QuotaEvidence::UsageLimitReached) {
-            for window in baseline.windows().iter().filter(|w| w.is_account_wide()) {
+        let error_deadline = state
+            .reset_at()
+            .filter(|at| {
+                state.evidence() == Some(QuotaEvidence::UsageLimitReached)
+                    && state.observed_at().is_some_and(|denied| *at > denied)
+            })
+            .map(DateTime::<Utc>::from);
+        let hinted = baseline.denied_window(state);
+        let conflicting_reset = hinted
+            .and_then(CodexQuotaWindow::reset_at)
+            .zip(error_deadline)
+            .is_some_and(|(snapshot, error)| (snapshot.timestamp() - error.timestamp()).abs() > 1);
+        if let Some(window) = hinted {
+            if !conflicting_reset {
+                pending.insert(
+                    window.key().to_owned(),
+                    window.reset_at().or(error_deadline),
+                );
+            }
+        } else if pending.is_empty() || state.evidence() == Some(QuotaEvidence::UsageLimitReached) {
+            for window in windows() {
                 // 错误与 usage 的秒级 reset 可能相差一秒；只用它识别窗口，
                 // 后续推进比较始终使用该窗口自己的 reset。
                 let matches_error_reset = window.reset_at().zip(state.reset_at()).is_some_and(
@@ -51,65 +98,120 @@ impl QuotaRecovery {
                 }
             }
         }
-        // 上游未指出耗尽窗口时保留所有候选，不能任意把错误归给 primary。
-        if pending.is_empty() {
-            pending.extend(
-                baseline
-                    .windows()
-                    .iter()
-                    .filter(|w| w.is_account_wide())
-                    .map(|w| (w.key().to_owned(), w.reset_at())),
-            );
+        let unmatched = error_deadline
+            .filter(|_| pending.is_empty() || conflicting_reset)
+            .map(|reset_at| UnmatchedQuotaReset {
+                reset_at,
+                window_keys: windows().map(|w| w.key().to_owned()).collect(),
+            });
+        if pending.is_empty() && unmatched.is_none() {
+            pending.extend(windows().map(|w| (w.key().to_owned(), w.reset_at())));
         }
         Self {
             exhausted_at_micros: exhaustion_time(state),
             pending,
+            unmatched,
             candidates: BTreeMap::new(),
+            allowed_candidates: BTreeSet::new(),
         }
     }
 
-    fn observe(&mut self, refreshed: &CodexAccountQuotaSnapshot) -> bool {
-        let had_baseline = !self.pending.is_empty();
+    fn observe(&mut self, refreshed: &CodexAccountQuotaSnapshot, state: QuotaState) -> bool {
+        let windows = || refreshed.windows().iter().filter(|w| w.is_account_wide());
+        let access = refreshed.quota().access();
+        let has_window_hint = state.limit_window_minutes().is_some();
+        let hinted_window_reported = state.limit_window_minutes().is_none_or(|minutes| {
+            windows().any(|window| {
+                window.window_seconds() == Some(u64::from(minutes) * 60)
+                    && window.used_percent().is_some()
+            })
+        });
+        if has_window_hint && access != QuotaAccessState::Allowed {
+            self.candidates.clear();
+            self.allowed_candidates.clear();
+            for window in windows().filter(|w| w.limit_reached()) {
+                self.pending
+                    .entry(window.key().to_owned())
+                    .or_insert(window.reset_at());
+            }
+            return false;
+        }
+        let had_baseline = self.unmatched.is_some() || !self.pending.is_empty();
+        self.unmatched
+            .take_if(|reset| hinted_window_reported && reset.recovered(refreshed));
+
+        // A fresh explicit allow can supersede a stale percentage once all known windows are due.
+        if !self.pending.is_empty()
+            && access == QuotaAccessState::Allowed
+            && self.pending.iter().all(|(key, reset)| {
+                let reported = !has_window_hint
+                    || windows().any(|w| w.key() == key && w.used_percent().is_some());
+                reported
+                    && reset.is_some_and(|reset| {
+                        reset.timestamp_micros() > self.exhausted_at_micros
+                            && SystemTime::from(reset) <= refreshed.observed_at()
+                    })
+            })
+        {
+            self.pending.clear();
+            self.candidates.clear();
+            self.allowed_candidates.clear();
+            return hinted_window_reported && self.unmatched.is_none();
+        }
+
         let mut candidates = BTreeMap::new();
-        for window in refreshed.windows().iter().filter(|w| w.is_account_wide()) {
+        let mut allowed_candidates = BTreeSet::new();
+        for window in windows() {
             let key = window.key();
-            if let Some(previous_reset) = self.pending.get(key).copied() {
-                if window_reset_recovered(window, previous_reset) {
-                    self.pending.remove(key);
-                    continue;
-                }
-                if previous_reset.is_none() {
-                    // 首次观测到该窗口只锚定 reset 基线，不构成解除证据。
+            let Some(previous) = self.pending.get(key).copied() else {
+                if window.limit_reached() {
                     self.pending.insert(key.to_owned(), window.reset_at());
-                    continue;
                 }
-                // 同一窗口内用量回落（reset 不滚动）时"reset 前进"永远不会
-                // 成立，滑动窗口的正常用量也长期高于低用量阈值；以上游连续
-                // 两次观测都报告未触顶为解除证据。单次观测无法排除耗尽后
-                // 立刻拉到的旧快照（reset 未滚动、用量尚未触顶）。
-                // Missing or older window data is not evidence of same-window
-                // recovery. Only an explicit measured percentage can confirm it.
-                // 新窗口已经消耗 >=10% 时仍需允许连续确认；不能永久要求
-                // reset 等于耗尽时的旧基线。倒退或缺失的 reset 仍不算证据。
-                if window
-                    .reset_at()
-                    .zip(previous_reset)
-                    .is_some_and(|(now, old)| now >= old)
-                    && window.used_percent().is_some_and(|used| used < 100.0)
-                    && !window.limit_reached()
-                {
-                    if self.candidates.get(key) == Some(&window.reset_at()) {
+                continue;
+            };
+            let Some(reset) = window.reset_at() else {
+                continue;
+            };
+            let Some(previous) = previous else {
+                if !has_window_hint || window.used_percent().is_some() {
+                    self.pending.insert(key.to_owned(), Some(reset));
+                }
+                continue;
+            };
+            let Some(used) = window.used_percent() else {
+                continue;
+            };
+            if window.limit_reached() {
+                continue;
+            }
+            if reset > previous && used < RESET_RECOVERY_MAX_USED_PERCENT {
+                self.pending.remove(key);
+                continue;
+            }
+            match access {
+                QuotaAccessState::Allowed => {
+                    if self.allowed_candidates.contains(key) {
                         self.pending.remove(key);
                     } else {
-                        candidates.insert(key.to_owned(), window.reset_at());
+                        allowed_candidates.insert(key.to_owned());
                     }
                 }
-            } else if window.limit_reached() {
-                self.pending.insert(key.to_owned(), window.reset_at());
+                QuotaAccessState::Unknown if reset >= previous => {
+                    if self.candidates.get(key) == Some(&Some(reset)) {
+                        self.pending.remove(key);
+                    } else {
+                        candidates.insert(key.to_owned(), Some(reset));
+                    }
+                }
+                _ => {}
             }
         }
         self.candidates = candidates;
-        had_baseline && self.pending.is_empty()
+        self.allowed_candidates = allowed_candidates;
+        had_baseline
+            && hinted_window_reported
+            && self.pending.is_empty()
+            && self.unmatched.is_none()
     }
 }
 
@@ -117,26 +219,7 @@ fn exhaustion_time(state: QuotaState) -> i64 {
     DateTime::<Utc>::from(state.observed_at().unwrap_or(SystemTime::UNIX_EPOCH)).timestamp_micros()
 }
 
-fn window_reset_recovered(window: &CodexQuotaWindow, previous: Option<DateTime<Utc>>) -> bool {
-    // reset 必须前进：防止耗尽后立刻拉到的旧快照（reset 未滚动）误解锁。
-    if !previous
-        .zip(window.reset_at())
-        .is_some_and(|(previous, current)| current > previous)
-    {
-        return false;
-    }
-    // reset 前进说明已进入新窗口，新窗口用量应接近零；高用量说明 reset 基线
-    // 不可信（例如滑动窗口），保持锁定，等待同一个窗口的连续观测解除。
-    window
-        .used_percent()
-        .is_some_and(|used| used < RESET_RECOVERY_MAX_USED_PERCENT)
-}
-
-/// 统一手动刷新和 worker 的恢复规则。已耗尽窗口的解除支持以下证据：
-/// 可用点数、所有耗尽窗口到期且上游明确允许、reset 前进且用量低于阈值，
-/// 或同一窗口内连续两次观测
-/// 都未触顶（reset 不早于耗尽基线）。后者防止账号被钉在旧
-/// reset 日期上；连续两次的要求排除耗尽后立刻拉到的旧快照。
+/// Reconcile the latest authoritative usage with the persisted exhaustion baseline.
 pub(super) fn reconcile_refresh(
     current: QuotaState,
     auto_use_credits: bool,
@@ -166,28 +249,18 @@ pub(super) fn reconcile_refresh(
         .filter(|recovery| recovery.exhausted_at_micros == exhaustion_time(state))
         .cloned()
         .unwrap_or_else(|| QuotaRecovery::new(state, previous.unwrap_or(refreshed)));
-    if recovery.pending.is_empty() {
+    if recovery.pending.is_empty() && recovery.unmatched.is_none() {
         recovery = QuotaRecovery::new(state, refreshed);
     }
-    // 只信任本次耗尽之后的边界，防止再次拒绝后复用已经过期的 reset 反复解封
-    // 多个耗尽窗口必须全部到期，未知 reset 仍走原有恢复规则
-    let allowed_after_reset = refreshed.quota().access() == QuotaAccessState::Allowed
-        && !recovery.pending.is_empty()
-        && recovery.pending.values().all(|reset| {
-            reset.is_some_and(|reset| {
-                reset.timestamp_micros() > recovery.exhausted_at_micros
-                    && SystemTime::from(reset) <= refreshed.observed_at()
-            })
-        });
-    if current.is_exhausted() && (allowed_after_reset || recovery.observe(refreshed)) {
+    if current.is_exhausted() && recovery.observe(refreshed, state) {
         refreshed.recovery = None;
         return Ok(QuotaState::allowed(refreshed.observed_at()));
     }
     let reset_at = recovery
-        .pending
-        .values()
-        .filter_map(|reset| *reset)
-        .min()
+        .unmatched
+        .as_ref()
+        .map(|reset| reset.reset_at)
+        .or_else(|| recovery.pending.values().filter_map(|reset| *reset).min())
         .map(SystemTime::from)
         .or(state.reset_at());
     let state = refreshed.access_with_credits(
@@ -197,7 +270,8 @@ pub(super) fn reconcile_refresh(
                 .unwrap_or(QuotaEvidence::AccountLimitReached),
             state.observed_at().unwrap_or(refreshed.observed_at()),
             reset_at,
-        ),
+        )
+        .with_limit_window_minutes(state.limit_window_minutes()),
         auto_use_credits,
     );
     if !state.is_exhausted() {

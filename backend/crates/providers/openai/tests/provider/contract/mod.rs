@@ -1494,6 +1494,116 @@ async fn image_custom_prices_apply_text_and_image_rates_from_the_frozen_request(
 }
 
 #[tokio::test]
+async fn image_model_fallback_preserves_root_and_inherited_session_affinity() {
+    use gateway_core::account::{AccountModelAccess, AccountModelAccessMode};
+
+    let store = Arc::new(MemoryAccountStore::default());
+    let primary = "acct_affinity_switch_a";
+    let image_account = "acct_affinity_switch_b";
+    create_account(&store, primary).await;
+    create_account(&store, image_account).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[]})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let provider = provider_with_affinity_and_base_url(&store, Arc::default(), server.uri());
+    let provider_kind = ProviderKind::new("openai").unwrap();
+    let scope = Arc::new(FrozenAccountScope::new(
+        Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+            (
+                ProviderAccountId::new(primary).unwrap(),
+                RuntimeAccount::new(provider_kind.clone(), BTreeSet::new()).with_model_access(
+                    AccountModelAccess::new(
+                        AccountModelAccessMode::Denylist,
+                        vec!["gpt-image-2".to_owned()],
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                ProviderAccountId::new(image_account).unwrap(),
+                RuntimeAccount::new(provider_kind, BTreeSet::new()),
+            ),
+        ]))),
+        ClientRoutingScope::all_accounts(),
+    ));
+    let attempt = |id| {
+        AttemptContext::new(
+            RequestAttemptContext::new(
+                ModelRequestId::new(id).unwrap(),
+                ClientApiKeyId::new("key_openai_contract").unwrap(),
+            ),
+            NonZeroU32::MIN,
+            gateway_core::lifecycle::Deadline::default(),
+            account_policy(),
+            AccountAttemptContext::new(BTreeSet::new(), None, None)
+                .with_account_scope(Arc::clone(&scope)),
+            None,
+            CancellationToken::new(),
+        )
+    };
+
+    for (session_id, thread_id) in [("image-root", None), ("image-parent", Some("image-child"))] {
+        store.set_scheduling(primary, None, AccountWeight::new(100).unwrap());
+        store.set_scheduling(image_account, None, AccountWeight::new(1).unwrap());
+        let root = Operation::Generate(generate_with_session_context(session_id, None, None));
+        let stream = provider
+            .execute(planned_request("openai", root), attempt("req_image_root"))
+            .await
+            .unwrap();
+        assert_eq!(stream.metadata().provider_account_id().as_str(), primary);
+        drop(stream);
+        store.set_scheduling(primary, None, AccountWeight::new(1).unwrap());
+        store.set_scheduling(image_account, None, AccountWeight::new(100).unwrap());
+
+        let mut payload_context = Map::from_iter([("session_id".to_owned(), json!(session_id))]);
+        if let Some(thread_id) = thread_id {
+            payload_context.insert("thread_id".to_owned(), json!(thread_id));
+        }
+        let payload = RawJsonPayload::new(
+            "openai",
+            Bytes::from_static(br#"{"model":"gpt-image-2","prompt":"image"}"#),
+        )
+        .unwrap()
+        .with_context(payload_context);
+        let image = Operation::GenerateImage(ImageRequest::from_raw_json(
+            ImageRequestKind::Generation,
+            payload,
+        ));
+        let mut stream = provider
+            .execute(
+                planned_provider_endpoint_request("openai", image),
+                attempt("req_image_fallback"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.metadata().provider_account_id().as_str(),
+            image_account
+        );
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        drop(stream);
+
+        let resumed =
+            Operation::Generate(generate_with_session_context(session_id, thread_id, None));
+        let stream = provider
+            .execute(
+                planned_request("openai", resumed),
+                attempt("req_image_resumed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream.metadata().provider_account_id().as_str(), primary);
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn image_endpoint_returns_the_exact_upstream_error_response() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
@@ -6294,39 +6404,65 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
 }
 
 #[tokio::test]
-async fn websocket_usage_limit_rejection_preserves_quota_state_for_account_rotation() {
-    let store = Arc::new(MemoryAccountStore::default());
-    let account_id = "acct_provider_contract";
-    create_account(&store, account_id).await;
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/codex/responses"))
-        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "129600")
-            .set_body_json(json!({"error": {"type": "usage_limit_reached", "message": "limit reached", "resets_at": 1_900_000_000}})))
-        .expect(1).mount(&server).await;
-    let mut stream = provider_with_base_url(&store, server.uri())
-        .execute(
-            planned_request("openai", generate_operation()),
-            context("req_ws_quota", CancellationToken::new()),
-        )
-        .await
-        .expect("prepare stream");
-    let error = loop {
-        match stream.next().await {
-            Some(Ok(_)) => {}
-            Some(Err(error)) => break error,
-            None => panic!("expected quota rejection"),
+async fn opening_usage_limit_rejection_preserves_only_account_wide_window_hints() {
+    for (websocket, bucket, minutes) in [
+        (true, "codex", Some(10080)),
+        (true, "image_gen", None),
+        (false, "codex", Some(10080)),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = "acct_provider_contract";
+        create_account(&store, account_id).await;
+        let server = MockServer::start().await;
+        Mock::given(method(if websocket { "GET" } else { "POST" }))
+            .and(path("/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "129600")
+                    .insert_header("x-codex-active-limit", bucket)
+                    .set_body_json(json!({"error": {
+                        "type": "usage_limit_reached", "message": "limit reached",
+                        "resets_at": 1_900_000_000, "limit_window_minutes": 10080
+                    }})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let operation = if websocket {
+            generate_operation()
+        } else {
+            http_generate_operation()
+        };
+        let mut stream = provider_with_base_url(&store, server.uri())
+            .execute(
+                planned_request("openai", operation),
+                context("req_opening_quota", CancellationToken::new()),
+            )
+            .await
+            .expect("prepare stream");
+        let error = loop {
+            match stream.next().await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => break error,
+                None => panic!("expected quota rejection"),
+            }
+        };
+        if websocket {
+            assert_eq!(error.send_state(), UpstreamSendState::NotSent);
         }
-    };
-    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
-    assert!(error.replay_is_safe());
-    assert_eq!(error.pre_delivery_retry(), None);
-    assert_eq!(error.retry_after(), Some(Duration::from_secs(129_600)));
-    assert_eq!(error.kind(), ProviderErrorKind::QuotaExhausted);
-    assert_eq!(
-        store.account(account_id).expect("account").quota().access(),
-        QuotaAccessState::Exhausted
-    );
+        assert!(error.replay_is_safe());
+        assert_eq!(error.pre_delivery_retry(), None);
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(129_600)));
+        assert_eq!(error.kind(), ProviderErrorKind::QuotaExhausted);
+        let quota = store.account(account_id).expect("account").quota();
+        assert!(quota.is_exhausted());
+        assert_eq!(quota.limit_window_minutes(), minutes);
+        assert_eq!(
+            quota.reset_at(),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000))
+        );
+        server.verify().await;
+    }
 }
 
 #[tokio::test]
@@ -8540,7 +8676,7 @@ async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
                 if semantic_output {
                     events.push(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"}));
                 }
-                let original = json!({"type":"response.failed","response":{"id":"resp_quota","error":{"code":"usage_limit_reached","message":"You have reached your usage limit."}}});
+                let original = json!({"type":"response.failed","response":{"id":"resp_quota","error":{"code":"usage_limit_reached","message":"You have reached your usage limit.","resets_at":1900000000,"limit_window_minutes":10080}}});
                 events.push(original.clone());
                 let (base_url, _http_server, websocket_server) = if use_websocket {
                     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -8609,6 +8745,12 @@ async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
                     }
                 };
                 assert_eq!(error.kind(), ProviderErrorKind::QuotaExhausted);
+                let quota = store.account("acct_provider_contract").unwrap().quota();
+                assert_eq!(quota.limit_window_minutes(), Some(10080));
+                assert_eq!(
+                    quota.reset_at(),
+                    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000))
+                );
                 assert_eq!(error.send_state(), UpstreamSendState::Sent);
                 assert_eq!(error.replay_is_safe(), !semantic_output);
                 assert_eq!(
@@ -9077,6 +9219,18 @@ async fn request_rejections_should_not_retry_or_cool_down_accounts() {
         [
             ("flex_unavailable", ProviderErrorKind::Unavailable),
             ("turn_rate_limit_exceeded", ProviderErrorKind::RateLimited),
+            (
+                "api_key_spend_limit_exceeded",
+                ProviderErrorKind::QuotaExhausted,
+            ),
+            (
+                "project_spend_limit_exceeded",
+                ProviderErrorKind::QuotaExhausted,
+            ),
+            (
+                "organization_spend_limit_exceeded",
+                ProviderErrorKind::QuotaExhausted,
+            ),
         ]
         .map(|case| (websocket, case))
     }) {
@@ -9085,7 +9239,7 @@ async fn request_rejections_should_not_retry_or_cool_down_accounts() {
         create_account(&store, account_id).await;
         let cooldowns = Arc::new(MemoryCooldownPort::new());
         let server = MockServer::start().await;
-        let error_type = if code == "turn_rate_limit_exceeded" {
+        let error_type = if code != "flex_unavailable" {
             "rate_limit_error"
         } else {
             "resource_unavailable"
@@ -9146,9 +9300,67 @@ async fn request_rejections_should_not_retry_or_cool_down_accounts() {
         );
         let account = store.account(account_id).unwrap();
         assert_eq!(account.credential_state(), CredentialState::Ready);
-        assert_eq!(account.quota().access(), QuotaAccessState::Unknown);
+        if expected_kind == ProviderErrorKind::QuotaExhausted {
+            assert_eq!(account.quota().access(), QuotaAccessState::Exhausted);
+            assert_eq!(
+                account.quota().evidence(),
+                Some(QuotaEvidence::ProviderDenied)
+            );
+            assert_eq!(account.quota().reset_at(), None);
+        } else {
+            assert_eq!(account.quota().access(), QuotaAccessState::Unknown);
+        }
         assert!(cooldowns.read(account.id()).await.unwrap().is_none());
     }
+}
+
+#[tokio::test]
+async fn spend_limit_in_stream_terminates_native_continuation() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_provider_contract";
+    create_account(&store, account_id).await;
+    let server = MockServer::start().await;
+    let code = "project_spend_limit_exceeded";
+    let event = json!({"type":"response.failed","response":{
+        "id":"resp_budget","error":{"code":code,"type":"rate_limit_error","message":"Budget exceeded."}
+    }});
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!("event: response.failed\ndata: {event}\n\n"),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let attempt = context("req_spend_limit_stream", CancellationToken::new())
+        .with_continuation_attempt(ContinuationAttempt::Native);
+    let mut stream = provider_with_base_url(&store, server.uri())
+        .execute(
+            planned_request("openai", quota_continuation_operation(false)),
+            attempt,
+        )
+        .await
+        .unwrap();
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("expected spend limit rejection"),
+        }
+    };
+    assert_eq!(error.kind(), ProviderErrorKind::QuotaExhausted);
+    assert_eq!(
+        error.client_visible_upstream_error().unwrap().code(),
+        Some(code)
+    );
+    assert_eq!(error.continuation_recovery_disposition(), None);
+    assert!(error.retry_is_prohibited());
+    assert_eq!(
+        store.account(account_id).unwrap().quota().evidence(),
+        Some(QuotaEvidence::ProviderDenied),
+    );
+    server.verify().await;
 }
 
 mod search_model_access;

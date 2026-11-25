@@ -2669,19 +2669,27 @@ async fn verified_credential_rotation_preserves_quota_exhaustion() {
         .expect("import exhausted account");
     // 模拟应用与数据库的微小时钟偏差，轮换不能把更新时间倒退到已有额度观测之前。
     let observed_at = SystemTime::now() + Duration::from_secs(3);
-    repository
-        .apply_quota_access(QuotaAccessChange {
-            account_id: ProviderAccountId::new("acct_rotation_quota").expect("account ID"),
-            expected_revision: CredentialRevision::new(1).expect("credential revision"),
-            state: QuotaState::exhausted(QuotaEvidence::ProviderDenied, observed_at, None),
-        })
-        .await
-        .expect("persist quota exhaustion");
+    assert_eq!(
+        repository
+            .compare_and_swap_quota(QuotaObservation {
+                account_id: ProviderAccountId::new("acct_rotation_quota").expect("account ID"),
+                expected_revision: CredentialRevision::new(1).expect("credential revision"),
+                plan_type: None,
+                observed_at,
+                quota: OpaqueProviderData::new(
+                    json!({"remaining": 0}).as_object().unwrap().clone(),
+                ),
+                state: QuotaState::exhausted(QuotaEvidence::ProviderDenied, observed_at, None),
+            })
+            .await
+            .expect("persist quota exhaustion"),
+        QuotaWriteOutcome::Updated
+    );
 
     repository
         .rotate_provider_account(RotateProviderAccount {
             settings: None,
-            scope,
+            scope: scope.clone(),
             profile: profile("acct_rotation_quota", "reauthorized account"),
             replacement_identity: None,
             credential: credential_update("acct_rotation_quota", 1, "reauthorized-secret"),
@@ -2694,13 +2702,124 @@ async fn verified_credential_rotation_preserves_quota_exhaustion() {
         .await
         .expect("rotate exhausted account credential");
 
-    let quota_access_state: String =
-        sqlx::query_scalar("select quota_access_state from provider_accounts where id = $1")
-            .bind("acct_rotation_quota")
-            .fetch_one(&database.pool)
+    let read_quota = || {
+        sqlx::query_as::<_, (String, Option<String>, Option<serde_json::Value>, bool)>(
+            "select quota_access_state, quota_evidence, provider_quota_json,
+                    quota_observed_at is not null and quota_access_observed_at is not null
+             from provider_accounts where id = $1",
+        )
+        .bind("acct_rotation_quota")
+        .fetch_one(&database.pool)
+    };
+    assert_eq!(
+        read_quota().await.unwrap(),
+        (
+            "exhausted".to_owned(),
+            Some("provider_denied".to_owned()),
+            Some(json!({"remaining": 0})),
+            true,
+        ),
+    );
+
+    repository
+        .rotate_provider_account(RotateProviderAccount {
+            settings: None,
+            scope,
+            profile: profile("acct_rotation_quota", "replacement account"),
+            replacement_identity: Some(ProviderAccountIdentity::new(
+                "different-upstream-user".to_owned(),
+                None,
+            )),
+            credential: credential_update("acct_rotation_quota", 2, "replacement-secret"),
+            audit: audit(
+                "audit_rotation_quota_rebind",
+                "rotate",
+                "acct_rotation_quota",
+            ),
+        })
+        .await
+        .expect("rotate credential to another upstream identity");
+
+    assert_eq!(
+        read_quota().await.unwrap(),
+        ("unknown".to_owned(), None, None, false),
+    );
+
+    database.close().await;
+}
+
+#[tokio::test]
+async fn quota_window_migration_preserves_existing_exhaustion_and_tracks_new_hints() {
+    let Some(database) = TestDatabase::create_at_version("quota_hint_upgrade", 55).await else {
+        return;
+    };
+    let id = ProviderAccountId::new("acct_quota_hint_upgrade").unwrap();
+    sqlx::query(
+        "insert into provider_accounts (id, provider_kind, name, authentication_kind,
+             provider_credentials_json, has_refresh_token, credential_observed_at,
+             quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
+             provider_quota_json, quota_observed_at, created_at, updated_at)
+         values ($1, 'openai', 'Existing account', 'oauth', '{}'::jsonb, false, now(),
+             'exhausted', 'usage_limit_reached', now(), now() + interval '1 hour',
+             '{}'::jsonb, now(), now(), now())",
+    )
+    .bind(id.as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    super::TEST_MIGRATOR.run(&database.pool).await.unwrap();
+
+    let store = PgProviderAccountRepository::new(database.pool.clone());
+    let account = store.get_account(&id).await.unwrap().unwrap();
+    assert!(account.quota().is_exhausted());
+    assert!(account.quota().reset_at().is_some());
+    assert_eq!(account.quota().limit_window_minutes(), None);
+    let observed_at = SystemTime::now() + Duration::from_secs(1);
+    let exhausted = QuotaState::exhausted(
+        QuotaEvidence::UsageLimitReached,
+        observed_at,
+        account.quota().reset_at(),
+    )
+    .with_limit_window_minutes(Some(10080));
+    let apply = |state| QuotaAccessChange {
+        account_id: id.clone(),
+        expected_revision: account.revision(),
+        state,
+    };
+    assert_eq!(
+        store.apply_quota_access(apply(exhausted)).await.unwrap(),
+        QuotaWriteOutcome::Updated
+    );
+    let read_quota = || store.get_quotas(std::slice::from_ref(&id));
+    assert_eq!(
+        read_quota().await.unwrap()[0].state.limit_window_minutes(),
+        Some(10080)
+    );
+    assert_eq!(
+        store
+            .get_account(&id)
             .await
-            .expect("load exhausted account after credential rotation");
-    assert_eq!(quota_access_state, "exhausted".to_owned());
+            .unwrap()
+            .unwrap()
+            .quota()
+            .limit_window_minutes(),
+        Some(10080)
+    );
+
+    let mut fresh = read_quota().await.unwrap().pop().unwrap();
+    fresh.observed_at = observed_at + Duration::from_secs(1);
+    fresh.state = QuotaState::allowed(fresh.observed_at);
+    assert_eq!(
+        store.compare_and_swap_quota(fresh).await.unwrap(),
+        QuotaWriteOutcome::Updated
+    );
+    assert_eq!(
+        store.apply_quota_access(apply(exhausted)).await.unwrap(),
+        QuotaWriteOutcome::Conflict
+    );
+    let quota = read_quota().await.unwrap()[0].state;
+    assert_eq!(quota.access(), QuotaAccessState::Allowed);
+    assert_eq!(quota.limit_window_minutes(), None);
 
     database.close().await;
 }

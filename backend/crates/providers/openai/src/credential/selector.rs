@@ -1,6 +1,6 @@
 //! AttemptContext 驱动的 Codex 账号选择与 Redis lease port。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -9,7 +9,7 @@ use gateway_core::account::{
     AccountCandidate, AccountCapacitySnapshot, AccountEligibilityPolicy, AccountErrorReason,
     AccountFeedbackStats, AccountRuntimeSignals, AccountSchedulingBlocker, AccountSelectionContext,
     AccountSelector, AccountStatus, CredentialState, PreferredAccountSelection, ProviderAccount,
-    ProviderAccountId, QuotaEvidence,
+    ProviderAccountId, QuotaEvidence, QuotaState,
 };
 use gateway_core::engine::{AttemptContext, ContinuationAttempt};
 use gateway_core::provider_ports::{
@@ -59,10 +59,12 @@ pub enum CodexAccountFailure {
     Banned,
     /// 账号信用额度已耗尽。
     QuotaExhausted,
+    SpendLimitExceeded,
     /// 当前用量窗口已耗尽；到重置时间后可自动恢复。
     UsageLimitExhausted {
         /// 上游返回的窗口绝对重置时刻。
         reset_at: Option<SystemTime>,
+        limit_window_minutes: Option<u16>,
     },
     /// 账号触发临时用量限制。
     RateLimited {
@@ -100,6 +102,7 @@ pub struct SelectCodexCredential<'a> {
 
 pub(crate) struct SelectCodexProviderEndpointCredential<'a> {
     pub model: Option<&'a str>,
+    pub image: bool,
     pub request_url: &'a Url,
     pub attempt: &'a AttemptContext,
     pub session_affinity: Option<&'a CodexSessionAffinity>,
@@ -270,7 +273,7 @@ struct AffinityTelemetry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelCatalogEligibility<'a> {
     Required(&'a str),
-    Endpoint(Option<&'a str>),
+    Endpoint { model: Option<&'a str>, image: bool },
 }
 
 impl CodexCredentialSelector {
@@ -365,7 +368,10 @@ impl CodexCredentialSelector {
         self.select_inner(
             &input,
             None,
-            ModelCatalogEligibility::Endpoint(request.model),
+            ModelCatalogEligibility::Endpoint {
+                model: request.model,
+                image: request.image,
+            },
         )
         .await
     }
@@ -460,10 +466,17 @@ impl CodexCredentialSelector {
             accounts.push(account);
         }
         let listed_count = accounts.len();
+        let mut image_ineligible = BTreeSet::new();
+        let image_request = matches!(
+            model_catalog_eligibility,
+            ModelCatalogEligibility::Endpoint { image: true, .. }
+        );
         let mut exclusions = std::collections::BTreeMap::<&str, usize>::new();
         let accounts = accounts
             .into_iter()
             .filter(|account| {
+                let scope = request.attempt.account_scope();
+                let within_scope = scope.is_some_and(|scope| scope.allows(account.id()));
                 let reason = if account.provider() != &self.provider_kind {
                     Some("provider_mismatch")
                 } else if request.oauth_only
@@ -471,11 +484,11 @@ impl CodexCredentialSelector {
                     Some("oauth_required")
                 } else if diagnostic {
                     None
-                } else if !request.attempt.account_scope().is_some_and(|scope| scope.allows(account.id())) {
+                } else if !within_scope {
                     Some("outside_scope")
                 } else {
                     match model_catalog_eligibility {
-                        ModelCatalogEligibility::Endpoint(model) => {
+                        ModelCatalogEligibility::Endpoint { model, .. } => {
                             let allowed = request.attempt.account_scope().is_some_and(|scope| {
                                 model.map_or_else(|| scope.directory().account(account.id()).is_some_and(|a| a.model_access().mode() == gateway_core::account::AccountModelAccessMode::All), |model| scope.allows_model(account.id(), model))
                             });
@@ -498,6 +511,11 @@ impl CodexCredentialSelector {
                 };
                 if let Some(reason) = reason {
                     *exclusions.entry(reason).or_default() += 1;
+                    if image_request && within_scope
+                        && matches!(reason, "model_policy" | "oauth_required")
+                    {
+                        image_ineligible.insert(account.id().clone());
+                    }
                 }
                 reason.is_none()
             })
@@ -621,6 +639,11 @@ impl CodexCredentialSelector {
             )
             .await
         };
+        // An image can borrow an eligible credential without claiming the text session.
+        let preserves_session_binding = pinned_account.is_none()
+            && affinity
+                .bound_account()
+                .is_some_and(|id| image_ineligible.contains(id));
         let cyber_policy_scope = self
             .prepare_cyber_policy_scope(cyber_policy_session_key)
             .await;
@@ -689,7 +712,7 @@ impl CodexCredentialSelector {
                     &self.provider_kind,
                     match model_catalog_eligibility {
                         ModelCatalogEligibility::Required(model) => Some(model),
-                        ModelCatalogEligibility::Endpoint(model) => model,
+                        ModelCatalogEligibility::Endpoint { model, .. } => model,
                     },
                     &candidates,
                     &mut context,
@@ -811,6 +834,7 @@ impl CodexCredentialSelector {
                         continue;
                     }
                     let initial_affinity_claim = if !diagnostic
+                        && !preserves_session_binding
                         && observed_affinity_account.is_none()
                         && let Some(key) = request.session_affinity_key
                     {
@@ -906,6 +930,7 @@ impl CodexCredentialSelector {
                         allows_account_state_mutation,
                         affinity_telemetry,
                         affinity_expected_account_id,
+                        preserves_session_binding,
                         capacity: capacity.map(AccountCapacitySnapshot::with_acquired_request),
                         _guard: Arc::from(guard),
                     });
@@ -970,6 +995,7 @@ impl CodexCredentialSelector {
             allows_account_state_mutation: lease.allows_account_state_mutation,
             affinity_telemetry: lease.affinity_telemetry,
             affinity_expected_account_id: lease.affinity_expected_account_id.clone(),
+            preserves_session_binding: lease.preserves_session_binding,
             capacity: lease.capacity,
             _guard: lease._guard.clone(),
         })
@@ -1226,16 +1252,29 @@ impl CodexCredentialSelector {
             }
             CodexAccountFailure::QuotaExhausted => self
                 .quota
-                .record_confirmed_exhaustion(account, QuotaEvidence::PaymentRequired, None, now)
+                .record_confirmed_exhaustion(
+                    account,
+                    QuotaState::exhausted(QuotaEvidence::PaymentRequired, now, None),
+                )
                 .await
                 .map_err(|_| CredentialSelectionError::Store),
-            CodexAccountFailure::UsageLimitExhausted { reset_at } => self
+            CodexAccountFailure::SpendLimitExceeded => self
                 .quota
                 .record_confirmed_exhaustion(
                     account,
-                    QuotaEvidence::UsageLimitReached,
-                    reset_at,
-                    now,
+                    QuotaState::exhausted(QuotaEvidence::ProviderDenied, now, None),
+                )
+                .await
+                .map_err(|_| CredentialSelectionError::Store),
+            CodexAccountFailure::UsageLimitExhausted {
+                reset_at,
+                limit_window_minutes,
+            } => self
+                .quota
+                .record_confirmed_exhaustion(
+                    account,
+                    QuotaState::exhausted(QuotaEvidence::UsageLimitReached, now, reset_at)
+                        .with_limit_window_minutes(limit_window_minutes),
                 )
                 .await
                 .map_err(|_| CredentialSelectionError::Store),
@@ -1613,6 +1652,7 @@ pub struct CodexCredentialLease {
     allows_account_state_mutation: bool,
     affinity_telemetry: AffinityTelemetry,
     affinity_expected_account_id: ProviderAccountId,
+    preserves_session_binding: bool,
     capacity: Option<AccountCapacitySnapshot>,
     _guard: Arc<dyn ProviderLeaseGuard>,
 }
@@ -1681,6 +1721,10 @@ impl CodexCredentialLease {
     #[must_use]
     pub(crate) const fn affinity_expected_account_id(&self) -> &ProviderAccountId {
         &self.affinity_expected_account_id
+    }
+
+    pub(crate) const fn preserves_session_binding(&self) -> bool {
+        self.preserves_session_binding
     }
 }
 
