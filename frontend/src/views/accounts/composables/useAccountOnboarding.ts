@@ -173,8 +173,6 @@ export function useAccountOnboarding(options: {
   async function importAccountDocument() {
     const provider = requireImportProvider(createForm.value.provider)
     const mode = createForm.value.mode
-    if (provider === 'antigravity')
-      throw new Error('Antigravity 仅支持 OAuth 授权')
     if (mode === 'oauth')
       throw new Error('请选择凭据导入方式')
     if (mode === 'api_key') {
@@ -339,6 +337,8 @@ function accountImportDocuments(
   if (provider === 'openai' && isOpenAiTokenImportMode(mode)) {
     return splitAccountDocument({ provider, document: parseOpenAiTokenImport(value, mode) })
   }
+  if (mode !== 'json')
+    throw new Error('请选择账号文件导入')
   const parsed: unknown = parseImportJson(value)
   if (reauthorizing && isRecord(parsed) && Array.isArray(parsed.documents)) {
     const documents = parseMixedImportDocuments(parsed)

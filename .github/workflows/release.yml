@@ -234,6 +234,10 @@ jobs:
             -e CPR_GIT_SHA="${CPR_GIT_SHA}" \
             -e CPR_BUILD_TIME="${CPR_BUILD_TIME}" \
             -e CPR_BUILD_TYPE="${CPR_BUILD_TYPE}" \
+            -e CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID \
+            -e CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_SECRET \
+            -e CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI \
+            -e CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES \
             -v "$HOME/.cargo:/cargo" \
             -v "$PWD/..:/workspace" \
             -w /workspace/backend \
@@ -253,6 +257,10 @@ jobs:
           CPR_GIT_SHA: ${{ needs.release-info.outputs.git_sha }}
           CPR_BUILD_TIME: ${{ needs.release-info.outputs.build_time }}
           CPR_BUILD_TYPE: release
+          CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID }}
+          CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_SECRET: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_SECRET }}
+          CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI }}
+          CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -313,6 +321,10 @@ jobs:
           CPR_GIT_SHA: ${{ needs.release-info.outputs.git_sha }}
           CPR_BUILD_TIME: ${{ needs.release-info.outputs.build_time }}
           CPR_BUILD_TYPE: release
+          CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID }}
+          CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_SECRET: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_SECRET }}
+          CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI }}
+          CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES: ${{ vars.CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

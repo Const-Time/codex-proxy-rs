@@ -1180,7 +1180,9 @@ Antigravity 的 GenAI 模型目录位于 `GET /v1beta/models`。列表使用 `pa
 
 GenAI 的分组模型别名通过 `generationConfig.thinkingConfig.thinkingLevel` 选择上游声明的变体。例如可在目录中的分组模型上指定 `HIGH`。只允许使用密钥所在账号范围内的变体，直接请求完整模型名时使用该模型。Chat 请求填写对象型 `web_search_options` 时，Antigravity 使用账号目录声明的专用搜索模型。请求模型和搜索模型均受账号模型权限约束。
 
-在账号管理中选择 Antigravity 并发起 OAuth。部署端从环境变量读取 `ANTIGRAVITY_OAUTH_CLIENT_ID` 和 `ANTIGRAVITY_OAUTH_CLIENT_SECRET`。OAuth 注册使用自定义回调时，同时设置 `ANTIGRAVITY_OAUTH_REDIRECT_URI`。
+在「账号管理 → 新增账号 → Antigravity」选择 OAuth 完成浏览器授权，或选择「账号文件」粘贴或上传 CPR 导出的 Antigravity JSON。文件可以包含多个账号，导入时会用每条记录的 `refreshToken` 向 Google 核验身份和权限。为已有账号重新授权时，可以上传只包含该 Google 账号的文件。
+
+默认构建使用与上游相同的 Antigravity Desktop OAuth 客户端注册，部署后即可生成授权链接。发行维护者可以在构建时成对设置 `CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID` 和 `CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_SECRET` 覆盖默认注册。Release 工作流读取同名仓库变量。可选的 `CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI` 和 `CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES` 用于已注册的自定义回调与权限范围。构建值会随二进制分发，仅使用获准随包分发的桌面客户端注册。
 
 ## Anthropic Messages
 

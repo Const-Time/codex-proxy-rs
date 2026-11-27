@@ -4,8 +4,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolveAccountCreatePresentation } from '../src/views/accounts/components/AccountCreateModal/presenter.ts'
 
-test('reauthorization offers OAuth and account files for OpenAI and xAI', () => {
-  for (const provider of ['openai', 'xai'] as const) {
+test('reauthorization offers OAuth and account files for all OAuth providers', () => {
+  for (const provider of ['openai', 'xai', 'antigravity'] as const) {
     const form = {
       provider,
       mode: 'json',
@@ -25,7 +25,7 @@ test('reauthorization offers OAuth and account files for OpenAI and xAI', () => 
   }
 })
 
-test('Antigravity create and reauthorization only expose OAuth with full callback guidance', () => {
+test('Antigravity accepts account files and keeps full callback guidance for OAuth', () => {
   const createForm = {
     provider: 'antigravity',
     mode: 'oauth',
@@ -44,7 +44,7 @@ test('Antigravity create and reauthorization only expose OAuth with full callbac
     reauthorizing: false,
   })
   assert.equal(createView.isAntigravity, true)
-  assert.deepEqual(createView.modeOptions.map(option => option.value), ['oauth'])
+  assert.deepEqual(createView.modeOptions.map(option => option.value), ['oauth', 'json'])
   assert.equal(createView.oauth.panelTitle, 'Antigravity OAuth 授权')
   assert.equal(createView.oauth.callbackLabel, '回调地址')
   assert.match(createView.oauth.callbackPlaceholder, /code.*state/)
@@ -67,7 +67,7 @@ test('Antigravity create and reauthorization only expose OAuth with full callbac
     oauthLoading: false,
     reauthorizing: true,
   })
-  assert.deepEqual(reauthView.modeOptions.map(option => option.value), ['oauth'])
+  assert.deepEqual(reauthView.modeOptions.map(option => option.value), ['oauth', 'json'])
   assert.equal(reauthView.oauth.panelTitle, 'Antigravity OAuth 重新授权')
   assert.equal(reauthView.submitLabel, '完成重新授权')
   assert.match(reauthView.modal.description, /Antigravity/)

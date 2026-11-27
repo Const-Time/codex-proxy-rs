@@ -232,50 +232,57 @@ impl TokenResponse {
 }
 
 impl GoogleOAuth {
-    pub(crate) fn from_environment() -> Result<Self, ConfigError> {
-        let optional = |name| match std::env::var(name) {
-            Ok(value) => Ok(Some(value)),
-            Err(std::env::VarError::NotPresent) => Ok(None),
-            Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError),
+    /// Uses the upstream desktop registration unless the build provides its own pair.
+    pub fn from_build_configuration() -> Result<Self, ConfigError> {
+        const CLIENT_ID: &str = match option_env!("CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID") {
+            Some(id) => id,
+            None => "",
         };
-        let client_id = optional("ANTIGRAVITY_OAUTH_CLIENT_ID")?;
-        let client_secret = optional("ANTIGRAVITY_OAUTH_CLIENT_SECRET")?;
-        if client_id.is_some() != client_secret.is_some() {
-            return Err(ConfigError);
+        const CLIENT_SECRET: &str = match option_env!("CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_SECRET") {
+            Some(secret) => secret,
+            None => "",
+        };
+        const {
+            assert!(
+                CLIENT_ID.is_empty() == CLIENT_SECRET.is_empty(),
+                "configure both Antigravity build OAuth client values or neither"
+            );
         }
-        let scopes = optional("ANTIGRAVITY_OAUTH_SCOPES")?.unwrap_or_else(|| {
-            concat!(
+        // Upstream Antigravity Desktop 2.34.0 distributes this native client registration.
+        let (client_id, client_secret) = if CLIENT_ID.is_empty() {
+            (
+                "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+                "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",
+            )
+        } else {
+            (CLIENT_ID, CLIENT_SECRET)
+        };
+        let scopes = option_env!("CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES")
+            .filter(|value| !value.is_empty())
+            .unwrap_or(concat!(
                 "https://www.googleapis.com/auth/cloud-platform ",
                 "https://www.googleapis.com/auth/cclog ",
                 "https://www.googleapis.com/auth/experimentsandconfigs ",
                 "https://www.googleapis.com/auth/aicode"
-            )
-            .to_owned()
-        });
+            ));
         let registration = OAuthRegistration::new(
-            client_id.unwrap_or_default(),
-            client_secret.unwrap_or_default(),
-            optional("ANTIGRAVITY_OAUTH_REDIRECT_URI")?
-                .unwrap_or_else(|| "http://localhost:8085/auth/callback".to_owned()),
+            client_id.to_owned(),
+            client_secret.to_owned(),
+            option_env!("CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI")
+                .filter(|value| !value.is_empty())
+                .unwrap_or("http://localhost:8085/auth/callback")
+                .to_owned(),
             scopes.split_ascii_whitespace().map(str::to_owned).collect(),
             Url::parse("https://daily-cloudcode-pa.googleapis.com").map_err(|_| ConfigError)?,
         );
-        if !registration.client_id.is_empty() || !registration.client_secret.is_empty() {
-            registration.validate()?;
-        }
+        registration.validate()?;
         Ok(Self::new(registration))
     }
 
-    pub(crate) fn is_configured(&self) -> bool {
-        !self.config.client_id.is_empty()
-    }
-
     pub(super) fn ensure_configured(&self) -> Result<(), ProviderAdminError> {
-        self.config.validate().map_err(|_| {
-            unavailable().with_public_message(
-                "Configure ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET to authorize an Antigravity account.",
-            )
-        })
+        self.config
+            .validate()
+            .map_err(|_| unavailable().with_public_message("Antigravity OAuth 客户端配置无效"))
     }
 
     pub(super) fn new(config: OAuthRegistration) -> Self {

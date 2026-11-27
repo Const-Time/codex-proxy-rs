@@ -25,6 +25,7 @@ const modeOptions = {
   ],
   antigravity: [
     { label: 'OAuth', value: 'oauth' },
+    { label: '账号文件', value: 'json' },
   ],
 } satisfies Record<Exclude<AccountCreateProvider, 'batch'>, Array<{ label: string, value: string }>>
 
@@ -73,29 +74,34 @@ function resolveModal(
     const providerName = provider && provider !== 'batch' ? formatProviderLabel(provider) : 'OAuth'
     return {
       title: '重新授权账号',
-      description: `${input.account?.email || input.account?.name || providerName} · ${input.form.mode === 'json' && provider !== 'antigravity' ? '仅上传该账号的单账号文件，保留原有配置' : '完成授权后更新账号凭据'}`,
+      description: `${input.account?.email || input.account?.name || providerName} · ${input.form.mode === 'json' ? '仅上传该账号的单账号文件，保留原有配置' : '完成授权后更新账号凭据'}`,
       tone: 'info' as const,
       size: 'md' as const,
     }
   }
 
   let description = '粘贴或上传包含 OAuth Token 的 JSON，匹配已有账号时更新凭据'
-  if (provider === 'batch')
+  if (provider === 'batch') {
     description = '粘贴或上传 CPR 账号包，一次导入多个平台账号'
-  else if (provider === 'antigravity')
-    description = '通过浏览器授权导入 Antigravity 账号'
-  else if (provider === 'xai' && input.form.mode === 'oauth')
-    description = '通过浏览器授权导入 xAI 账号'
-  else if (provider === 'xai')
-    description = '粘贴或上传 xAI 账号文件，匹配已有账号时更新凭据'
-  else if (input.form.mode === 'api_key')
+  }
+  else if (provider === 'xai' || provider === 'antigravity') {
+    const name = formatProviderLabel(provider)
+    description = input.form.mode === 'oauth'
+      ? `通过浏览器授权导入 ${name} 账号`
+      : `粘贴或上传 ${name} 账号文件，匹配已有账号时更新凭据`
+  }
+  else if (input.form.mode === 'api_key') {
     description = '接入 OpenAI Responses 兼容上游'
-  else if (input.form.mode === 'oauth')
+  }
+  else if (input.form.mode === 'oauth') {
     description = '通过浏览器授权导入 OpenAI 账号'
-  else if (input.form.mode === 'access_token')
+  }
+  else if (input.form.mode === 'access_token') {
     description = '逐行粘贴 Access Token；未包含 Refresh Token 时无法自动续期'
-  else if (input.form.mode === 'refresh_token')
+  }
+  else if (input.form.mode === 'refresh_token') {
     description = '逐行粘贴 Refresh Token，导入时将自动换取 Access Token'
+  }
 
   return {
     title: '导入账号',
@@ -160,10 +166,10 @@ function resolveImportInput(
       uploadable: true,
     }
   }
-  if (provider === 'xai') {
+  if (provider === 'xai' || provider === 'antigravity') {
     return {
       label: '账号文件',
-      placeholder: '粘贴包含 xAI OAuth 凭据的 JSON 内容',
+      placeholder: `粘贴包含 ${formatProviderLabel(provider)} OAuth 凭据的 JSON 内容`,
       uploadable: true,
     }
   }

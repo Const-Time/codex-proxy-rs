@@ -22,6 +22,38 @@ fn stub_oauth(server: &MockServer) -> GoogleOAuth {
     )
 }
 
+#[test]
+fn authorization_uses_the_registration_in_the_build() {
+    let oauth = GoogleOAuth::from_build_configuration().unwrap();
+    let authorization = oauth.authorize_url("test-state", "test-verifier");
+    let client_id = option_env!("CPR_BUILD_ANTIGRAVITY_OAUTH_CLIENT_ID")
+        .filter(|value| !value.is_empty())
+        .unwrap_or("1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com");
+
+    let url = Url::parse(&authorization.unwrap()).unwrap();
+    let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    assert_eq!(params["client_id"], client_id);
+    assert_eq!(params["code_challenge_method"], "S256");
+    assert!(!params.contains_key("client_secret"));
+    assert_eq!(
+        params["redirect_uri"],
+        option_env!("CPR_BUILD_ANTIGRAVITY_OAUTH_REDIRECT_URI")
+            .filter(|value| !value.is_empty())
+            .unwrap_or("http://localhost:8085/auth/callback")
+    );
+    if let Some(scopes) =
+        option_env!("CPR_BUILD_ANTIGRAVITY_OAUTH_SCOPES").filter(|value| !value.is_empty())
+    {
+        for scope in scopes.split_ascii_whitespace() {
+            assert!(
+                params["scope"]
+                    .split_ascii_whitespace()
+                    .any(|item| item == scope)
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn verified_exchange_and_refresh_preserve_subject() {
     let server = MockServer::start().await;

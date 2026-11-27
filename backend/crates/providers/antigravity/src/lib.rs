@@ -78,8 +78,7 @@ pub fn initialize(ports: ProviderStorePorts) -> Result<ProviderBundle, ConfigErr
         ports.runtime_policy(),
         release.clone(),
     ));
-    let oauth = Arc::new(GoogleOAuth::from_environment()?.with_profile(profiles.clone()));
-    let configured = oauth.is_configured();
+    let oauth = Arc::new(GoogleOAuth::from_build_configuration()?.with_profile(profiles.clone()));
     let origin = oauth.resource_origin().clone();
     let credentials = Arc::new(CredentialService::new(kind.clone(), &ports, oauth.clone()));
     let catalog = Arc::new(
@@ -126,10 +125,7 @@ pub fn initialize(ports: ProviderStorePorts) -> Result<ProviderBundle, ConfigErr
         profiles,
     });
     let mut workers = vec![workers::release_contribution(release).map_err(|_| ConfigError)?];
-    if configured {
-        workers
-            .extend(workers::contributions(credentials, catalog, quota).map_err(|_| ConfigError)?);
-    }
+    workers.extend(workers::contributions(credentials, catalog, quota).map_err(|_| ConfigError)?);
     Ok(ProviderBundle {
         core,
         admin,
