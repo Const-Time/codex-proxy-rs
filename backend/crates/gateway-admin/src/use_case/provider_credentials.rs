@@ -1,4 +1,4 @@
-//! xAI 管理资源的中立 ProviderAdmin 委托。
+//! Provider-owned credential mutations using the shared account and snapshot stores.
 
 use std::sync::Arc;
 
@@ -24,9 +24,9 @@ use super::{
     validate_prepared_import,
 };
 
-/// xAI 固定管理路由消费的服务。
+/// Management operations shared by providers that use the standard credential contracts.
 #[async_trait]
-pub trait XaiService: Send + Sync {
+pub trait ProviderCredentialsService: Send + Sync {
     async fn list(&self, query: CredentialListQuery) -> Result<CredentialPage, AdminError>;
     async fn import_document(
         &self,
@@ -46,37 +46,46 @@ pub trait XaiService: Send + Sync {
     ) -> Result<CredentialDeletionResult, AdminError>;
 }
 
-pub(crate) struct DefaultXaiService {
+pub(crate) struct CredentialResources {
+    pub credential: &'static str,
+    pub import: &'static str,
+    pub authorization: &'static str,
+}
+
+pub(crate) struct DefaultProviderCredentialsService {
     provider: Arc<dyn ProviderAdmin>,
     accounts: Arc<dyn AccountStore>,
     proxies: Arc<dyn crate::ports::proxy::ProxyStore>,
     snapshot: Arc<dyn SnapshotControl>,
+    resources: CredentialResources,
 }
 
-impl DefaultXaiService {
+impl DefaultProviderCredentialsService {
     #[must_use]
     pub(crate) fn new(
         provider: Arc<dyn ProviderAdmin>,
         accounts: Arc<dyn AccountStore>,
         proxies: Arc<dyn crate::ports::proxy::ProxyStore>,
         snapshot: Arc<dyn SnapshotControl>,
+        resources: CredentialResources,
     ) -> Self {
         Self {
             provider,
             accounts,
             proxies,
             snapshot,
+            resources,
         }
     }
 }
 
 #[async_trait]
-impl XaiService for DefaultXaiService {
+impl ProviderCredentialsService for DefaultProviderCredentialsService {
     async fn list(&self, query: CredentialListQuery) -> Result<CredentialPage, AdminError> {
         self.accounts
             .list_credentials(self.provider.provider_kind(), query)
             .await
-            .map_err(|error| map_store_error(error, "xAI credential"))
+            .map_err(|error| map_store_error(error, self.resources.credential))
     }
 
     async fn import_document(
@@ -114,11 +123,11 @@ impl XaiService for DefaultXaiService {
                 document: command.document,
             })
             .await
-            .map_err(|error| map_provider_error(error, "xAI credential import"))?;
+            .map_err(|error| map_provider_error(error, self.resources.import))?;
         validate_prepared_import(
             self.provider.provider_kind(),
             &prepared,
-            "xAI credential import",
+            self.resources.import,
         )?;
         let result = self
             .accounts
@@ -131,8 +140,11 @@ impl XaiService for DefaultXaiService {
                 &context,
             )
             .await
-            .map_err(|error| map_store_error(error, "xAI credential import"))?;
+            .map_err(|error| map_store_error(error, self.resources.import))?;
         drop(proxy_reservation);
+        self.provider
+            .account_facts_changed(&result.credential_ids())
+            .await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         // 导入已经提交，额度属于可重建观察事实；单个账号查询失败由周期任务重试。
         for account_id in &result.credential_ids() {
@@ -157,13 +169,13 @@ impl XaiService for DefaultXaiService {
             self.proxies.as_ref(),
             self.provider.provider_kind(),
             &command,
-            "xAI credential",
+            self.resources.credential,
         )
         .await?;
         self.provider
             .start_authorization(pending)
             .await
-            .map_err(|error| map_provider_error(error, "xAI authorization"))
+            .map_err(|error| map_provider_error(error, self.resources.authorization))
     }
 
     async fn complete_authorization(
@@ -176,12 +188,12 @@ impl XaiService for DefaultXaiService {
             .provider
             .complete_authorization(command)
             .await
-            .map_err(|error| map_provider_error(error, "xAI authorization"))?;
+            .map_err(|error| map_provider_error(error, self.resources.authorization))?;
         let prepared = validate_authorization_commit(
             self.provider.provider_kind(),
             &context,
             prepared,
-            "xAI authorization",
+            self.resources.authorization,
         )
         .await?;
         let result = commit_authorization(
@@ -189,9 +201,12 @@ impl XaiService for DefaultXaiService {
             prepared,
             settings,
             &context,
-            "xAI authorization",
+            self.resources.authorization,
         )
         .await?;
+        self.provider
+            .account_facts_changed(std::slice::from_ref(&result.account_id))
+            .await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         Ok(result)
     }
@@ -204,7 +219,7 @@ impl XaiService for DefaultXaiService {
             self.accounts.as_ref(),
             self.provider.as_ref(),
             command,
-            "xAI credential",
+            self.resources.credential,
         )
         .await?;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;

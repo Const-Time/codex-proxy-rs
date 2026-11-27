@@ -99,6 +99,7 @@ use crate::transport::{
 mod execution;
 mod failure;
 mod guardian;
+mod messages;
 mod observation;
 mod upstream_adapter;
 mod workers;
@@ -264,6 +265,23 @@ impl Provider for CodexProvider {
                 ..Default::default()
             };
         };
+        if request.protocol_payload().protocol() == gateway_protocol::anthropic::ANTHROPIC_PROTOCOL
+        {
+            let payload = request.protocol_payload();
+            let affinity =
+                crate::credential::derive_messages_session_affinity(payload, client_api_key_id);
+            return ProviderRequestObservation {
+                reasoning_effort: gateway_protocol::anthropic::messages_request_effort(
+                    payload.body(),
+                )
+                .map(str::to_owned),
+                continuation: ContinuationRequestObservation {
+                    affinity_hash: affinity.map(|value| value.persistence_hash().to_owned()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+        }
         let Ok(encoded) = encode_generate_request(request, "observability") else {
             return ProviderRequestObservation::default();
         };
@@ -301,17 +319,28 @@ impl Provider for CodexProvider {
             provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
         })?;
         let mut accounts = snapshot.model_catalog_accounts();
+        let mut protocols = snapshot.model_protocols();
         Ok(snapshot
             .models()
             .iter()
             .map(|model| {
-                compile_model_capabilities(model).with_catalog_accounts(
+                compile_model_capabilities(
+                    model,
+                    protocols
+                        .remove(model.request_model().as_str())
+                        .unwrap_or_default(),
+                )
+                .with_catalog_accounts(
                     accounts
                         .remove(model.request_model().as_str())
                         .unwrap_or_default(),
                 )
             })
             .collect())
+    }
+
+    fn diagnostic_selects_generation_protocol(&self) -> bool {
+        true
     }
 
     async fn query_client_model_catalog(
@@ -339,15 +368,19 @@ impl Provider for CodexProvider {
         candidate: &ProviderCandidate,
         fast_mode: gateway_core::account::FastMode,
     ) -> Operation {
-        if fast_mode == gateway_core::account::FastMode::Default
-            || candidate.provider().as_str() != PROVIDER_NAME
-        {
+        if candidate.provider().as_str() != PROVIDER_NAME {
             return operation;
         }
         let Operation::Generate(generate) = operation else {
             return operation;
         };
-        if generate.protocol_payload().protocol() != PROVIDER_NAME {
+        let generate = match translate_chat_request(&generate) {
+            Ok(Some(translated)) => translated,
+            Ok(None) | Err(_) => generate,
+        };
+        if generate.protocol_payload().protocol() != PROVIDER_NAME
+            || fast_mode == gateway_core::account::FastMode::Default
+        {
             return Operation::Generate(generate);
         }
         let mut request =
@@ -395,12 +428,21 @@ impl Provider for CodexProvider {
         if let Operation::Search(search) = request.operation() {
             return self.execute_search(search, candidate, context).await;
         }
+        if let Operation::CountTokens(count) = request.operation() {
+            return self.execute_messages_count(count, candidate, context).await;
+        }
         let Operation::Generate(generate) = request.operation() else {
             return Err(provider_error(
                 ProviderErrorKind::Unsupported,
                 UpstreamSendState::NotSent,
             ));
         };
+        if generate.protocol_payload().protocol() == gateway_protocol::anthropic::ANTHROPIC_PROTOCOL
+        {
+            return self.execute_messages(generate, candidate, context).await;
+        }
+        let converted = translate_chat_request(generate)?;
+        let generate = converted.as_ref().unwrap_or(generate);
         let Some(upstream_model) = candidate.upstream_model() else {
             return Err(provider_error(
                 ProviderErrorKind::Protocol,
@@ -487,6 +529,19 @@ impl Provider for CodexProvider {
         };
         let account_selection_wait_ms =
             u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // A probe uses the saved protocol of its revision-checked credential lease.
+        if context.is_diagnostic_required_account()
+            && matches!(lease.authentication(), crate::credential::CodexRuntimeAuthentication::ApiKey(auth)
+                if auth.configuration.protocol == crate::credential::ApiKeyProtocol::Messages)
+        {
+            return self.execute_messages_probe(
+                generate,
+                candidate,
+                context,
+                lease,
+                account_selection_wait_ms,
+            );
+        }
         let lease = Arc::new(lease);
         // 首字计时的起点：账号选择完成之后、上游建立之前。
         if previous_session.as_ref().is_some_and(|state| {
@@ -839,4 +894,33 @@ impl Provider for CodexProvider {
             stream
         })
     }
+}
+
+fn translate_chat_request(
+    generate: &GenerateRequest,
+) -> Result<Option<GenerateRequest>, ProviderError> {
+    let source = generate.protocol_payload();
+    if source.protocol() != gateway_protocol::chat_completions::CHAT_PROTOCOL {
+        return Ok(None);
+    }
+    let invalid = || {
+        provider_error(
+            ProviderErrorKind::InvalidRequest,
+            UpstreamSendState::NotSent,
+        )
+    };
+    let body = gateway_protocol::chat_completions::responses::convert_request(source.body())
+        .map_err(|error| {
+            if error.is_target_unsupported()
+                && gateway_protocol::chat_completions::validate_request(source.body()).is_ok()
+            {
+                provider_error(ProviderErrorKind::Unsupported, UpstreamSendState::NotSent)
+            } else {
+                invalid()
+            }
+        })?;
+    let payload = gateway_core::operation::ProtocolPayload::json_object(PROVIDER_NAME, body)
+        .map_err(|_| invalid())?
+        .with_context(source.context().clone());
+    Ok(Some(generate.clone().with_protocol_payload(payload)))
 }

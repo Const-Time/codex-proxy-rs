@@ -123,6 +123,224 @@ fn snapshot() -> RuntimeSnapshot {
 }
 
 #[test]
+fn matching_native_protocol_only_and_chat_can_bridge_both_providers() {
+    let openai = ProviderKind::new("openai").unwrap();
+    let antigravity = ProviderKind::new("antigravity").unwrap();
+    let chat = gateway_protocol::chat_completions::CHAT_PROTOCOL;
+    let genai = gateway_protocol::genai::GENAI_PROTOCOL;
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).unwrap(),
+        scheduling(),
+        vec![openai.clone(), antigravity.clone()],
+        vec![
+            model(
+                "openai",
+                "shared",
+                capabilities()
+                    .with_generation_protocol("openai")
+                    .with_translated_generation_protocols([chat]),
+            ),
+            model(
+                "antigravity",
+                "shared",
+                capabilities()
+                    .with_generation_protocol(genai)
+                    .with_translated_generation_protocols([chat]),
+            ),
+        ],
+        Vec::new(),
+    )
+    .unwrap()
+    .with_account_directory(Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+        (
+            ProviderAccountId::new("acct_openai").unwrap(),
+            RuntimeAccount::new(openai.clone(), BTreeSet::new()),
+        ),
+        (
+            ProviderAccountId::new("acct_agy").unwrap(),
+            RuntimeAccount::new(antigravity.clone(), BTreeSet::new()),
+        ),
+    ]))));
+    let shared = PublicModelId::new("shared").unwrap();
+    for (protocol, expected) in [
+        ("openai", BTreeSet::from([openai.clone()])),
+        (genai, BTreeSet::from([antigravity.clone()])),
+        (chat, BTreeSet::from([openai, antigravity])),
+    ] {
+        let request = Operation::Generate(GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(protocol, Default::default()).unwrap(),
+        ));
+        let plan = snapshot
+            .plan(
+                &shared,
+                &request,
+                snapshot.all_account_scope(),
+                &RoutingContext::default(),
+            )
+            .unwrap();
+        let found = plan
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.provider().clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected, found);
+    }
+}
+
+#[test]
+fn genai_group_alias_resolves_generation_and_count_to_an_authorized_variant() {
+    use gateway_core::operation::TokenCountRequest;
+    use gateway_core::routing::ReasoningModelVariant;
+
+    let provider = ProviderKind::new("antigravity").unwrap();
+    let owner = ProviderAccountId::new("acct_variant").unwrap();
+    let other = ProviderAccountId::new("acct_other").unwrap();
+    let genai = gateway_protocol::genai::GENAI_PROTOCOL;
+    let variant = UpstreamModelId::new("gemini-high").unwrap();
+    let capability = ModelCapabilities::new(
+        BTreeSet::from([OperationKind::Generate, OperationKind::CountTokens]),
+        None,
+    )
+    .with_upstream_feature_validation()
+    .with_generation_protocol(genai);
+    let group = PublicModelId::new("gemini-group").unwrap();
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).unwrap(),
+        scheduling(),
+        vec![provider.clone()],
+        vec![
+            model(
+                "antigravity",
+                group.as_str(),
+                capability.clone().with_reasoning_variants(BTreeMap::from([(
+                    "high".into(),
+                    ReasoningModelVariant {
+                        model: variant.clone(),
+                        accounts: BTreeSet::from([owner.clone()]),
+                    },
+                )])),
+            ),
+            model("antigravity", variant.as_str(), capability),
+        ],
+        Vec::new(),
+    )
+    .unwrap()
+    .with_account_directory(Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+        (
+            owner.clone(),
+            RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+        ),
+        (
+            other,
+            RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+        ),
+    ]))));
+    let input = serde_json::json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}});
+    let count = serde_json::json!({"generate_content_request":input});
+    for operation in [
+        Operation::Generate(GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(genai, input.as_object().unwrap().clone()).unwrap(),
+        )),
+        Operation::CountTokens(TokenCountRequest::from_raw_json(
+            RawJsonPayload::new(genai, Bytes::from(count.to_string())).unwrap(),
+        )),
+    ] {
+        let plan = snapshot
+            .plan(
+                &group,
+                &operation,
+                snapshot.all_account_scope(),
+                &RoutingContext::default(),
+            )
+            .unwrap();
+        let candidate = &plan.candidates()[0];
+        assert_eq!(candidate.upstream_model(), Some(&variant));
+        assert_eq!(
+            candidate.account_scope().account_ids(&provider),
+            vec![owner.clone()]
+        );
+    }
+    let missing_level = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(genai, Default::default()).unwrap(),
+    ));
+    assert!(matches!(
+        snapshot.plan(
+            &group,
+            &missing_level,
+            snapshot.all_account_scope(),
+            &RoutingContext::default()
+        ),
+        Err(gateway_core::validation::RoutingError::InvalidReasoningVariant),
+    ));
+}
+
+#[test]
+fn antigravity_search_only_selects_a_declared_target_allowed_by_the_account() {
+    use gateway_core::account::{AccountModelAccess, AccountModelAccessMode};
+
+    let provider = ProviderKind::new("antigravity").unwrap();
+    let owner = ProviderAccountId::new("acct_search").unwrap();
+    let restricted = ProviderAccountId::new("acct_restricted").unwrap();
+    let unknown = ProviderAccountId::new("acct_unmapped").unwrap();
+    let target = UpstreamModelId::new("gemini-search").unwrap();
+    let source = PublicModelId::new("gemini").unwrap();
+    let chat = gateway_protocol::chat_completions::CHAT_PROTOCOL;
+    let capability = capabilities()
+        .with_upstream_feature_validation()
+        .with_generation_protocol(gateway_protocol::genai::GENAI_PROTOCOL)
+        .with_translated_generation_protocols([chat])
+        .with_dedicated_web_search(BTreeMap::from([
+            (owner.clone(), target.clone()),
+            (restricted.clone(), target.clone()),
+        ]));
+    let model_access = AccountModelAccess::new(
+        AccountModelAccessMode::Denylist,
+        vec![target.as_str().to_owned()],
+    )
+    .unwrap();
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).unwrap(),
+        scheduling(),
+        vec![provider.clone()],
+        vec![model("antigravity", source.as_str(), capability)],
+        Vec::new(),
+    )
+    .unwrap()
+    .with_account_directory(Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+        (
+            owner.clone(),
+            RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+        ),
+        (
+            restricted,
+            RuntimeAccount::new(provider.clone(), BTreeSet::new()).with_model_access(model_access),
+        ),
+        (
+            unknown,
+            RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+        ),
+    ]))));
+    let body = serde_json::json!({"web_search_options":{}});
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(chat, body.as_object().unwrap().clone()).unwrap(),
+    ));
+    let plan = snapshot
+        .plan(
+            &source,
+            &operation,
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+        )
+        .unwrap();
+    assert_eq!(plan.candidates().len(), 1);
+    assert_eq!(plan.candidates()[0].upstream_model(), Some(&target));
+    assert_eq!(
+        plan.candidates()[0].account_scope().account_ids(&provider),
+        vec![owner]
+    );
+}
+
+#[test]
 fn config_revision_should_reject_zero() {
     assert!(ConfigRevision::new(0).is_err());
 }

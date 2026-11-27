@@ -749,14 +749,15 @@ impl ResponseObservation {
                 |(usage, _)| usage.add_responses(&self.response_usage),
             );
         }
-        if let GatewayEvent::CalculatedCost(observed) = event
-            && self.response_cost.source() != CostSource::ProviderReported
-        {
-            self.response_cost = observed.clone().into_estimate();
-            self.update_response_cost();
-        }
-        if let GatewayEvent::ProviderCost(observed) = event {
-            self.response_cost = observed.into_estimate();
+        let response_cost = match event {
+            GatewayEvent::ProviderCost(observed) => Some(observed.into_estimate()),
+            _ if self.response_cost.source() == CostSource::ProviderReported => None,
+            GatewayEvent::CalculatedCost(observed) => Some(observed.clone().into_estimate()),
+            GatewayEvent::CalculatedCostWithdrawn => Some(CostEstimate::unavailable()),
+            _ => None,
+        };
+        if let Some(response_cost) = response_cost {
+            self.response_cost = response_cost;
             self.update_response_cost();
         }
     }
@@ -874,7 +875,6 @@ fn observe_event_timing(timings: &mut ModelRequestTimings, event: &GatewayEvent,
         GatewayEvent::ToolCallDelta(delta) if !delta.arguments_delta.is_empty() => {
             timings.first_token_ms.get_or_insert(elapsed_ms);
         }
-        GatewayEvent::CalculatedCost(_) | GatewayEvent::ProviderCost(_) => {}
         _ => {}
     }
 }

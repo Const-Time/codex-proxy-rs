@@ -13,10 +13,10 @@ pub(crate) mod plugin_credentials;
 pub(crate) mod plugin_data;
 pub(crate) mod plugin_quota;
 pub(crate) mod plugin_resources;
+pub mod provider_credentials;
 pub mod proxies;
 pub mod settings;
 pub mod system;
-pub mod xai;
 
 use crate::{
     model::{

@@ -2,7 +2,7 @@
 import type { AccountCreateProvider } from './model'
 import { LayoutGrid } from '@lucide/vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
+import { AntigravityIcon, OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { PROVIDER_DISPLAY_NAMES } from '@/utils/providers'
 
 withDefaults(
@@ -16,7 +16,7 @@ withDefaults(
 )
 
 const emit = defineEmits<{
-  select: [provider: 'openai' | 'xai' | 'batch']
+  select: [provider: AccountCreateProvider]
 }>()
 
 const providers = [
@@ -35,6 +35,11 @@ const providers = [
     label: PROVIDER_DISPLAY_NAMES.xai,
     icon: XaiIcon,
   },
+  {
+    value: 'antigravity' as const,
+    label: PROVIDER_DISPLAY_NAMES.antigravity,
+    icon: AntigravityIcon,
+  },
 ]
 
 function selectProvider(value: string) {
@@ -51,7 +56,7 @@ function selectProvider(value: string) {
     :options="providers"
     :disabled="disabled"
     display="icon"
-    class="w-31"
+    class="w-41"
     @update:model-value="selectProvider"
   />
 </template>

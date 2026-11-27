@@ -3,7 +3,10 @@
 use axum::{
     Json,
     body::Body,
-    http::{HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
+        header::{CONTENT_TYPE, RETRY_AFTER},
+    },
     response::{IntoResponse, Response},
 };
 use gateway_core::{
@@ -207,53 +210,58 @@ pub fn gateway_error_response(error: &GatewayError) -> Response {
 
 /// 在下游尚未提交时交付 Provider 的 HTTP 失败响应，并应用客户端容量恢复合同。
 pub fn engine_error_response(error: &EngineError) -> Response {
+    engine_error_response_with_projection(error, false)
+}
+
+pub(super) fn chat_engine_error_response(error: &EngineError) -> Response {
+    engine_error_response_with_projection(error, true)
+}
+
+fn engine_error_response_with_projection(error: &EngineError, chat: bool) -> Response {
     let capacity_unavailable = matches!(error, EngineError::Provider(error)
         if error.kind() == ProviderErrorKind::UpstreamCapacityUnavailable);
     if let EngineError::Provider(error) = error
         && let Some(upstream) = error.client_visible_upstream_response()
         && let Ok(status) = StatusCode::from_u16(upstream.status())
     {
-        let projected = serde_json::from_slice::<Value>(upstream.body())
-            .ok()
-            .and_then(|body| capacity_error_for_client(&body));
-        let rewritten = projected.is_some();
-        let mut response = match projected {
-            Some(body) => {
-                let mut response = Response::new(Body::from(body.to_string()));
-                *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                response
-            }
-            None => {
-                let mut response = Response::new(Body::from(upstream.body().clone()));
-                *response.status_mut() = if capacity_unavailable {
-                    StatusCode::SERVICE_UNAVAILABLE
-                } else {
-                    status
-                };
-                response
-            }
+        let document = serde_json::from_slice::<Value>(upstream.body()).unwrap_or_default();
+        let projected = capacity_error_for_client(&document);
+        let status = if capacity_unavailable || projected.is_some() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            status
         };
-        if let Some(content_type) = upstream.content_type()
+        let mut response = if chat {
+            let document = projected.as_ref().unwrap_or(&document);
+            (status, Json(chat_error_document(document, status.as_u16()))).into_response()
+        } else {
+            let body = projected.map_or_else(
+                || Body::from(upstream.body().clone()),
+                |body| Body::from(body.to_string()),
+            );
+            (status, body).into_response()
+        };
+        if !chat
+            && let Some(content_type) = upstream.content_type()
             && let Ok(content_type) = HeaderValue::from_bytes(content_type)
         {
             response.headers_mut().insert(CONTENT_TYPE, content_type);
         }
+        let options = super::responses::response_connection_options(upstream.headers());
         for header in upstream.headers() {
+            if !super::responses::response_header_is_forwardable(header.name(), &options) {
+                continue;
+            }
             let Ok(name) = HeaderName::from_bytes(header.name().as_bytes()) else {
                 continue;
             };
-            if rewritten
-                && matches!(
-                    name.as_str(),
-                    "content-length" | "content-encoding" | "transfer-encoding"
-                )
-            {
-                continue;
-            }
             let Ok(value) = HeaderValue::from_bytes(header.value()) else {
                 continue;
             };
             response.headers_mut().append(name, value);
+        }
+        if chat {
+            add_chat_retry_after(response.headers_mut(), &document);
         }
         return response;
     }
@@ -269,6 +277,31 @@ pub fn engine_error_response(error: &EngineError) -> Response {
         response.headers_mut().insert("x-request-id", value);
     }
     response
+}
+
+pub(super) fn chat_retry_after_header(document: &Value) -> Option<HeaderValue> {
+    let seconds = gateway_protocol::chat_completions::error_retry_after_seconds(document)?;
+    HeaderValue::from_str(&seconds.to_string()).ok()
+}
+
+pub(super) fn add_chat_retry_after(headers: &mut HeaderMap, document: &Value) {
+    if !headers.contains_key(RETRY_AFTER)
+        && let Some(value) = chat_retry_after_header(document)
+    {
+        headers.insert(RETRY_AFTER, value);
+    }
+}
+
+/// Keep only the public Chat error fields from an upstream or middleware document.
+pub(super) fn chat_error_document(document: &Value, status: u16) -> Value {
+    let mut public = gateway_protocol::chat_completions::public_error_fields(document);
+    if public.get("message").and_then(Value::as_str).is_none() {
+        public.insert(
+            "message".into(),
+            format!("Upstream request failed ({status})").into(),
+        );
+    }
+    json!({"error": public})
 }
 
 /// Gateway 错误稳定映射，供 HTTP、SSE 和 WebSocket 共用。

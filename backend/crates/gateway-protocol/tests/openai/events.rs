@@ -395,6 +395,19 @@ fn retry_after_should_read_string_reset_timestamp() {
 }
 
 #[test]
+fn retry_after_uses_top_level_delay_when_the_nested_reset_is_expired() {
+    let body = json!({
+        "resets_in_seconds": 23,
+        "error": {"message": "slow down", "resets_at": 1}
+    });
+    assert_eq!(retry_after_seconds_from_body(&body.to_string()), Some(23));
+    assert_eq!(
+        retry_after_seconds_from_body(&body["error"].to_string()),
+        None
+    );
+}
+
+#[test]
 fn retry_after_should_read_nested_error_delay() {
     let body = json!({
         "type": "error",

@@ -36,6 +36,16 @@ pub trait ProviderAccountStore: Send + Sync {
         provider: &ProviderKind,
     ) -> Result<Vec<StoredAccountCatalog>, StoreError>;
 
+    /// Read a single account's current catalog for a fixed-account diagnostic,
+    /// including when the account is paused. The provider, revision and plan must match.
+    async fn load_diagnostic_account_catalog(
+        &self,
+        _provider: &ProviderKind,
+        _account: &ProviderAccountId,
+    ) -> Result<Option<(AccountCatalogObservation, Vec<u8>)>, StoreError> {
+        Ok(None)
+    }
+
     /// 账号删除或凭据已变化时返回 false，不发布迟到的观测
     async fn save_account_catalog(
         &self,

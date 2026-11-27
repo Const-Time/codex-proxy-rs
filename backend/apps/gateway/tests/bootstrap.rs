@@ -506,6 +506,7 @@ fn assert_rejected(config: String) {
 
 fn valid_config() -> String {
     CONFIG_EXAMPLE
+        .replace("\r\n", "\n")
         .replacen(
             "password: &postgres_password ''",
             &format!("password: &postgres_password '{POSTGRES_PASSWORD}'"),

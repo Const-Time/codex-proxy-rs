@@ -22,3 +22,5 @@ pub use codex::{
     codex_responses_request_semantics_with_turn_metadata, codex_session_id, codex_thread_id,
 };
 pub use headers::{is_transport_managed_request_header, parse_retry_after_seconds};
+/// Public identifier used by the native Responses gateway.
+pub const OPENAI_PROTOCOL: &str = "openai";

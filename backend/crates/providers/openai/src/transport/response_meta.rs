@@ -199,6 +199,7 @@ fn client_response_header_is_forwardable(name: &str, connection_options: &[Strin
             // 上游账号、凭据和 cookie 不能跨越换号边界。
             | "authorization"
             | "x-api-key"
+            | "x-goog-api-key"
             | "www-authenticate"
             | "authentication-info"
             | "proxy-authenticate"

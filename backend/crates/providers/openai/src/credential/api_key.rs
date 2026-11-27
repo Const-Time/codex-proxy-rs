@@ -9,6 +9,20 @@ pub const CODEX_AUTHENTICATION_KIND_API_KEY: &str = "api_key";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ApiKeyProtocol {
+    #[default]
+    Responses,
+    Messages,
+}
+
+impl ApiKeyProtocol {
+    pub(super) fn is_responses(&self) -> bool {
+        *self == Self::Responses
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ApiKeyTransport {
     #[default]
     Http,
@@ -21,6 +35,8 @@ pub enum ApiKeyTransport {
 pub struct ApiKeyConfiguration {
     pub base_url: String,
     #[serde(default)]
+    pub protocol: ApiKeyProtocol,
+    #[serde(default)]
     pub transport: ApiKeyTransport,
 }
 
@@ -29,6 +45,19 @@ impl ApiKeyConfiguration {
         self.base_url.len() <= 2048
             && !self.base_url.chars().any(char::is_control)
             && crate::transport::parse_upstream_base_url(&self.base_url).is_some()
+            && (self.protocol == ApiKeyProtocol::Responses
+                || self.transport == ApiKeyTransport::Http)
+    }
+
+    pub(crate) fn supports_native_count(&self) -> bool {
+        self.protocol == ApiKeyProtocol::Messages
+            && self.transport == ApiKeyTransport::Http
+            && crate::transport::parse_upstream_base_url(&self.base_url).is_some_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str() == Some("api.anthropic.com")
+                    && url.port_or_known_default() == Some(443)
+                    && url.path().trim_end_matches('/') == "/v1"
+            })
     }
 }
 
@@ -39,6 +68,8 @@ pub struct ApiKeyCredentialData {
     pub installation_id: String,
     pub api_key: String,
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "ApiKeyProtocol::is_responses")]
+    pub protocol: ApiKeyProtocol,
     #[serde(default)]
     pub transport: ApiKeyTransport,
 }
@@ -47,6 +78,7 @@ impl ApiKeyCredentialData {
     pub fn configuration(&self) -> ApiKeyConfiguration {
         ApiKeyConfiguration {
             base_url: self.base_url.clone(),
+            protocol: self.protocol,
             transport: self.transport,
         }
     }

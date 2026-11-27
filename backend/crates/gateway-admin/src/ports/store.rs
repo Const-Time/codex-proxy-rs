@@ -690,6 +690,19 @@ pub trait SettingsStore: Send + Sync {
 
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings>;
 
+    async fn replace_client_profile(
+        &self,
+        _provider: &gateway_core::routing::ProviderKind,
+        _configuration: gateway_core::account::OpaqueProviderData,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<Revision> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "provider client profile",
+            "not configured",
+        ))
+    }
+
     async fn admin_api_key_exists(&self) -> AdminStoreResult<bool>;
 
     async fn replace_runtime_settings(

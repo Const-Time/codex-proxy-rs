@@ -766,8 +766,11 @@ pub enum GatewayEvent {
     ToolCallDelta(ToolCallDelta),
     /// 规范化用量。
     Usage(Usage),
-    /// Provider 域依据实际模型和终态用量计算的费用。
+    /// Provider 域依据实际模型和最新用量计算的费用，替换同一响应的旧估算。
     CalculatedCost(CalculatedCost),
+    /// 撤销当前响应的本地费用估算，例如后续帧出现无法计价的模态。
+    /// 不影响 Provider 上报的费用或先前响应的费用。
+    CalculatedCostWithdrawn,
     /// Provider 最终 usage chunk 上报的实际已计费总额；同 attempt 最新值覆盖旧值。
     ProviderCost(ProviderReportedCost),
     /// 响应完成；必须是末事件。
@@ -826,6 +829,20 @@ impl ProviderEvent {
     pub fn with_wire_projection(mut self, wire: Option<ProtocolWireEvent>) -> Self {
         self.wire = wire.map(Box::new);
         self.replayable_prelude = false;
+        self
+    }
+
+    /// Strip provider-owned data from an event attached to a translated response for plugins.
+    #[must_use]
+    pub fn without_provider_private_content(mut self) -> Self {
+        self.wire = None;
+        self.session_update = None;
+        self.observation = None;
+        self.canonical.retain(|event| match event {
+            GatewayEvent::ReasoningDelta(_) => false,
+            GatewayEvent::ContentAdded(item) => item.kind() != ContentKind::Reasoning,
+            _ => true,
+        });
         self
     }
     /// 创建只有一个 canonical fact 的事件。
@@ -1039,6 +1056,7 @@ impl EventSequenceValidator {
             }
             GatewayEvent::Usage(_)
             | GatewayEvent::CalculatedCost(_)
+            | GatewayEvent::CalculatedCostWithdrawn
             | GatewayEvent::ProviderCost(_) => {}
             GatewayEvent::Completed(_) => {
                 self.completed = true;

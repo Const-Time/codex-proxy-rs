@@ -43,7 +43,7 @@ export function useAccountEditor(options: {
         return
       if (!detail.credentialConfiguration)
         throw new Error('该账号没有 API Key 上游设置')
-      apiKey.value = { ...emptyApiKeyAccountForm(), ...detail.credentialConfiguration }
+      apiKey.value = { ...emptyApiKeyAccountForm(), ...detail.credentialConfiguration, protocol: detail.credentialConfiguration.protocol ?? 'responses' }
       savedConfiguration.value = detail.credentialConfiguration
       configurationReady.value = true
     }
@@ -77,7 +77,7 @@ export function useAccountEditor(options: {
     savedConfiguration.value = undefined
     configurationReady.value = false
     showEditModal.value = true
-    if (account.authenticationKind === 'api_key')
+    if (account.provider === 'openai' && account.authenticationKind === 'api_key')
       void loadConfiguration(account.id)
   }
 
@@ -85,7 +85,7 @@ export function useAccountEditor(options: {
     const accountId = editingAccountId.value
     if (!accountId || saving.value)
       return
-    const isApiKey = editingAccount.value?.authenticationKind === 'api_key'
+    const isApiKey = editingAccount.value?.provider === 'openai' && editingAccount.value.authenticationKind === 'api_key'
     if (isApiKey) {
       if (!configurationReady.value)
         return
@@ -129,9 +129,17 @@ export function useAccountEditor(options: {
         apiKey.value.apiKey !== ''
         || apiKey.value.base_url.trim() !== savedConfiguration.value?.base_url
         || apiKey.value.transport !== savedConfiguration.value?.transport
+        || apiKey.value.protocol !== (savedConfiguration.value?.protocol ?? 'responses')
       )
       if (connectionChanged) {
-        await updateAccountApiKey({ accountId, baseUrl: apiKey.value.base_url.trim(), transport: apiKey.value.transport, apiKey: apiKey.value.apiKey || undefined, settings })
+        await updateAccountApiKey({
+          accountId,
+          baseUrl: apiKey.value.base_url.trim(),
+          transport: apiKey.value.transport,
+          protocol: apiKey.value.protocol,
+          apiKey: apiKey.value.apiKey || undefined,
+          settings,
+        })
       }
       else {
         await updateAccount(settings)

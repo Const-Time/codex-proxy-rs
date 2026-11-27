@@ -2,5 +2,11 @@
 //!
 //! 本 crate 只处理 wire contract，不包含 Provider 认证、路由、重试或传输策略。
 
+pub mod anthropic;
+pub mod chat_completions;
+pub mod genai;
 /// OpenAI wire contract。
 pub mod openai;
+pub mod request;
+
+mod capabilities;

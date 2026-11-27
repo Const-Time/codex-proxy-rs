@@ -25,11 +25,13 @@ mod reset_credit_automation;
 mod subscription_task;
 mod use_case;
 
+pub use use_case::provider_credentials::ProviderCredentialsService as XaiService;
 pub use use_case::{
     account_groups::AccountGroupService, accounts::AccountsService, auth::AuthService,
     backup::BackupService, client_distribution::ClientDistributionService,
     client_keys::ClientKeyService, observability::ObservabilityService, openai::OpenAiService,
-    proxies::ProxiesService, settings::SettingsService, system::SystemService, xai::XaiService,
+    provider_credentials::ProviderCredentialsService, proxies::ProxiesService,
+    settings::SettingsService, system::SystemService,
 };
 
 use model::{AdminError, AdminErrorKind};
@@ -40,15 +42,22 @@ use ports::{
     system::SystemOperations,
 };
 use use_case::{
-    account_groups::DefaultAccountGroupService, accounts::DefaultAccountsService,
-    auth::DefaultAuthService, backup::DefaultBackupService,
-    client_distribution::DefaultClientDistributionService, client_keys::DefaultClientKeyService,
-    observability::DefaultObservabilityService, openai::DefaultOpenAiService,
-    settings::DefaultSettingsService, system::DefaultSystemService, xai::DefaultXaiService,
+    account_groups::DefaultAccountGroupService,
+    accounts::DefaultAccountsService,
+    auth::DefaultAuthService,
+    backup::DefaultBackupService,
+    client_distribution::DefaultClientDistributionService,
+    client_keys::DefaultClientKeyService,
+    observability::DefaultObservabilityService,
+    openai::DefaultOpenAiService,
+    provider_credentials::{CredentialResources, DefaultProviderCredentialsService},
+    settings::DefaultSettingsService,
+    system::DefaultSystemService,
 };
 
 const OPENAI_PROVIDER_KIND: &str = "openai";
 const XAI_PROVIDER_KIND: &str = "xai";
+const ANTIGRAVITY_PROVIDER_KIND: &str = "antigravity";
 const MINIMUM_INITIAL_PASSWORD_BYTES: usize = 12;
 const WEAK_INITIAL_PASSWORDS: &[&str] = &[
     "",
@@ -170,6 +179,7 @@ pub struct AdminServices {
     system: Arc<dyn SystemService>,
     openai: Arc<dyn OpenAiService>,
     xai: Arc<dyn XaiService>,
+    antigravity: Option<Arc<dyn ProviderCredentialsService>>,
     backups: Arc<dyn BackupService>,
 }
 
@@ -272,6 +282,12 @@ impl AdminServices {
         self.xai.as_ref()
     }
 
+    pub fn antigravity(&self) -> Result<&dyn ProviderCredentialsService, AdminError> {
+        self.antigravity
+            .as_deref()
+            .ok_or_else(|| AdminError::unavailable("Antigravity provider is unavailable"))
+    }
+
     #[must_use]
     pub fn backups(&self) -> &dyn BackupService {
         self.backups.as_ref()
@@ -334,6 +350,9 @@ pub async fn initialize(
     let xai = registry
         .require(&provider_kind(XAI_PROVIDER_KIND)?)
         .map_err(map_provider_registry_error)?;
+    let antigravity = registry
+        .require(&provider_kind(ANTIGRAVITY_PROVIDER_KIND)?)
+        .ok();
 
     let auth = Arc::new(DefaultAuthService::new(
         config.default_username,
@@ -434,12 +453,30 @@ pub async fn initialize(
             store.proxies(),
             snapshot.clone(),
         )),
-        xai: Arc::new(DefaultXaiService::new(
+        xai: Arc::new(DefaultProviderCredentialsService::new(
             xai,
             store.accounts(),
             store.proxies(),
             snapshot.clone(),
+            CredentialResources {
+                credential: "xAI credential",
+                import: "xAI credential import",
+                authorization: "xAI authorization",
+            },
         )),
+        antigravity: antigravity.map(|provider| {
+            Arc::new(DefaultProviderCredentialsService::new(
+                provider,
+                store.accounts(),
+                store.proxies(),
+                snapshot.clone(),
+                CredentialResources {
+                    credential: "Antigravity credential",
+                    import: "Antigravity credential import",
+                    authorization: "Antigravity authorization",
+                },
+            )) as Arc<dyn ProviderCredentialsService>
+        }),
         backups,
     };
     let mut worker_contributions = backup_worker_contribution(backup_task)?;

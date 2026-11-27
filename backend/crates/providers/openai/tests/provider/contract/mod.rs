@@ -1,6 +1,7 @@
 mod account_isolation;
 mod cookies;
 mod fast_mode;
+mod messages;
 mod precommit;
 mod response_interrupt;
 mod upstream_adapter;
@@ -55,7 +56,7 @@ use provider_openai::{CodexProvider, OFFICIAL_CODEX_BASE_URL};
 use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::oneshot,
     time::timeout,
 };
@@ -486,6 +487,7 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
         "acct_prefetch_limit",
         "acct_presentation",
         "acct_provider_contract",
+        "acct_messages_contract",
         "acct_scope_new",
         "acct_scope_old",
         "acct_scope_same",
@@ -9675,9 +9677,12 @@ async fn bare_sse_error_without_status_preserves_request_and_capacity_classifica
 async fn unreachable_proxy_dial_blocks_same_endpoint_retries_before_send() {
     for scheme in ["http", "socks5h"] {
         for websocket in [false, true] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            drop(listener);
+            let socket = TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let address = socket.local_addr().unwrap();
+            // On Linux, retain the unlistening socket so parallel tests cannot reuse the port.
+            #[cfg(not(target_os = "linux"))]
+            drop(socket);
             let proxy =
                 gateway_core::account::OutboundProxy::parse(&format!("{scheme}://{address}"))
                     .unwrap();

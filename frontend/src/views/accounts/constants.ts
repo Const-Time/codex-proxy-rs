@@ -1,6 +1,7 @@
 import type { AccountErrorReason, AccountStatus, getAccounts } from '@/api'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import { formatProviderLabel } from '@/utils/providers'
+import { quotaLimitLabel } from './utils/quotaPresentation'
 
 export type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
 export type AccountQuotaWindow = AccountRow['quota']['windows'][number]
@@ -191,12 +192,6 @@ function windowRoleOrder(role: AccountQuotaWindow['role']) {
     default:
       return 3
   }
-}
-
-function quotaLimitLabel(window: AccountQuotaWindow) {
-  if (window.limitId === 'codex')
-    return '通用额度'
-  return window.limitName
 }
 
 function accountProviderLabel(value?: string | null) {

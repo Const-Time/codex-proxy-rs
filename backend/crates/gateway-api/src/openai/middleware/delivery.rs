@@ -1,5 +1,9 @@
 //! Only the outer API response may acknowledge Core's atomic delivery batch.
-use crate::openai::error::{engine_error_response, gateway_error_response, openai_error_response};
+use super::messages_sse::MessagesSse;
+use crate::openai::error::{
+    chat_engine_error_response, engine_error_response, gateway_error_response,
+    openai_error_response,
+};
 use axum::response::IntoResponse;
 use axum::{
     body::{Body, Bytes},
@@ -13,8 +17,9 @@ use gateway_core::{
     lifecycle::ConnectionGuard,
     operation::ProviderSessionState,
 };
-use gateway_protocol::openai::sse::{
-    DONE_SSE_FRAME, parse_sse_events, response_failed_sse_event_with_id,
+use gateway_protocol::{
+    anthropic::ANTHROPIC_PROTOCOL,
+    openai::sse::{DONE_SSE_FRAME, parse_sse_events, response_failed_sse_event_with_id},
 };
 use std::{collections::VecDeque, convert::Infallible, time::Duration};
 
@@ -26,9 +31,15 @@ struct Batch {
     terminal: bool,
     facts: Vec<ProviderEvent>,
 }
+#[derive(PartialEq)]
+enum MessagesTerminalDelivery {
+    Absent,
+    Queued,
+    Emitted,
+}
+
 pub(super) struct Delivery {
     body: Option<Box<dyn MiddlewareBody>>,
-    chat: Option<crate::openai::chat_completions::ChatProjection>,
     status: u16,
     valid: bool,
     streaming: bool,
@@ -40,7 +51,10 @@ pub(super) struct Delivery {
     pending: VecDeque<Bytes>,
     response_id: Option<String>,
     wire_terminal: bool,
+    messages: Option<MessagesSse>,
+    messages_terminal: MessagesTerminalDelivery,
     response_chain: bool,
+    protocol: String,
     _connection: Option<Box<dyn ConnectionGuard>>,
 }
 impl Delivery {
@@ -50,11 +64,16 @@ impl Delivery {
         connection: Option<Box<dyn ConnectionGuard>>,
     ) -> (Self, Vec<MiddlewareHeader>) {
         let (protocol, status, headers, body, _) = response.into_parts();
+        let accepted = match format {
+            super::WireFormat::Generation {
+                protocol: expected, ..
+            } => protocol == expected || (protocol == "openai" && !(200..300).contains(&status)),
+            _ => protocol == "openai",
+        };
         let delivery = Self {
             body: Some(body),
-            chat: None,
             status,
-            valid: protocol == "openai" && (200..=599).contains(&status),
+            valid: accepted && (200..=599).contains(&status),
             streaming: format.streaming() && (200..300).contains(&status),
             websocket: format.websocket(),
             original_response_id: None,
@@ -64,7 +83,10 @@ impl Delivery {
             pending: VecDeque::new(),
             response_id: None,
             wire_terminal: false,
+            messages: (protocol == ANTHROPIC_PROTOCOL).then(MessagesSse::default),
+            messages_terminal: MessagesTerminalDelivery::Absent,
             response_chain: false,
+            protocol,
             _connection: connection,
         };
         (delivery, headers)
@@ -112,22 +134,16 @@ impl Delivery {
                 break;
             }
         }
-        if ((200..300).contains(&self.status) || self.websocket)
-            && serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
-        {
-            return Err(MiddlewareError::InvalidState);
-        }
-        if self.websocket
-            && !serde_json::from_slice::<serde_json::Value>(&bytes)
-                .map_err(|_| MiddlewareError::InvalidState)?
-                .is_object()
-        {
-            return Err(MiddlewareError::InvalidState);
-        }
-        if (200..300).contains(&self.status)
-            && let Some(chat) = self.chat.as_ref()
-        {
-            bytes = chat.document(&bytes)?;
+        let success = (200..300).contains(&self.status);
+        if success || self.websocket {
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| MiddlewareError::InvalidState)?;
+            if self.websocket && !value.is_object() {
+                return Err(MiddlewareError::InvalidState);
+            }
+            if success && self.protocol == gateway_protocol::chat_completions::CHAT_PROTOCOL {
+                validate_chat_body(&value, "chat.completion")?;
+            }
         }
         for batch in &batches {
             self.acknowledge(batch).await?;
@@ -398,17 +414,43 @@ impl Delivery {
         Err(MiddlewareError::InvalidState)
     }
     fn observe_sse(&mut self, payload: &[u8]) -> Result<(), MiddlewareError> {
-        let events = if let Some(chat) = self.chat.as_mut() {
-            chat.observe(payload)?
-        } else {
-            if !(payload.ends_with(b"\n\n") || payload.ends_with(b"\r\n\r\n")) {
-                return Err(MiddlewareError::InvalidState);
-            }
-            let text = std::str::from_utf8(payload).map_err(|_| MiddlewareError::InvalidState)?;
-            parse_sse_events(text).map_err(|_| MiddlewareError::InvalidState)?
-        };
+        if let Some(messages) = &mut self.messages {
+            messages.observe(payload)?;
+            self.wire_terminal = messages.terminal;
+            return Ok(());
+        }
+        if !(payload.ends_with(b"\n\n") || payload.ends_with(b"\r\n\r\n")) {
+            return Err(MiddlewareError::InvalidState);
+        }
+        let text = std::str::from_utf8(payload).map_err(|_| MiddlewareError::InvalidState)?;
+        let events = parse_sse_events(text).map_err(|_| MiddlewareError::InvalidState)?;
         for event in events {
+            if self.protocol == gateway_protocol::chat_completions::CHAT_PROTOCOL {
+                let value = serde_json::from_str::<serde_json::Value>(&event.data)
+                    .map_err(|_| MiddlewareError::InvalidState)?;
+                let has_error = value.get("error").is_some_and(serde_json::Value::is_object);
+                if !has_error {
+                    validate_chat_body(&value, "chat.completion.chunk")?;
+                }
+                self.wire_terminal |= has_error
+                    || value
+                        .pointer("/choices/0/finish_reason")
+                        .is_some_and(serde_json::Value::is_string);
+                continue;
+            }
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                if self.protocol == gateway_protocol::genai::GENAI_PROTOCOL {
+                    self.wire_terminal |= value
+                        .get("candidates")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|candidates| {
+                            candidates
+                                .iter()
+                                .any(|candidate| candidate.get("finishReason").is_some())
+                        })
+                        || value.pointer("/promptFeedback/blockReason").is_some();
+                    continue;
+                }
                 if let Some(id) = value.pointer("/response/id").and_then(|v| v.as_str()) {
                     self.response_id = Some(id.to_owned());
                 }
@@ -450,8 +492,15 @@ impl Delivery {
         Ok(())
     }
     pub(super) async fn advance(&mut self) -> Result<(), MiddlewareError> {
+        let already_terminal = self.wire_terminal;
         match self.batch(false).await? {
             Some(batch) => {
+                // Standalone preludes are buffered by batch() before the host boundary.
+                // If a plugin replaced that boundary's start event with a prelude,
+                // Core cannot advance without committing it, so fail before acknowledging.
+                if self.messages.as_ref().is_some_and(|sse| !sse.started) {
+                    return Err(MiddlewareError::InvalidState);
+                }
                 if batch.terminal && !self.wire_terminal {
                     return Err(MiddlewareError::InvalidState);
                 }
@@ -461,16 +510,14 @@ impl Delivery {
                 {
                     return Err(MiddlewareError::InvalidState);
                 }
-                let bytes = if let Some(chat) = self.chat.as_mut() {
-                    chat.stream(&batch.bytes)?
-                } else {
-                    batch.bytes.clone()
-                };
                 self.acknowledge(&batch).await?;
                 if batch.terminal {
                     self.finish_terminal().await?;
                 }
-                self.pending.extend(bytes);
+                self.pending.extend(batch.bytes);
+                if self.messages.is_some() && !already_terminal && self.wire_terminal {
+                    self.messages_terminal = MessagesTerminalDelivery::Queued;
+                }
             }
             None => {
                 if !self.is_finalized() || !self.wire_terminal {
@@ -479,16 +526,31 @@ impl Delivery {
                 self.finished = true;
             }
         }
-        if self.finished
-            && let Some(chat) = self.chat.as_mut()
-        {
-            chat.finish()?;
-        }
-        if self.finished && !self.websocket {
+        if self.finished && !self.websocket && requires_done_frame(&self.protocol) {
             self.pending
                 .push_back(Bytes::from_static(DONE_SSE_FRAME.as_bytes()));
         }
         Ok(())
+    }
+}
+
+fn requires_done_frame(protocol: &str) -> bool {
+    matches!(
+        protocol,
+        "openai" | gateway_protocol::chat_completions::CHAT_PROTOCOL
+    )
+}
+
+fn validate_chat_body(value: &serde_json::Value, object: &str) -> Result<(), MiddlewareError> {
+    if value.get("object").and_then(serde_json::Value::as_str) == Some(object)
+        && value
+            .get("choices")
+            .is_some_and(serde_json::Value::is_array)
+        && value.get("output").is_none()
+    {
+        Ok(())
+    } else {
+        Err(MiddlewareError::InvalidState)
     }
 }
 
@@ -499,28 +561,30 @@ pub async fn deliver_middleware_response(
     streaming: bool,
     connection: Option<Box<dyn ConnectionGuard>>,
 ) -> Response {
-    deliver_with_chat(response, streaming, connection, None).await
+    deliver_generation(response, streaming, connection, "openai").await
 }
 
-pub(in crate::openai) async fn deliver_with_chat(
+pub(in crate::openai) async fn deliver_generation(
     response: MiddlewareResponse,
     streaming: bool,
     connection: Option<Box<dyn ConnectionGuard>>,
-    chat: Option<crate::openai::chat_completions::ChatProjection>,
+    protocol: &'static str,
 ) -> Response {
     let (mut delivery, headers) = Delivery::new(
         response,
-        super::WireFormat::Responses { streaming },
+        super::WireFormat::Generation {
+            protocol,
+            streaming,
+        },
         connection,
     );
-    delivery.chat = chat;
     let status = delivery.status;
     let stream = delivery.streaming;
     let result = async {
         delivery.validate()?;
         if stream {
             delivery.advance().await?;
-            while delivery.chat.is_some() && delivery.pending.is_empty() && !delivery.finished {
+            while delivery.pending.is_empty() && !delivery.finished {
                 delivery.advance().await?;
             }
             if delivery.pending.is_empty() {
@@ -532,6 +596,21 @@ pub(in crate::openai) async fn deliver_with_chat(
     }
     .await;
     match result {
+        Ok(Some(bytes))
+            if protocol == gateway_protocol::chat_completions::CHAT_PROTOCOL
+                && !(200..300).contains(&status) =>
+        {
+            let document = serde_json::from_slice(&bytes).unwrap_or_default();
+            let error = crate::openai::error::chat_error_document(&document, status);
+            let mut response = http_response(
+                status,
+                headers,
+                Body::from(error.to_string()),
+                "application/json",
+            );
+            crate::openai::error::add_chat_retry_after(response.headers_mut(), &document);
+            response
+        }
         Ok(Some(bytes)) => http_response(
             status,
             headers,
@@ -544,7 +623,7 @@ pub(in crate::openai) async fn deliver_with_chat(
         ),
         Ok(None) => streaming_response(delivery, headers),
         Err(error) => {
-            let response = error_response(&error);
+            let response = generation_error_response(&error, protocol);
             if let Ok(body) = delivery.body() {
                 let _ = body.record_client_status(response.status().as_u16()).await;
             }
@@ -555,8 +634,20 @@ pub(in crate::openai) async fn deliver_with_chat(
 }
 
 pub(in crate::openai) fn error_response(error: &MiddlewareError) -> Response {
+    generation_error_response(error, "openai")
+}
+
+pub(in crate::openai) fn generation_error_response(
+    error: &MiddlewareError,
+    protocol: &str,
+) -> Response {
     match error {
         MiddlewareError::Gateway(error) => gateway_error_response(error),
+        MiddlewareError::Engine(error)
+            if protocol == gateway_protocol::chat_completions::CHAT_PROTOCOL =>
+        {
+            chat_engine_error_response(error)
+        }
         MiddlewareError::Engine(error) => engine_error_response(error),
         _ => openai_error_response(
             StatusCode::BAD_GATEWAY,
@@ -610,17 +701,37 @@ fn http_response(
 
 fn streaming_response(delivery: Delivery, headers: Vec<MiddlewareHeader>) -> Response {
     let status = delivery.status;
-    let output = Box::pin(stream::unfold(delivery, |mut state| async move {
+    let native_genai = delivery.protocol == gateway_protocol::genai::GENAI_PROTOCOL;
+    let native_anthropic = delivery.protocol == ANTHROPIC_PROTOCOL;
+    let output = Box::pin(stream::unfold(delivery, move |mut state| async move {
         loop {
             if let Some(chunk) = state.pending.pop_front() {
+                // The terminal was validated with the whole batch. Only a
+                // drained batch proves its terminal was emitted to the body.
+                if state.messages_terminal == MessagesTerminalDelivery::Queued
+                    && state.pending.is_empty()
+                {
+                    state.messages_terminal = MessagesTerminalDelivery::Emitted;
+                }
                 return Some((Ok::<Bytes, Infallible>(chunk), state));
             }
             if state.finished {
                 return None;
             }
-            if state.advance().await.is_err() {
+            if let Err(error) = state.advance().await {
                 state.close().await;
-                if state.chat.is_some() {
+                if native_genai {
+                    state.pending.push_back(crate::openai::genai::error_frame(
+                        StatusCode::BAD_GATEWAY,
+                        "Upstream stream ended before completion",
+                    ));
+                } else if native_anthropic {
+                    if state.messages_terminal != MessagesTerminalDelivery::Emitted {
+                        state
+                            .pending
+                            .push_back(crate::openai::messages::error_frame(&error));
+                    }
+                } else if state.protocol == gateway_protocol::chat_completions::CHAT_PROTOCOL {
                     state.pending.push_back(Bytes::from_static(b"data: {\"error\":{\"type\":\"server_error\",\"code\":\"invalid_upstream_response\",\"message\":\"Chat response could not be delivered\"}}\n\n"));
                 } else {
                     state
@@ -632,17 +743,19 @@ fn streaming_response(delivery: Delivery, headers: Vec<MiddlewareHeader>) -> Res
                             "Plugin response could not be delivered",
                         )));
                 }
-                state
-                    .pending
-                    .push_back(Bytes::from_static(DONE_SSE_FRAME.as_bytes()));
+                if requires_done_frame(&state.protocol) {
+                    state
+                        .pending
+                        .push_back(Bytes::from_static(DONE_SSE_FRAME.as_bytes()));
+                }
                 state.finished = true;
             }
         }
     }));
-    let body = Body::from_stream(stream::unfold(output, |mut output| async move {
+    let body = Body::from_stream(stream::unfold(output, move |mut output| async move {
         let next = tokio::select! { biased;
             next = output.next() => next?,
-            () = tokio::time::sleep(Duration::from_secs(15)) => Ok(Bytes::from_static(b": keep-alive\n\n")),
+            () = tokio::time::sleep(Duration::from_secs(15)), if !native_genai && !native_anthropic => Ok(Bytes::from_static(b": keep-alive\n\n")),
         };
         Some((next, output))
     }));

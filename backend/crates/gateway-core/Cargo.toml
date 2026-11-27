@@ -20,6 +20,7 @@ bytes = "1.11.1"
 event-listener = "5.4.2"
 futures = "0.3.32"
 futures-timer = "3.0.3"
+gateway-protocol = { path = "../gateway-protocol" }
 http = "1.4.0"
 http-body = "1.0.1"
 http-body-util = "0.1.3"

@@ -1,5 +1,5 @@
 use crate::openai::responses::{
-    DecodedResponsesRequest, decode_request_with_headers, request::forwarded_request_headers,
+    DecodedResponsesRequest, http::GenerationProtocol, request::forwarded_request_headers,
 };
 use crate::openai::{
     error::{gateway_error_response, runtime_unavailable_response},
@@ -22,7 +22,7 @@ use gateway_core::{
 
 pub(in crate::openai) struct Ingress {
     pub client: AuthenticatedClient,
-    pub chat: Option<crate::openai::chat_completions::ChatProjection>,
+    pub generation: GenerationProtocol,
     pub decoded: DecodedResponsesRequest,
     pub headers: HeaderMap,
     pub body: Bytes,
@@ -40,6 +40,7 @@ pub(in crate::openai) async fn respond(
         Err(error) => return gateway_error_response(&error),
     };
     let streaming = input.decoded.metadata().stream();
+    let protocol = input.generation.name();
     let transport = if streaming {
         ClientTransport::HttpSse
     } else {
@@ -68,7 +69,7 @@ pub(in crate::openai) async fn respond(
         .map(|guard| guard.with_revocation(revocation));
     let request_id = prepared.request_id().as_str().to_owned();
     // Empty plans keep the existing transparent response path and its size contract.
-    let mut response = if plan.is_empty() && !has_attempts && input.chat.is_none() {
+    let mut response = if plan.is_empty() && !has_attempts && protocol == "openai" {
         match service
             .start_prepared_response(prepared, input.decoded, transport, input.endpoint)
             .await
@@ -112,7 +113,7 @@ pub(in crate::openai) async fn respond(
             }
         };
         let request = MiddlewareRequest::new(
-            "openai",
+            protocol,
             forwarded_request_headers(&input.headers)
                 .map(|(name, value)| {
                     MiddlewareHeader::new(name.as_str(), Bytes::copy_from_slice(value.as_bytes()))
@@ -127,7 +128,7 @@ pub(in crate::openai) async fn respond(
         let (admitted, keepalive) = tokio::sync::oneshot::channel();
         let next = gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
             Box::pin(async move {
-                if request.protocol() != "openai" {
+                if request.protocol() != protocol {
                     return Err(MiddlewareError::InvalidState);
                 }
                 let prepared = prepared.with_settings(
@@ -137,7 +138,9 @@ pub(in crate::openai) async fn respond(
                         .clone(),
                 )?;
                 let headers = super::headers::filtered_headers(request.headers())?;
-                let decoded = decode_request_with_headers(request.body(), &headers)
+                let decoded = input
+                    .generation
+                    .decode(request.body(), &headers, |_| Ok(()))
                     .map_err(|_| {
                         MiddlewareError::Gateway(GatewayError::new(
                             GatewayErrorKind::InvalidRequest,
@@ -152,6 +155,7 @@ pub(in crate::openai) async fn respond(
                         "middleware cannot change the client transport",
                     )));
                 }
+                let chat = crate::openai::chat_completions::ChatProjection::for_request(&decoded);
                 let started = service
                     .start_prepared_response(prepared, decoded, transport, input.endpoint)
                     .await?;
@@ -168,27 +172,32 @@ pub(in crate::openai) async fn respond(
                     .trace()
                     .capture("client.request.body", &input.body);
                 let _ = admitted.send(started.session.response_commit());
-                super::execution_middleware_response(started.session, transport).await
+                super::generation_response(started.session, transport, protocol, chat).await
             })
         });
-        let chat_error = input.chat.is_some().then_some(
+        let chat_error = (protocol == gateway_protocol::chat_completions::CHAT_PROTOCOL).then_some(
             crate::openai::chat_completions::error_sse as fn(&serde_json::Value) -> Bytes,
         );
         let response = async move {
             match plan.run(request, next).await {
                 Ok(response) => {
-                    super::delivery::deliver_with_chat(
+                    super::delivery::deliver_generation(
                         response,
                         streaming,
                         input.connection,
-                        input.chat,
+                        protocol,
                     )
                     .await
                 }
-                Err(error) => super::delivery::error_response(&error),
+                Err(error) => super::delivery::generation_error_response(&error, protocol),
             }
         };
-        if streaming {
+        if streaming
+            && matches!(
+                protocol,
+                "openai" | gateway_protocol::chat_completions::CHAT_PROTOCOL
+            )
+        {
             crate::openai::responses::keepalive::response_with_encoder(
                 response, keepalive, chat_error,
             )

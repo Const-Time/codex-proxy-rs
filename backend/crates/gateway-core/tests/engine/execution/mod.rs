@@ -10,6 +10,7 @@ use std::{
 use gateway_core::engine::budget::{ClientBudgetCharge, ClientBudgetError, ClientBudgetPort};
 use gateway_core::error::GatewayError;
 mod affinity;
+mod probe;
 
 #[derive(Default)]
 pub(super) struct Admissions {
@@ -288,6 +289,12 @@ impl Provider for SchedulingProvider {
         request: ProviderRequest,
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
+        if self.mode == "unsupported" {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Unsupported,
+                UpstreamSendState::NotSent,
+            ));
+        }
         use gateway_core::account::*;
         let now = SystemTime::now();
         let candidates = ["acct_start", "acct_second", "acct_foreign"]
@@ -414,9 +421,32 @@ impl Provider for SchedulingFallback {
     }
     async fn execute(
         &self,
-        _: ProviderRequest,
+        request: ProviderRequest,
         _: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
+        if self.0 == "unsupported" {
+            let model = request.candidate().upstream_model().unwrap();
+            let metadata = ProviderCallMetadata::new(
+                request.candidate().provider().clone(),
+                model.clone(),
+                ProviderAccountId::new("acct_xai").unwrap(),
+                UpstreamTransport::new("http").unwrap(),
+            );
+            let response = ResponseMeta::new("resp_capability_fallback", model.as_str());
+            let events = [
+                Ok(GatewayEvent::Started(response.clone()).into()),
+                Ok(GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(known_charge().scaled()).unwrap(),
+                )
+                .into()),
+                Ok(GatewayEvent::Completed(response).into()),
+            ];
+            return Ok(ProviderStream::new(
+                metadata,
+                futures::stream::iter(events),
+                (),
+            ));
+        }
         assert!(
             matches!(self.0, "busy" | "stale" | "filtered_all"),
             "a policy rejection/fault must not delegate to another Provider: {}",
@@ -749,6 +779,220 @@ fn routing_policy_preserves_requested_model_and_revalidates_original_capability_
                     "gpt-start"
                 );
                 assert_eq!(admissions.releases.load(Ordering::SeqCst), 1);
+            }
+        }
+    });
+}
+
+#[test]
+fn dedicated_search_honors_the_original_model_after_model_router_rewrite() {
+    use gateway_core::account::{AccountModelAccess, AccountModelAccessMode};
+    use gateway_core::engine::{execution::PreparedExecutionRequest, model_routing::*};
+    use gateway_core::lifecycle::CancellationToken;
+    use gateway_core::routing::AccountGroupId;
+    use gateway_core::routing::snapshot::{
+        RuntimeSnapshotCompiler, SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts,
+        SnapshotClientPolicyFacts, SnapshotFacts, SnapshotProviderAccountFacts, SnapshotStoreError,
+        SnapshotStorePort,
+    };
+    use gateway_core::settings::SettingsValues;
+    use gateway_protocol::chat_completions::CHAT_PROTOCOL;
+
+    struct SearchCatalog(&'static str, Vec<ProviderModelCapabilities>);
+    #[async_trait]
+    impl Provider for SearchCatalog {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn catalog_generation(&self) -> ProviderCatalogGeneration {
+            ProviderCatalogGeneration::default()
+        }
+        async fn query_model_capabilities(
+            &self,
+        ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+            Ok(self.1.clone())
+        }
+        async fn execute(
+            &self,
+            request: ProviderRequest,
+            context: AttemptContext,
+        ) -> Result<ProviderStream, ProviderError> {
+            ChargedProvider { fail: false }
+                .execute(request, context)
+                .await
+        }
+    }
+
+    struct SearchSnapshot(SnapshotFacts);
+    impl SnapshotStorePort for SearchSnapshot {
+        fn load_snapshot_facts(&self) -> BoxFuture<'_, Result<SnapshotFacts, SnapshotStoreError>> {
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+        fn current_config_revision(
+            &self,
+        ) -> BoxFuture<'_, Result<ConfigRevision, SnapshotStoreError>> {
+            Box::pin(async { Ok(self.0.config_revision()) })
+        }
+    }
+
+    struct SearchRouter;
+    impl ModelRouter for SearchRouter {
+        fn cancellation(&self) -> CancellationToken {
+            CancellationToken::new()
+        }
+        fn route_model(
+            &self,
+            input: ModelRouteInput,
+        ) -> BoxFuture<'static, Result<ModelRouteResult, ModelRoutingFault>> {
+            assert_eq!(input.requested_model().as_str(), "original");
+            Box::pin(async {
+                Ok(ModelRouteResult {
+                    decision: ModelRouteDecision::Route {
+                        provider: None,
+                        model: Some(PublicModelId::new("rewritten").unwrap()),
+                    },
+                    revocation: CancellationToken::new(),
+                })
+            })
+        }
+    }
+
+    block_on(async {
+        for (other_provider, owns_original, allows_original) in [
+            ("openai", false, true),
+            ("xai", false, true),
+            ("openai", true, false),
+            ("openai", true, true),
+        ] {
+            let allowed = owns_original && allows_original;
+            let account = ProviderAccountId::new("acct_start").unwrap();
+            let other = ProviderAccountId::new("acct_other").unwrap();
+            let group = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
+            let target = UpstreamModelId::new("dedicated-search").unwrap();
+            let access = if allows_original {
+                AccountModelAccess::all()
+            } else {
+                AccountModelAccess::new(
+                    AccountModelAccessMode::Allowlist,
+                    vec!["rewritten".to_owned(), target.to_string()],
+                )
+                .unwrap()
+            };
+            let capabilities =
+                ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
+                    .with_generation_protocol(CHAT_PROTOCOL)
+                    .with_upstream_feature_validation()
+                    .with_dedicated_web_search(BTreeMap::from([(account.clone(), target.clone())]));
+            let source = ProviderModelCapabilities::new(
+                UpstreamModelId::new("source").unwrap(),
+                capabilities.clone(),
+            )
+            .with_catalog_accounts(BTreeSet::from([if owns_original {
+                account.clone()
+            } else {
+                other.clone()
+            }]));
+            let mut openai_models = vec![
+                ProviderModelCapabilities::new(
+                    UpstreamModelId::new("rewritten").unwrap(),
+                    capabilities,
+                )
+                .with_catalog_accounts(BTreeSet::from([account.clone()])),
+            ];
+            let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+            if other_provider == "openai" {
+                openai_models.push(source);
+            } else {
+                providers.push(Arc::new(SearchCatalog(other_provider, vec![source])));
+            }
+            providers.push(Arc::new(SearchCatalog("openai", openai_models)));
+            let providers = Arc::new(ProviderRegistry::new(providers).unwrap());
+            let facts = SnapshotFacts::new(
+                ConfigRevision::new(1).unwrap(),
+                ConfigRevision::new(1).unwrap(),
+                SettingsValues::new(
+                    3,
+                    0,
+                    "smart",
+                    BTreeMap::from([("original".to_owned(), "source".to_owned())]),
+                    None,
+                    None,
+                ),
+                vec![SnapshotClientPolicyFacts::new(
+                    ClientApiKeyId::new("key_start_test").unwrap(),
+                    PlaintextClientApiKey::new("sk_start_test").unwrap(),
+                    vec![group.clone()],
+                    RateLimits::unlimited(),
+                )],
+                vec![SnapshotAccountGroupFacts::new(
+                    group.clone(),
+                    "Search scope".into(),
+                    true,
+                )],
+                vec![
+                    SnapshotProviderAccountFacts::new(account.clone(), "openai")
+                        .with_model_access(access),
+                    SnapshotProviderAccountFacts::new(other, other_provider),
+                ],
+                vec![SnapshotAccountGroupMemberFacts::new(group, account)],
+            );
+            let snapshot =
+                RuntimeSnapshotCompiler::new(Arc::new(SearchSnapshot(facts)), providers.clone())
+                    .compile()
+                    .await
+                    .unwrap();
+            let original = PublicModelId::new("original").unwrap();
+            assert_eq!(
+                snapshot.contains_public_model_for_scope(
+                    &original,
+                    snapshot.client_policies().next().unwrap().account_scope(),
+                ),
+                allowed
+            );
+            let admissions = Arc::new(Admissions::default());
+            let store = Arc::new(TrackingExecutionStore::default());
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(snapshot),
+                store.clone(),
+                providers.as_ref().clone(),
+                admissions.clone(),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            );
+            let request = request(&service, ClientTransport::HttpJson);
+            let body = json!({"model":"original","messages":[{"role":"user","content":"hello"}],
+                "web_search_options":{}});
+            let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+                ProtocolPayload::json_object(CHAT_PROTOCOL, body.as_object().unwrap().clone())
+                    .unwrap(),
+            ));
+            let prepared = service
+                .prepare_execution(request.client)
+                .unwrap()
+                .with_model_router(Arc::new(SearchRouter));
+            let result = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: original,
+                        operation,
+                        metadata: request.metadata,
+                    },
+                )
+                .await;
+            if allowed {
+                let mut started = result.unwrap();
+                consume_charged_prefix(started.session.as_mut()).await;
+                started.session.detach_finalize().await;
+                assert_eq!(
+                    store.attempts.lock().unwrap()[0].upstream_model_id.as_ref(),
+                    Some(&target)
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(error) if error.kind() == GatewayErrorKind::NoAvailableProvider)
+                );
+                assert!(admissions.limits.lock().unwrap().is_empty());
             }
         }
     });
@@ -1818,8 +2062,10 @@ fn account_probe_should_not_write_to_the_persistent_execution_store() {
 #[test]
 fn probe_failures_should_be_observable_without_a_model_request_row() {
     let store = Arc::new(TrackingExecutionStore::default());
-    let providers = ProviderRegistry::new([Arc::new(FailingProvider) as Arc<dyn Provider>])
-        .expect("provider registry");
+    let providers = ProviderRegistry::new([
+        Arc::new(FailingProvider { expose_body: true }) as Arc<dyn Provider>
+    ])
+    .expect("provider registry");
     let service = DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(probe_snapshot()),
         store.clone(),
@@ -1844,6 +2090,7 @@ fn probe_failures_should_be_observable_without_a_model_request_row() {
         .upstream_response()
         .expect("probe must preserve its request-local upstream response");
     assert_eq!(upstream.status(), 502);
+    assert_eq!(error.upstream_status(), Some(502));
     assert_eq!(
         upstream.content_type(),
         Some(b"application/json".as_slice())
@@ -1890,8 +2137,10 @@ fn probe_observation_store_failure_preserves_the_provider_error() {
         fail_probe_observation: AtomicBool::new(true),
         ..TrackingExecutionStore::default()
     });
-    let providers = ProviderRegistry::new([Arc::new(FailingProvider) as Arc<dyn Provider>])
-        .expect("provider registry");
+    let providers = ProviderRegistry::new([
+        Arc::new(FailingProvider { expose_body: false }) as Arc<dyn Provider>
+    ])
+    .expect("provider registry");
     let service = DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(probe_snapshot()),
         store.clone(),
@@ -1911,10 +2160,14 @@ fn probe_observation_store_failure_preserves_the_provider_error() {
 
     assert_eq!(error.kind(), GatewayErrorKind::UpstreamUnavailable);
     assert!(!store.touched.load(Ordering::SeqCst));
+    assert_eq!(error.upstream_status(), Some(502));
+    assert!(error.upstream_response().is_none());
     assert!(store.probe_failures().is_empty());
 }
 
-struct FailingProvider;
+struct FailingProvider {
+    expose_body: bool,
+}
 
 #[async_trait]
 impl Provider for FailingProvider {
@@ -1937,14 +2190,16 @@ impl Provider for FailingProvider {
         _request: ProviderRequest,
         _context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
-        Err(
-            ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::NotSent)
-                .with_client_visible_upstream_response(ClientVisibleUpstreamResponse::new(
-                    502,
-                    Some(b"application/json".to_vec()),
-                    Bytes::from_static(br#"{"error":{"message":"source upstream failure"}}"#),
-                )),
-        )
+        let error = ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::NotSent);
+        Err(if self.expose_body {
+            error.with_client_visible_upstream_response(ClientVisibleUpstreamResponse::new(
+                502,
+                Some(b"application/json".to_vec()),
+                Bytes::from_static(br#"{"error":{"message":"source upstream failure"}}"#),
+            ))
+        } else {
+            error.with_status(502)
+        })
     }
 }
 
@@ -4220,6 +4475,38 @@ mod retry_policy {
                 RateLimits::unlimited(),
             )],
         )
+    }
+
+    #[test]
+    fn provider_rejecting_a_capability_before_send_allows_the_next_candidate() {
+        block_on(async {
+            let (service, admissions, budget, _, _) = scheduling_fixture("unsupported");
+            let request = request(&service, ClientTransport::HttpJson);
+            let policy = Policy::new(RetryDecision::Delegate);
+            let prepared = service
+                .prepare_execution(request.client)
+                .unwrap()
+                .with_retry_policy(policy.clone());
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    PreparedExecutionRequest {
+                        public_model: request.public_model,
+                        operation: request.operation,
+                        metadata: request.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            started.session.collect_uncommitted().await.unwrap();
+            started.session.commit_downstream(Some(200)).await.unwrap();
+            assert!(!admissions.active.load(Ordering::SeqCst));
+            assert_eq!(budget.charges.lock().unwrap().len(), 1);
+            let inputs = policy.inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 1);
+            assert_eq!(inputs[0].error_kind(), ProviderErrorKind::Unsupported);
+            assert!(inputs[0].retry_allowed());
+        });
     }
 
     #[test]

@@ -34,7 +34,7 @@ const groupOptions = computed(() => [
     aria-label="账号筛选"
   >
     <div
-      class="grid w-full min-w-0 grid-cols-2 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7.75rem] xl:flex xl:w-full xl:flex-wrap xl:gap-3"
+      class="grid w-full min-w-0 grid-cols-2 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_10.25rem] xl:flex xl:w-full xl:flex-wrap xl:gap-3"
     >
       <BaseInput
         v-model="search"
@@ -63,7 +63,7 @@ const groupOptions = computed(() => [
 
       <ProviderFilterSegmented
         v-model="provider"
-        class="col-span-2 w-full sm:col-span-1 xl:w-31 xl:shrink-0"
+        class="col-span-2 w-full sm:col-span-1 xl:w-41 xl:shrink-0"
       />
     </div>
   </div>

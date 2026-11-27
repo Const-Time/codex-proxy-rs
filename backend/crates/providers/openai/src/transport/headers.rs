@@ -23,6 +23,7 @@ pub(super) fn is_managed_identity_header(name: &str) -> bool {
         name,
         "authorization"
             | "x-api-key"
+            | "x-goog-api-key"
             | "x-openai-actor-authorization"
             | "cookie"
             | "cookie2"
@@ -112,6 +113,18 @@ impl CodexBackendClient {
         profile: &CodexWireProfile,
         context: CodexRequestContext<'_>,
     ) -> CodexClientResult<HeaderMap> {
+        if matches!(self.protocol, OpenAiUpstreamProtocol::MessagesApi { .. }) {
+            let mut headers = HeaderMap::new();
+            let key = context
+                .authorization
+                .strip_prefix("Bearer ")
+                .unwrap_or(context.authorization);
+            let mut value = HeaderValue::from_str(key)?;
+            value.set_sensitive(true);
+            headers.insert("x-api-key", value);
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            return Ok(headers);
+        }
         if self.protocol == OpenAiUpstreamProtocol::ResponsesApi {
             let mut headers = HeaderMap::new();
             headers.insert(AUTHORIZATION, HeaderValue::from_str(context.authorization)?);

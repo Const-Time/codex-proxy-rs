@@ -15,6 +15,7 @@ import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import { useAuthStore } from '@/stores/modules/auth'
 
 import AdminApiKeyCard from './components/AdminApiKeyCard.vue'
+import AntigravityProfileCard from './components/AntigravityProfileCard.vue'
 import ClientVersionSettings from './components/client-version/index.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import ResetCreditCard from './components/ResetCreditCard.vue'
@@ -87,15 +88,18 @@ const {
 } = useAdminApiKey()
 
 const backupSettings = useTemplateRef<InstanceType<typeof SettingsBackupSection>>('backupSettings')
-const hasUnsavedChanges = computed(() => dirty.value || !!backupSettings.value?.dirty)
+const antigravityProfile = useTemplateRef<InstanceType<typeof AntigravityProfileCard>>('antigravityProfile')
+const hasUnsavedChanges = computed(() => dirty.value || !!backupSettings.value?.dirty || !!antigravityProfile.value?.dirty)
 const confirmLeave = ref(false)
 let pendingLeave: ((allowed: boolean) => void) | undefined
 
 function finishLeave(allowed: boolean) {
   const resolve = pendingLeave
   pendingLeave = undefined
-  if (allowed)
+  if (allowed) {
     resetSettings()
+    antigravityProfile.value?.reset()
+  }
   confirmLeave.value = false
   resolve?.(allowed)
 }
@@ -252,6 +256,7 @@ watch([() => route.hash, loading, section], async ([hash, isLoading, currentSect
       </BaseConfirmModal>
     </div>
 
+    <AntigravityProfileCard v-if="visited.has('upstream')" v-show="section === 'upstream'" ref="antigravityProfile" class="mt-5" />
     <SettingsBackupSection v-if="visited.has('backup')" v-show="section === 'backup'" ref="backupSettings" :active="section === 'backup'" class="mt-5" />
     <PricingSection v-if="visited.has('pricing')" v-show="section === 'pricing'" class="mt-5 min-h-0 flex-1" />
     <BaseConfirmModal v-model="confirmLeave" title="有未保存的设置" description="离开此页会放弃这些更改。" confirm-text="放弃并离开" cancel-text="继续编辑" @confirm="finishLeave(true)" />

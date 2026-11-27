@@ -1,5 +1,6 @@
 //! Validate projected bytes before Core can acknowledge downstream delivery.
-use bytes::Bytes;
+use super::super::messages_sse::{self, MessagesSse};
+use bytes::{Bytes, BytesMut};
 use gateway_core::{
     engine::{
         attempt_middleware::{AttemptOutput, AttemptResponseHead},
@@ -7,7 +8,7 @@ use gateway_core::{
     },
     event::{GatewayEvent, ProtocolWireEvent, ProviderEvent, ProviderResponseHeader},
 };
-use gateway_protocol::openai::sse::parse_sse_events;
+use gateway_protocol::{anthropic::ANTHROPIC_PROTOCOL, openai::sse::parse_sse_events};
 use std::collections::VecDeque;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FRAMES: usize = 1024;
@@ -23,17 +24,22 @@ struct Output {
     wire_terminal: bool,
     response_chain: bool,
     finished: bool,
+    messages: Option<MessagesSse>,
+    protocol: String,
 }
 pub(super) fn decode(
     response: MiddlewareResponse,
     format: super::super::WireFormat,
 ) -> Result<AttemptOutput, MiddlewareError> {
     let (protocol, status, headers, body, _) = response.into_parts();
+    if protocol != format.protocol() || !(200..=599).contains(&status) {
+        return Err(MiddlewareError::InvalidState);
+    }
     let output = Output {
         body: Some(body),
         pending: VecDeque::new(),
         streaming: format.streaming() && (200..300).contains(&status),
-        raw_json: format.raw_json(),
+        raw_json: format.raw_json() || protocol != "openai",
         websocket: format.websocket(),
         status,
         original_response_id: None,
@@ -41,10 +47,9 @@ pub(super) fn decode(
         wire_terminal: false,
         response_chain: false,
         finished: false,
+        messages: (protocol == ANTHROPIC_PROTOCOL).then(MessagesSse::default),
+        protocol,
     };
-    if protocol != "openai" || !(200..=599).contains(&status) {
-        return Err(MiddlewareError::InvalidState);
-    }
     let head = AttemptResponseHead {
         status_code: status,
         headers: headers
@@ -95,9 +100,12 @@ impl Output {
         let mut batch = VecDeque::new();
         let mut facts = vec![];
         let mut response_boundary = false;
+        let messages_opening = self.messages.as_ref().is_some_and(|sse| !sse.started);
+        let mut opening_payloads = Vec::new();
+        let mut opening_start = None;
         for _ in 0..MAX_FRAMES {
             let Some(frame) = self.body()?.next_frame().await? else {
-                if !self.wire_terminal || !batch.is_empty() {
+                if !self.wire_terminal || !batch.is_empty() || !opening_payloads.is_empty() {
                     return Err(MiddlewareError::InvalidState);
                 }
                 self.finished = true;
@@ -111,7 +119,10 @@ impl Output {
                 return Err(MiddlewareError::InvalidState);
             }
             let boundary = envelope.is_some() || !transformed;
+            let mut source_wire = false;
             if let Some(envelope) = envelope {
+                source_wire =
+                    messages_opening && envelope.events().any(|event| event.wire_event().is_some());
                 response_boundary |= envelope.events().any(ProviderEvent::is_response_boundary);
                 self.response_chain |= response_boundary;
                 if self.websocket {
@@ -127,8 +138,42 @@ impl Output {
                         .flat_map(|e| e.canonical_facts().iter().cloned()),
                 );
             }
-            if !payload.is_empty() {
-                let (wire, is_terminal) = if self.websocket {
+            let wire = if messages_opening {
+                if !payload.is_empty() {
+                    if framing != MiddlewareFraming::SseEvent {
+                        return Err(MiddlewareError::InvalidState);
+                    }
+                    let start = self
+                        .messages
+                        .as_mut()
+                        .ok_or(MiddlewareError::InvalidState)?
+                        .observe(&payload)?
+                        .into_iter()
+                        .find(messages_sse::Event::is_start);
+                    opening_start = start.or(opening_start);
+                    opening_payloads.push(payload);
+                }
+                // Observations may precede the source's first wire frame. Keep
+                // their preludes until the opening can commit with its source.
+                if source_wire || terminal || (boundary && opening_start.is_some()) {
+                    let start = opening_start.take().ok_or(MiddlewareError::InvalidState)?;
+                    let payload = if let [only] = opening_payloads.as_slice() {
+                        only.clone()
+                    } else {
+                        let mut merged = BytesMut::with_capacity(bytes);
+                        for chunk in &opening_payloads {
+                            merged.extend_from_slice(chunk);
+                        }
+                        merged.freeze()
+                    };
+                    Some((start.into_wire(payload)?, false))
+                } else {
+                    None
+                }
+            } else if payload.is_empty() {
+                None
+            } else {
+                let projected = if self.websocket {
                     if framing != MiddlewareFraming::JsonDocument {
                         return Err(MiddlewareError::InvalidState);
                     }
@@ -137,8 +182,14 @@ impl Output {
                     if framing != MiddlewareFraming::SseEvent {
                         return Err(MiddlewareError::InvalidState);
                     }
-                    sse(payload)?
+                    match self.messages.as_mut() {
+                        Some(messages) => (messages_wire(messages, payload)?, false),
+                        None => sse_for_protocol(payload, &self.protocol)?,
+                    }
                 };
+                Some(projected)
+            };
+            if let Some((wire, is_terminal)) = wire {
                 if self.wire_terminal && !self.response_chain {
                     return Err(MiddlewareError::InvalidState);
                 }
@@ -152,7 +203,7 @@ impl Output {
                     event = event.with_response_boundary();
                 }
                 batch.push_back(event);
-            } else if boundary {
+            } else if boundary && !messages_opening {
                 batch.extend(
                     std::mem::take(&mut facts)
                         .into_iter()
@@ -160,6 +211,19 @@ impl Output {
                 );
             }
             if terminal {
+                if self.protocol != "openai" {
+                    // The source holds the provider's terminal canonical event and receipts.
+                    let completed = facts
+                        .iter()
+                        .any(|event| matches!(event, GatewayEvent::Completed(_)))
+                        || batch.iter().any(|event| {
+                            event
+                                .canonical_facts()
+                                .iter()
+                                .any(|fact| matches!(fact, GatewayEvent::Completed(_)))
+                        });
+                    self.wire_terminal |= completed;
+                }
                 if !self.wire_terminal {
                     return Err(MiddlewareError::InvalidState);
                 }
@@ -225,8 +289,15 @@ impl Output {
                     ProtocolWireEvent::json("openai", Some("error".into()), value.into())
                         .map_err(|_| MiddlewareError::InvalidState)?
                 } else if self.raw_error || self.raw_json {
-                    ProtocolWireEvent::raw_json("openai", Bytes::from(bytes))
-                        .map_err(|_| MiddlewareError::InvalidState)?
+                    ProtocolWireEvent::raw_json(
+                        if self.raw_error {
+                            "openai"
+                        } else {
+                            self.protocol.as_str()
+                        },
+                        Bytes::from(bytes),
+                    )
+                    .map_err(|_| MiddlewareError::InvalidState)?
                 } else {
                     let value: serde_json::Value = serde_json::from_slice(&bytes)
                         .map_err(|_| MiddlewareError::InvalidState)?;
@@ -281,6 +352,29 @@ fn websocket_message(payload: Bytes) -> Result<(ProtocolWireEvent, bool), Middle
 pub(in crate::openai::middleware) fn sse(
     payload: Bytes,
 ) -> Result<(ProtocolWireEvent, bool), MiddlewareError> {
+    sse_for_protocol(payload, "openai")
+}
+
+fn messages_wire(
+    messages: &mut MessagesSse,
+    payload: Bytes,
+) -> Result<ProtocolWireEvent, MiddlewareError> {
+    let mut events = messages.observe(&payload)?;
+    match events.len() {
+        0 => ProtocolWireEvent::raw_sse(ANTHROPIC_PROTOCOL, payload)
+            .map_err(|_| MiddlewareError::InvalidState),
+        1 => events
+            .pop()
+            .ok_or(MiddlewareError::InvalidState)?
+            .into_wire(payload),
+        _ => Err(MiddlewareError::InvalidState),
+    }
+}
+
+fn sse_for_protocol(
+    payload: Bytes,
+    protocol: &str,
+) -> Result<(ProtocolWireEvent, bool), MiddlewareError> {
     if !(payload.ends_with(b"\n\n") || payload.ends_with(b"\r\n\r\n")) {
         return Err(MiddlewareError::InvalidState);
     }
@@ -288,7 +382,7 @@ pub(in crate::openai::middleware) fn sse(
     let mut events = parse_sse_events(text).map_err(|_| MiddlewareError::InvalidState)?;
     if events.is_empty() {
         return Ok((
-            ProtocolWireEvent::raw_sse("openai", payload)
+            ProtocolWireEvent::raw_sse(protocol, payload)
                 .map_err(|_| MiddlewareError::InvalidState)?,
             false,
         ));
@@ -298,8 +392,11 @@ pub(in crate::openai::middleware) fn sse(
     }
     let event = events.pop().ok_or(MiddlewareError::InvalidState)?;
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+        if protocol != "openai" {
+            return Err(MiddlewareError::InvalidState);
+        }
         return Ok((
-            ProtocolWireEvent::raw_sse("openai", payload)
+            ProtocolWireEvent::raw_sse(protocol, payload)
                 .map_err(|_| MiddlewareError::InvalidState)?,
             false,
         ));
@@ -308,12 +405,13 @@ pub(in crate::openai::middleware) fn sse(
         .event
         .as_deref()
         .or_else(|| value.get("type").and_then(|v| v.as_str()));
-    let terminal = matches!(
-        kind,
-        Some("response.completed" | "response.incomplete" | "response.failed" | "error")
-    );
+    let terminal = protocol == "openai"
+        && matches!(
+            kind,
+            Some("response.completed" | "response.incomplete" | "response.failed" | "error")
+        );
     let wire = ProtocolWireEvent::json_with_raw_sse_metadata(
-        "openai",
+        protocol,
         event.event,
         value,
         payload,

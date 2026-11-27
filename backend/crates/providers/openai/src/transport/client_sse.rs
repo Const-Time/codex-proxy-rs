@@ -628,9 +628,14 @@ impl CodexBackendClient {
         context: CodexRequestContext<'_>,
         client_version: Option<&str>,
     ) -> CodexClientResult<CodexModelCatalogSnapshot> {
+        if let OpenAiUpstreamProtocol::MessagesApi { native_count } = self.protocol {
+            return self.fetch_messages_models(context, native_count).await;
+        }
         let path = match self.protocol {
             OpenAiUpstreamProtocol::Codex => "codex/models",
-            OpenAiUpstreamProtocol::ResponsesApi => "models",
+            OpenAiUpstreamProtocol::ResponsesApi | OpenAiUpstreamProtocol::MessagesApi { .. } => {
+                "models"
+            }
         };
         let profile = self.profile.snapshot();
         let headers = self.model_request_headers(&profile, context)?;
@@ -673,7 +678,7 @@ impl CodexBackendClient {
         }
         Ok(match self.protocol {
             OpenAiUpstreamProtocol::Codex => parse_codex_model_catalog(&body, etag.as_deref())?,
-            OpenAiUpstreamProtocol::ResponsesApi => {
+            OpenAiUpstreamProtocol::ResponsesApi | OpenAiUpstreamProtocol::MessagesApi { .. } => {
                 super::catalog::parse_api_model_catalog(&body, etag.as_deref())?
             }
         })

@@ -5,6 +5,7 @@ import { computed } from 'vue'
 
 import BasePopover from '@/components/base/BasePopover.vue'
 import { useUiClock } from '@/composables/useUiClock'
+import { quotaWindowConsumptionDisplay, quotaWindowDisplayLabel } from '../../utils/quotaPresentation'
 import AccountRequestTimeline from '../AccountUsageWindow/AccountRequestTimeline.vue'
 import AccountUsageWindow from '../AccountUsageWindow/index.vue'
 import { resolveAccountUsageWindowPresentation } from '../AccountUsageWindow/presenter'
@@ -20,9 +21,10 @@ const props = withDefaults(defineProps<{
 
 const now = useUiClock()
 const detailHeading = computed(() => props.label)
-const detailTitle = computed(() => detailHeading.value ?? props.windows[0]?.labelDisplay ?? '额度详情')
-const summaryLabel = computed(() => props.label ?? props.windows[0]?.labelDisplay ?? '额度')
-const hasQuotaWindow = computed(() => props.windows.some(window => typeof window.usedPercent === 'number'))
+const firstWindowLabel = computed(() => props.windows[0] ? quotaWindowDisplayLabel(props.windows[0], false) : null)
+const detailTitle = computed(() => detailHeading.value ?? firstWindowLabel.value ?? '额度详情')
+const summaryLabel = computed(() => props.label ?? firstWindowLabel.value ?? '额度')
+const hasQuotaWindow = computed(() => props.windows.some(window => typeof window.usedPercent === 'number' || Boolean(window.limitId || window.limitName)))
 const detailItems = computed(() =>
   props.windows.map((window) => {
     const view = resolveAccountUsageWindowPresentation({
@@ -45,7 +47,7 @@ const detailItems = computed(() =>
       usedPercent: window.usedPercent,
       usedPercentDisplay: window.usedPercentDisplay,
       resetAtDisplay: window.resetAtDisplay,
-      localUsageDisplay: view.quota.localUsageVisible ? view.quota.localUsageDisplay : '—',
+      localUsageDisplay: quotaWindowConsumptionDisplay(window.localUsage),
       percentTextClass: view.quota.percentTextClass,
       barClass: view.quota.barClass,
       barStyle: view.quota.barStyle,

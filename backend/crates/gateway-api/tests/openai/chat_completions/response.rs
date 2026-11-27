@@ -131,7 +131,15 @@ async fn sse_deduplicates_text_snapshots_and_emits_usage_only_when_requested() {
             assert_eq!(usage[0]["usage"]["total_tokens"], 18);
         }
         let captured = fixture.captured();
-        assert!(captured.body.get("stream_options").is_none());
+        assert_eq!(
+            captured.body["stream_options"]["include_usage"],
+            include_usage
+        );
+        let upstream = gateway_protocol::chat_completions::responses::convert_request(
+            captured.body.as_object().unwrap(),
+        )
+        .unwrap();
+        assert!(!upstream.contains_key("stream_options"));
     }
 }
 
@@ -533,21 +541,26 @@ async fn wire_failures_preserve_existing_recovery_fields_without_success_chunks(
         let mut expected = json!({
             "type":"rate_limit_error","code":"rate_limit_exceeded","param":null,
             "message":"retry later","headers":{"retry-after":"2"},
-            "recovery":{"action":"retry","future":[1,2]},
-            "future_error_property":{"enabled":true}
+            "recovery":{"action":"retry"},
         });
+        let mut upstream_error = expected.clone();
+        upstream_error["output"] =
+            json!([{"type":"reasoning","encrypted_content":"fixture-private"}]);
+        upstream_error["headers"]["X-Goog-Api-Key"] = json!("fixture-key");
+        upstream_error["private_details"] = json!({"nested":[{"reasoning":"fixture-thought","encrypted_content":"fixture-private"}]});
+        upstream_error["recovery"]["future"] = json!({"encrypted_content":"fixture-private"});
         let failure = match shape {
             "response.failed" => wire(
                 "response.failed",
                 json!({"response":{
                     "id":"resp_chat_test","object":"response","model":"upstream-model",
-                    "status":"failed","output":[],"error":expected.clone()
+                    "status":"failed","output":[],"error":upstream_error
                 }}),
             ),
-            "error" => wire("error", json!({"error":expected.clone()})),
+            "error" => wire("error", json!({"error":upstream_error})),
             _ => {
                 // 裸事件的 type 是 wire 名称，仅该包装身份归一化为 Chat 错误类型
-                let failure = wire("error", expected.clone());
+                let failure = wire("error", upstream_error);
                 expected["type"] = json!("server_error");
                 failure
             }

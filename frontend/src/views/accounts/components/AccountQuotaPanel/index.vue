@@ -6,7 +6,9 @@ import { computed, defineAsyncComponent, shallowRef } from 'vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import { groupedAccountQuotaWindows, orderedPanelQuotaWindows } from '../../constants'
+import { accountQuotaSubtitle } from '../../utils/quotaPresentation'
 import AccountPlanBadge from '../AccountPlanBadge.vue'
+import AccountQuotaCredits from './Credits.vue'
 import AccountQuotaPanelEntry from './Entry.vue'
 import AccountResetCredits from './ResetCredits.vue'
 import UsageCap from './UsageCap.vue'
@@ -26,6 +28,13 @@ const AccountProfileModal = defineAsyncComponent(() => import('../AccountProfile
 const quotaEntries = computed(() => groupedAccountQuotaWindows(
   orderedPanelQuotaWindows(props.account.quota.windows),
 ))
+const quotaSubtitle = computed(() => accountQuotaSubtitle(props.account.provider))
+const showHeaderPlanBadge = computed(() =>
+  props.account.authenticationKind === 'oauth'
+  && (props.account.provider === 'openai' || (props.account.provider === 'antigravity' && Boolean(props.account.planType))),
+)
+const supportsQuotaPolicy = computed(() => props.account.authenticationKind === 'oauth'
+  && (props.account.provider === 'openai' || props.account.provider === 'antigravity'))
 const profileOpen = shallowRef(false)
 const profileLoaded = shallowRef(false)
 
@@ -46,8 +55,8 @@ function openProfile() {
           v-if="account.authenticationKind !== 'api_key'"
           class="m-0 mt-1 flex min-w-0 items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary"
         >
-          <span>{{ account.provider === 'xai' ? 'xAI 用量窗口' : 'Codex 额度' }}</span>
-          <template v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'">
+          <span>{{ quotaSubtitle }}</span>
+          <template v-if="showHeaderPlanBadge">
             <span>·</span>
             <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
           </template>
@@ -101,7 +110,8 @@ function openProfile() {
         额度待观测
       </p>
     </div>
-    <UsageCap v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'" :account="account" @account-updated="emit('accountUpdated', $event)" />
+    <AccountQuotaCredits v-if="supportsQuotaPolicy && account.provider === 'antigravity'" class="mt-3" :account="account" @account-updated="emit('accountUpdated', $event)" />
+    <UsageCap v-if="supportsQuotaPolicy" :account="account" @account-updated="emit('accountUpdated', $event)" />
   </section>
 
   <AccountProfileModal

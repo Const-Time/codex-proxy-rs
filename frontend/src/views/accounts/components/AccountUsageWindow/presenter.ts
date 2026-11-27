@@ -221,7 +221,7 @@ function usageWindowMode(
 ): AccountUsageWindowMode {
   if (typeof window?.usedPercent === 'number')
     return 'quota'
-  if (localUsage)
+  if (localUsage && !window?.limitId && !window?.limitName)
     return 'local'
   return window ? 'quota' : 'unknown'
 }

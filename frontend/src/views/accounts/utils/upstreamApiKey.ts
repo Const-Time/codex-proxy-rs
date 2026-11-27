@@ -2,10 +2,11 @@ import type { ApiKeyConfiguration } from '@/api'
 
 export interface ApiKeyAccountForm extends ApiKeyConfiguration {
   apiKey: string
+  protocol: NonNullable<ApiKeyConfiguration['protocol']>
 }
 
 export function emptyApiKeyAccountForm(): ApiKeyAccountForm {
-  return { base_url: '', apiKey: '', transport: 'http' }
+  return { base_url: '', apiKey: '', transport: 'http', protocol: 'responses' }
 }
 
 export function apiKeyAccountError(form: ApiKeyAccountForm, editing = false): string | undefined {

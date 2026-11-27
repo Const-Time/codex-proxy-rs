@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gateway_core::operation::RawJsonPayload;
+use gateway_core::operation::{ProtocolPayload, RawJsonPayload};
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::ProviderSessionAffinityKey;
 use serde_json::{Map, Value};
@@ -113,6 +113,20 @@ pub(crate) fn derive_codex_session_affinity(
     let (anchor_source, anchor) = derive_account_affinity_anchor(request)?;
     session_affinity(anchor_source, anchor, session_id, client_api_key_id)?
         .with_thread(request.client_thread_id.as_deref())
+}
+
+pub(crate) fn derive_messages_session_affinity(
+    payload: &ProtocolPayload,
+    client_api_key_id: &ClientApiKeyId,
+) -> Option<CodexSessionAffinity> {
+    let headers = crate::transport::request::decode_passthrough_headers(payload.context());
+    let session = gateway_protocol::anthropic::claude_session_id(
+        payload.body(),
+        headers
+            .get("x-claude-code-session-id")
+            .and_then(|value| value.to_str().ok()),
+    )?;
+    session_affinity("claude-session", session, None, client_api_key_id)
 }
 
 /// 原始 JSON 端点只读取会话身份，发送时仍保留原始字节。Search 的 `id` 是官方

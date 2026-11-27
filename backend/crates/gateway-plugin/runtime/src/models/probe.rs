@@ -160,7 +160,7 @@ impl AccountProbes {
                 super::encode(json!({"text":text,"complete":result.complete,"status":"ok"}))
             }
             Err(error) => {
-                let status = error.upstream_response().map(|r| r.status());
+                let status = error.upstream_status();
                 // Raw upstream bodies can contain credentials; retain only bounded, stable facts.
                 let mut fault = PluginFault::new(ErrorCode::Upstream, "account diagnostic failed");
                 fault.http_status = status;

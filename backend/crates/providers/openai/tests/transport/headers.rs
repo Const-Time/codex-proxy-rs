@@ -57,6 +57,7 @@ fn request_with_opaque_headers(use_websocket: bool) -> CodexResponsesRequest {
                 ["x-invalid-base64", "%%%"],
                 ["x-still-valid", STANDARD.encode(b"after-invalid")],
                 ["authorization", STANDARD.encode(b"Bearer client-secret")],
+                ["x-goog-api-key", STANDARD.encode(b"google-client-secret")],
                 [
                     "X-OpenAI-Actor-Authorization",
                     STANDARD.encode(b"proxy-managed")
@@ -468,6 +469,7 @@ async fn backend_http_should_preserve_business_headers_without_downstream_transp
     );
     for dropped in [
         "openai-beta",
+        "x-goog-api-key",
         "x-openai-actor-authorization",
         "x-oai-attestation",
         "x-oai-is",
@@ -591,6 +593,7 @@ async fn backend_websocket_should_preserve_business_headers_without_downstream_t
     assert!(values("x-openai-internal-codex-residency").is_empty());
     for dropped in [
         "x-openai-actor-authorization",
+        "x-goog-api-key",
         "x-oai-attestation",
         "x-oai-is",
         "x-oai-is-update",

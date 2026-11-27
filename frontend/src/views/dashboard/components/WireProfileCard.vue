@@ -5,7 +5,7 @@ import { computed, shallowRef, watch } from 'vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
+import { AntigravityIcon, OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { formatDateTime } from '@/utils/date'
 import { formatProviderLabel } from '@/utils/providers'
 
@@ -42,7 +42,13 @@ const providerOptions = computed(() =>
   props.profiles.map(profile => ({
     label: providerLabel(profile.provider),
     value: profile.provider,
-    icon: profile.provider === 'openai' ? OpenaiIcon : profile.provider === 'xai' ? XaiIcon : undefined,
+    icon: profile.provider === 'openai'
+      ? OpenaiIcon
+      : profile.provider === 'xai'
+        ? XaiIcon
+        : profile.provider === 'antigravity'
+          ? AntigravityIcon
+          : undefined,
   })),
 )
 
@@ -183,7 +189,7 @@ function providerLabel(provider: string) {
         label="上游平台"
         :options="providerOptions"
         display="icon"
-        class="w-21"
+        :style="{ width: `${providerOptions.length * 2.5 + 0.25}rem` }"
       />
     </template>
 

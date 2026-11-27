@@ -63,7 +63,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         </div>
       </div>
 
-      <section v-if="account.authenticationKind === 'api_key'" class="grid gap-4">
+      <section v-if="account.provider === 'openai' && account.authenticationKind === 'api_key'" class="grid gap-4">
         <h3 class="m-0 text-cp font-heavy text-cp-text">
           上游连接
         </h3>
@@ -100,7 +100,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
       <BaseButton
         variant="primary"
         :loading="saving"
-        :disabled="!account || groupsLoading || (account.authenticationKind === 'api_key' && !configurationReady)"
+        :disabled="!account || groupsLoading || (account.provider === 'openai' && account.authenticationKind === 'api_key' && !configurationReady)"
         @click="emit('save')"
       >
         保存更改

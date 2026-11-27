@@ -618,11 +618,33 @@ pub(super) fn nonnegative_millis(value: Option<i64>) -> Option<u64> {
     value.and_then(|value| u64::try_from(value).ok())
 }
 
-pub(super) fn compile_model_capabilities(model: &CodexCatalogModel) -> ProviderModelCapabilities {
+pub(super) fn compile_model_capabilities(
+    model: &CodexCatalogModel,
+    protocols: crate::credential::ModelProtocols,
+) -> ProviderModelCapabilities {
     // Catalog membership is enough to publish Generate. `supported_in_api` is advisory;
     // the upstream response is authoritative for normal and diagnostic requests.
-    let capabilities = ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
-        .with_upstream_feature_validation();
+    let mut operations = BTreeSet::from([OperationKind::Generate]);
+    if protocols.messages_count {
+        operations.insert(OperationKind::CountTokens);
+    }
+    let native = protocols
+        .responses
+        .then_some(gateway_protocol::openai::OPENAI_PROTOCOL)
+        .into_iter()
+        .chain(
+            protocols
+                .messages
+                .then_some(gateway_protocol::anthropic::ANTHROPIC_PROTOCOL),
+        );
+    let capabilities = ModelCapabilities::new(operations, None)
+        .with_upstream_feature_validation()
+        .with_native_generation_protocols(native)
+        .with_translated_generation_protocols(
+            protocols
+                .responses
+                .then_some(gateway_protocol::chat_completions::CHAT_PROTOCOL),
+        );
     ProviderModelCapabilities::new(model.request_model().clone(), capabilities)
         .with_presentation(codex_model_presentation(model))
 }

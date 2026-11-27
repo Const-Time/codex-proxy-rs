@@ -1168,9 +1168,31 @@ Usage 列表和详情（含个人视图）返回 `requestedServiceTier` 与 `ups
 
 账号 `quota.credits` 为 `null` 或 `{hasCredits, unlimited, balance}`。`balance` 为十进制字符串或 `null`，不转浮点数；`"0"`、无限额度和未返回余额分别展示。余额来自上游刷新或被动额度事件，缺失的新余额不会保留旧值。展示不改变本地订阅、共享额度及计费口径。
 
-## Chat Completions 兼容入口（2026-10）
+## Chat Completions 与 GenAI
 
-`POST /v1/chat/completions` 使用现有 API Key 鉴权，转换为 Responses 后经过原权限、路由、请求插件和账本链路；支持 JSON 和 SSE、文本/图像输入、函数工具、结构化输出及可表示的拒答。`stream_options.include_usage=true` 在成功终态后附加 usage；不支持的多候选、音频等字段在发出上游请求前返回 400。该入口不增加独立的账号或扣费配置。
+`POST /v1/chat/completions` 使用现有 API Key 和计费规则。请求以 Chat 形状进入请求插件和路由，选定的 Provider 再转换为自己的生成协议。OpenAI 和 xAI 使用 Responses，Antigravity 使用 GenAI。Chat 支持 JSON 和 SSE，按所选 Provider 支持的能力接收工具、图片和结构化输出。`stream_options.include_usage=true` 在成功终态附加 usage。
+
+Chat 错误公开 `message`、`type`、`code` 和 `param`，可附带 `headers.x-retry-metadata` 和 `recovery.action`。错误提供重试时间时，HTTP 响应通过 `Retry-After` 返回，流式错误通过 `headers.retry-after` 返回。
+
+Antigravity 的 GenAI 模型目录位于 `GET /v1beta/models`。列表使用 `pageSize` 和 `pageToken` 分页，从响应中的 `nextPageToken` 继续读取。生成入口为 `POST /v1beta/models/{model}:generateContent` 和 `POST /v1beta/models/{model}:streamGenerateContent?alt=sse`。这些入口接受网关 API Key，可用 Bearer 或 `x-goog-api-key` 请求头，并按密钥可见的账号和模型筛选。
+
+模型的 `supportedGenerationMethods` 包含 `countTokens` 时，可以请求 `POST /v1beta/models/{model}:countTokens`。输入可直接提供 `contents`，也可使用 `generateContentRequest` 包装完整生成参数。后者存在时优先使用。返回上游的 `totalTokens`，计数本身不产生网关生成用量或费用。
+
+GenAI 的分组模型别名通过 `generationConfig.thinkingConfig.thinkingLevel` 选择上游声明的变体。例如可在目录中的分组模型上指定 `HIGH`。只允许使用密钥所在账号范围内的变体，直接请求完整模型名时使用该模型。Chat 请求填写对象型 `web_search_options` 时，Antigravity 使用账号目录声明的专用搜索模型。请求模型和搜索模型均受账号模型权限约束。
+
+在账号管理中选择 Antigravity 并发起 OAuth。部署端从环境变量读取 `ANTIGRAVITY_OAUTH_CLIENT_ID` 和 `ANTIGRAVITY_OAUTH_CLIENT_SECRET`。OAuth 注册使用自定义回调时，同时设置 `ANTIGRAVITY_OAUTH_REDIRECT_URI`。
+
+## Anthropic Messages
+
+`POST /v1/messages` 使用网关 API Key，可通过 Bearer 或 `x-api-key` 认证。上游账号需要在 API Key 配置中选择 `Anthropic Messages` 并使用 HTTP。旧账号默认继续使用 Responses。网关支持原生 JSON 和 SSE 响应，可透传 `anthropic-version` 和 `anthropic-beta`，调用上游使用所选账号自己的凭据。官方 Anthropic API 账号支持 `POST /v1/messages/count_tokens`，返回 `input_tokens`。
+
+## Antigravity 客户端配置
+
+管理员在「系统设置 → 上游设置」选择 Desktop 或 CLI、平台、架构与版本策略。可以先预览请求使用的 User-Agent，再保存。官方发布资料可用时，页面会显示对应版本的安装包链接。
+
+- `GET /api/admin/settings/antigravity/profile` 读取已保存配置及发布资料。
+- `GET /api/admin/settings/antigravity/profile/options` 读取平台预设。
+- `POST /api/admin/settings/antigravity/profile` 保存 `configuration` 对象中的 `client`、`platform`、`arch`、`versionMode` 和 `clientVersion`。添加 `?preview=true` 只预览。
 
 使用统计 `performance.points` 增加 `concurrencyAverage`、`concurrencyPeak`，其余字段保持兼容；统计口径为请求从开始到终结的重叠量，均值按持续时间加权，包含跨桶和跨查询起点的活动请求。
 

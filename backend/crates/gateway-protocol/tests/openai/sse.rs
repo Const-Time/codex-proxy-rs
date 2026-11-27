@@ -1,8 +1,9 @@
 use gateway_protocol::openai::sse::{
     DONE_SSE_FRAME, MAX_SSE_EVENT_BUFFER_BYTES, SseError, SseEvent, SseEventDecoder,
-    encode_sse_event, encode_sse_event_with_metadata, parse_sse_events,
+    encode_sse_event, encode_sse_event_with_metadata, parse_sse_events, parse_sse_events_strict,
     response_failed_sse_data_from_error_event, response_failed_sse_event,
     response_failed_sse_event_with_id, sse_frame_end, sse_frame_is_done,
+    strict_sse_frame_is_complete,
 };
 use serde_json::json;
 
@@ -30,6 +31,86 @@ fn parser_should_preserve_multiline_data_id_and_retry() {
             id: Some("evt_1".to_owned()),
             retry: Some(250),
         }]
+    );
+}
+
+#[test]
+fn strict_sse_uses_only_data_fields_and_preserves_done_for_protocol_validation() {
+    let input = concat!(
+        "\u{feff}: keep-alive\r\n",
+        "event: message_start\r\n",
+        "data: {\"type\":\"message_start\",\r\n",
+        "\"discarded\":true,\r\n",
+        "data: \"message\":{\"id\":\"msg_fixture\"}}\r\n\r\n",
+        "data: [DONE]\r\n\r\n",
+    );
+    let events = parse_sse_events_strict(input, true).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event.as_deref(), Some("message_start"));
+    assert_eq!(
+        events[0].data,
+        "{\"type\":\"message_start\",\n\"message\":{\"id\":\"msg_fixture\"}}"
+    );
+    assert_eq!(events[1].data, "[DONE]");
+    let legacy = parse_sse_events(input).unwrap();
+    assert_eq!(legacy.len(), 1);
+    assert!(legacy[0].data.contains("\"discarded\":true"));
+    assert!(
+        parse_sse_events_strict(r#"{"type":"message_start"}"#, true)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn native_sse_decoder_keeps_crlf_across_chunks_and_ignores_a_later_bom() {
+    let opening = b"\xef\xbb\xbfdata: first,\rx-extension: ignored\rdata: second\r\n\r\n";
+    let ignored = b"\xef\xbb\xbfdata: not-an-event\n\r\n";
+    let closing = b"data: last\r\r";
+    let mut decoder = SseEventDecoder::strict();
+    let mut frames = Vec::new();
+    for byte in opening.iter().chain(ignored).chain(closing) {
+        frames.extend(decoder.push_frames(std::slice::from_ref(byte)));
+    }
+    assert_eq!(frames.len(), 3);
+    let reconstructed: Vec<_> = frames
+        .iter()
+        .flat_map(|frame| frame.raw())
+        .copied()
+        .collect();
+    assert_eq!(
+        reconstructed,
+        [opening.as_slice(), ignored, closing].concat()
+    );
+    assert_eq!(frames[0].events()[0].data, "first,\nsecond");
+    assert!(frames[1].events().is_empty());
+    assert_eq!(frames[2].events()[0].data, "last");
+    assert!(decoder.finish_frames().is_empty());
+    assert!(!strict_sse_frame_is_complete(b"data: incomplete\r\n"));
+    assert!(strict_sse_frame_is_complete(closing));
+}
+
+#[test]
+fn native_sse_emits_frames_ending_in_cr_without_waiting_for_eof() {
+    for ending in [b"\r\r".as_slice(), b"\n\r", b"\r\n\r"] {
+        let wire = [b"data: last".as_slice(), ending].concat();
+        let mut decoder = SseEventDecoder::strict();
+        let frames = decoder.push_frames(&wire);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].raw(), wire);
+        assert_eq!(frames[0].events()[0].data, "last");
+    }
+}
+
+#[test]
+fn openai_compatibility_ignores_done_with_an_extra_cr_before_crlf() {
+    let input = "data: [DONE]\r\r\n\n";
+    assert!(parse_sse_events(input).unwrap().is_empty());
+    assert!(
+        SseEventDecoder::default()
+            .push(input.as_bytes())
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -117,6 +198,23 @@ fn parser_should_convert_non_sse_json_error_to_a_safe_error_event() {
             false,
         )
     );
+}
+
+#[test]
+fn non_sse_fallback_message_excludes_unstructured_response_content() {
+    for raw in [
+        r#"{"private_details":{"encrypted_content":"private-fixture"},"detail":{"reasoning":"private-fixture"}}"#,
+        "private-fixture",
+    ] {
+        let events = parse_sse_events(raw).unwrap();
+        assert_eq!(events.len(), 1);
+        let error: serde_json::Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(
+            error["error"]["message"],
+            "Upstream response was not an event stream"
+        );
+        assert!(!events[0].data.contains("private-fixture"));
+    }
 }
 
 #[test]

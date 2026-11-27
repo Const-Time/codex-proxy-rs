@@ -22,6 +22,7 @@ use secrecy::ExposeSecret;
 use thiserror::Error;
 use url::Url;
 
+use super::ApiKeyProtocol;
 use super::affinity::{CODEX_ROOT_SESSION_TTL, CodexSessionAffinity};
 use super::catalog::CodexCredentialCatalogService;
 use super::cookie::CodexCookiePolicy;
@@ -109,12 +110,35 @@ pub(crate) struct SelectCodexProviderEndpointCredential<'a> {
 }
 
 struct CredentialSelectionInput<'a> {
+    protocol: CredentialProtocol,
     requires_websocket: bool,
     oauth_only: bool,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
     session_affinity_observation: Option<&'a CodexSessionAffinity>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialProtocol {
+    Responses,
+    Messages,
+    MessagesCount,
+    Diagnostic,
+}
+
+impl CredentialProtocol {
+    fn matches(self, authentication: &CodexRuntimeAuthentication) -> bool {
+        match authentication {
+            CodexRuntimeAuthentication::ApiKey(auth) => match self {
+                Self::Responses => auth.configuration.protocol == ApiKeyProtocol::Responses,
+                Self::Messages => auth.configuration.protocol == ApiKeyProtocol::Messages,
+                Self::MessagesCount => auth.configuration.supports_native_count(),
+                Self::Diagnostic => true,
+            },
+            _ => matches!(self, Self::Responses | Self::Diagnostic),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -309,7 +333,17 @@ impl CodexCredentialSelector {
         &self,
         request: &SelectCodexCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        self.select_for_protocol(request, CredentialProtocol::Responses)
+            .await
+    }
+
+    pub(crate) async fn select_for_protocol(
+        &self,
+        request: &SelectCodexCredential<'_>,
+        protocol: CredentialProtocol,
+    ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            protocol,
             requires_websocket: false,
             oauth_only: false,
             request_url: request.request_url,
@@ -333,7 +367,16 @@ impl CodexCredentialSelector {
         requires_websocket: bool,
         oauth_only: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        let protocol = if request.attempt.is_diagnostic_required_account()
+            && !requires_websocket
+            && !oauth_only
+        {
+            CredentialProtocol::Diagnostic
+        } else {
+            CredentialProtocol::Responses
+        };
         let input = CredentialSelectionInput {
+            protocol,
             requires_websocket,
             oauth_only,
             request_url: request.request_url,
@@ -358,6 +401,7 @@ impl CodexCredentialSelector {
         request: &SelectCodexProviderEndpointCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            protocol: CredentialProtocol::Responses,
             requires_websocket: false,
             oauth_only: true,
             request_url: request.request_url,
@@ -482,6 +526,9 @@ impl CodexCredentialSelector {
                 } else if request.oauth_only
                     && account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH {
                     Some("oauth_required")
+                } else if matches!(request.protocol, CredentialProtocol::Messages | CredentialProtocol::MessagesCount)
+                    && account.authentication_kind() != super::CODEX_AUTHENTICATION_KIND_API_KEY {
+                    Some("api_key_required")
                 } else if diagnostic {
                     None
                 } else if !within_scope {
@@ -498,7 +545,7 @@ impl CodexCredentialSelector {
                             if !request.attempt.account_scope().is_some_and(|scope| scope.allows_model(account.id(), model)) {
                                 Some("model_policy")
                             } else {
-                                match self.catalog.observed_model_support(account, model) {
+                                match self.catalog.observed_model_support_for_protocol(account, model, request.protocol) {
                                     Ok(Some(true)) => None,
                                     Ok(Some(false)) => Some("model_not_supported"),
                                     Ok(None) if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY => Some("catalog_unobserved"),
@@ -522,11 +569,17 @@ impl CodexCredentialSelector {
             .collect::<Vec<_>>();
         let mut eligible = Vec::with_capacity(accounts.len());
         for account in accounts {
+            // Fixed-account diagnostics can check the format on the revision-checked load below.
             if request.requires_websocket
                 && account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY
             {
                 let runtime = self.repository.load_runtime_credential(&account).await?;
-                if !matches!(runtime.authentication, CodexRuntimeAuthentication::ApiKey(ref auth)
+                if !request.protocol.matches(&runtime.authentication) {
+                    *exclusions.entry("protocol_mismatch").or_default() += 1;
+                    continue;
+                }
+                if request.requires_websocket
+                    && !matches!(runtime.authentication, CodexRuntimeAuthentication::ApiKey(ref auth)
                     if auth.configuration.transport == super::ApiKeyTransport::PreferWebsocket)
                 {
                     *exclusions.entry("websocket_unsupported").or_default() += 1;
@@ -803,6 +856,10 @@ impl CodexCredentialSelector {
             // Only observation timestamps may advance without invalidating selection.
             // Revalidate all other facts before reserving capacity or request intervals.
             let (account, runtime) = self.repository.reload_selected_credential(&account).await?;
+            if !request.protocol.matches(&runtime.authentication) {
+                excluded.insert(account.id().clone());
+                continue;
+            }
             if !account.dispatch_hours().allows_at(SystemTime::now()) {
                 excluded.insert(account.id().clone());
                 continue;
@@ -959,6 +1016,7 @@ impl CodexCredentialSelector {
             || account.upstream_account_id() != lease.account.upstream_account_id()
             || account.outbound_proxy() != lease.account.outbound_proxy()
             || runtime.principal != lease.principal
+            || !CredentialProtocol::Responses.matches(&runtime.authentication)
             || account
                 .access_token_expires_at()
                 .is_some_and(|expires| expires <= SystemTime::now())

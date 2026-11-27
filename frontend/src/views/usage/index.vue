@@ -116,7 +116,7 @@ watch([timeRange, customDates], () => {
         <ProviderFilterSegmented
           v-model="providerQuery"
           :disabled="refreshingList"
-          class="w-31 shrink-0"
+          class="w-41 shrink-0"
         />
       </template>
     </BasePageHeader>

@@ -96,6 +96,12 @@ pub enum RequestDecodeError {
         /// 字段路径。
         field: String,
     },
+    /// Public diagnostic from a native protocol validator.
+    #[error("{message}")]
+    NativeContract {
+        /// Static diagnostic emitted by the protocol validator.
+        message: String,
+    },
 }
 
 impl RequestDecodeError {
@@ -153,6 +159,7 @@ impl RequestDecodeError {
                 format!("Parameter `{field}` is not supported by this gateway."),
                 Some(field.clone()),
             ),
+            Self::NativeContract { message } => ("invalid_value", message.clone(), None),
         };
         ProtocolErrorBody {
             error: ProtocolError {

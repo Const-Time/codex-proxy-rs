@@ -20,6 +20,8 @@ use crate::validation::{OperationError, validate_text};
 pub enum OperationKind {
     /// 文本、多模态和工具生成。
     Generate,
+    /// Native input token counting.
+    CountTokens,
     /// 图像生成。
     GenerateImage,
     /// Provider 原生 standalone search。
@@ -32,6 +34,7 @@ impl OperationKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Generate => "generate",
+            Self::CountTokens => "count_tokens",
             Self::GenerateImage => "generate_image",
             Self::Search => "search",
         }
@@ -335,6 +338,13 @@ struct GeneratePayload {
 }
 
 impl GenerateRequest {
+    /// Install a provider's translated wire payload while retaining execution authority.
+    #[must_use]
+    pub fn with_protocol_payload(mut self, payload: ProtocolPayload) -> Self {
+        Arc::make_mut(&mut self.payload).protocol_payload = payload;
+        self
+    }
+
     /// Provider-owned request defaults may replace wire facts without losing context or inherited authority.
     #[must_use]
     pub fn with_protocol_body(mut self, body: Map<String, Value>) -> Self {
@@ -372,6 +382,11 @@ impl GenerateRequest {
     /// 返回最大输出 token 数。
     #[must_use]
     pub fn max_output_tokens(&self) -> Option<u64> {
+        let protocol = self.protocol_payload().protocol();
+        if protocol != "openai" {
+            return gateway_protocol::request::request_facts(protocol, self.body())
+                .max_output_tokens;
+        }
         self.body()
             .get("max_output_tokens")
             .and_then(Value::as_u64)
@@ -399,6 +414,11 @@ impl GenerateRequest {
     /// 返回客户端是否请求了图片生成工具。
     #[must_use]
     pub fn image_generation_requested(&self) -> bool {
+        let protocol = self.protocol_payload().protocol();
+        if protocol != "openai" {
+            return gateway_protocol::request::request_facts(protocol, self.body())
+                .image_generation;
+        }
         self.body()
             .get("tools")
             .and_then(Value::as_array)
@@ -431,12 +451,31 @@ impl GenerateRequest {
     }
 
     fn requirements(&self) -> CapabilityRequirements {
+        let protocol = self.protocol_payload().protocol();
+        let facts = (protocol != "openai")
+            .then(|| gateway_protocol::request::request_facts(protocol, self.body()));
         let mut requirements = CapabilityRequirements::new(OperationKind::Generate)
-            .with_requested_output_tokens(self.max_output_tokens());
+            .with_requested_output_tokens(
+                facts.map_or_else(|| self.max_output_tokens(), |facts| facts.max_output_tokens),
+            );
         if let Some(inherited) = &self.payload.inherited_capability_requirements {
             for feature in inherited.features() {
                 requirements = requirements.require(*feature);
             }
+        }
+        if let Some(facts) = facts {
+            for (enabled, feature) in [
+                (facts.tools, Feature::Tools),
+                (facts.vision, Feature::Vision),
+                (facts.reasoning, Feature::Reasoning),
+                (facts.json_schema, Feature::JsonSchema),
+                (facts.native_continuation, Feature::NativeContinuation),
+            ] {
+                if enabled {
+                    requirements = requirements.require(feature);
+                }
+            }
+            return requirements;
         }
         if self
             .body()
@@ -589,13 +628,65 @@ impl fmt::Debug for StandaloneSearchRequest {
 pub enum Operation {
     /// 生成。
     Generate(GenerateRequest),
+    /// Count input tokens through the provider's native operation.
+    CountTokens(TokenCountRequest),
     /// 图像生成。
     GenerateImage(ImageRequest),
     /// Provider 原生 standalone search。
     Search(StandaloneSearchRequest),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenCountRequest {
+    payload: RawJsonPayload,
+}
+
+impl TokenCountRequest {
+    #[must_use]
+    pub const fn from_raw_json(payload: RawJsonPayload) -> Self {
+        Self { payload }
+    }
+
+    #[must_use]
+    pub const fn payload(&self) -> &RawJsonPayload {
+        &self.payload
+    }
+}
+
 impl Operation {
+    pub(crate) fn requested_reasoning_effort(&self) -> Option<String> {
+        let observation = match self {
+            Self::Generate(request) => {
+                let payload = request.protocol_payload();
+                gateway_protocol::request::request_observation(
+                    payload.protocol(),
+                    payload.body(),
+                    payload.context(),
+                    None,
+                )
+            }
+            Self::CountTokens(request) => {
+                let payload = request.payload();
+                let body = serde_json::from_slice(payload.body()).ok()?;
+                gateway_protocol::request::token_count_observation(
+                    payload.protocol(),
+                    &body,
+                    payload.context(),
+                )
+            }
+            _ => return None,
+        };
+        observation.reasoning_effort
+    }
+
+    pub(crate) fn requires_web_search(&self) -> bool {
+        matches!(self, Self::Generate(request) if {
+            let payload = request.protocol_payload();
+            payload.protocol() == gateway_protocol::chat_completions::CHAT_PROTOCOL
+                && payload.body().get("web_search_options").is_some_and(Value::is_object)
+        })
+    }
+
     pub(crate) fn with_inherited_capability_requirements(
         self,
         inherited: CapabilityRequirements,
@@ -630,6 +721,7 @@ impl Operation {
     pub const fn kind(&self) -> OperationKind {
         match self {
             Self::Generate(_) => OperationKind::Generate,
+            Self::CountTokens(_) => OperationKind::CountTokens,
             Self::GenerateImage(_) => OperationKind::GenerateImage,
             Self::Search(_) => OperationKind::Search,
         }
@@ -640,6 +732,7 @@ impl Operation {
     pub fn capability_requirements(&self) -> CapabilityRequirements {
         match self {
             Self::Generate(request) => request.requirements(),
+            Self::CountTokens(_) => CapabilityRequirements::new(OperationKind::CountTokens),
             Self::GenerateImage(_) => CapabilityRequirements::new(OperationKind::GenerateImage),
             Self::Search(_) => CapabilityRequirements::new(OperationKind::Search),
         }
@@ -651,7 +744,7 @@ impl Operation {
         match self {
             Self::Generate(request) => request.image_generation_requested(),
             Self::GenerateImage(_) => true,
-            Self::Search(_) => false,
+            Self::Search(_) | Self::CountTokens(_) => false,
         }
     }
 
@@ -660,7 +753,7 @@ impl Operation {
     pub fn provider_session_state(&self, provider: &str) -> Option<&ProviderSessionState> {
         match self {
             Self::Generate(request) => request.provider_session_state(provider),
-            Self::GenerateImage(_) | Self::Search(_) => None,
+            Self::GenerateImage(_) | Self::Search(_) | Self::CountTokens(_) => None,
         }
     }
 }

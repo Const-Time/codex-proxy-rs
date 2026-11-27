@@ -5,6 +5,7 @@ import { KeyRound, Pencil, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vu
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
 import RowActionMenu from '@/components/RowActionMenu.vue'
+import { supportsAccountReauthorization } from '../utils/quotaPresentation'
 
 defineProps<{
   account: AccountRow
@@ -72,7 +73,7 @@ const emit = defineEmits<{
         </template>
         刷新令牌
       </BaseMenuItem>
-      <BaseMenuItem v-if="account.authenticationKind === 'oauth'" role="menuitem" tabindex="-1" @click.stop="select(() => emit('reauthorize', account))">
+      <BaseMenuItem v-if="supportsAccountReauthorization(account)" role="menuitem" tabindex="-1" @click.stop="select(() => emit('reauthorize', account))">
         <template #icon>
           <KeyRound class="size-3.5 text-cp-text-quaternary" />
         </template>

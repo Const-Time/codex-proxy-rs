@@ -3,6 +3,7 @@ mod attempt;
 mod body;
 pub(in crate::openai) mod delivery;
 mod headers;
+mod messages_sse;
 mod native;
 pub(super) mod raw;
 pub(super) mod request;
@@ -26,6 +27,16 @@ pub async fn execution_middleware_response(
     body::ExecutionBody::response(session, WireFormat::responses(transport)).await
 }
 
+pub(in crate::openai) async fn generation_response(
+    session: Box<dyn ExecutionSession>,
+    transport: gateway_core::engine::execution::ClientTransport,
+    protocol: &'static str,
+    chat: Option<crate::openai::chat_completions::ChatProjection>,
+) -> Result<MiddlewareResponse, MiddlewareError> {
+    let format = WireFormat::generation(transport, protocol);
+    body::ExecutionBody::generation(session, format, chat).await
+}
+
 /// Bind the Responses wire adapter to a frozen, root-scoped publication snapshot.
 /// Core remains the sole owner of provider execution and original receipts.
 pub fn responses_attempt_middleware(
@@ -43,11 +54,36 @@ pub fn responses_attempt_middleware(
 
 #[derive(Clone, Copy)]
 pub(super) enum WireFormat {
-    Responses { streaming: bool },
+    Responses {
+        streaming: bool,
+    },
+    Generation {
+        streaming: bool,
+        protocol: &'static str,
+    },
     RawJson,
     WebSocket,
 }
 impl WireFormat {
+    fn protocol(self) -> &'static str {
+        match self {
+            Self::Generation { protocol, .. } => protocol,
+            _ => "openai",
+        }
+    }
+    fn generation(
+        transport: gateway_core::engine::execution::ClientTransport,
+        protocol: &'static str,
+    ) -> Self {
+        if protocol == "openai" {
+            return Self::responses(transport);
+        }
+        Self::Generation {
+            streaming: transport == gateway_core::engine::execution::ClientTransport::HttpSse,
+            protocol,
+        }
+    }
+
     fn responses(transport: gateway_core::engine::execution::ClientTransport) -> Self {
         use gateway_core::engine::execution::ClientTransport;
         match transport {
@@ -59,7 +95,15 @@ impl WireFormat {
         }
     }
     fn streaming(self) -> bool {
-        matches!(self, Self::Responses { streaming: true } | Self::WebSocket)
+        matches!(
+            self,
+            Self::Responses { streaming: true }
+                | Self::Generation {
+                    streaming: true,
+                    ..
+                }
+                | Self::WebSocket
+        )
     }
     fn websocket(self) -> bool {
         matches!(self, Self::WebSocket)

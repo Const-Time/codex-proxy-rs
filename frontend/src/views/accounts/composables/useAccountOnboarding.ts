@@ -1,4 +1,5 @@
 import type { getAccounts } from '@/api'
+import type { SupportedProvider } from '@/utils/providers'
 
 import { computed, ref, shallowRef, watch } from 'vue'
 import {
@@ -13,10 +14,11 @@ import { isRecord } from '@/utils/object'
 import { formatProviderLabel, isSupportedProvider } from '@/utils/providers'
 import { accountImportSettings, accountProxyError, emptyAccountCreateForm } from '../components/AccountCreateModal/model'
 import { splitAccountDocument } from '../utils/accountImport'
+import { supportsAccountReauthorization } from '../utils/quotaPresentation'
 import { apiKeyAccountError, emptyApiKeyAccountForm } from '../utils/upstreamApiKey'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
-type ImportProvider = 'openai' | 'xai'
+type ImportProvider = SupportedProvider
 
 interface MixedImportDocument {
   provider: ImportProvider
@@ -119,7 +121,9 @@ export function useAccountOnboarding(options: {
         if (!callbackUrl) {
           throw new Error(createForm.value.provider === 'xai'
             ? '请粘贴 OAuth 回调地址、含 code 和 state 的查询字符串或授权码'
-            : '请粘贴 OAuth 回调地址')
+            : createForm.value.provider === 'antigravity'
+              ? '请粘贴包含 code 和 state 的完整 OAuth 回调地址'
+              : '请粘贴 OAuth 回调地址')
         }
         await completeAccountOAuth({
           provider: createForm.value.provider,
@@ -130,9 +134,7 @@ export function useAccountOnboarding(options: {
         await finishCreate(
           reauthorizingAccount.value
             ? '账号重新授权成功'
-            : createForm.value.provider === 'xai'
-              ? 'xAI OAuth 账号已添加'
-              : 'OpenAI OAuth 账号已添加',
+            : `${formatProviderLabel(createForm.value.provider)} OAuth 账号已添加`,
         )
       },
       {
@@ -148,7 +150,7 @@ export function useAccountOnboarding(options: {
   }
 
   function openReauthorizeAccount(account: AccountRow) {
-    if (account.authenticationKind !== 'oauth' || (account.provider !== 'openai' && account.provider !== 'xai'))
+    if (!supportsAccountReauthorization(account) || !isSupportedProvider(account.provider))
       return
     reauthorizingAccount.value = account
     createForm.value = {
@@ -164,13 +166,15 @@ export function useAccountOnboarding(options: {
     const account = reauthorizingAccount.value
     return {
       provider: createForm.value.provider,
-      name: account?.name || account?.email || `${createForm.value.provider} OAuth`,
+      name: account?.name || account?.email || `${formatProviderLabel(createForm.value.provider)} OAuth`,
     }
   }
 
   async function importAccountDocument() {
     const provider = requireImportProvider(createForm.value.provider)
     const mode = createForm.value.mode
+    if (provider === 'antigravity')
+      throw new Error('Antigravity 仅支持 OAuth 授权')
     if (mode === 'oauth')
       throw new Error('请选择凭据导入方式')
     if (mode === 'api_key') {
@@ -191,6 +195,7 @@ export function useAccountOnboarding(options: {
           base_url: form.base_url.trim(),
           api_key: form.apiKey,
           transport: form.transport,
+          protocol: form.protocol,
         },
       })
       return 'API Key 账号已添加'

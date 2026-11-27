@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use gateway_core::{
-    account::ProviderAccountId,
+    account::{OpaqueProviderData, ProviderAccountId},
     operation::Operation,
     routing::{ProviderKind, UpstreamModelId},
 };
@@ -21,6 +21,7 @@ use crate::model::provider_credentials::{
     ProviderProfileAvatar, ProviderProfileStatistics, ProviderQuota, ProviderQuotaRequest,
     ProviderResetCreditResult, ProviderResetCredits, explicit_plan_type,
 };
+use crate::model::settings::ProviderRequestProfile;
 
 /// Provider 管理失败的稳定分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +140,21 @@ pub trait ProviderAdmin: Send + Sync {
 
     /// 返回该 Provider 实际持有的 Dashboard 上游身份画像。
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile>;
+
+    async fn load_dashboard_wire_profile(&self) -> Option<DashboardWireProfile> {
+        self.dashboard_wire_profile()
+    }
+
+    fn client_profile_options(&self) -> Result<OpaqueProviderData, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
+
+    async fn client_profile(
+        &self,
+        _configuration: Option<&OpaqueProviderData>,
+    ) -> Result<ProviderRequestProfile, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
 
     /// 使用 Provider-owned 价格规则恢复持久请求的逐项费用。
     fn calculated_billing(
@@ -364,11 +380,12 @@ impl ProviderAdminRegistry {
     }
 
     /// 返回所有已注册 Provider 的 Dashboard 上游身份画像。
-    pub fn dashboard_wire_profiles(&self) -> Vec<DashboardWireProfile> {
-        self.providers
-            .values()
-            .filter_map(|provider| provider.dashboard_wire_profile())
-            .collect()
+    pub async fn dashboard_wire_profiles(&self) -> Vec<DashboardWireProfile> {
+        let mut profiles = Vec::new();
+        for provider in self.providers.values() {
+            profiles.extend(provider.load_dashboard_wire_profile().await);
+        }
+        profiles
     }
 
     /// 动态分派 Provider-owned 费用规则，不含任何具体 Provider 分支。

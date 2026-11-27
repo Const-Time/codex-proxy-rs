@@ -38,6 +38,9 @@ pub(crate) fn execution(event: &ProviderEvent) -> Result<ExecutionFacts, PluginF
                 GatewayEvent::ProviderCost(cost) => Some(ExecutionCost::ProviderReported {
                     total: money(cost.total()),
                 }),
+                // A withdrawal changes Core's final cost without adding a money value
+                // to the existing SDK wire format.
+                GatewayEvent::CalculatedCostWithdrawn => None,
                 _ => None,
             })
             .collect(),
@@ -157,6 +160,7 @@ fn observation(value: &ProviderResponseObservation) -> facts::ResponseObservatio
         client_headers: value
             .client_headers()
             .iter()
+            .filter(|value| !value.name().trim().eq_ignore_ascii_case("x-goog-api-key"))
             .map(|value| MiddlewareHeader {
                 name: value.name().to_owned(),
                 value: value.value().to_vec(),
@@ -245,8 +249,10 @@ fn project_fact(event: GatewayEvent) -> Option<Result<CanonicalEvent, PluginFaul
                 total_tokens: usage.total_tokens,
             },
         },
-        // 费用随 host 快照完整开放，结算仍由原执行完成
-        GatewayEvent::CalculatedCost(_) | GatewayEvent::ProviderCost(_) => return None,
+        // 金额随 host 快照提供，撤销由 Core 消费。
+        GatewayEvent::CalculatedCost(_)
+        | GatewayEvent::CalculatedCostWithdrawn
+        | GatewayEvent::ProviderCost(_) => return None,
         GatewayEvent::Completed(meta) => CanonicalEvent::Completed {
             id: meta.response_id().to_owned(),
             model: meta.model().map(str::to_owned),

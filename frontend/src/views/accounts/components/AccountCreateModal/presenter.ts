@@ -1,5 +1,6 @@
 import type { AccountRow } from '../../constants'
 import type { AccountCreateForm, AccountCreateProvider } from './model'
+import { formatProviderLabel } from '../../../../utils/providers.ts'
 import { apiKeyAccountError } from '../../utils/upstreamApiKey.ts'
 
 interface AccountCreatePresentationInput {
@@ -22,6 +23,9 @@ const modeOptions = {
     { label: 'OAuth', value: 'oauth' },
     { label: '账号文件', value: 'json' },
   ],
+  antigravity: [
+    { label: 'OAuth', value: 'oauth' },
+  ],
 } satisfies Record<Exclude<AccountCreateProvider, 'batch'>, Array<{ label: string, value: string }>>
 
 export function resolveAccountCreatePresentation(input: AccountCreatePresentationInput) {
@@ -29,22 +33,24 @@ export function resolveAccountCreatePresentation(input: AccountCreatePresentatio
   const provider = isAccountCreateProvider(form.provider) ? form.provider : undefined
   const configuring = !input.reauthorizing && form.step === 'settings'
   const oauthAuthUrl = form.oauthAuthUrl || ''
+  const availableModes = resolveModeOptions(provider).filter(option => !input.reauthorizing || option.value === 'oauth' || option.value === 'json')
 
   return {
     configuring,
     isXai: provider === 'xai',
+    isAntigravity: provider === 'antigravity',
     isBatch: provider === 'batch',
-    modeOptions: resolveModeOptions(provider).filter(option => !input.reauthorizing || option.value === 'oauth' || option.value === 'json'),
+    modeOptions: availableModes,
     modal: resolveModal(input, provider, configuring),
-    oauth: resolveOAuth(provider, oauthAuthUrl),
+    oauth: resolveOAuth(provider, oauthAuthUrl, input.reauthorizing),
     importInput: resolveImportInput(form, provider),
-    canSubmit: canSubmit(input, provider, oauthAuthUrl),
+    canSubmit: canSubmit(input, provider, oauthAuthUrl, availableModes),
     submitLabel: resolveSubmitLabel(input, provider),
   }
 }
 
 function resolveModeOptions(provider: AccountCreateProvider | undefined) {
-  if (provider === 'openai' || provider === 'xai')
+  if (provider === 'openai' || provider === 'xai' || provider === 'antigravity')
     return modeOptions[provider]
   return []
 }
@@ -64,10 +70,10 @@ function resolveModal(
   }
 
   if (input.reauthorizing) {
-    const providerName = provider === 'xai' ? 'xAI' : 'OpenAI'
+    const providerName = provider && provider !== 'batch' ? formatProviderLabel(provider) : 'OAuth'
     return {
       title: '重新授权账号',
-      description: `${input.account?.email || input.account?.name || providerName} · ${input.form.mode === 'json' ? '仅上传该账号的单账号文件，保留原有配置' : '完成授权后更新账号凭据'}`,
+      description: `${input.account?.email || input.account?.name || providerName} · ${input.form.mode === 'json' && provider !== 'antigravity' ? '仅上传该账号的单账号文件，保留原有配置' : '完成授权后更新账号凭据'}`,
       tone: 'info' as const,
       size: 'md' as const,
     }
@@ -76,6 +82,8 @@ function resolveModal(
   let description = '粘贴或上传包含 OAuth Token 的 JSON，匹配已有账号时更新凭据'
   if (provider === 'batch')
     description = '粘贴或上传 CPR 账号包，一次导入多个平台账号'
+  else if (provider === 'antigravity')
+    description = '通过浏览器授权导入 Antigravity 账号'
   else if (provider === 'xai' && input.form.mode === 'oauth')
     description = '通过浏览器授权导入 xAI 账号'
   else if (provider === 'xai')
@@ -97,17 +105,31 @@ function resolveModal(
   }
 }
 
-function resolveOAuth(provider: AccountCreateProvider | undefined, authUrl: string) {
+function resolveOAuth(provider: AccountCreateProvider | undefined, authUrl: string, reauthorizing: boolean) {
+  const action = reauthorizing ? '重新授权' : '授权'
   if (provider === 'xai') {
     return {
       authUrl,
+      panelTitle: `xAI OAuth ${action}`,
+      panelDescription: '生成并打开授权链接、完成浏览器授权、粘贴回调地址或授权码',
       callbackLabel: '回调地址或授权码',
       callbackPlaceholder: '回调地址、?code=...&state=... 或授权码',
+    }
+  }
+  if (provider === 'antigravity') {
+    return {
+      authUrl,
+      panelTitle: `Antigravity OAuth ${action}`,
+      panelDescription: '生成并打开授权链接、完成浏览器授权、将地址栏中的完整回调地址粘贴到下方',
+      callbackLabel: '回调地址',
+      callbackPlaceholder: '粘贴包含 code 和 state 的完整回调地址',
     }
   }
 
   return {
     authUrl,
+    panelTitle: `OpenAI OAuth ${action}`,
+    panelDescription: '生成并打开授权链接、完成浏览器授权、粘贴回调地址',
     callbackLabel: '回调地址',
     callbackPlaceholder: 'http://localhost:1455/auth/callback?code=...&state=...',
   }
@@ -169,8 +191,11 @@ function canSubmit(
   input: AccountCreatePresentationInput,
   provider: AccountCreateProvider | undefined,
   oauthAuthUrl: string,
+  availableModes: Array<{ label: string, value: string }>,
 ) {
   if (!provider || input.saving || input.oauthLoading)
+    return false
+  if (provider !== 'batch' && !availableModes.some(option => option.value === input.form.mode))
     return false
   if (input.form.mode === 'api_key')
     return !apiKeyAccountError(input.form.apiKey)
@@ -184,5 +209,5 @@ function canSubmit(
 }
 
 function isAccountCreateProvider(value: string): value is AccountCreateProvider {
-  return value === 'openai' || value === 'xai' || value === 'batch'
+  return value === 'openai' || value === 'xai' || value === 'antigravity' || value === 'batch'
 }

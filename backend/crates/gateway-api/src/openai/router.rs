@@ -20,6 +20,8 @@ use crate::ApiState;
 pub(crate) fn router() -> Router<ApiState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
+        .merge(super::genai::router())
+        .merge(super::messages::router())
         .route("/v1/images/generations", post(image_generations))
         .route("/v1/images/edits", post(image_edits))
         .route("/v1/alpha/search", post(standalone_search))

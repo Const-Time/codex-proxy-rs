@@ -1343,6 +1343,10 @@ async fn streaming_upstream_http_failure_before_first_frame_should_preserve_raw_
                 ProviderResponseHeader::new("x-future-error", Bytes::from_static(b"first")),
                 ProviderResponseHeader::new("x-future-error", Bytes::from_static(b"second")),
                 ProviderResponseHeader::new("x-future-bytes", Bytes::from_static(b"\xffopaque")),
+                ProviderResponseHeader::new(
+                    "x-goog-api-key",
+                    Bytes::from_static(b"fixture-secret"),
+                ),
             ]),
         );
     let session = FakeSession::streaming(
@@ -1353,6 +1357,7 @@ async fn streaming_upstream_http_failure_before_first_frame_should_preserve_raw_
     let response = stream_execution_response(Box::new(session), None).await;
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(!response.headers().contains_key("x-goog-api-key"));
     assert_eq!(
         response
             .headers()

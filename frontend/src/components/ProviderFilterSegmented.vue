@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { LayoutGrid } from '@lucide/vue'
 
-import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
+import { AntigravityIcon, OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { PROVIDER_DISPLAY_NAMES } from '@/utils/providers'
 import BaseSegmented from './base/BaseSegmented.vue'
 
@@ -20,6 +20,7 @@ const providerOptions = [
   { label: '全部平台', value: '', icon: LayoutGrid },
   { label: PROVIDER_DISPLAY_NAMES.openai, value: 'openai', icon: OpenaiIcon },
   { label: PROVIDER_DISPLAY_NAMES.xai, value: 'xai', icon: XaiIcon },
+  { label: PROVIDER_DISPLAY_NAMES.antigravity, value: 'antigravity', icon: AntigravityIcon },
 ]
 </script>
 

@@ -98,6 +98,7 @@ async fn codex_backend_client_should_preserve_oversized_error_response() {
                 .insert_header("x-request-id", "req-upstream-error")
                 .insert_header("set-cookie", "account-secret=value")
                 .insert_header("authorization", "Bearer response-secret")
+                .insert_header("x-goog-api-key", "fixture-secret")
                 .insert_header("connection", "x-hop-secret")
                 .insert_header("x-hop-secret", "hop-secret")
                 .set_body_raw(
@@ -181,6 +182,7 @@ async fn codex_backend_client_should_preserve_oversized_error_response() {
         "content-length",
         "set-cookie",
         "authorization",
+        "x-goog-api-key",
         "connection",
         "x-hop-secret",
     ] {
@@ -392,6 +394,7 @@ async fn codex_backend_client_should_capture_forwardable_response_metadata() {
                 )
                 .insert_header("set-cookie", "secret=value")
                 .insert_header("authorization", "Bearer response-secret")
+                .insert_header("x-goog-api-key", "fixture-secret")
                 .insert_header("chatgpt-account-id", "account-secret")
                 .insert_header("connection", "x-hop-secret")
                 .insert_header("x-hop-secret", "hop-secret")
@@ -505,6 +508,7 @@ async fn codex_backend_client_should_capture_forwardable_response_metadata() {
         "set-cookie",
         "authorization",
         "chatgpt-account-id",
+        "x-goog-api-key",
         "connection",
         "x-hop-secret",
         "content-type",

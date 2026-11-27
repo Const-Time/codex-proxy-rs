@@ -7,7 +7,7 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BasePopover from '@/components/base/BasePopover.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
-import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
+import { AntigravityIcon, OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { PROVIDER_DISPLAY_NAMES } from '@/utils/providers'
 import { sourceLabels } from './model'
 
@@ -28,6 +28,7 @@ const syncTime = computed(() => props.syncedAt ? new Date(props.syncedAt).toLoca
 const providerOptions = [
   { label: PROVIDER_DISPLAY_NAMES.openai, value: 'openai', icon: OpenaiIcon },
   { label: PROVIDER_DISPLAY_NAMES.xai, value: 'xai', icon: XaiIcon },
+  { label: PROVIDER_DISPLAY_NAMES.antigravity, value: 'antigravity', icon: AntigravityIcon },
 ]
 </script>
 
@@ -39,7 +40,7 @@ const providerOptions = [
           <Search class="size-4" />
         </template>
       </BaseInput>
-      <BaseSegmented v-model="provider" class="w-21 shrink-0 bg-(--cp-input-bg)!" label="模型提供商" :options="providerOptions" :disabled="saving" display="icon" />
+      <BaseSegmented v-model="provider" class="w-31 shrink-0 bg-(--cp-input-bg)!" label="模型提供商" :options="providerOptions" :disabled="saving" display="icon" />
       <BaseSelect v-model="source" class="w-32" aria-label="价格来源" :options="[{ label: '全部来源', value: 'all' }, { label: sourceLabels.custom, value: 'custom' }, { label: sourceLabels.synced, value: 'synced' }, { label: sourceLabels.builtin, value: 'builtin' }]" />
       <div v-if="selectedCount" class="ml-auto flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto" role="group" aria-label="批量操作">
         <span class="inline-flex h-cp-control w-full items-center gap-1 whitespace-nowrap text-cp text-cp-text-secondary sm:mr-1 sm:w-auto" aria-live="polite">

@@ -1,6 +1,7 @@
 //! Admin 认证与设置 adapter。
 
 use super::*;
+use gateway_core::{account::OpaqueProviderData, routing::ProviderKind};
 
 pub struct UserAuthStore {
     pub(crate) security: postgres::PgAdminSecurityAuditRepository,
@@ -96,6 +97,27 @@ impl SettingsStore for AdminSettingsStoreAdapter {
             .await
             .map_err(|error| admin_store_error("runtime settings", error))?;
         admin_runtime_settings(snapshot.settings)
+    }
+
+    async fn replace_client_profile(
+        &self,
+        provider: &ProviderKind,
+        configuration: OpaqueProviderData,
+        context: &MutationContext,
+    ) -> AdminStoreResult<AdminRevision> {
+        let audit = mutation_audit(
+            context,
+            "settings.client_profile.replace",
+            "provider_client_profile",
+            provider.as_str(),
+            vec!["configuration".to_owned()],
+        );
+        let revision = self
+            .control_plane
+            .replace_client_profile(provider, configuration, audit)
+            .await
+            .map_err(|error| admin_store_error("provider client profile", error))?;
+        admin_revision(revision)
     }
 
     async fn admin_api_key_exists(&self) -> AdminStoreResult<bool> {

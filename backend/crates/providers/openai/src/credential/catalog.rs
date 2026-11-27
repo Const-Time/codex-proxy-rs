@@ -5,6 +5,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
+use super::selector::CredentialProtocol;
+use gateway_protocol::anthropic::ANTHROPIC_PROTOCOL;
+
 use chrono::{DateTime, Utc};
 use futures::{StreamExt, stream};
 use gateway_core::account::{
@@ -123,6 +126,21 @@ struct CatalogScopeSnapshot {
 }
 
 impl CodexCredentialCatalogSnapshot {
+    pub(crate) fn model_protocols(&self) -> BTreeMap<&str, ModelProtocols> {
+        let mut protocols = BTreeMap::<_, ModelProtocols>::new();
+        for entry in self.scope_catalogs.values() {
+            for model in entry.content.iter() {
+                let facts = protocols.entry(model.request_model().as_str()).or_default();
+                if model.document().protocol() == ANTHROPIC_PROTOCOL {
+                    facts.messages = true;
+                    facts.messages_count |= model.supports_native_count();
+                } else {
+                    facts.responses = true;
+                }
+            }
+        }
+        protocols
+    }
     #[must_use]
     pub const fn observed_at(&self) -> SystemTime {
         self.observed_at
@@ -158,6 +176,13 @@ impl CodexCredentialCatalogSnapshot {
         }
         accounts
     }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ModelProtocols {
+    pub responses: bool,
+    pub messages: bool,
+    pub messages_count: bool,
 }
 
 impl fmt::Debug for CodexCredentialCatalogSnapshot {
@@ -277,6 +302,9 @@ impl CodexCredentialCatalogService {
             };
             available = true;
             for (model_index, model) in catalog.content.iter().enumerate() {
+                if model.document().protocol() == ANTHROPIC_PROTOCOL {
+                    continue;
+                }
                 let id = model.request_model();
                 if !account.model_access().allows(id.as_str())
                     || !scope.allows_model(account.id(), id.as_str())
@@ -362,6 +390,29 @@ impl CodexCredentialCatalogService {
         account: &ProviderAccount,
         model: &str,
     ) -> Result<Option<bool>, CodexCredentialCatalogError> {
+        self.observed_model_support_matching(account, model, |_| true)
+    }
+
+    pub(crate) fn observed_model_support_for_protocol(
+        &self,
+        account: &ProviderAccount,
+        model: &str,
+        protocol: CredentialProtocol,
+    ) -> Result<Option<bool>, CodexCredentialCatalogError> {
+        self.observed_model_support_matching(account, model, |entry| match protocol {
+            CredentialProtocol::Responses => entry.document().protocol() != ANTHROPIC_PROTOCOL,
+            CredentialProtocol::Messages => entry.document().protocol() == ANTHROPIC_PROTOCOL,
+            CredentialProtocol::MessagesCount => entry.supports_native_count(),
+            CredentialProtocol::Diagnostic => true,
+        })
+    }
+
+    fn observed_model_support_matching(
+        &self,
+        account: &ProviderAccount,
+        model: &str,
+        matches: impl Fn(&CodexCatalogModel) -> bool,
+    ) -> Result<Option<bool>, CodexCredentialCatalogError> {
         let Some(snapshot) = self.cached()? else {
             return Ok(None);
         };
@@ -376,7 +427,11 @@ impl CodexCredentialCatalogService {
                     .elapsed()
                     .is_ok_and(|age| age < SCHEDULING_CATALOG_MAX_AGE)
             })
-            .map(|entry| entry.models.iter().any(|candidate| candidate == model)))
+            .map(|entry| {
+                entry.content.iter().any(|candidate| {
+                    candidate.request_model().as_str() == model && matches(candidate)
+                })
+            }))
     }
 
     /// 优先读取账号目录 cache；缺失时才用当前账号自身实时填充。
@@ -565,8 +620,8 @@ impl CodexCredentialCatalogService {
                         entry.insert(model.clone());
                     }
                     Entry::Occupied(mut entry)
-                        if model.document().protocol() == "codex"
-                            && entry.get().document().protocol() != "codex" =>
+                        if catalog_protocol_precedence(model)
+                            > catalog_protocol_precedence(entry.get()) =>
                     {
                         entry.insert(model.clone());
                     }
@@ -684,8 +739,8 @@ impl CodexCredentialCatalogService {
                     }
                     Entry::Occupied(mut entry) => {
                         // 原生目录含完整能力证据，同名 API ID 不能覆盖它，也不能跨来源拼字段。
-                        if model.document().protocol() == "codex"
-                            && entry.get().document().protocol() != "codex"
+                        if catalog_protocol_precedence(model)
+                            > catalog_protocol_precedence(entry.get())
                         {
                             entry.insert(model.clone());
                         }
@@ -775,12 +830,16 @@ impl CodexCredentialCatalogService {
                 .authentication
                 .authorization_header()
                 .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?;
-            let result = client
-                .for_account(account)
+            let client = if matches!(&credential.authentication, super::CodexRuntimeAuthentication::ApiKey(auth)
+                if auth.configuration.protocol == super::ApiKeyProtocol::Messages) {
+                client.for_messages_account(account, &credential.authentication)
+            } else {
+                client.for_account(account).map(|client| client.with_authentication(&credential.authentication))
+            }
                 .map_err(|error| CodexCredentialCatalogError::Upstream {
                     detail: error.to_string(),
-                })?
-                .with_authentication(&credential.authentication)
+                })?;
+            let result = client
                 .fetch_models_with_context(
                     CodexRequestContext::auxiliary(
                         authorization.expose_secret(),
@@ -1139,8 +1198,7 @@ fn snapshot_from_scopes(
     for entry in scope_catalogs.values() {
         for model in entry.content.iter() {
             if let Some(index) = indices.get(model.request_model().as_str()).copied() {
-                if model.document().protocol() == "codex"
-                    && models[index].document().protocol() != "codex"
+                if catalog_protocol_precedence(model) > catalog_protocol_precedence(&models[index])
                 {
                     models[index] = model.clone();
                 }
@@ -1154,5 +1212,13 @@ fn snapshot_from_scopes(
         observed_at: SystemTime::now(),
         models,
         scope_catalogs,
+    }
+}
+
+fn catalog_protocol_precedence(model: &CodexCatalogModel) -> u8 {
+    match model.document().protocol() {
+        "codex" => 2,
+        ANTHROPIC_PROTOCOL => 0,
+        _ => 1,
     }
 }

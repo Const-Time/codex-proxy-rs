@@ -376,6 +376,10 @@ mod response {
 }
 
 mod actions {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
     use base64::Engine as _;
     use gateway_admin::model::{
         Revision,
@@ -396,6 +400,61 @@ mod actions {
         error::GatewayErrorKind, upstream::UpstreamSendState,
     };
     use serde_json::json;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn antigravity_oauth_endpoints_dispatch_to_registered_provider() {
+        let fixture = super::super::AdminTestFixture::new().await;
+        fixture.auth.insert_session("valid-session");
+        let app = gateway_api::admin::accounts::router().with_state(fixture.state());
+        let post = |action: &str, body: serde_json::Value| {
+            Request::post(format!("/api/admin/accounts/oauth/{action}"))
+                .header(header::COOKIE, "cpr_admin_session=valid-session")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-request-id", "req_antigravity_oauth")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let response = app
+            .clone()
+            .oneshot(post(
+                "start",
+                json!({
+                    "provider": "antigravity", "name": "Antigravity OAuth"
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            body["data"]["authorizationUrl"],
+            "https://oauth.example.test/authorize"
+        );
+        let callback = |flow_id: &str| {
+            json!({
+                "provider": "antigravity", "flowId": flow_id,
+                "callbackUrl": "http://localhost:8085/auth/callback?code=fixture&state=fixture"
+            })
+        };
+        let invalid: CompleteAccountAuthorizationRequest =
+            serde_json::from_value(callback("invalid-flow-length")).unwrap();
+        assert_eq!(invalid.validate().unwrap_err().field(), "flowId");
+        let response = app
+            .oneshot(post(
+                "complete",
+                callback(body["data"]["flowId"].as_str().unwrap()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("Antigravity fixture rejected the callback")
+        );
+    }
 
     #[test]
     fn export_should_require_explicit_unique_ids_and_confirmation() {
@@ -507,6 +566,21 @@ mod actions {
             .expect("decode combined save")
             .validate()
             .expect("blank replacement key preserves the existing key");
+        request["protocol"] = json!("messages");
+        assert!(
+            serde_json::from_value::<RotateAccountRequest>(request.clone())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        request["transport"] = json!("prefer_websocket");
+        assert!(
+            serde_json::from_value::<RotateAccountRequest>(request.clone())
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        request["transport"] = json!("http");
         request["settings"]["accountId"] = json!("acct_other");
         assert_eq!(
             serde_json::from_value::<RotateAccountRequest>(request.clone())

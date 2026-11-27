@@ -249,28 +249,18 @@ pub fn retry_after_seconds_from_value(value: &Value) -> Option<u64> {
     retry_after_header(error)
         .or_else(|| retry_after_header(value))
         .map(|(_, seconds)| seconds)
-        .or_else(|| retry_after_seconds_field(error))
-        .or_else(|| {
-            error
-                .get("resets_in_seconds")
-                .and_then(positive_u64)
-                .filter(|seconds| *seconds > 0)
-        })
-        .or_else(|| retry_after_seconds_from_resets_at(error))
-        .or_else(|| retry_after_seconds_field(value))
+        .or_else(|| retry_after_structured_fields(error))
+        .or_else(|| retry_after_structured_fields(value))
         .or_else(|| retry_after_seconds_from_rate_limit_message(error))
 }
 
-fn retry_after_seconds_field(value: &Value) -> Option<u64> {
+fn retry_after_structured_fields(value: &Value) -> Option<u64> {
     value
         .get("retry_after_seconds")
         .or_else(|| value.get("retry_after"))
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
-        })
-        .filter(|seconds| *seconds > 0)
+        .and_then(positive_u64)
+        .or_else(|| value.get("resets_in_seconds").and_then(positive_u64))
+        .or_else(|| retry_after_seconds_from_resets_at(value))
 }
 
 pub(super) fn retry_after_header(value: &Value) -> Option<(&Value, u64)> {
@@ -645,7 +635,7 @@ fn retry_after_seconds_from_resets_at(error: &Value) -> Option<u64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    (resets_at > now).then_some(resets_at - now)
+    resets_at.checked_sub(now).filter(|seconds| *seconds > 0)
 }
 
 fn positive_u64(value: &Value) -> Option<u64> {

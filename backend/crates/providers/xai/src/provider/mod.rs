@@ -178,6 +178,20 @@ impl Provider for GrokBuildProvider {
             .collect())
     }
 
+    fn prepare_operation(
+        &self,
+        operation: Operation,
+        _: &ProviderCandidate,
+        _: gateway_core::account::FastMode,
+    ) -> Operation {
+        if let Operation::Generate(generate) = &operation
+            && let Ok(Some(translated)) = translate_chat_request(generate)
+        {
+            return Operation::Generate(translated);
+        }
+        operation
+    }
+
     async fn execute(
         &self,
         request: ProviderRequest,
@@ -194,6 +208,8 @@ impl Provider for GrokBuildProvider {
 
         match request.operation() {
             Operation::Generate(generate) => {
+                let converted = translate_chat_request(generate)?;
+                let generate = converted.as_ref().unwrap_or(generate);
                 self.execute_generate(generate, candidate, context).await
             }
             _ => Err(provider_error(
@@ -202,6 +218,35 @@ impl Provider for GrokBuildProvider {
             )),
         }
     }
+}
+
+fn translate_chat_request(
+    generate: &GenerateRequest,
+) -> Result<Option<GenerateRequest>, ProviderError> {
+    let source = generate.protocol_payload();
+    if source.protocol() != gateway_protocol::chat_completions::CHAT_PROTOCOL {
+        return Ok(None);
+    }
+    let invalid = || {
+        provider_error(
+            ProviderErrorKind::InvalidRequest,
+            UpstreamSendState::NotSent,
+        )
+    };
+    let body = gateway_protocol::chat_completions::responses::convert_request(source.body())
+        .map_err(|error| {
+            if error.is_target_unsupported()
+                && gateway_protocol::chat_completions::validate_request(source.body()).is_ok()
+            {
+                provider_error(ProviderErrorKind::Unsupported, UpstreamSendState::NotSent)
+            } else {
+                invalid()
+            }
+        })?;
+    let payload = gateway_core::operation::ProtocolPayload::json_object("openai", body)
+        .map_err(|_| invalid())?
+        .with_context(source.context().clone());
+    Ok(Some(generate.clone().with_protocol_payload(payload)))
 }
 
 impl GrokBuildProvider {
@@ -554,6 +599,8 @@ fn compile_grok_model_capabilities(model: GrokCatalogModel) -> ProviderModelCapa
             .map(std::num::NonZeroU64::get),
     )
     .with_upstream_feature_validation()
+    .with_generation_protocol("openai")
+    .with_translated_generation_protocols([gateway_protocol::chat_completions::CHAT_PROTOCOL])
     .with_feature(
         Feature::Reasoning,
         support(model.capabilities().reasoning_effort()),
@@ -573,7 +620,9 @@ fn default_grok_model_capabilities() -> Result<ProviderModelCapabilities, Provid
     let model = UpstreamModelId::new(DEFAULT_GROK_MODEL.to_owned())
         .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
     let capabilities = ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
-        .with_upstream_feature_validation();
+        .with_upstream_feature_validation()
+        .with_generation_protocol("openai")
+        .with_translated_generation_protocols([gateway_protocol::chat_completions::CHAT_PROTOCOL]);
     Ok(ProviderModelCapabilities::new(model, capabilities)
         .with_presentation(default_grok_model_presentation()))
 }

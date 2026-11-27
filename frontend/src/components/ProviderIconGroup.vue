@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { KeyRound, Link2 } from '@lucide/vue'
 import { computed } from 'vue'
-import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
+import { AntigravityIcon, OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { formatProviderLabel } from '@/utils/providers'
 
 const props = withDefaults(
@@ -54,6 +54,7 @@ const authenticationLabel = computed(() => {
     >
       <OpenaiIcon v-if="normalizedProvider === 'openai'" :class="iconClass" />
       <XaiIcon v-else-if="normalizedProvider === 'xai'" :class="iconClass" />
+      <AntigravityIcon v-else-if="normalizedProvider === 'antigravity'" :class="iconClass" />
       <span v-else class="text-[10px] font-heavy text-cp-text-quaternary">?</span>
     </span>
 

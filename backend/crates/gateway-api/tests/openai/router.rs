@@ -219,4 +219,6 @@ async fn configured_cors_origin_assembles_router_and_answers_preflight() {
     assert!(allow_headers.contains("authorization"));
     assert!(allow_headers.contains("x-api-key"));
     assert!(allow_headers.contains("x-request-id"));
+    assert!(allow_headers.contains("anthropic-version"));
+    assert!(allow_headers.contains("anthropic-beta"));
 }

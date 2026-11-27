@@ -825,18 +825,17 @@ impl AccountsService for DefaultAccountsService {
         let mut credit_refreshes = Vec::new();
         for account_id in &account_ids {
             let (item, provider) = self.provider_for_account(account_id).await?;
-            if command.quota_usage_limits.is_some()
-                && (item.account.provider_kind.as_str() != "openai"
-                    || item.account.authentication_kind != "oauth")
-            {
+            let supports_quota_policy = item.account.authentication_kind == "oauth"
+                && matches!(
+                    item.account.provider_kind.as_str(),
+                    "openai" | "antigravity"
+                );
+            if command.quota_usage_limits.is_some() && !supports_quota_policy {
                 return Err(AdminError::invalid(
-                    "仅 OpenAI OAuth 账号支持额度使用率上限",
+                    "仅 OpenAI 和 Antigravity 的 OAuth 账号支持额度使用率上限",
                 ));
             }
-            if command.auto_use_quota_credits.is_some()
-                && (item.account.provider_kind.as_str() != "openai"
-                    || item.account.authentication_kind != "oauth")
-            {
+            if command.auto_use_quota_credits.is_some() && !supports_quota_policy {
                 return Err(AdminError::invalid("该账号不支持使用额度点数"));
             }
             if command.auto_use_quota_credits == Some(true)
@@ -1108,9 +1107,7 @@ impl AccountsService for DefaultAccountsService {
                     .chain(std::iter::once(AccountConnectionTestEvent::Completed))
                     .collect(),
                 Err(error) => {
-                    let upstream_status = error
-                        .upstream_response()
-                        .map(gateway_core::engine::probe::AccountProbeUpstreamResponse::status);
+                    let upstream_status = error.upstream_status();
                     let upstream_content_type = error
                         .upstream_response()
                         .and_then(|response| response.content_type())

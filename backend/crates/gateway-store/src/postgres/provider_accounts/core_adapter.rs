@@ -19,6 +19,16 @@ impl ProviderAccountStore for PgProviderAccountRepository {
     ) -> Result<Vec<gateway_core::account::StoredAccountCatalog>, CoreStoreError> {
         self.load_model_catalogs(provider).await
     }
+
+    async fn load_diagnostic_account_catalog(
+        &self,
+        provider: &ProviderKind,
+        account: &CoreProviderAccountId,
+    ) -> Result<Option<(gateway_core::account::AccountCatalogObservation, Vec<u8>)>, CoreStoreError>
+    {
+        self.load_diagnostic_model_catalog(provider, account).await
+    }
+
     async fn save_account_catalog(
         &self,
         observation: &gateway_core::account::AccountCatalogObservation,

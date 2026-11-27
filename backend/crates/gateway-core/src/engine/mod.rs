@@ -920,6 +920,11 @@ impl CoordinatedEvent {
         self.events
     }
 
+    #[must_use]
+    pub fn provider_events(&self) -> &[ProviderEvent] {
+        &self.events
+    }
+
     /// 返回本批次中 Provider 交付的私有会话更新。
     #[must_use]
     pub fn session_update(&self) -> Option<&ProviderSessionState> {

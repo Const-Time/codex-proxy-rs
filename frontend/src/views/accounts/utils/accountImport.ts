@@ -1,5 +1,7 @@
+import type { SupportedProvider } from '../../../utils/providers.ts'
+
 interface ImportDocument {
-  provider: 'openai' | 'xai'
+  provider: SupportedProvider
   document: Record<string, unknown>
 }
 
@@ -7,7 +9,7 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** OpenAI entries are independent; xAI retains document-wide refresh-token deduplication. */
+/** OpenAI entries are independent; xAI and Antigravity retain document-wide deduplication. */
 export function splitAccountDocument(entry: ImportDocument): ImportDocument[] {
   if (entry.provider !== 'openai')
     return [entry]

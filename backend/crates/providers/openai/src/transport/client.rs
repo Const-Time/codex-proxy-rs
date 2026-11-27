@@ -656,6 +656,7 @@ pub struct CodexBackendJsonResponse {
 pub(super) enum OpenAiUpstreamProtocol {
     Codex,
     ResponsesApi,
+    MessagesApi { native_count: bool },
 }
 
 impl OpenAiUpstreamProtocol {
@@ -663,6 +664,7 @@ impl OpenAiUpstreamProtocol {
         match self {
             Self::Codex => super::endpoints::CODEX_RESPONSES_PATH,
             Self::ResponsesApi => "/responses",
+            Self::MessagesApi { .. } => "/messages",
         }
     }
 }
@@ -743,7 +745,16 @@ impl CodexBackendClient {
     ) -> Self {
         if let crate::credential::CodexRuntimeAuthentication::ApiKey(auth) = authentication {
             self.base_url = auth.configuration.base_url.trim_end_matches('/').to_owned();
-            self.protocol = OpenAiUpstreamProtocol::ResponsesApi;
+            self.protocol = match auth.configuration.protocol {
+                crate::credential::ApiKeyProtocol::Responses => {
+                    OpenAiUpstreamProtocol::ResponsesApi
+                }
+                crate::credential::ApiKeyProtocol::Messages => {
+                    OpenAiUpstreamProtocol::MessagesApi {
+                        native_count: auth.configuration.supports_native_count(),
+                    }
+                }
+            };
             self.websocket_origin_key = format!(
                 "{}:{}",
                 websocket_origin_key(&self.base_url),
@@ -751,6 +762,20 @@ impl CodexBackendClient {
             );
         }
         self
+    }
+
+    pub(crate) fn for_messages_account(
+        &self,
+        account: &gateway_core::account::ProviderAccount,
+        authentication: &crate::credential::CodexRuntimeAuthentication,
+    ) -> CodexClientResult<Self> {
+        let mut client = self
+            .for_account(account)?
+            .with_authentication(authentication);
+        // The API key uses a custom header. Never follow redirects with that header.
+        client.client =
+            build_account_http_client(&client.egress_key, client.outbound_proxy.as_ref())?;
+        Ok(client)
     }
 
     pub fn for_account(

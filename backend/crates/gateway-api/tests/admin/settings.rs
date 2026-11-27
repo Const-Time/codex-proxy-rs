@@ -324,6 +324,38 @@ async fn settings_should_require_admin_auth() {
 }
 
 #[tokio::test]
+async fn antigravity_profile_endpoints_require_admin_auth() {
+    let fixture = AdminTestFixture::new().await;
+    let router = app(fixture.state());
+    for (method, path) in [
+        (Method::GET, "/api/admin/settings/antigravity/profile"),
+        (
+            Method::GET,
+            "/api/admin/settings/antigravity/profile/options",
+        ),
+        (Method::POST, "/api/admin/settings/antigravity/profile"),
+        (
+            Method::POST,
+            "/api/admin/settings/antigravity/profile?preview=true",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-request-id", "req_profile_unauthorized")
+                    .body(Body::empty())
+                    .expect("unauthorized profile request"),
+            )
+            .await
+            .expect("unauthorized profile response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
 async fn admin_key_should_return_secret_only_on_regenerate() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");

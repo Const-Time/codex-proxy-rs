@@ -269,7 +269,7 @@ impl DefaultObservabilityService {
             average(first_token_latency_sum_ms, first_token_latency_count);
         let trend = trend(TrendKind::Usage, observation.trend.clone())?;
         let health_timeline = health_timeline_at(&observation.trend, Utc::now());
-        let wire_profiles = self.providers.dashboard_wire_profiles();
+        let wire_profiles = self.providers.dashboard_wire_profiles().await;
         let max_concurrent_per_account = u64::from(settings.max_concurrent_per_account);
         let total_slots = runtime_slots.as_ref().map_or_else(
             || {

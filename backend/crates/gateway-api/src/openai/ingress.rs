@@ -7,7 +7,7 @@ use crate::ApiState;
 use axum::{
     body::Bytes,
     extract::{FromRequest, Request},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
 };
 use futures::StreamExt as _;
@@ -15,6 +15,19 @@ use gateway_core::engine::execution::AuthenticatedClient;
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+pub(super) fn normalize_api_key(headers: &mut HeaderMap, name: &'static str) {
+    let Some(api_key) = headers.remove(name) else {
+        return;
+    };
+    if !headers.contains_key(AUTHORIZATION)
+        && let Ok(key) = api_key.to_str()
+        && let Ok(mut bearer) = HeaderValue::from_str(&format!("Bearer {key}"))
+    {
+        bearer.set_sensitive(true);
+        headers.insert(AUTHORIZATION, bearer);
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -81,7 +94,7 @@ impl IngressMemory {
 }
 impl FromRequest<ApiState> for AuthenticatedBody {
     type Rejection = Response;
-    async fn from_request(request: Request, state: &ApiState) -> Result<Self, Response> {
+    async fn from_request(mut request: Request, state: &ApiState) -> Result<Self, Response> {
         let budget = &state.openai().ingress;
         let _upload = budget
             .uploads
@@ -90,6 +103,14 @@ impl FromRequest<ApiState> for AuthenticatedBody {
             .map_err(|_| exhausted())?;
         // The deadline includes plugin authentication, but never upstream generation/SSE delivery.
         tokio::time::timeout(budget.timeout, async {
+            if request.uri().path().starts_with("/v1beta/models/") {
+                normalize_api_key(request.headers_mut(), "x-goog-api-key");
+            } else if matches!(
+                request.uri().path(),
+                "/v1/messages" | "/v1/messages/count_tokens"
+            ) {
+                normalize_api_key(request.headers_mut(), "x-api-key");
+            }
             let client = authenticate_client(state.openai(), request.headers())
                 .await
                 .map_err(client_access_error_response)?;

@@ -2408,12 +2408,13 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
         .unwrap()
         .unwrap();
     let configuration = configuration.expose_to_provider().expose_to_provider();
-    assert_eq!(configuration.len(), 2);
+    assert_eq!(configuration.len(), 3);
     assert_eq!(
         configuration.get("base_url"),
         Some(&json!("https://first.example/v1"))
     );
     assert!(!configuration.contains_key("api_key"));
+    assert_eq!(configuration.get("protocol"), Some(&json!("responses")));
     for base_url in [
         "https://second.example/root",
         "http://10.0.0.7:8080/v1",

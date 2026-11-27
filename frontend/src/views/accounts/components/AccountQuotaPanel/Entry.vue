@@ -3,6 +3,7 @@ import type { AccountQuotaWindow } from '../../constants'
 
 import { computed } from 'vue'
 import { useUiClock } from '@/composables/useUiClock'
+import { quotaWindowDisplayLabel, shouldShowWindowEstimate } from '../../utils/quotaPresentation'
 import AccountRequestTimeline from '../AccountUsageWindow/AccountRequestTimeline.vue'
 import {
   quotaWindowLocalUsageDisplay,
@@ -36,15 +37,13 @@ const items = computed(() => props.windows.map((window) => {
     requestBars: view.local.requestBars,
     timelineTitle: view.local.timelineTitle,
     durationDisplay: view.local.durationDisplay,
-    label: grouped.value
-      ? window.windowLabelDisplay
-      : window.labelDisplay,
-    ariaLabel: window.labelDisplay,
+    label: quotaWindowDisplayLabel(window, grouped.value),
+    ariaLabel: quotaWindowDisplayLabel(window, false),
     usedPercent: window.usedPercent,
     usedPercentDisplay: window.usedPercentDisplay,
     localUsageDisplay: quotaWindowLocalUsageDisplay(window),
     resetAtDisplay: window.resetAtDisplay,
-    showEstimate: Boolean(window.localUsage),
+    showEstimate: shouldShowWindowEstimate(window),
     estimateDisplay: estimateCostDisplay(window.estimatedQuota?.totalUsd, estimateCostCoverage(window.estimatedQuota).raw),
     estimateBilledDisplay: estimateCostDisplay(window.estimatedQuota?.billedTotalUsd, estimateCostCoverage(window.estimatedQuota).billed),
     estimateTokens: window.estimatedQuota?.estimatedTokens != null ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(window.estimatedQuota.estimatedTokens) : '待估算',

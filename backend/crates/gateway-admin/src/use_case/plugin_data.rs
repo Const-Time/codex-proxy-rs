@@ -69,7 +69,7 @@ impl PluginDataService for DefaultPluginDataService {
             || query
                 .provider
                 .as_deref()
-                .is_some_and(|p| !matches!(p, "openai" | "xai"))
+                .is_some_and(|p| !matches!(p, "openai" | "xai" | "antigravity"))
             || query
                 .cursor
                 .as_deref()

@@ -8,12 +8,12 @@
 
 Codex Proxy RS 是单进程、单副本运行的多 Provider AI 网关，同时提供：
 
-- 面向客户端的 OpenAI Responses、Images、standalone Search 和模型目录协议；
+- 面向客户端的 OpenAI Responses、Chat Completions、Images、standalone Search、Google GenAI 和模型目录协议；
 - 带管理员/普通用户角色隔离的控制面和 Vue 界面；
-- OpenAI 与 xAI 两个编译期 Provider；
+- OpenAI、xAI 和 Antigravity 三个编译期 Provider；
 - PostgreSQL 持久化、Redis 协调状态以及 S3/R2 数据库备份。
 
-系统不提供 `/v1/chat/completions`，不存在 Provider Instance 层，也不支持通过复制应用容器进行多副本
+系统不存在 Provider Instance 层，也不支持通过复制应用容器进行多副本
 扩容。Client Key 限定账号分组，而不是绑定某个 Provider；一次请求的 Provider 候选由账号范围、模型
 能力和运行时健康共同决定。
 
@@ -31,8 +31,10 @@ flowchart LR
   Admin --> Registry
   Registry --> OpenAI[provider-openai]
   Registry --> XAI[provider-xai]
+  Registry --> Antigravity[provider-antigravity]
   OpenAI --> OpenAIUpstream[OpenAI upstream]
   XAI --> XAIUpstream[xAI upstream]
+  Antigravity --> GenAIUpstream[Antigravity Cloud Code]
 
   Core --> Store[gateway-store]
   Admin --> Store
@@ -55,7 +57,7 @@ flowchart LR
 | 路径 | 责任 |
 | --- | --- |
 | `backend/apps/gateway` | 读取顶层配置、连接 Bundle、注册 Provider 与 Worker |
-| `gateway-protocol` | 跨层共享的 OpenAI wire contract、SSE 编解码与无业务 owner 的解析事实，不依赖其他 workspace crate |
+| `gateway-protocol` | 跨层共享的协议合同、Chat 转换、SSE 编解码与解析事实，不依赖其他 workspace crate |
 | `gateway-core` | operation、canonical event、请求快照、路由、admission、attempt 协调、交付边界和计量 |
 | `gateway-admin` | 管理领域、用例、Provider/Store 端口、审计语义和备份策略 |
 | `gateway-api` | HTTP/WS/SSE 解码与交付、Admin wire、静态管理端；不直接访问 Store 或具体 Provider |
@@ -63,6 +65,7 @@ flowchart LR
 | `gateway-host` | 配置加载、日志、HTTP 生命周期、Worker 监督和系统更新 |
 | `providers/openai` | OpenAI OAuth、账号选择、目录、额度、Responses/Images/Search transport |
 | `providers/xai` | xAI OAuth session、账号选择、目录、额度和 Grok/Responses 转换 |
+| `providers/antigravity` | Google OAuth、Cloud Code 模型目录及额度、GenAI 生成和 Chat 转换 |
 | `gateway-plugin/sdk` | 上游 manifest / RPC / 能力线协议，不拥有本地业务策略 |
 | `gateway-plugin/runtime` | 制品校验、RPC 会话、私有状态回调和管理能力适配，依赖 Admin 端口与 Host 进程管理 |
 | `backend/apps/plugin-cli` | 制品打包命令，仅依赖 SDK |

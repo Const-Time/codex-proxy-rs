@@ -98,3 +98,39 @@ export function getCodexDesktopWindowsDownloads(refresh = false) {
     params: refresh ? { refresh: true } : undefined,
   })
 }
+
+export interface AntigravityProfileConfiguration {
+  client: 'desktop' | 'cli'
+  platform: 'macos' | 'linux' | 'windows'
+  arch: 'arm64' | 'amd64' | null
+  versionMode: 'latest' | 'fixed'
+  clientVersion: string | null
+}
+
+export interface AntigravityProfile {
+  configuration: AntigravityProfileConfiguration
+  release: { version: string, downloadUrl: string, checkedAt: string } | null
+  userAgent: string
+}
+
+const antigravityProfilePath = '/api/admin/settings/antigravity/profile'
+
+export function getAntigravityProfile() {
+  return request<AntigravityProfile>({ url: antigravityProfilePath, method: 'GET' })
+}
+
+export function getAntigravityProfileOptions() {
+  return request<{
+    defaults: AntigravityProfileConfiguration
+    presets: { configuration: AntigravityProfileConfiguration, automaticAvailable: boolean, reason: string | null }[]
+  }>({ url: `${antigravityProfilePath}/options`, method: 'GET' })
+}
+
+export function updateAntigravityProfile(configuration: AntigravityProfileConfiguration, preview: boolean) {
+  return request<AntigravityProfile>({
+    url: antigravityProfilePath,
+    method: 'POST',
+    params: preview ? { preview: true } : undefined,
+    data: { configuration },
+  })
+}

@@ -24,10 +24,13 @@ pub(crate) use affinity::{
 pub(crate) use oauth::oauth_owner_ref;
 pub(crate) use types::parse_access_token_expiration;
 
+pub(crate) use affinity::derive_messages_session_affinity;
 pub use api_key::{
-    ApiKeyAuthentication, ApiKeyConfiguration, ApiKeyCredentialData, ApiKeyTransport,
-    CODEX_AUTHENTICATION_KIND_API_KEY,
+    ApiKeyAuthentication, ApiKeyConfiguration, ApiKeyCredentialData, ApiKeyProtocol,
+    ApiKeyTransport, CODEX_AUTHENTICATION_KIND_API_KEY,
 };
+pub(crate) use catalog::ModelProtocols;
+pub(crate) use selector::CredentialProtocol;
 
 pub use admin::{
     CodexCprExportDocument, CodexCredentialAdmin, CodexCredentialAdminError,

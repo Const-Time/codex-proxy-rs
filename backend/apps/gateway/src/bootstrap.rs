@@ -100,16 +100,26 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
     // Normal request session identity and native continuation remain provider-owned.
     let mut openai = provider_openai::initialize(openai, provider_ports.clone()).await?;
     host.report_startup_ready("OpenAI Provider");
-    let mut xai = provider_xai::initialize(xai, provider_ports).await?;
+    let mut xai = provider_xai::initialize(xai, provider_ports.clone()).await?;
     host.report_startup_ready("xAI Provider");
-    let providers = ProviderRegistry::new([openai.core_provider(), xai.core_provider()])?;
+    let mut antigravity = provider_antigravity::initialize(provider_ports)?;
+    host.report_startup_ready("Antigravity Provider");
+    let providers = ProviderRegistry::new([
+        openai.core_provider(),
+        xai.core_provider(),
+        antigravity.core_provider(),
+    ])?;
     let mut core = gateway_core::initialize(store.core_ports(), providers).await?;
     host.report_startup_ready("Core");
     let mut admin = gateway_admin::initialize(
         admin,
         store.admin_ports(),
         gateway_admin::AdminRuntimePorts {
-            providers: vec![openai.admin_provider(), xai.admin_provider()],
+            providers: vec![
+                openai.admin_provider(),
+                xai.admin_provider(),
+                antigravity.admin_provider(),
+            ],
             snapshot: core.snapshot_control(),
             probes: (core.account_probe(), proxy_probe),
             client_distribution: host.client_distribution_resolver(),
@@ -190,6 +200,7 @@ pub async fn run(invocation: Invocation) -> Result<RunOutput, BootstrapError> {
         plan.extend(core.take_worker_contributions());
         plan.extend(openai.take_worker_contributions());
         plan.extend(xai.take_worker_contributions());
+        plan.extend(antigravity.take_worker_contributions());
         plan.extend(admin.take_worker_contributions());
         plan.push(
             plugins
@@ -245,6 +256,8 @@ pub enum BootstrapError {
     OpenAi(#[from] provider_openai::OpenAiInitializeError),
     #[error(transparent)]
     Xai(#[from] provider_xai::XaiInitializeError),
+    #[error(transparent)]
+    Antigravity(#[from] provider_antigravity::ConfigError),
     #[error(transparent)]
     Registry(#[from] RegistryError),
     #[error(transparent)]

@@ -2,12 +2,13 @@
 import type { getAccounts } from '@/api'
 import { computed } from 'vue'
 
+import { resolveAccountIdentityDisplay } from '../utils/quotaPresentation'
 import { stablePresetVisualToneClass } from '../utils/visualTone'
 import AccountPlanBadge from './AccountPlanBadge.vue'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
 type AccountIdentity = Pick<AccountRow, 'id' | 'email' | 'planType' | 'planTypeDisplay'>
-  & Partial<Pick<AccountRow, 'accountId' | 'name' | 'authenticationKind'>>
+  & Partial<Pick<AccountRow, 'accountId' | 'userId' | 'name' | 'authenticationKind'>>
 
 const props = withDefaults(
   defineProps<{
@@ -27,24 +28,10 @@ const props = withDefaults(
   },
 )
 
-const emailText = computed(() => {
-  if (props.account.authenticationKind === 'api_key' && props.account.name)
-    return props.account.name
-  const email = props.account.email?.trim()
-  if (email)
-    return email
-  if ('accountId' in props.account && typeof props.account.accountId === 'string')
-    return props.account.accountId
-  return String(props.account.id)
-})
-
-const displayTitle = computed(() =>
-  props.titleMode === 'email' || props.account.authenticationKind === 'api_key' ? emailText.value : emailText.value.split('@')[0],
-)
-
-const secondaryText = computed(() =>
-  props.titleMode === 'email' || props.account.authenticationKind === 'api_key' ? null : emailText.value,
-)
+const identityView = computed(() => resolveAccountIdentityDisplay(props.account, props.titleMode))
+const displayTitle = computed(() => identityView.value.displayTitle)
+const secondaryText = computed(() => identityView.value.secondaryText)
+const identityTitle = computed(() => identityView.value.identityTitle)
 
 const initial = computed(() => displayTitle.value.slice(0, 1).toUpperCase())
 
@@ -76,7 +63,7 @@ const avatarToneClass = computed(() => {
     </span>
     <div class="min-w-0 flex-1">
       <div class="flex min-w-0 items-center gap-2">
-        <span class="min-w-0 flex-1 truncate text-cp font-heavy text-cp-text">
+        <span class="min-w-0 flex-1 truncate text-cp font-heavy text-cp-text" :title="identityTitle">
           {{ displayTitle }}
         </span>
         <span

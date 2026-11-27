@@ -89,6 +89,7 @@ export interface AccountModelUsage {
 }
 
 export interface AccountUsage {
+  windowKind?: 'general' | 'daily' | 'recent_week' | 'weekly' | 'monthly' | 'quota'
   windowLabelDisplay: string
   requestCount: number | null
   requestCountDisplay: string
@@ -536,6 +537,7 @@ export function completeAccountOAuth(data: AccountOAuthCompleteParam) {
 export interface ApiKeyConfiguration {
   base_url: string
   transport: 'http' | 'prefer_websocket'
+  protocol?: 'responses' | 'messages'
 }
 
 export function getAccountDetail(data: AccountIdParam, options: RequestOptions = {}) {
@@ -547,7 +549,7 @@ export function getAccountDetail(data: AccountIdParam, options: RequestOptions =
   })
 }
 
-export function updateAccountApiKey(data: { accountId: string, baseUrl: string, transport: ApiKeyConfiguration['transport'], apiKey?: string, settings?: AccountUpdateParam }) {
+export function updateAccountApiKey(data: { accountId: string, baseUrl: string, transport: ApiKeyConfiguration['transport'], protocol?: ApiKeyConfiguration['protocol'], apiKey?: string, settings?: AccountUpdateParam }) {
   return request<{ accountId: string }>({
     url: '/api/admin/accounts/rotate',
     method: 'POST',

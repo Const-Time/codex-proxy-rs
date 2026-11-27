@@ -109,6 +109,7 @@ struct FakeStore {
     state: Mutex<StoreState>,
     failures: BTreeSet<StoreWriteFailure>,
     create_gate: Mutex<Option<oneshot::Receiver<()>>>,
+    send_state_gate: Mutex<Option<oneshot::Receiver<()>>>,
     finalize_gate: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
@@ -177,6 +178,10 @@ impl ExecutionStore for FakeStore {
             .expect("store lock")
             .send_states
             .push(state);
+        let gate = self.send_state_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.await.expect("send-state write released");
+        }
         Ok(())
     }
 
@@ -2535,6 +2540,210 @@ fn key_budget_settles_post_send_failures_from_observed_cost_without_replaying() 
 }
 
 #[test]
+fn settles_latest_calculated_cost_or_withdrawal_when_stream_is_interrupted() {
+    for cancel in [false, true] {
+        for (withdraw, reported, expected_source, expected_ticks) in [
+            (false, false, CostSource::Calculated, Some(123)),
+            (true, false, CostSource::Unavailable, None),
+            (true, true, CostSource::ProviderReported, Some(456)),
+        ] {
+            let operation = generate_operation();
+            let route_plan = plan(&operation);
+            let mut usage = Usage::new();
+            usage.total_tokens = Some(10);
+            let mut items = vec![
+                Ok(
+                    ProviderEvent::canonical(GatewayEvent::Started(ResponseMeta::new(
+                        "response-interrupted",
+                        "gemini-test",
+                    )))
+                    .with_fact(GatewayEvent::Usage(usage))
+                    .with_fact(GatewayEvent::CalculatedCost(
+                        CalculatedCost::from_usd_ticks(100).unwrap(),
+                    )),
+                ),
+                Ok(ProviderEvent::canonical(GatewayEvent::CalculatedCost(
+                    CalculatedCost::from_usd_ticks(123).unwrap(),
+                ))),
+            ];
+            if reported {
+                items.push(Ok(ProviderEvent::canonical(GatewayEvent::ProviderCost(
+                    ProviderReportedCost::from_usd_ticks(456).unwrap(),
+                ))));
+            }
+            if withdraw {
+                items.push(Ok(ProviderEvent::canonical(
+                    GatewayEvent::CalculatedCostWithdrawn,
+                )));
+            }
+            let event_count = items.len();
+            items.push(Err(ProviderError::new(
+                ProviderErrorKind::Transport,
+                UpstreamSendState::Sent,
+            )));
+            let (coordinator, store, _) = coordinator(vec![Script::ObservedStream {
+                account_id: "acct_first",
+                items,
+            }]);
+            let mut session = block_on(coordinator.start(
+                model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+                operation,
+                route_plan,
+                None,
+                None,
+                CancellationToken::new(),
+            ))
+            .unwrap();
+            block_on(session.next_event()).unwrap().unwrap();
+            block_on(session.commit_downstream(Some(200))).unwrap();
+            for _ in 1..event_count {
+                block_on(session.next_event()).unwrap().unwrap();
+            }
+            let outcome = if cancel {
+                block_on(session.cancel_and_finalize()).unwrap();
+                ExecutionOutcome::Cancelled
+            } else {
+                assert!(matches!(
+                    block_on(session.next_event()),
+                    Err(EngineError::Provider(error)) if error.kind() == ProviderErrorKind::Transport
+                ));
+                ExecutionOutcome::Incomplete
+            };
+            block_on(session.cancel_and_finalize()).unwrap();
+            assert_eq!(
+                session.budget_charge().amount_usd.scaled(),
+                expected_ticks.unwrap_or(0)
+            );
+            let state = store.state.lock().unwrap();
+            assert_eq!(state.finalizations.len(), 1);
+            let finalization = &state.finalizations[0];
+            assert_eq!(finalization.outcome, outcome);
+            assert_eq!(finalization.total_tokens, Some(10));
+            assert_eq!(finalization.cost_source, expected_source);
+            assert_eq!(finalization.cost_ticks, expected_ticks);
+        }
+    }
+}
+
+#[test]
+fn atomic_accounting_facts_settle_without_creating_a_delivery_batch() {
+    for streaming in [false, true] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let mut usage = Usage::new();
+        usage.total_tokens = Some(10);
+        let failure = ProviderError::new(ProviderErrorKind::Protocol, UpstreamSendState::Sent)
+            .with_atomic_client_events(vec![
+                ProviderEvent::canonical(GatewayEvent::Usage(usage)),
+                ProviderEvent::canonical(GatewayEvent::CalculatedCost(
+                    CalculatedCost::from_usd_ticks(123).unwrap(),
+                )),
+            ]);
+        let (coordinator, store, provider) = coordinator(vec![Script::ObservedStream {
+            account_id: "acct_first",
+            items: vec![Err(failure)],
+        }]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+
+        let error = if streaming {
+            block_on(session.next_event()).expect_err("first output must be a typed failure")
+        } else {
+            block_on(session.collect_uncommitted()).expect_err("document must fail")
+        };
+        assert!(matches!(
+            error,
+            EngineError::Provider(error) if error.kind() == ProviderErrorKind::Protocol
+        ));
+        assert!(session.is_finalized());
+        assert!(block_on(session.next_event()).unwrap().is_none());
+        block_on(session.cancel_and_finalize()).unwrap();
+        assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
+
+        assert_eq!(provider.contexts.lock().unwrap().len(), 1);
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.commits, 0);
+        assert_eq!(state.finalizations.len(), 1);
+        let finalization = &state.finalizations[0];
+        assert_eq!(finalization.outcome, ExecutionOutcome::Failed);
+        assert!(!finalization.committed);
+        assert_eq!(finalization.send_state, UpstreamSendState::Sent);
+        assert_eq!(finalization.total_tokens, Some(10));
+        assert_eq!(finalization.cost_source, CostSource::Calculated);
+        assert_eq!(finalization.cost_ticks, Some(123));
+    }
+}
+
+#[test]
+fn cancellation_during_send_state_write_retains_the_observed_metering() {
+    for terminal_withdrawal in [false, true] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let mut usage = Usage::new();
+        usage.total_tokens = Some(10);
+        let first = ProviderEvent::canonical(GatewayEvent::Started(ResponseMeta::new(
+            "response-interrupted",
+            "gemini-test",
+        )))
+        .with_fact(GatewayEvent::Usage(usage))
+        .with_fact(GatewayEvent::CalculatedCost(
+            CalculatedCost::from_usd_ticks(123).unwrap(),
+        ));
+        let mut items = vec![Ok(first)];
+        if terminal_withdrawal {
+            items.push(Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                UpstreamSendState::Sent,
+            )
+            .with_atomic_client_events(vec![ProviderEvent::canonical(
+                GatewayEvent::CalculatedCostWithdrawn,
+            )])));
+        }
+        let (coordinator, store, _) = coordinator(vec![Script::ObservedStream {
+            account_id: "acct_first",
+            items,
+        }]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        if terminal_withdrawal {
+            block_on(session.next_event()).unwrap().unwrap();
+            block_on(session.commit_downstream(Some(200))).unwrap();
+        }
+        let (_release, pending) = oneshot::channel();
+        *store.send_state_gate.lock().unwrap() = Some(pending);
+        let mut next = Box::pin(session.next_event());
+        assert!(block_on(async { futures::poll!(&mut next) }).is_pending());
+        drop(next);
+
+        block_on(session.cancel_and_finalize()).unwrap();
+        let expected_ticks = (!terminal_withdrawal).then_some(123);
+        assert_eq!(
+            session.budget_charge().amount_usd.scaled(),
+            expected_ticks.unwrap_or(0)
+        );
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.finalizations.len(), 1);
+        assert_eq!(state.finalizations[0].send_state, UpstreamSendState::Sent);
+        assert_eq!(state.finalizations[0].total_tokens, Some(10));
+        assert_eq!(state.finalizations[0].cost_ticks, expected_ticks);
+    }
+}
+
+#[test]
 fn pre_commit_failure_excludes_account_and_retries_same_target() {
     let operation = generate_operation();
     let route_plan = plan(&operation);
@@ -3156,6 +3365,7 @@ fn empty_selection_after_atomic_failure_should_deliver_the_last_upstream_wire() 
         .expect("last account failure remains deliverable")
         .expect("terminal failure batch");
     let events = terminal.into_provider_events();
+    assert_eq!(events.len(), 1, "only the upstream failure is delivered");
     let failure = events
         .iter()
         .filter_map(ProviderEvent::wire_event)
@@ -4858,10 +5068,15 @@ fn deadline_after_commit_is_incomplete_without_upstream_failure() {
     let route_plan = plan(&operation);
     let (coordinator, store, _) = coordinator(vec![Script::HangingStream {
         account_id: "acct_first",
-        items: vec![Ok(GatewayEvent::Started(ResponseMeta::new(
-            "response-1",
-            "gpt-5",
-        )))],
+        items: vec![
+            Ok(GatewayEvent::Started(ResponseMeta::new(
+                "response-1",
+                "gpt-5",
+            ))),
+            Ok(GatewayEvent::CalculatedCost(
+                CalculatedCost::from_usd_ticks(123).unwrap(),
+            )),
+        ],
     }]);
     let mut session = block_on(coordinator.start(
         model_request(&operation, SystemTime::now() + Duration::from_millis(300)),
@@ -4880,6 +5095,9 @@ fn deadline_after_commit_is_incomplete_without_upstream_failure() {
         CommitRequirement::CommitBeforeDelivery
     );
     block_on(session.commit_downstream(Some(200))).expect("commit started event");
+    block_on(session.next_event())
+        .unwrap()
+        .expect("calculated cost");
 
     let error = block_on(session.next_event()).expect_err("deadline elapses mid-stream");
 
@@ -4887,8 +5105,10 @@ fn deadline_after_commit_is_incomplete_without_upstream_failure() {
     // 网关自身请求预算到期不是上游超时；已在交付中的长流集中到期
     // 不得作为 provider Timeout 计入熔断。
     assert!(session.provider_attempt_outcomes().is_empty());
+    assert_eq!(session.budget_charge().amount_usd.scaled(), 123);
     let state = store.state.lock().expect("store lock");
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Incomplete);
+    assert_eq!(state.finalizations[0].cost_ticks, Some(123));
     assert!(state.finalizations[0].committed);
 }
 
@@ -4979,6 +5199,7 @@ enum AttemptMiddlewareMode {
     ShortCircuitAfterRetry,
     EarlyEnd,
     RequireImage,
+    ChangeChatReasoning,
     FailWhileStalled,
     ForgeCheckpoint,
     ResumeRead,
@@ -5043,6 +5264,16 @@ impl gateway_core::engine::attempt_middleware::AttemptMiddleware for TestAttempt
                 Operation::Generate(request.clone().with_protocol_body(body))
             } else if matches!(mode, AttemptMiddlewareMode::RequireImage) {
                 image_generate_operation()
+            } else if matches!(mode, AttemptMiddlewareMode::ChangeChatReasoning) {
+                let Operation::Generate(request) = request.operation() else {
+                    panic!("generate expected");
+                };
+                let mut body = request.protocol_payload().body().clone();
+                assert_eq!(
+                    body.insert("reasoning_effort".into(), json!("high")),
+                    Some(json!("low"))
+                );
+                Operation::Generate(request.clone().with_protocol_body(body))
             } else {
                 request.operation().clone()
             };
@@ -5226,6 +5457,78 @@ fn attempt_middleware_cannot_expand_routed_capabilities() {
         UpstreamSendState::NotSent
     );
 }
+
+#[test]
+fn attempt_middleware_cannot_change_the_reasoning_level_used_by_a_chat_group() {
+    use gateway_core::{operation::OperationKind, routing::ReasoningModelVariant};
+    use gateway_protocol::chat_completions::CHAT_PROTOCOL;
+    use std::collections::BTreeMap;
+
+    let kind = ProviderKind::new("openai").unwrap();
+    let account = ProviderAccountId::new("acct_first").unwrap();
+    let model = UpstreamModelId::new("gpt-5-low").unwrap();
+    let capabilities = ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
+        .with_generation_protocol(CHAT_PROTOCOL)
+        .with_upstream_feature_validation();
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).unwrap(),
+        AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::MIN, Duration::ZERO),
+        vec![kind.clone()],
+        vec![
+            ProviderModel::new(kind.clone(), model.clone(), capabilities.clone()),
+            ProviderModel::new(
+                kind.clone(),
+                UpstreamModelId::new("gpt-5").unwrap(),
+                capabilities.with_reasoning_variants(BTreeMap::from([(
+                    "low".into(),
+                    ReasoningModelVariant {
+                        model: model.clone(),
+                        accounts: BTreeSet::from([account.clone()]),
+                    },
+                )])),
+            ),
+        ],
+        Vec::new(),
+    )
+    .unwrap()
+    .with_account_directory(Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
+        account,
+        RuntimeAccount::new(kind, BTreeSet::new()),
+    )]))));
+    let body = json!({"model":"gpt-5","reasoning_effort":"low","messages":[{"role":"user","content":"hello"}]});
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(CHAT_PROTOCOL, body.as_object().unwrap().clone()).unwrap(),
+    ));
+    let routing = snapshot
+        .plan(
+            &PublicModelId::new("gpt-5").unwrap(),
+            &operation,
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+        )
+        .unwrap();
+    assert_eq!(routing.candidates()[0].upstream_model(), Some(&model));
+    let (coordinator, store, provider) = coordinator(vec![costed_attempt()]);
+    let coordinator = coordinator.with_attempt_middleware(Some(attempt_hook(
+        AttemptMiddlewareMode::ChangeChatReasoning,
+        &store,
+    )));
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        routing,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        block_on(session.collect_uncommitted()),
+        Err(EngineError::Middleware)
+    ));
+    assert!(provider.contexts.lock().unwrap().is_empty());
+}
+
 #[test]
 fn attempt_middleware_short_circuit_never_selects_or_sends_a_provider() {
     let operation = generate_operation();

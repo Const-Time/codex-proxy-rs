@@ -359,6 +359,7 @@ fn response_execution_request(
     transport: ClientTransport,
     endpoint: &'static str,
 ) -> Result<PreparedExecutionRequest, GatewayError> {
+    let protocol = request.protocol().to_owned();
     let (operation, metadata) = request.into_parts();
     let public_model = PublicModelId::from_client_wire(metadata.requested_model().to_owned())
         .map_err(|_| {
@@ -377,7 +378,7 @@ fn response_execution_request(
         public_model,
         operation,
         metadata: ExecutionRequestMetadata {
-            protocol: "openai".into(),
+            protocol,
             endpoint: endpoint.into(),
             transport,
             stream: metadata.stream(),

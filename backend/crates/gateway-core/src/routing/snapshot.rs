@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 
 use super::{ProviderCatalogGeneration, ProviderCatalogPort};
 use crate::account::{AccountSelectionPolicy, ProviderAccountId};
-use crate::operation::Operation;
+use crate::operation::{Operation, OperationKind};
 use crate::policy::{
     ClientApiKeyId, ClientPolicy, CodexClientMinVersions, PlaintextClientApiKey, RateLimits,
 };
@@ -20,6 +20,55 @@ use super::{
     ProviderCandidate, ProviderKind, ProviderModel, PublicModelId, RoutingContext,
     RoutingGroupSnapshot, RoutingPlan, RuntimeAccount, RuntimeAccountDirectory, UpstreamModelId,
 };
+
+fn supports_operation(
+    capabilities: &ModelCapabilities,
+    provider: &ProviderKind,
+    operation: &Operation,
+) -> bool {
+    match operation {
+        Operation::Generate(request) => capabilities
+            .supports_generation_protocol(provider, request.protocol_payload().protocol()),
+        Operation::CountTokens(request) => supports_native_operation(
+            capabilities,
+            request.payload().protocol(),
+            OperationKind::CountTokens,
+        ),
+        _ => true,
+    }
+}
+
+fn supports_native_operation(
+    capabilities: &ModelCapabilities,
+    protocol: &str,
+    operation: OperationKind,
+) -> bool {
+    if operation == OperationKind::CountTokens
+        && !matches!(
+            protocol,
+            gateway_protocol::genai::GENAI_PROTOCOL
+                | gateway_protocol::anthropic::ANTHROPIC_PROTOCOL
+        )
+    {
+        return false;
+    }
+    capabilities.operations.contains(&operation)
+        && capabilities.native_generation_protocols.contains(protocol)
+}
+
+fn scoped_model_accounts(
+    scope: &FrozenAccountScope,
+    provider: &ProviderKind,
+    model: &UpstreamModelId,
+    owners: &BTreeSet<ProviderAccountId>,
+) -> Arc<FrozenAccountScope> {
+    let excluded = scope
+        .account_ids(provider)
+        .into_iter()
+        .filter(|account| !owners.contains(account) || !scope.allows_model(account, model.as_str()))
+        .collect();
+    Arc::new(scope.execution_target(Some(provider), None, &excluded))
+}
 
 const MAXIMUM_SNAPSHOT_STABILITY_ATTEMPTS: usize = 4;
 
@@ -816,6 +865,102 @@ impl RuntimeSnapshot {
             .collect()
     }
 
+    /// Publish only models with an explicit native wire contract for this endpoint.
+    #[must_use]
+    pub fn public_native_model_profiles(
+        &self,
+        scope: &FrozenAccountScope,
+        protocol: &str,
+    ) -> Vec<super::PublicModelProfile> {
+        let mut profiles = BTreeMap::new();
+        for provider in scope.provider_kinds() {
+            let mut available = self
+                .public_model_profiles_for_provider(provider)
+                .into_iter()
+                .map(|profile| (profile.model().clone(), profile))
+                .collect::<BTreeMap<_, _>>();
+            for model in self.public_models_for_provider(provider) {
+                if self.native_model_protocol(provider, &model, protocol)
+                    && self.catalog_model_allowed_for_scope(provider, &model, scope)
+                {
+                    profiles.entry(model.clone()).or_insert_with(|| {
+                        available.remove(&model).unwrap_or_else(|| {
+                            super::PublicModelProfile::new(model, Default::default())
+                        })
+                    });
+                }
+            }
+        }
+        profiles.into_values().collect()
+    }
+
+    pub(crate) fn native_model_protocol(
+        &self,
+        provider: &ProviderKind,
+        model: &PublicModelId,
+        protocol: &str,
+    ) -> bool {
+        let legacy = protocol == "openai" && super::legacy_generation_protocol(provider, protocol);
+        let Ok(upstream) = UpstreamModelId::from_client_wire(self.mapped_model(model.as_str()))
+        else {
+            return false;
+        };
+        self.provider_models
+            .get(provider)
+            .and_then(|models| models.get(&upstream))
+            .map_or(legacy, |capabilities| {
+                if capabilities.native_generation_protocols.is_empty() {
+                    legacy
+                } else {
+                    capabilities.native_generation_protocols.contains(protocol)
+                }
+            })
+    }
+
+    /// Whether a native endpoint action is advertised for a model visible to this key.
+    pub fn supports_public_native_operation(
+        &self,
+        model: &PublicModelId,
+        scope: &FrozenAccountScope,
+        protocol: &str,
+        operation: OperationKind,
+    ) -> bool {
+        let target = self.mapped_model(model.as_str());
+        scope.provider_kinds().iter().any(|provider| {
+            let Some(capabilities) = self.model_capabilities(provider, &target) else {
+                return false;
+            };
+            if !supports_native_operation(capabilities, protocol, operation)
+                || !self.catalog_model_allowed_for_scope(provider, model, scope)
+            {
+                return false;
+            }
+            capabilities.reasoning_variants.is_empty()
+                || capabilities.reasoning_variants.values().any(|variant| {
+                    self.model_capabilities(provider, variant.model.as_str())
+                        .is_some_and(|capabilities| {
+                            supports_native_operation(capabilities, protocol, operation)
+                        })
+                        && variant.accounts.iter().any(|account| {
+                            scope
+                                .directory()
+                                .account(account)
+                                .is_some_and(|info| info.provider_kind() == provider)
+                                && scope.allows_model(account, variant.model.as_str())
+                        })
+                })
+        })
+    }
+
+    fn model_capabilities(
+        &self,
+        provider: &ProviderKind,
+        model: &str,
+    ) -> Option<&ModelCapabilities> {
+        let model = UpstreamModelId::from_client_wire(model).ok()?;
+        self.provider_models.get(provider)?.get(&model)
+    }
+
     /// 合并冻结账号范围内实际存在 Provider 的公开模型画像。
     #[must_use]
     pub fn public_model_profiles_for_scope(
@@ -885,6 +1030,19 @@ impl RuntimeSnapshot {
             return false;
         }
         let upstream_model = self.mapped_model(public_model.as_str());
+        if let Some(group) = self.model_capabilities(provider, &upstream_model)
+            && !group.reasoning_variants.is_empty()
+        {
+            return group.reasoning_variants.values().any(|variant| {
+                variant.accounts.iter().any(|account| {
+                    scope
+                        .directory()
+                        .account(account)
+                        .is_some_and(|info| info.provider_kind() == provider)
+                        && scope.allows_model(account, variant.model.as_str())
+                })
+            });
+        }
         match self
             .model_catalog_accounts
             .get(provider)
@@ -949,8 +1107,24 @@ impl RuntimeSnapshot {
         account_scope: Arc<FrozenAccountScope>,
         context: &RoutingContext,
     ) -> Result<RoutingPlan, RoutingError> {
+        self.plan_model(public_model, operation, account_scope, context, None, false)
+    }
+
+    pub(crate) fn plan_model(
+        &self,
+        public_model: &PublicModelId,
+        operation: &Operation,
+        account_scope: Arc<FrozenAccountScope>,
+        context: &RoutingContext,
+        original_model: Option<&PublicModelId>,
+        diagnostic_selects_generation_protocol: bool,
+    ) -> Result<RoutingPlan, RoutingError> {
+        let original_model = original_model.filter(|original| *original != public_model);
+        let diagnostic_selects_generation_protocol =
+            diagnostic_selects_generation_protocol && matches!(operation, Operation::Generate(_));
         let requirements = operation.capability_requirements();
         let mut candidates = Vec::new();
+        let mut invalid_variant = false;
 
         if context.required_provider.is_none() && account_scope.provider_kinds().is_empty() {
             return Err(RoutingError::EmptyAccountScope);
@@ -980,7 +1154,7 @@ impl RuntimeSnapshot {
             }
             let requested_model = public_model.as_str();
             let mapped_model = self.mapped_model(requested_model);
-            let upstream_model = if self.values.model_mappings.contains_key(requested_model)
+            let mut upstream_model = if self.values.model_mappings.contains_key(requested_model)
                 || self.model_alias(requested_model).is_some()
             {
                 UpstreamModelId::new(mapped_model)
@@ -988,20 +1162,151 @@ impl RuntimeSnapshot {
                 UpstreamModelId::from_client_wire(mapped_model)
             }
             .map_err(|_| RoutingError::InvalidIdentifier)?;
+            let mut candidate_scope = Arc::clone(&account_scope);
+            let mut frozen_reasoning_effort = None;
+            if let Some(group) = self.model_capabilities(provider, upstream_model.as_str())
+                && !group.reasoning_variants.is_empty()
+            {
+                if !supports_operation(group, provider, operation) {
+                    continue;
+                }
+                let effort = operation.requested_reasoning_effort();
+                let Some(variant) = effort
+                    .as_ref()
+                    .and_then(|level| group.reasoning_variants.get(level))
+                else {
+                    invalid_variant = true;
+                    continue;
+                };
+                candidate_scope = scoped_model_accounts(
+                    &account_scope,
+                    provider,
+                    &variant.model,
+                    &variant.accounts,
+                );
+                if !candidate_scope.allows_provider_model(provider, variant.model.as_str()) {
+                    continue;
+                }
+                frozen_reasoning_effort = effort;
+                upstream_model = variant.model.clone();
+            }
             let emulated_features = match self
                 .provider_models
                 .get(provider)
                 .and_then(|models| models.get(&upstream_model))
             {
                 Some(capabilities) => {
+                    if !diagnostic_selects_generation_protocol
+                        && !supports_operation(capabilities, provider, operation)
+                    {
+                        continue;
+                    }
                     let Some(emulated) = capabilities.match_requirements(&requirements) else {
                         continue;
                     };
                     emulated
                 }
                 None if self.known_provider_catalogs.contains(provider) => continue,
+                None if matches!(operation, Operation::CountTokens(_)) => continue,
+                None if matches!(operation, Operation::Generate(generate)
+                    if !super::legacy_generation_protocol(provider, generate.protocol_payload().protocol())) =>
+                {
+                    continue;
+                }
                 None => BTreeSet::new(),
             };
+            if operation.requires_web_search()
+                && let Some(search_models) = self
+                    .model_capabilities(provider, upstream_model.as_str())
+                    .and_then(|capabilities| capabilities.dedicated_web_search.as_ref())
+            {
+                if original_model.is_some_and(|original| {
+                    self.model_alias(original.as_str())
+                        .is_some_and(|alias| &alias.provider != provider)
+                }) {
+                    continue;
+                }
+                // A plugin can choose a different model without changing the original model grant.
+                // Apply the configured mappings and group level to that original grant too.
+                let original = original_model.map(|model| self.mapped_model(model.as_str()));
+                let original_variant = if let Some(group) = original
+                    .as_deref()
+                    .and_then(|model| self.model_capabilities(provider, model))
+                    .filter(|capabilities| !capabilities.reasoning_variants.is_empty())
+                {
+                    let effort = operation.requested_reasoning_effort();
+                    let Some(variant) = effort
+                        .as_ref()
+                        .and_then(|effort| group.reasoning_variants.get(effort))
+                    else {
+                        invalid_variant = true;
+                        continue;
+                    };
+                    frozen_reasoning_effort = effort;
+                    Some(variant)
+                } else {
+                    None
+                };
+                let catalog_owners = self.model_catalog_accounts.get(provider);
+                let owners = catalog_owners.and_then(|models| models.get(upstream_model.as_str()));
+                let original_owners = original
+                    .as_deref()
+                    .and_then(|model| catalog_owners.and_then(|owners| owners.get(model)));
+                let original_has_catalog_owners = original_owners.is_some()
+                    || original.as_deref().is_some_and(|model| {
+                        self.model_catalog_accounts
+                            .values()
+                            .any(|owners| owners.contains_key(model))
+                    });
+                let mut targets = BTreeMap::<_, BTreeSet<_>>::new();
+                for (account, target) in search_models {
+                    if owners.is_some_and(|owners| !owners.contains(account))
+                        || !candidate_scope.allows_model(account, upstream_model.as_str())
+                        || !candidate_scope.allows_model(account, target.as_str())
+                        || original_variant.is_some_and(|variant| {
+                            !variant.accounts.contains(account)
+                                || !candidate_scope.allows_model(account, variant.model.as_str())
+                        })
+                        || (original_variant.is_none()
+                            && original.as_deref().is_some_and(|original| {
+                                (original_has_catalog_owners
+                                    && original_owners
+                                        .is_none_or(|owners| !owners.contains(account)))
+                                    || !candidate_scope.allows_model(account, original)
+                            }))
+                    {
+                        continue;
+                    }
+                    targets
+                        .entry(target.clone())
+                        .or_default()
+                        .insert(account.clone());
+                }
+                for (target, accounts) in targets {
+                    let scope =
+                        scoped_model_accounts(&candidate_scope, provider, &target, &accounts);
+                    if !scope.allows_provider_model(provider, target.as_str()) {
+                        continue;
+                    }
+                    if self
+                        .model_capabilities(provider, target.as_str())
+                        .is_some_and(|capabilities| {
+                            capabilities.match_requirements(&requirements).is_none()
+                        })
+                    {
+                        continue;
+                    }
+                    candidates.push(ProviderCandidate {
+                        presentation: None,
+                        provider: provider.clone(),
+                        upstream_model: Some(target),
+                        emulated_features: emulated_features.clone(),
+                        account_scope: scope,
+                        frozen_reasoning_effort: frozen_reasoning_effort.clone(),
+                    });
+                }
+                continue;
+            }
             candidates.push(ProviderCandidate {
                 presentation: self
                     .provider_model_presentations
@@ -1012,11 +1317,15 @@ impl RuntimeSnapshot {
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
                 emulated_features,
-                account_scope: Arc::clone(&account_scope),
+                account_scope: candidate_scope,
+                frozen_reasoning_effort,
             });
         }
 
         if candidates.is_empty() {
+            if invalid_variant {
+                return Err(RoutingError::InvalidReasoningVariant);
+            }
             // 模型存在性必须包含被请求路由限制排除的 Provider；目录未知时不能断言模型不存在。
             let mut scoped_providers = providers.intersection(&self.providers).peekable();
             if scoped_providers.peek().is_some()
@@ -1046,6 +1355,65 @@ impl RuntimeSnapshot {
                 .expect("constant request attempt limit is non-zero"),
             account_scope,
             candidates: Arc::from(candidates),
+        })
+    }
+
+    /// Plan a probe of a literal upstream model from the pinned account's catalog.
+    pub(crate) fn plan_diagnostic_model(
+        &self,
+        provider: &ProviderKind,
+        account: &ProviderAccountId,
+        model: &UpstreamModelId,
+        operation: &Operation,
+        catalog: &[super::ProviderModelCapabilities],
+    ) -> Result<RoutingPlan, RoutingError> {
+        let no_capable_provider = || RoutingError::NoCapableProvider {
+            model: model.as_str().to_owned(),
+        };
+        if !self.providers.contains(provider) {
+            return Err(no_capable_provider());
+        }
+        let entry = catalog
+            .iter()
+            .find(|entry| {
+                entry.upstream_model() == model
+                    && entry
+                        .catalog_accounts()
+                        .is_some_and(|owners| owners.contains(account))
+            })
+            .ok_or_else(|| RoutingError::ModelNotFound {
+                model: model.as_str().to_owned(),
+                mapped_model: model.as_str().to_owned(),
+            })?;
+        let capabilities = entry.capabilities();
+        if let Operation::Generate(generate) = operation
+            && !capabilities
+                .supports_generation_protocol(provider, generate.protocol_payload().protocol())
+        {
+            return Err(no_capable_provider());
+        }
+        let emulated_features = capabilities
+            .match_requirements(&operation.capability_requirements())
+            .ok_or_else(no_capable_provider)?;
+        let account_scope = self.all_account_scope();
+        let candidate = ProviderCandidate {
+            presentation: entry.presentation().cloned().map(Arc::new),
+            provider: provider.clone(),
+            upstream_model: Some(model.clone()),
+            emulated_features,
+            account_scope: Arc::clone(&account_scope),
+            frozen_reasoning_effort: None,
+        };
+        Ok(RoutingPlan {
+            max_retry_after_seconds: self.values.max_retry_after_seconds,
+            fast_mode: crate::account::FastMode::Default,
+            config_revision: self.revision,
+            pricing: Arc::clone(&self.values.pricing),
+            account_selection_policy: self.account_selection_policy,
+            operation: operation.kind(),
+            max_attempts: NonZeroU32::MIN,
+            account_scope,
+            candidates: Arc::from([candidate]),
         })
     }
 
@@ -1079,6 +1447,7 @@ impl RuntimeSnapshot {
             upstream_model: None,
             emulated_features: BTreeSet::new(),
             account_scope: Arc::clone(&account_scope),
+            frozen_reasoning_effort: None,
         };
         Ok(RoutingPlan {
             max_retry_after_seconds: self.values.max_retry_after_seconds,

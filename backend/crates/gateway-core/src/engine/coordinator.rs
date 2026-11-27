@@ -570,16 +570,29 @@ where
                 }
                 PullOutcome::AttemptDiscarded => {}
                 PullOutcome::TerminalFailure {
-                    events,
+                    mut events,
                     error,
                     send_state,
                 } => {
-                    if error.kind() == crate::error::ProviderErrorKind::InvalidRequest
+                    // Recovery already observed the facts carried by the failure.
+                    events.retain(|event| {
+                        event.wire_event().is_some()
+                            || event.canonical_facts().iter().any(|fact| {
+                                !matches!(
+                                    fact,
+                                    GatewayEvent::Usage(_)
+                                        | GatewayEvent::CalculatedCost(_)
+                                        | GatewayEvent::CalculatedCostWithdrawn
+                                        | GatewayEvent::ProviderCost(_)
+                                )
+                            })
+                    });
+                    let early_http_error = error.kind() == ProviderErrorKind::InvalidRequest
                         && error
                             .client_visible_upstream_response()
                             .is_some_and(|response| response.status() == 400)
-                        && self.response_commit.claim_early_http_error()
-                    {
+                        && self.response_commit.claim_early_http_error();
+                    if early_http_error || events.is_empty() {
                         self.finish_provider_error_with_send_state(&error, send_state)
                             .await?;
                         return Err(provider_engine_error(error));
@@ -967,14 +980,15 @@ where
         for fact in event.canonical_facts() {
             self.observation.observe_identity(fact);
         }
+        // Observe all facts from the frame before yielding to the send-state store write.
         for fact in event.canonical_facts() {
-            self.observe_event(fact).await;
+            self.observation.observe_event(fact);
         }
         if event.is_response_boundary() {
             self.observation.response_boundary();
         }
-        if event.wire_event().is_some() && !event.has_canonical_facts() {
-            self.observe_wire_event().await;
+        if event.has_client_event() {
+            self.mark_send_observed().await;
         }
     }
 
@@ -1309,7 +1323,7 @@ where
                     pinned_account.clone(),
                     self.account_state_owner.clone(),
                 )
-                .with_account_scope(Arc::clone(self.plan.account_scope())),
+                .with_account_scope(Arc::clone(candidate.account_scope())),
             }
             .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
                 self.credential_recovery_attempted_accounts
@@ -1426,6 +1440,10 @@ where
                         // Protocol adapters additionally re-decode model/continuation facts.
                         if request.operation.capability_requirements()
                             != self.operation.capability_requirements()
+                            || candidate.frozen_reasoning_effort().is_some_and(|expected| {
+                                request.operation.requested_reasoning_effort().as_deref()
+                                    != Some(expected)
+                            })
                             || request.operation.image_generation_requested()
                                 != self.operation.image_generation_requested()
                             || request
@@ -1522,6 +1540,7 @@ where
                                 | ProviderErrorKind::NoEligibleAccount
                                 | ProviderErrorKind::QuotaExhausted
                                 | ProviderErrorKind::ProviderInfrastructureUnavailable
+                                | ProviderErrorKind::Unsupported
                         )
                         && error.send_state() == UpstreamSendState::NotSent
                         && matches!(
@@ -1780,15 +1799,6 @@ where
         Err(provider_engine_error(error))
     }
 
-    async fn observe_event(&mut self, event: &GatewayEvent) {
-        self.observation.observe_event(event);
-        self.mark_send_observed().await;
-    }
-
-    async fn observe_wire_event(&mut self) {
-        self.mark_send_observed().await;
-    }
-
     fn observe_session_update(&mut self, state: &ProviderSessionState) {
         let Some(current) = self.current.as_mut() else {
             return;
@@ -1804,6 +1814,8 @@ where
             return;
         };
         if !current.send_observed {
+            current.send_observed = true;
+            self.send_state_watermark = UpstreamSendState::Sent;
             if let Some(context) = &self.execution_context {
                 context.scope().observe_upstream_effect();
             }
@@ -1817,8 +1829,6 @@ where
                 )
                 .await;
             }
-            current.send_observed = true;
-            self.send_state_watermark = UpstreamSendState::Sent;
         }
     }
 
@@ -1866,16 +1876,6 @@ where
             self.connection_budget.complete();
         }
         let send_state = self.raise_send_watermark(attempt_send_state);
-        if self.request_persisted {
-            best_effort_store_write(
-                "mark_send_state",
-                &self.request_id,
-                self.engine
-                    .store()
-                    .mark_send_state(&self.request_id, send_state),
-            )
-            .await;
-        }
         let provider_proved_replay_safe = provider_proved_replay_safe(&error);
         let continuation_retry = self.prepare_continuation_retry(
             &current,
@@ -2042,6 +2042,17 @@ where
                     && !account_rotation_retry,
             })),
         });
+        // Retain terminal events for cancellation even if the send-state write is dropped.
+        if self.request_persisted {
+            best_effort_store_write(
+                "mark_send_state",
+                &self.request_id,
+                self.engine
+                    .store()
+                    .mark_send_state(&self.request_id, send_state),
+            )
+            .await;
+        }
         self.resume_recovery().await
     }
 

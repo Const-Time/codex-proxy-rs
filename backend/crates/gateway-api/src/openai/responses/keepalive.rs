@@ -118,14 +118,24 @@ async fn stream_failure(response: Response, error_encoder: Option<fn(&Value) -> 
         .get(header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
+    let chat_no_more_retry = error_encoder.is_some()
+        && response
+            .headers()
+            .get("x-retry-metadata")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("NO_MORE_RETRY"));
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap_or_default();
     let json = serde_json::from_slice::<Value>(&bytes).ok();
-    let raw_message = std::str::from_utf8(&bytes)
-        .ok()
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
+    let raw_message = if error_encoder.is_none() {
+        std::str::from_utf8(&bytes)
+            .ok()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    } else {
+        None
+    };
     // 已完成客户端错误投影的对象原样保留，包括重试建议和策略错误的扩展字段
     let mut data = json
         .as_ref()
@@ -143,16 +153,21 @@ async fn stream_failure(response: Response, error_encoder: Option<fn(&Value) -> 
             )
         });
     // HTTP 头已提交，按官方 SSE 错误合同保留允许下发的重试建议
-    if let Some(retry_after) = retry_after
+    if (retry_after.is_some() || chat_no_more_retry)
         && let Some(error) = data["response"]["error"].as_object_mut()
         && let Some(headers) = error
             .entry("headers")
             .or_insert_with(|| serde_json::json!({}))
             .as_object_mut()
     {
-        headers
-            .entry("retry-after")
-            .or_insert(Value::String(retry_after));
+        if let Some(retry_after) = retry_after {
+            headers
+                .entry("retry-after")
+                .or_insert(Value::String(retry_after));
+        }
+        if chat_no_more_retry {
+            headers.insert("x-retry-metadata".into(), "NO_MORE_RETRY".into());
+        }
     }
     let mut event = match error_encoder {
         Some(encode) => encode(&data).to_vec(),

@@ -7,6 +7,7 @@ import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import { modelSuccessRateTextClass } from '../constants'
+import { accountUsageWindowLabel, supportsAccountQuotaForecast } from '../utils/quotaPresentation'
 import AccountQuotaForecastModal from './AccountQuotaForecastModal/index.vue'
 
 const props = defineProps<{
@@ -15,6 +16,8 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ refreshQuota: [accountId: string] }>()
 const forecastOpen = ref(false)
+const canForecast = computed(() => supportsAccountQuotaForecast(props.account))
+const usageWindowLabel = computed(() => accountUsageWindowLabel(props.account.usage))
 
 type AccountModelUsage = AccountRow['usage']['models'][number]
 
@@ -44,7 +47,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
         <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
           Tokens 结构
         </h3>
-        <span class="text-cp-xs font-emphasis text-cp-text-quaternary">{{ account.usage.windowLabelDisplay }}</span>
+        <span class="text-cp-xs font-emphasis text-cp-text-quaternary">{{ usageWindowLabel }}</span>
       </div>
       <div class="grid gap-2 xl:min-h-0 xl:flex-1 xl:grid-rows-5">
         <div class="flex items-center justify-between rounded-lg bg-cp-green-container px-3 py-2">
@@ -86,7 +89,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
           <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
             模型使用排行
           </h3>
-          <BaseIconButton v-if="account.authenticationKind !== 'api_key'" label="额度预测" size="sm" aria-haspopup="dialog" @click="forecastOpen = true">
+          <BaseIconButton v-if="canForecast" label="额度预测" size="sm" aria-haspopup="dialog" @click="forecastOpen = true">
             <ChartNoAxesCombined class="size-3.5" />
           </BaseIconButton>
         </div>
@@ -112,7 +115,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
               <span class="font-mono text-cp-sm font-heavy tabular-nums text-cp-green-text">{{ totalBilledDisplay }}</span>
             </span>
           </div>
-          <span class="whitespace-nowrap text-cp-xs font-emphasis text-cp-text-quaternary">{{ account.usage.windowLabelDisplay }}</span>
+          <span class="whitespace-nowrap text-cp-xs font-emphasis text-cp-text-quaternary">{{ usageWindowLabel }}</span>
         </div>
       </div>
 
@@ -136,5 +139,5 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
       </div>
     </div>
   </section>
-  <AccountQuotaForecastModal v-if="account.authenticationKind !== 'api_key'" v-model="forecastOpen" :account="account" :refreshing="refreshing" @refresh-quota="emit('refreshQuota', $event)" />
+  <AccountQuotaForecastModal v-if="canForecast" v-model="forecastOpen" :account="account" :refreshing="refreshing" @refresh-quota="emit('refreshQuota', $event)" />
 </template>

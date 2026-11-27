@@ -117,6 +117,7 @@ pub(super) fn payload(operation: &Operation) -> Result<&RawJsonPayload, Middlewa
     let payload = match operation {
         Operation::GenerateImage(image) => image.payload(),
         Operation::Search(search) => search.payload(),
+        Operation::CountTokens(count) => return Ok(count.payload()),
         _ => return Err(MiddlewareError::InvalidState),
     };
     if payload.protocol() != "openai" {
@@ -128,25 +129,26 @@ pub(super) fn request(
     operation: &Operation,
     headers: &HeaderMap,
 ) -> Result<MiddlewareRequest, MiddlewareError> {
+    let payload = payload(operation)?;
     Ok(MiddlewareRequest::new(
-        "openai",
+        payload.protocol(),
         forwarded_request_headers(headers)
             .map(|(name, value)| {
                 MiddlewareHeader::new(name.as_str(), Bytes::copy_from_slice(value.as_bytes()))
             })
             .collect(),
-        payload(operation)?.body().clone(),
+        payload.body().clone(),
     ))
 }
 pub(super) fn rewrite(
     original: &Operation,
     request: &MiddlewareRequest,
 ) -> Result<Operation, MiddlewareError> {
-    if request.protocol() != "openai" || request.has_capability_declaration() {
+    if request.protocol() != payload(original)?.protocol() || request.has_capability_declaration() {
         return Err(MiddlewareError::InvalidState);
     }
     let headers = super::headers::filtered_headers(request.headers())?;
-    // Endpoint kind is host-owned; body.model never becomes a text-routing fact.
+    // Keep the endpoint kind and frozen routing facts when re-decoding attempt bytes.
     match original {
         Operation::GenerateImage(image) => {
             crate::openai::images::image_operation(request.body().clone(), &headers, image.kind())
@@ -156,6 +158,37 @@ pub(super) fn rewrite(
             crate::openai::search::search_operation(request.body().clone(), &headers)
                 .map_err(Into::into)
         }
+        Operation::CountTokens(count) => {
+            use crate::openai::responses::http::GenerationProtocol;
+            let original_payload = count.payload();
+            let model = original_payload
+                .context()
+                .get("requested_model")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(MiddlewareError::InvalidState)?;
+            let generation = match original_payload.protocol() {
+                gateway_protocol::genai::GENAI_PROTOCOL => GenerationProtocol::GenAiCount {
+                    model: model.to_owned(),
+                },
+                gateway_protocol::anthropic::ANTHROPIC_PROTOCOL => {
+                    GenerationProtocol::Messages { count: true }
+                }
+                _ => return Err(MiddlewareError::InvalidState),
+            };
+            let decoded = generation
+                .decode(request.body(), &headers, |_| Ok(()))
+                .map_err(|_| MiddlewareError::InvalidState)?;
+            if decoded.metadata().requested_model() != model {
+                return Err(MiddlewareError::InvalidState);
+            }
+            if original_payload.protocol() == gateway_protocol::genai::GENAI_PROTOCOL
+                && count_reasoning_level(original_payload)?
+                    != count_reasoning_level(payload(decoded.operation())?)?
+            {
+                return Err(MiddlewareError::InvalidState);
+            }
+            Ok(decoded.into_parts().0)
+        }
         _ => Err(MiddlewareError::InvalidState),
     }
 }
@@ -163,6 +196,9 @@ pub(super) fn rewrite(
 // Raw endpoints have a deliberately smaller header contract than Responses.
 // Reconstruct only the semantic headers their Provider already consumes.
 pub(super) fn context_headers(payload: &RawJsonPayload) -> Result<HeaderMap, MiddlewareError> {
+    if payload.protocol() != "openai" {
+        return super::headers::from_context(payload.context());
+    }
     let mut headers = HeaderMap::new();
     for (field, name) in [
         ("session_id", "session-id"),
@@ -179,4 +215,14 @@ pub(super) fn context_headers(payload: &RawJsonPayload) -> Result<HeaderMap, Mid
         }
     }
     Ok(headers)
+}
+
+fn count_reasoning_level(payload: &RawJsonPayload) -> Result<Option<String>, MiddlewareError> {
+    let body = serde_json::from_slice(payload.body()).map_err(|_| MiddlewareError::InvalidState)?;
+    Ok(gateway_protocol::request::token_count_observation(
+        payload.protocol(),
+        &body,
+        payload.context(),
+    )
+    .reasoning_effort)
 }

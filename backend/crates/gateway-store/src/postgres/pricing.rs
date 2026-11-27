@@ -128,7 +128,7 @@ pub(crate) fn validate_pricing(pricing: &PricingOverrides) -> StoreResult<()> {
         return Err(invalid_pricing());
     }
     for (provider, models) in pricing {
-        if !matches!(provider.as_str(), "openai" | "xai") {
+        if !matches!(provider.as_str(), "openai" | "xai" | "antigravity") {
             return Err(invalid_pricing());
         }
         for (model, pricing) in models {

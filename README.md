@@ -31,7 +31,7 @@
 图片生成、编辑和 Codex 独立搜索由 OpenAI 账号提供；模型与功能的可用性取决于上游账号权限。
 
 > [!NOTE]
-> 本项目提供 Responses API，不支持 `/v1/chat/completions`。接入前请确认客户端支持 Responses 协议。
+> 本项目提供 Responses 和 Chat Completions 接口。Antigravity 账号还可通过 Google GenAI 原生接口接入。
 
 ## 快速开始
 

@@ -62,6 +62,13 @@ pub(super) async fn collect_raw_json_response(started: StartedExecution) -> Resp
 pub(super) fn raw_json_body(
     events: &[ProviderEvent],
 ) -> Result<Option<Bytes>, ResponseEncodeError> {
+    protocol_json_body(events, "openai")
+}
+
+pub(super) fn protocol_json_body(
+    events: &[ProviderEvent],
+    protocol: &str,
+) -> Result<Option<Bytes>, ResponseEncodeError> {
     const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
     let mut body = None;
     let mut chunks: Option<BytesMut> = None;
@@ -69,7 +76,7 @@ pub(super) fn raw_json_body(
     for event in events {
         let Some(wire) = event
             .wire_event()
-            .filter(|wire| wire.protocol() == "openai")
+            .filter(|wire| wire.protocol() == protocol)
         else {
             continue;
         };
@@ -83,7 +90,10 @@ pub(super) fn raw_json_body(
             }
             chunks.extend_from_slice(raw);
         } else if let Some(raw) = wire.raw_json_body() {
-            if chunks.is_some() || body.is_some() {
+            if chunks.is_some()
+                || body.is_some()
+                || (protocol != "openai" && raw.len() > MAX_BODY_BYTES)
+            {
                 return Err(ResponseEncodeError::InvalidRawBody);
             }
             body = Some(raw.clone());

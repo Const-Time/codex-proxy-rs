@@ -3,6 +3,7 @@ import type { AccountRow } from '../../constants'
 
 import { computed } from 'vue'
 import { groupedAccountQuotaWindows, visibleSummaryQuotaWindows } from '../../constants'
+import { accountUsageWindowLabel } from '../../utils/quotaPresentation'
 import AccountUsageWindow from '../AccountUsageWindow/index.vue'
 import { quotaWindowPresentation } from '../AccountUsageWindow/presenter'
 import AccountQuotaSummaryEntry from './Entry.vue'
@@ -25,6 +26,7 @@ const currentUsageDisplay = computed(() => currentUsageWindow.value?.usedPercent
 const currentUsageTextClass = computed(() => currentUsageWindow.value
   ? quotaWindowPresentation(currentUsageWindow.value, '2px').percentTextClass
   : 'text-cp-text-quaternary')
+const usageWindowLabel = computed(() => accountUsageWindowLabel(props.account.usage))
 const additionalEntryCount = computed(() => Math.max(summaryEntries.value.length - 1, 0))
 </script>
 
@@ -39,18 +41,19 @@ const additionalEntryCount = computed(() => Math.max(summaryEntries.value.length
         <span class="shrink-0 text-[9px] font-emphasis tracking-[0.02em] text-cp-text-quaternary">Tokens</span>
       </span>
       <div class="grid min-w-0 gap-1.5">
-        <span class="text-[10px] leading-3 font-bold text-cp-text-quaternary">{{ account.usage.windowLabelDisplay }}</span>
+        <span class="text-[10px] leading-3 font-bold text-cp-text-quaternary">{{ usageWindowLabel }}</span>
         <div class="h-1 w-full rounded-full bg-cp-success" title="上游额度未提供；绿色条不表示剩余额度" aria-hidden="true" />
       </div>
     </template>
     <template v-else-if="summaryEntries.length > 0">
       <div
-        v-if="hasUsage"
+        v-if="hasUsage || currentUsageWindow"
         class="flex min-w-0 items-baseline justify-between gap-2 leading-none"
       >
         <span
+          v-if="hasUsage"
           class="flex min-w-0 items-baseline gap-1 font-mono tabular-nums"
-          :title="`${account.usage.windowLabelDisplay}总 Token`"
+          :title="`${usageWindowLabel}总 Token`"
         >
           <strong class="truncate text-cp-xs font-heavy text-cp-text">
             {{ account.usage.totalTokensDisplay }}
@@ -60,7 +63,8 @@ const additionalEntryCount = computed(() => Math.max(summaryEntries.value.length
           </span>
         </span>
         <span
-          class="flex shrink-0 items-baseline gap-1 text-[9px] font-emphasis text-cp-text-quaternary"
+          v-if="currentUsageWindow"
+          class="ml-auto flex shrink-0 items-baseline gap-1 text-[9px] font-emphasis text-cp-text-quaternary"
           title="最近使用额度的当前已用比例"
         >
           <span>使用率</span>

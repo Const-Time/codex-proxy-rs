@@ -527,6 +527,21 @@ pub trait Provider: Send + Sync {
         &self,
     ) -> Result<Vec<ProviderModelCapabilities>, ProviderError>;
 
+    /// Resolve a fixed-account probe using the account's own catalog. `None` selects
+    /// snapshot routing. `Some` is authoritative, including an empty account catalog.
+    async fn query_diagnostic_model_catalog(
+        &self,
+        _account: &ProviderAccountId,
+    ) -> Result<Option<Vec<ProviderModelCapabilities>>, ProviderError> {
+        Ok(None)
+    }
+
+    /// The provider can choose a generation protocol from the checked credential
+    /// of the pinned account. Consulted only when routing a trusted diagnostic.
+    fn diagnostic_selects_generation_protocol(&self) -> bool {
+        false
+    }
+
     /// 读取当前客户端协议的原生目录，必须限定到认证时冻结的账号范围。
     /// `None` 表示不提供该协议的原生目录；读取失败不能伪装成不支持。
     async fn query_client_model_catalog(

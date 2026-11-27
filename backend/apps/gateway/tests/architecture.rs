@@ -21,6 +21,7 @@ pub(super) const WORKSPACE_MEMBERS: &[&str] = &[
     "crates/gateway-host",
     "crates/gateway-protocol",
     "crates/gateway-store",
+    "crates/providers/antigravity",
     "crates/providers/openai",
     "crates/providers/xai",
 ];
@@ -61,6 +62,7 @@ fn gateway_core_depends_on_no_http_db_redis_or_provider_crate() {
             "gateway-store",
             "provider-openai",
             "provider-xai",
+            "provider-antigravity",
         ],
     );
 }
@@ -178,6 +180,7 @@ const PACKAGE_TO_MEMBER: &[(&str, &str)] = &[
     ("gateway-host", "crates/gateway-host"),
     ("gateway-protocol", "crates/gateway-protocol"),
     ("gateway-store", "crates/gateway-store"),
+    ("provider-antigravity", "crates/providers/antigravity"),
     ("provider-openai", "crates/providers/openai"),
     ("provider-xai", "crates/providers/xai"),
 ];
@@ -200,6 +203,7 @@ const ADAPTER_PUBLIC_MODULES: &[(&str, &[&str])] = &[
         ],
     ),
     ("crates/gateway-store", &["backup", "postgres", "redis"]),
+    ("crates/providers/antigravity", &[]),
     (
         "crates/providers/openai",
         &["config", "credential", "transport"],
@@ -234,6 +238,8 @@ const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("codex-proxy-rs", "gateway-store"),
     ("codex-proxy-rs", "provider-openai"),
     ("codex-proxy-rs", "provider-xai"),
+    ("codex-proxy-rs", "provider-antigravity"),
+    ("gateway-core", "gateway-protocol"),
     ("gateway-admin", "gateway-core"),
     ("gateway-api", "gateway-admin"),
     ("gateway-api", "gateway-core"),
@@ -242,6 +248,9 @@ const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("gateway-host", "gateway-core"),
     ("gateway-store", "gateway-admin"),
     ("gateway-store", "gateway-core"),
+    ("provider-antigravity", "gateway-admin"),
+    ("provider-antigravity", "gateway-core"),
+    ("provider-antigravity", "gateway-protocol"),
     ("provider-openai", "gateway-admin"),
     ("provider-openai", "gateway-core"),
     ("provider-openai", "gateway-protocol"),

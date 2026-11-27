@@ -3,7 +3,7 @@ import type { dashboardSnapshotView } from '../composables/useDashboard'
 import { KeyRound, Link2 } from '@lucide/vue'
 import { computed } from 'vue'
 
-import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
+import { AntigravityIcon, OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { formatProviderLabel } from '@/utils/providers'
 import AccountPlanBadge from '@/views/accounts/components/AccountPlanBadge.vue'
 import { stablePresetVisualToneClass } from '@/views/accounts/utils/visualTone'
@@ -46,6 +46,7 @@ const avatarToneClass = computed(() =>
       >
         <OpenaiIcon v-if="normalizedProvider === 'openai'" class="size-3.5" />
         <XaiIcon v-else-if="normalizedProvider === 'xai'" class="size-3.5" />
+        <AntigravityIcon v-else-if="normalizedProvider === 'antigravity'" class="size-3.5" />
         <span v-else class="text-cp-xs font-heavy">?</span>
         <span class="sr-only">{{ providerLabel }}</span>
       </span>

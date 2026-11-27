@@ -33,11 +33,127 @@ use crate::openai::{
 };
 
 use super::{
-    OpenAiResponsesEncoder, ProtocolErrorBody, ResponseEncodeError,
-    request::decode_request_with_headers_accounted,
+    DecodedResponsesRequest, OpenAiResponsesEncoder, ProtocolErrorBody, RequestDecodeError,
+    ResponseEncodeError, request::decompress_request_body_accounted,
 };
 
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+#[derive(Clone)]
+pub(in crate::openai) enum GenerationProtocol {
+    Responses,
+    Chat,
+    GenAi { model: String, streaming: bool },
+    GenAiCount { model: String },
+    Messages { count: bool },
+}
+
+impl GenerationProtocol {
+    pub(in crate::openai) fn name(&self) -> &'static str {
+        match self {
+            Self::Responses => "openai",
+            Self::Chat => gateway_protocol::chat_completions::CHAT_PROTOCOL,
+            Self::GenAi { .. } | Self::GenAiCount { .. } => gateway_protocol::genai::GENAI_PROTOCOL,
+            Self::Messages { .. } => gateway_protocol::anthropic::ANTHROPIC_PROTOCOL,
+        }
+    }
+
+    pub(in crate::openai) fn decode(
+        &self,
+        body: &[u8],
+        headers: &HeaderMap,
+        mut reserve: impl FnMut(usize) -> Result<(), RequestDecodeError>,
+    ) -> Result<DecodedResponsesRequest, RequestDecodeError> {
+        match self {
+            Self::Responses => {
+                super::request::decode_request_with_headers_accounted(body, headers, reserve)
+            }
+            Self::Chat => {
+                let body = decompress_request_body_accounted(body, headers, &mut reserve)?;
+                crate::openai::chat_completions::request::decode(&body, headers)
+            }
+            Self::GenAi { model, streaming } => {
+                let body = decompress_request_body_accounted(body, headers, &mut reserve)?;
+                let body = decode_object(&body)?;
+                if !body
+                    .get("contents")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|contents| !contents.is_empty())
+                {
+                    return Err(RequestDecodeError::InvalidType {
+                        field: "contents".into(),
+                        expected: "a nonempty array",
+                    });
+                }
+                DecodedResponsesRequest::for_protocol(
+                    self.name(),
+                    body,
+                    headers,
+                    model.clone(),
+                    *streaming,
+                )
+            }
+            Self::GenAiCount { model } => {
+                let body = decompress_request_body_accounted(body, headers, &mut reserve)?;
+                let request = decode_object(&body)?;
+                gateway_protocol::genai::count_tokens_request(&request).map_err(|_| {
+                    RequestDecodeError::InvalidType {
+                        field: "generateContentRequest".into(),
+                        expected: "a JSON object",
+                    }
+                })?;
+                DecodedResponsesRequest::for_count(self.name(), &body, headers, model.clone())
+            }
+            Self::Messages { count } => {
+                let body = decompress_request_body_accounted(body, headers, &mut reserve)?;
+                let request = decode_object(&body)?;
+                let model = request
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|model| !model.trim().is_empty())
+                    .ok_or_else(|| RequestDecodeError::InvalidValue {
+                        field: "model".into(),
+                    })?
+                    .trim()
+                    .to_owned();
+                let validation = if *count {
+                    gateway_protocol::anthropic::validate_count_request(&request)
+                } else {
+                    gateway_protocol::anthropic::validate_request(&request)
+                };
+                validation.map_err(|error| RequestDecodeError::NativeContract {
+                    message: error.to_string(),
+                })?;
+                if *count {
+                    DecodedResponsesRequest::for_count(self.name(), &body, headers, model)
+                } else {
+                    let streaming = request
+                        .get("stream")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    DecodedResponsesRequest::for_protocol(
+                        self.name(),
+                        request,
+                        headers,
+                        model,
+                        streaming,
+                    )
+                }
+            }
+        }
+    }
+}
+
+fn decode_object(
+    body: &[u8],
+) -> Result<serde_json::Map<String, serde_json::Value>, RequestDecodeError> {
+    let body: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| RequestDecodeError::MalformedJson)?;
+    match body {
+        serde_json::Value::Object(object) => Ok(object),
+        _ => Err(RequestDecodeError::ExpectedObject),
+    }
+}
 
 /// `POST /v1/responses`。
 pub(crate) async fn responses(
@@ -55,7 +171,7 @@ pub(crate) async fn responses(
         body.body,
         "/v1/responses",
         (body.client, Some(body.memory)),
-        None,
+        GenerationProtocol::Responses,
     )
     .await
 }
@@ -85,7 +201,7 @@ pub(crate) async fn responses_at_endpoint(
         body,
         endpoint,
         (client, None),
-        None,
+        GenerationProtocol::Responses,
     )
     .await
 }
@@ -98,20 +214,22 @@ pub(in crate::openai) async fn respond_authenticated(
     State(state): State<ApiState>,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     ingress_id: Option<Extension<tower_http::request_id::RequestId>>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Bytes,
     endpoint: &'static str,
     authenticated: (
         gateway_core::engine::execution::AuthenticatedClient,
         Option<crate::openai::ingress::IngressMemory>,
     ),
-    chat: Option<crate::openai::chat_completions::ChatProjection>,
+    generation: GenerationProtocol,
 ) -> Response {
+    headers.remove("x-goog-api-key");
+    headers.remove("x-api-key");
     let (client, mut memory) = authenticated;
     let service = state.openai();
     let access = client.bound_access();
     let mut capacity_exhausted = false;
-    let decoded = match decode_request_with_headers_accounted(&body, &headers, |bytes| {
+    let decoded = match generation.decode(&body, &headers, |bytes| {
         if memory.as_mut().is_none_or(|memory| memory.reserve(bytes)) {
             Ok(())
         } else {
@@ -145,7 +263,7 @@ pub(in crate::openai) async fn respond_authenticated(
             registry,
             crate::openai::middleware::request::Ingress {
                 client,
-                chat,
+                generation,
                 decoded,
                 headers,
                 body,
@@ -157,6 +275,7 @@ pub(in crate::openai) async fn respond_authenticated(
         )
         .await;
     }
+    let chat = crate::openai::chat_completions::ChatProjection::for_request(&decoded);
     let started = match service
         .start_response(
             client,
@@ -182,33 +301,38 @@ pub(in crate::openai) async fn respond_authenticated(
     let StartedExecution {
         stream, session, ..
     } = started;
-    let mut response = if let Some(chat) = chat {
+    let protocol = generation.name();
+    let mut response = if protocol != "openai" {
         let (admitted, keepalive) = tokio::sync::oneshot::channel();
         let _ = admitted.send(session.response_commit());
         let response = async move {
-            match crate::openai::middleware::execution_middleware_response(
+            match crate::openai::middleware::generation_response(
                 session,
                 if stream {
                     ClientTransport::HttpSse
                 } else {
                     ClientTransport::HttpJson
                 },
+                protocol,
+                chat,
             )
             .await
             {
                 Ok(response) => {
-                    crate::openai::middleware::delivery::deliver_with_chat(
+                    crate::openai::middleware::delivery::deliver_generation(
                         response,
                         stream,
                         connection_guard,
-                        Some(chat),
+                        protocol,
                     )
                     .await
                 }
-                Err(error) => crate::openai::middleware::delivery::error_response(&error),
+                Err(error) => {
+                    crate::openai::middleware::delivery::generation_error_response(&error, protocol)
+                }
             }
         };
-        if stream {
+        if stream && protocol == gateway_protocol::chat_completions::CHAT_PROTOCOL {
             super::keepalive::response_with_encoder(
                 response,
                 keepalive,

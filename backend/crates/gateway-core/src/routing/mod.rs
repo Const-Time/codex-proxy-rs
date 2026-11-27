@@ -136,6 +136,16 @@ pub struct ModelCapabilities {
     features: BTreeMap<Feature, SupportLevel>,
     max_output_tokens: Option<u64>,
     upstream_validates_features: bool,
+    native_generation_protocols: BTreeSet<&'static str>,
+    translated_generation_protocols: BTreeSet<&'static str>,
+    reasoning_variants: BTreeMap<String, ReasoningModelVariant>,
+    dedicated_web_search: Option<BTreeMap<crate::account::ProviderAccountId, UpstreamModelId>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningModelVariant {
+    pub model: UpstreamModelId,
+    pub accounts: BTreeSet<crate::account::ProviderAccountId>,
 }
 
 /// Provider 为客户端模型目录提供的展示与交互能力。
@@ -396,6 +406,10 @@ impl ModelCapabilities {
             features: BTreeMap::new(),
             max_output_tokens,
             upstream_validates_features: false,
+            native_generation_protocols: BTreeSet::new(),
+            translated_generation_protocols: BTreeSet::new(),
+            reasoning_variants: BTreeMap::new(),
+            dedicated_web_search: None,
         }
     }
 
@@ -410,6 +424,64 @@ impl ModelCapabilities {
     pub const fn with_upstream_feature_validation(mut self) -> Self {
         self.upstream_validates_features = true;
         self
+    }
+
+    #[must_use]
+    pub fn with_generation_protocol(self, protocol: &'static str) -> Self {
+        self.with_native_generation_protocols([protocol])
+    }
+
+    #[must_use]
+    pub fn with_native_generation_protocols(
+        mut self,
+        protocols: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.native_generation_protocols = protocols.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_translated_generation_protocols(
+        mut self,
+        protocols: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.translated_generation_protocols = protocols.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_reasoning_variants(
+        mut self,
+        variants: BTreeMap<String, ReasoningModelVariant>,
+    ) -> Self {
+        self.reasoning_variants = variants;
+        self
+    }
+
+    #[must_use]
+    pub fn with_dedicated_web_search(
+        mut self,
+        models: BTreeMap<crate::account::ProviderAccountId, UpstreamModelId>,
+    ) -> Self {
+        self.dedicated_web_search = Some(models);
+        self
+    }
+
+    fn supports_generation_protocol(&self, provider: &ProviderKind, protocol: &str) -> bool {
+        if self.native_generation_protocols.is_empty()
+            || !matches!(
+                protocol,
+                gateway_protocol::openai::OPENAI_PROTOCOL
+                    | gateway_protocol::chat_completions::CHAT_PROTOCOL
+                    | gateway_protocol::genai::GENAI_PROTOCOL
+                    | gateway_protocol::anthropic::ANTHROPIC_PROTOCOL
+            )
+        {
+            // Legacy providers and trusted upstream adapters predate protocol declarations.
+            return legacy_generation_protocol(provider, protocol);
+        }
+        self.native_generation_protocols.contains(protocol)
+            || self.translated_generation_protocols.contains(protocol)
     }
 
     #[must_use]
@@ -448,6 +520,17 @@ impl ModelCapabilities {
             }
         }
         Some(emulated)
+    }
+}
+
+fn legacy_generation_protocol(provider: &ProviderKind, protocol: &str) -> bool {
+    match protocol {
+        gateway_protocol::chat_completions::CHAT_PROTOCOL => {
+            matches!(provider.as_str(), "openai" | "xai")
+        }
+        gateway_protocol::genai::GENAI_PROTOCOL
+        | gateway_protocol::anthropic::ANTHROPIC_PROTOCOL => false,
+        _ => provider.as_str() != "antigravity",
     }
 }
 
@@ -513,9 +596,14 @@ pub struct ProviderCandidate {
     upstream_model: Option<UpstreamModelId>,
     emulated_features: BTreeSet<Feature>,
     account_scope: Arc<FrozenAccountScope>,
+    frozen_reasoning_effort: Option<String>,
 }
 
 impl ProviderCandidate {
+    pub(crate) fn frozen_reasoning_effort(&self) -> Option<&str> {
+        self.frozen_reasoning_effort.as_deref()
+    }
+
     pub fn model_presentation(&self) -> Option<&ModelPresentation> {
         self.presentation.as_deref()
     }

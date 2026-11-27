@@ -51,9 +51,29 @@ impl AttemptMiddleware for ResponsesAttempt {
                 return Err(MiddlewareError::InvalidState);
             };
             let payload = generate.protocol_payload();
-            if payload.protocol() != "openai" {
-                return Err(MiddlewareError::InvalidState);
-            }
+            let format = match payload.protocol() {
+                "openai" => format,
+                gateway_protocol::chat_completions::CHAT_PROTOCOL if !format.websocket() => {
+                    super::WireFormat::Generation {
+                        streaming: format.streaming(),
+                        protocol: gateway_protocol::chat_completions::CHAT_PROTOCOL,
+                    }
+                }
+                gateway_protocol::genai::GENAI_PROTOCOL if !format.websocket() => {
+                    super::WireFormat::Generation {
+                        streaming: format.streaming(),
+                        protocol: gateway_protocol::genai::GENAI_PROTOCOL,
+                    }
+                }
+                gateway_protocol::anthropic::ANTHROPIC_PROTOCOL if !format.websocket() => {
+                    super::WireFormat::Generation {
+                        streaming: format.streaming(),
+                        protocol: gateway_protocol::anthropic::ANTHROPIC_PROTOCOL,
+                    }
+                }
+                _ => return Err(MiddlewareError::InvalidState),
+            };
+            let protocol = format.protocol();
             let body = Bytes::from(
                 serde_json::to_vec(payload.body()).map_err(|_| MiddlewareError::InvalidState)?,
             );
@@ -61,7 +81,7 @@ impl AttemptMiddleware for ResponsesAttempt {
             let expected = request::decode(original.operation(), &body, &headers, format)
                 .map_err(|_| MiddlewareError::InvalidState)?;
             let request = MiddlewareRequest::new(
-                "openai",
+                protocol,
                 forwarded_request_headers(&headers)
                     .map(|(name, value)| {
                         MiddlewareHeader::new(
@@ -83,7 +103,7 @@ impl AttemptMiddleware for ResponsesAttempt {
             let terminal =
                 gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
                     Box::pin(async move {
-                        if request.protocol() != "openai" || request.has_capability_declaration() {
+                        if request.protocol() != protocol || request.has_capability_declaration() {
                             return Err(MiddlewareError::InvalidState);
                         }
                         let headers = super::headers::filtered_headers(request.headers())?;

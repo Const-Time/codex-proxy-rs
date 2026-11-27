@@ -15,7 +15,14 @@ async fn convert(body: Value) -> Value {
     let status = response.status();
     let result = json_body(response).await;
     assert_eq!(status, StatusCode::OK, "{result}");
-    fixture.captured().body
+    let captured = fixture.captured();
+    assert_eq!(captured.protocol, "chat_completions");
+    Value::Object(
+        gateway_protocol::chat_completions::responses::convert_request(
+            captured.body.as_object().unwrap(),
+        )
+        .unwrap(),
+    )
 }
 
 #[tokio::test]
@@ -162,19 +169,11 @@ async fn refuses_known_unrepresentable_features_before_starting_execution() {
     for (name, value) in [
         ("n", json!(2)),
         ("store", json!(true)),
-        ("stop", json!(["stop"])),
-        ("seed", json!(7)),
-        ("frequency_penalty", json!(0.3)),
-        ("logprobs", json!(true)),
         ("functions", json!([{"name":"old"}])),
         ("function_call", json!("auto")),
         ("input", json!("not chat")),
         ("previous_response_id", json!("resp_previous")),
         ("audio", json!({"voice":"alloy","format":"wav"})),
-        (
-            "prediction",
-            json!({"type":"content","content":"predicted"}),
-        ),
     ] {
         let fixture = Fixture::new(Session::new(Vec::new())).await;
         let mut body = chat_request(false);
@@ -190,13 +189,32 @@ async fn refuses_known_unrepresentable_features_before_starting_execution() {
     }
 }
 
+#[test]
+fn responses_only_unsupported_options_are_checked_by_the_target_codec() {
+    for (name, value) in [
+        ("stop", json!(["stop"])),
+        ("seed", json!(7)),
+        ("frequency_penalty", json!(0.3)),
+        (
+            "prediction",
+            json!({"type":"content","content":"predicted"}),
+        ),
+    ] {
+        let mut body = chat_request(false);
+        body[name] = value;
+        let parsed =
+            gateway_protocol::chat_completions::parse_request(&serde_json::to_vec(&body).unwrap())
+                .unwrap();
+        let error = gateway_protocol::chat_completions::responses::convert_request(&parsed.body)
+            .unwrap_err();
+        assert_eq!(error.parameter(), Some(name));
+    }
+}
+
 #[tokio::test]
 async fn rejects_unmapped_message_content_and_identity_fields() {
     for message in [
-        json!({"role":"user","name":"speaker","content":"hello"}),
-        json!({"role":"user","content":[{"type":"file","file":{"file_id":"file-example"}}]}),
-        json!({"role":"assistant","content":"hello","reasoning_content":"private"}),
-        json!({"role":"assistant","content":[{"type":"text","text":"history","prompt_cache_breakpoint":{"type":"default"}}]}),
+        json!({"role":"user","content":[{"type":"unknown_part","data":"file-example"}]}),
         json!({"role":"tool","content":"unassociated output"}),
     ] {
         let fixture = Fixture::new(Session::new(Vec::new())).await;
@@ -213,6 +231,20 @@ async fn rejects_unmapped_message_content_and_identity_fields() {
         );
         assert!(fixture.execution.captured.lock().unwrap().is_none());
     }
+}
+
+#[tokio::test]
+async fn responses_converter_keeps_files_and_omits_unsupported_private_history() {
+    let converted = convert(json!({"model":"model-a","messages":[
+        {"role":"user","name":"speaker","content":[{"type":"file","file":{"file_id":"file-example"}}]},
+        {"role":"assistant","content":"hello","reasoning_content":"private"}
+    ]})).await;
+    assert_eq!(
+        converted["input"][0]["content"][0]["file_id"],
+        "file-example"
+    );
+    assert!(converted["input"][0].get("name").is_none());
+    assert!(!converted.to_string().contains("private"));
 }
 
 #[tokio::test]

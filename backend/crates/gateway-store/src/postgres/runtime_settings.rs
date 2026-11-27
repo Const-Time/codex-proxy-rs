@@ -6,15 +6,21 @@ use std::{collections::BTreeMap, fmt};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::future::BoxFuture;
+use serde_json::{Map, Value};
+use sqlx::types::Json;
 use sqlx::{PgPool, Postgres, Transaction};
 
-use gateway_core::account::RotationStrategy;
+use gateway_core::account::{OpaqueProviderData, RotationStrategy};
 use gateway_core::policy::CodexClientVersion;
 use gateway_core::provider_ports::{
     ProviderRefreshPolicy, ProviderRuntimePolicyPort, ProviderStoreError, ProviderStoreErrorKind,
 };
+use gateway_core::routing::ProviderKind;
 
 use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
+
+use super::{AdminAuditEvent, PgControlPlaneRepository, append_admin_audit_event_in_transaction};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
@@ -193,6 +199,22 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
 }
 
 impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
+    fn load_client_profile<'a>(
+        &'a self,
+        provider: &'a ProviderKind,
+    ) -> BoxFuture<'a, Result<Option<OpaqueProviderData>, ProviderStoreError>> {
+        Box::pin(async move {
+            sqlx::query_scalar::<_, Option<Json<Map<String, Value>>>>(
+                "select provider_request_profiles_json -> $1::text from runtime_settings where id = 1",
+            )
+            .bind(provider.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map(|configuration| configuration.map(|Json(value)| OpaqueProviderData::new(value)))
+            .map_err(|_| provider_unavailable("load provider client profile"))
+        })
+    }
+
     fn load_account_selection_policy(
         &self,
     ) -> futures::future::BoxFuture<
@@ -227,6 +249,39 @@ impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
                 concurrency,
             )
         })
+    }
+}
+
+impl PgControlPlaneRepository {
+    pub(crate) async fn replace_client_profile(
+        &self,
+        provider: &ProviderKind,
+        configuration: OpaqueProviderData,
+        audit: AdminAuditEvent,
+    ) -> StoreResult<Revision> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| postgres_unavailable("begin provider client profile update"))?;
+        sqlx::query(
+            "update runtime_settings
+             set provider_request_profiles_json =
+                 jsonb_set(provider_request_profiles_json, array[$1::text], $2)
+             where id = 1",
+        )
+        .bind(provider.as_str())
+        .bind(Json(configuration.into_inner()))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| postgres_unavailable("update provider client profile"))?;
+        let revision = bump_config_revision_in_transaction(&mut transaction).await?;
+        append_admin_audit_event_in_transaction(&mut transaction, audit, revision).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| postgres_unavailable("commit provider client profile update"))?;
+        Ok(revision)
     }
 }
 

@@ -9,7 +9,7 @@ use gateway_core::routing::{ModelServiceTier, UpstreamModelId};
 use reqwest::header::{ETAG, HeaderMap};
 use serde::Deserialize;
 
-const MAX_CATALOG_MODELS: usize = 2_048;
+pub(super) const MAX_CATALOG_MODELS: usize = 2_048;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
 const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 const MAX_ETAG_BYTES: usize = 256;
@@ -193,9 +193,14 @@ pub struct CodexCatalogModel {
     capabilities: CodexCatalogCapabilities,
     limits: CodexCatalogLimits,
     metadata: CodexCatalogMetadata,
+    native_count: bool,
 }
 
 impl CodexCatalogModel {
+    pub(crate) const fn supports_native_count(&self) -> bool {
+        self.native_count
+    }
+
     /// 完整原生对象只用于客户端目录，不写入控制面画像或日志。
     #[must_use]
     pub const fn document(&self) -> &RawJsonPayload {
@@ -249,6 +254,8 @@ impl CodexModelCatalogSnapshot {
         match document.split_first() {
             Some((0, body)) => parse_codex_model_catalog(body, None),
             Some((1, body)) => parse_api_model_catalog(body, None),
+            Some((2, body)) => parse_messages_model_catalog(body, None, false),
+            Some((3, body)) => parse_messages_model_catalog(body, None, true),
             _ => Err(CodexModelCatalogError::InvalidWire),
         }
     }
@@ -454,6 +461,7 @@ fn normalize_model(
     }
 
     Ok(CodexCatalogModel {
+        native_count: false,
         document,
         request_model,
         display_name: wire.display_name,
@@ -652,6 +660,28 @@ pub(crate) fn parse_api_model_catalog(
     body: &[u8],
     etag: Option<&str>,
 ) -> Result<CodexModelCatalogSnapshot, CodexModelCatalogError> {
+    parse_standard_model_catalog(body, etag, "openai", 1)
+}
+
+pub(super) fn parse_messages_model_catalog(
+    body: &[u8],
+    etag: Option<&str>,
+    native_count: bool,
+) -> Result<CodexModelCatalogSnapshot, CodexModelCatalogError> {
+    parse_standard_model_catalog(
+        body,
+        etag,
+        gateway_protocol::anthropic::ANTHROPIC_PROTOCOL,
+        if native_count { 3 } else { 2 },
+    )
+}
+
+fn parse_standard_model_catalog(
+    body: &[u8],
+    etag: Option<&str>,
+    protocol: &'static str,
+    archive_format: u8,
+) -> Result<CodexModelCatalogSnapshot, CodexModelCatalogError> {
     #[derive(Deserialize, serde::Serialize)]
     struct ApiModels {
         data: Vec<ApiModel>,
@@ -670,7 +700,7 @@ pub(crate) fn parse_api_model_catalog(
         return Err(CodexModelCatalogError::TooManyModels);
     }
     let mut seen = BTreeSet::new();
-    let document = archive_catalog(1, &wire)?;
+    let document = archive_catalog(archive_format, &wire)?;
     let mut models = Vec::with_capacity(wire.data.len());
     for item in wire.data {
         if item.id.trim() != item.id {
@@ -683,7 +713,7 @@ pub(crate) fn parse_api_model_catalog(
             .unwrap_or_else(|| request_model.as_str().to_owned());
         validate_public_text(&display_name, MAX_DISPLAY_NAME_BYTES, false)?;
         let document = RawJsonPayload::new(
-            "openai",
+            protocol,
             Bytes::from(
                 serde_json::to_vec(&serde_json::json!({"id": request_model.as_str()}))
                     .map_err(|_| CodexModelCatalogError::InvalidWire)?,
@@ -700,6 +730,7 @@ pub(crate) fn parse_api_model_catalog(
             capabilities: CodexCatalogCapabilities::default(),
             limits: CodexCatalogLimits::default(),
             metadata: CodexCatalogMetadata::default(),
+            native_count: archive_format == 3,
         });
     }
     Ok(CodexModelCatalogSnapshot {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { resolveAccountPlanDisplay } from '../utils/quotaPresentation'
 import { stableVisualIndex } from '../utils/visualTone'
 
 const props = withDefaults(
@@ -24,6 +25,7 @@ const planPalettes: Record<string, string> = {
   business: 'bg-cp-green-container-strong text-cp-green-on-container',
   pro: 'bg-cp-purple-container-strong text-cp-purple-on-container',
   prolite: 'bg-cp-purple-container text-cp-purple-on-container',
+  ultra: 'bg-cp-orange-container-strong text-cp-orange-on-container',
 }
 
 const fallbackPalettes = [
@@ -33,8 +35,13 @@ const fallbackPalettes = [
   'bg-cp-orange-container text-cp-orange-on-container',
 ] as const
 
-const rawPlanType = computed(() => props.authenticationKind === 'api_key' ? 'api' : props.planType?.trim() || '')
-const displayText = computed(() => props.authenticationKind === 'api_key' ? 'API' : props.planTypeDisplay)
+const plan = computed(() => resolveAccountPlanDisplay({
+  authenticationKind: props.authenticationKind,
+  planType: props.planType,
+  planTypeDisplay: props.planTypeDisplay,
+}))
+const rawPlanType = computed(() => plan.value.rawPlanType)
+const displayText = computed(() => plan.value.displayText)
 
 const sizeClass = computed(() => {
   if (props.size === 'xs')
@@ -45,12 +52,13 @@ const sizeClass = computed(() => {
 })
 
 const paletteClass = computed(() => {
-  const key = rawPlanType.value.toLowerCase()
-  const planPalette = planPalettes[key]
+  const key = plan.value.paletteKey
+  const rawKey = rawPlanType.value.toLowerCase()
+  const planPalette = planPalettes[key] ?? planPalettes[rawKey]
   if (planPalette)
     return planPalette
 
-  return fallbackPalettes[stableVisualIndex(key, fallbackPalettes.length)]
+  return fallbackPalettes[stableVisualIndex(rawKey || key, fallbackPalettes.length)]
 })
 </script>
 

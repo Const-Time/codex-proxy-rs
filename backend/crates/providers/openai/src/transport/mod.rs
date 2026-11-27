@@ -4,6 +4,7 @@ pub mod canonical;
 pub mod catalog;
 pub mod client;
 mod client_json;
+mod client_messages;
 mod client_sse;
 pub(crate) mod connection;
 pub mod diagnostics;

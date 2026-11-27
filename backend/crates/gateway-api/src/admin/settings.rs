@@ -16,8 +16,9 @@ use gateway_admin::model::client_distribution::{
 use gateway_admin::model::settings::{
     ModelMappings as DomainModelMappings, ReplaceRuntimeSettings, RotationStrategy, RuntimeSettings,
 };
+use gateway_core::account::OpaqueProviderData;
 use gateway_core::policy::CodexClientVersion;
-use gateway_core::routing::{PublicModelId, UpstreamModelId};
+use gateway_core::routing::{ProviderKind, PublicModelId, UpstreamModelId};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -284,6 +285,14 @@ where
         .route("/api/admin/settings", get(settings::<S>))
         .route("/api/admin/settings/update", post(update_settings::<S>))
         .route(
+            "/api/admin/settings/antigravity/profile",
+            get(antigravity_profile::<S>).post(update_antigravity_profile::<S>),
+        )
+        .route(
+            "/api/admin/settings/antigravity/profile/options",
+            get(antigravity_profile_options::<S>),
+        )
+        .route(
             "/api/admin/settings/client-downloads/codex-desktop/windows",
             get(codex_desktop_windows_downloads::<S>),
         )
@@ -299,6 +308,92 @@ where
             "/api/admin/settings/admin-api-key/regenerate",
             post(regenerate_admin_api_key::<S>),
         )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AntigravityProfileRequest {
+    configuration: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AntigravityProfileQuery {
+    #[serde(default)]
+    preview: bool,
+}
+
+fn antigravity_kind() -> Result<ProviderKind, AdminError> {
+    ProviderKind::new("antigravity").map_err(|_| AdminError::internal())
+}
+
+async fn antigravity_profile<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let profile = state
+        .admin_services()
+        .settings()
+        .client_profile(&antigravity_kind()?, None)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(profile),
+    ))
+}
+
+async fn antigravity_profile_options<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let options = state
+        .admin_services()
+        .settings()
+        .client_profile_options(&antigravity_kind()?)
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(options.into_inner()),
+    ))
+}
+
+async fn update_antigravity_profile<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AntigravityProfileQuery>,
+    AdminJson(request): AdminJson<AntigravityProfileRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let settings = state.admin_services().settings();
+    let provider = antigravity_kind()?;
+    let configuration = OpaqueProviderData::new(request.configuration);
+    let profile = if query.preview {
+        settings
+            .client_profile(&provider, Some(&configuration))
+            .await
+    } else {
+        settings
+            .replace_client_profile(
+                &provider,
+                &configuration,
+                &auth.context().mutation_context(),
+            )
+            .await
+    }
+    .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(profile),
+    ))
 }
 
 async fn codex_desktop_windows_downloads<S>(

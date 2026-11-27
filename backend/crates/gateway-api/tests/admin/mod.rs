@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use futures::future::BoxFuture;
 use gateway_admin::{
@@ -157,6 +158,11 @@ impl AdminTestFixture {
             )),
             Arc::new(UnusedProvider::new(
                 "xai",
+                Arc::clone(&provider_error),
+                Arc::clone(&stored_quota),
+            )),
+            Arc::new(UnusedProvider::new(
+                "antigravity",
                 Arc::clone(&provider_error),
                 Arc::clone(&stored_quota),
             )),
@@ -1367,15 +1373,28 @@ impl ProviderAdmin for UnusedProvider {
 
     async fn start_authorization(
         &self,
-        _: PendingAuthorizationMutation,
+        pending: PendingAuthorizationMutation,
     ) -> Result<AuthorizationStarted, ProviderAdminError> {
+        if self.kind.as_str() == "antigravity" {
+            assert_eq!(pending.provider_kind(), &self.kind);
+            return Ok(AuthorizationStarted {
+                flow_id: URL_SAFE_NO_PAD.encode([7_u8; 32]),
+                authorization_url: "https://oauth.example.test/authorize".to_owned(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            });
+        }
         Err(unsupported_provider())
     }
 
     async fn complete_authorization(
         &self,
-        _: CompleteAuthorization,
+        command: CompleteAuthorization,
     ) -> Result<PreparedAuthorizationCommit, ProviderAdminError> {
+        if self.kind.as_str() == "antigravity" {
+            assert_eq!(command.flow_id, URL_SAFE_NO_PAD.encode([7_u8; 32]));
+            return Err(ProviderAdminError::new(ProviderAdminErrorKind::Invalid)
+                .with_public_message("Antigravity fixture rejected the callback"));
+        }
         Err(unsupported_provider())
     }
 

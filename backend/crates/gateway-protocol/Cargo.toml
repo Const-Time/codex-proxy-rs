@@ -13,9 +13,11 @@ path = "tests/main.rs"
 
 [dependencies]
 httpdate = "1.0.3"
+sha2 = "0.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.18"
+url = "2.5.8"
 uuid = { version = "1.23.3", features = ["v4"] }
 
 [lints.rust]

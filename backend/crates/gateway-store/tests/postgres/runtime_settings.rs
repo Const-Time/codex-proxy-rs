@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use gateway_core::provider_ports::ProviderRuntimePolicyPort;
+use gateway_admin::model::{MutationActor, MutationContext};
+use gateway_core::{
+    account::OpaqueProviderData, provider_ports::ProviderRuntimePolicyPort, routing::ProviderKind,
+};
 use gateway_store::postgres::{
     PgRuntimeSettingsRepository, RuntimeSettingsRepository, RuntimeSettingsUpdate,
 };
+use serde_json::{Value, json};
 
 use super::TestDatabase;
 
@@ -36,6 +40,80 @@ pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettin
 fn runtime_settings_keep_account_rotation_global() {
     let settings = settings_with_margin(3_600);
     assert!(settings.validate().is_ok());
+}
+
+#[tokio::test]
+async fn client_profile_write_is_audited_and_read_by_provider_runtime_policy() {
+    let Some(redis_url) = crate::support::test_env("CPR_TEST_REDIS_URL") else {
+        return;
+    };
+    let Some(database) = TestDatabase::create("client_profile").await else {
+        return;
+    };
+    let mut database_url = url::Url::parse(
+        &crate::support::test_env("CPR_TEST_DATABASE_URL").expect("test database URL"),
+    )
+    .unwrap();
+    database_url
+        .query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={}", database.schema));
+    let connection = |mut url: url::Url| {
+        let password = url.password().expect("test password").to_owned();
+        url.set_password(None).unwrap();
+        json!({"url": url.as_str(), "password": password})
+    };
+    let mut config: gateway_store::StoreConfig = serde_json::from_value(json!({
+        "database": connection(database_url),
+        "redis": connection(url::Url::parse(&redis_url).unwrap()),
+    }))
+    .unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    config.resolve_and_validate(runtime.path()).unwrap();
+    let bundle = gateway_store::initialize(config).await.unwrap();
+    let settings = bundle.admin_ports().settings();
+    let policy = bundle.provider_ports().runtime_policy();
+    let provider = ProviderKind::new("antigravity").unwrap();
+    assert!(
+        policy
+            .load_client_profile(&provider)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let Value::Object(configuration) = json!({
+        "client": "cli", "platform": "linux", "arch": null,
+        "versionMode": "fixed", "clientVersion": "1.5.17"
+    }) else {
+        unreachable!();
+    };
+    let configuration = OpaqueProviderData::new(configuration);
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "client-profile-test".to_owned(),
+    };
+    let revision = settings
+        .replace_client_profile(&provider, configuration.clone(), &context)
+        .await
+        .unwrap();
+    PgRuntimeSettingsRepository::new(database.pool.clone())
+        .update_runtime_settings(settings_with_margin(3600))
+        .await
+        .unwrap();
+    assert_eq!(
+        policy.load_client_profile(&provider).await.unwrap(),
+        Some(configuration)
+    );
+    let audited_revision = sqlx::query_scalar::<_, i64>(
+        "select config_revision from admin_audit_events
+         where action = 'settings.client_profile.replace' and entity_ref = 'antigravity'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(u64::try_from(audited_revision).unwrap(), revision.get());
+    drop(bundle);
+    database.close().await;
 }
 
 #[tokio::test]

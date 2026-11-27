@@ -37,10 +37,40 @@ async fn model_catalogs_restore_grouped_documents_with_revision_plan_and_delete_
     let restored = repo.load_account_catalogs(&provider).await.unwrap();
     assert_eq!(restored.len(), 1, "identical payloads are transferred once");
     assert_eq!(restored[0].accounts.len(), 2);
+
+    let paused = &observations[0].account_id;
+    repo.set_provider_account_enabled(paused.as_str(), false)
+        .await
+        .unwrap();
+    let public = repo.load_account_catalogs(&provider).await.unwrap();
+    assert_eq!(public[0].accounts.len(), 1);
+    assert_eq!(public[0].accounts[0].account_id, observations[1].account_id);
+    let (observed, document) = repo
+        .load_diagnostic_account_catalog(&provider, paused)
+        .await
+        .unwrap()
+        .expect("paused account's current catalog");
+    assert_eq!(&observed.account_id, paused);
+    assert_eq!(observed.revision, observations[0].revision);
+    assert_eq!(observed.etag, observations[0].etag);
+    assert_eq!(&document[..], b"validated-provider-document");
+    assert!(
+        repo.load_diagnostic_account_catalog(&ProviderKind::new("xai").unwrap(), paused)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     let mut stale = observations[0].clone();
     stale.observed_at -= Duration::from_secs(60);
     assert!(!repo.save_account_catalog(&stale, b"older").await.unwrap());
     sqlx::query("update provider_accounts set credential_revision=credential_revision+1 where id='acct_catalog_a'").execute(&db.pool).await.unwrap();
+    assert!(
+        repo.load_diagnostic_account_catalog(&provider, paused)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         !repo
             .save_account_catalog(&observations[0], b"late")
@@ -57,6 +87,12 @@ async fn model_catalogs_restore_grouped_documents_with_revision_plan_and_delete_
         .execute(&db.pool)
         .await
         .unwrap();
+    assert!(
+        repo.load_diagnostic_account_catalog(&provider, &observations[1].account_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         repo.load_account_catalogs(&provider)
             .await

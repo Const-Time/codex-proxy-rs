@@ -1013,9 +1013,74 @@ async fn api_key_import_export_preserves_target_without_oauth_exchange() {
     assert_eq!(data.base_url, "https://relay.example/custom/v2");
     assert_eq!(data.api_key, "sk-test-only");
     assert_eq!(
+        data.protocol,
+        provider_openai::credential::ApiKeyProtocol::Responses
+    );
+    assert_eq!(
         data.transport,
         provider_openai::credential::ApiKeyTransport::Http
     );
+}
+
+#[tokio::test]
+async fn messages_api_key_export_retains_protocol_and_rejects_websocket() {
+    use gateway_core::account::LoadedCredential;
+    use provider_openai::credential::{
+        CodexCredentialAdmin, CodexCredentialData, ExportManagedCodexCredential,
+    };
+    let service = CodexCredentialAdminService::new(
+        Arc::new(UnusedRefresher),
+        Arc::new(TestLeaseCoordinator::default()),
+        runtime_policy(),
+    );
+    let mut input = serde_json::json!({
+        "provider": "openai", "authentication_kind": "api_key", "name": "messages",
+        "base_url": "https://relay.example/v1", "api_key": "fixture-key", "protocol": "messages",
+        "transport": "prefer_websocket",
+    });
+    assert!(
+        service
+            .prepare_import_document(input.clone())
+            .await
+            .is_err()
+    );
+    input["transport"] = serde_json::json!("http");
+    let account = service
+        .prepare_import_document(input)
+        .await
+        .unwrap()
+        .into_accounts()
+        .pop()
+        .unwrap();
+    let now = Utc::now();
+    let document = CodexCredentialAdmin
+        .format_cpr_export(vec![ExportManagedCodexCredential {
+            current: LoadedCredential {
+                account: account.account,
+                credential: account.credential,
+            },
+            added_at: now,
+            updated_at: now,
+        }])
+        .unwrap()
+        .into_json()
+        .unwrap();
+    let restored = service
+        .prepare_import_document(document)
+        .await
+        .unwrap()
+        .into_accounts()
+        .pop()
+        .unwrap();
+    let CodexCredentialData::ApiKey(data) =
+        CodexCredentialCodec::decode_complete(&restored.credential).unwrap()
+    else {
+        panic!("API credential")
+    };
+    let safe = serde_json::to_value(data.configuration()).unwrap();
+    assert_eq!(safe["protocol"], "messages");
+    assert_eq!(safe["transport"], "http");
+    assert!(safe.get("api_key").is_none());
 }
 
 #[tokio::test]

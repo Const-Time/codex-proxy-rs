@@ -57,6 +57,41 @@ impl PgProviderAccountRepository {
             .collect()
     }
 
+    pub(super) async fn load_diagnostic_model_catalog(
+        &self,
+        provider: &ProviderKind,
+        account: &CoreProviderAccountId,
+    ) -> Result<Option<(AccountCatalogObservation, Vec<u8>)>, CoreStoreError> {
+        let row = sqlx::query_as::<_, (i64, Option<String>, Option<String>, DateTime<Utc>, Vec<u8>)>(
+            "select c.credential_revision, c.plan_type, c.etag, c.observed_at, c.document
+             from provider_account_model_catalogs c join provider_accounts a on a.id = c.account_id
+             where a.id = $1 and a.provider_kind = $2 and a.credential_revision = c.credential_revision
+               and a.plan_type is not distinct from c.plan_type",
+        )
+        .bind(account.as_str())
+        .bind(provider.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        row.map(|(revision, plan, etag, observed_at, document)| {
+            let revision = u64::try_from(revision)
+                .ok()
+                .and_then(|revision| CoreCredentialRevision::new(revision).ok())
+                .ok_or_else(|| CoreStoreError::new(CoreStoreErrorKind::InvalidData))?;
+            Ok((
+                AccountCatalogObservation {
+                    account_id: account.clone(),
+                    revision,
+                    plan,
+                    etag,
+                    observed_at: observed_at.into(),
+                },
+                document,
+            ))
+        })
+        .transpose()
+    }
+
     pub(super) async fn save_model_catalog(
         &self,
         observation: &AccountCatalogObservation,

@@ -7,7 +7,7 @@ import { computed } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import { OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
+import { AntigravityIcon, OpenaiIcon, XaiIcon } from '@/components/icons/BrandIcons'
 import { accountModelAccessError } from '../../utils/modelAccess'
 import { parseAccountSchedulingForm } from '../../utils/schedulingForm'
 import AccountApiKeyFields from '../AccountApiKeyFields.vue'
@@ -74,6 +74,7 @@ function continueToImport() {
       <Settings2 v-if="view.configuring" class="text-cp-text" :size="20" aria-hidden="true" />
       <LayoutGrid v-else-if="view.isBatch" class="text-cp-text" :size="20" aria-hidden="true" />
       <XaiIcon v-else-if="view.isXai" class="text-cp-text" :width="20" :height="20" aria-hidden="true" />
+      <AntigravityIcon v-else-if="view.isAntigravity" class="text-cp-text" :width="20" :height="20" aria-hidden="true" />
       <OpenaiIcon v-else class="text-cp-text" :width="20" :height="20" aria-hidden="true" />
     </template>
 
@@ -91,7 +92,7 @@ function continueToImport() {
       </p>
       <template v-if="!view.configuring">
         <BaseSegmented
-          v-if="!view.isBatch"
+          v-if="!view.isBatch && view.modeOptions.length > 1"
           v-model="mode"
           :label="reauthorizing ? '重新授权方式' : '账号添加方式'"
           :options="view.modeOptions"
@@ -102,8 +103,8 @@ function continueToImport() {
           v-if="mode === 'oauth'"
           v-model="form.oauthCallback"
           :auth-url="view.oauth.authUrl"
-          :panel-title="`${view.isXai ? 'xAI' : 'OpenAI'} OAuth ${reauthorizing ? '重新授权' : '授权'}`"
-          :panel-description="view.isXai ? '生成并打开授权链接、完成浏览器授权、粘贴回调地址或授权码' : '生成并打开授权链接、完成浏览器授权、粘贴回调地址'"
+          :panel-title="view.oauth.panelTitle"
+          :panel-description="view.oauth.panelDescription"
           :loading="oauthLoading"
           :callback-label="view.oauth.callbackLabel"
           :callback-placeholder="view.oauth.callbackPlaceholder"

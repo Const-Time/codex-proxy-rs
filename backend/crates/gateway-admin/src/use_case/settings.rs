@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use gateway_core::account::OpaqueProviderData;
 use gateway_core::policy::CodexClientVersion;
+use gateway_core::routing::ProviderKind;
 use gateway_core::runtime::SnapshotControl;
 use rand_core::{OsRng, RngCore as _};
 
@@ -11,14 +13,14 @@ use crate::{
     model::{
         AdminError, MutationContext,
         settings::{
-            AdminApiKey, AdminApiKeyMutation, RegeneratedAdminApiKey, ReplaceRuntimeSettings,
-            RuntimeSettings,
+            AdminApiKey, AdminApiKeyMutation, ProviderRequestProfile, RegeneratedAdminApiKey,
+            ReplaceRuntimeSettings, RuntimeSettings,
         },
     },
     ports::store::SettingsStore,
 };
 
-use super::{map_store_error, publish_committed};
+use super::{map_provider_error, map_store_error, publish_committed};
 
 /// API 消费的 Runtime settings 管理服务。
 #[async_trait]
@@ -44,6 +46,21 @@ pub trait SettingsService: Send + Sync {
         command: crate::model::pricing::UpdatePricing,
     ) -> Result<(), AdminError>;
     async fn load(&self) -> Result<RuntimeSettings, AdminError>;
+    fn client_profile_options(
+        &self,
+        provider: &ProviderKind,
+    ) -> Result<OpaqueProviderData, AdminError>;
+    async fn client_profile(
+        &self,
+        provider: &ProviderKind,
+        configuration: Option<&OpaqueProviderData>,
+    ) -> Result<ProviderRequestProfile, AdminError>;
+    async fn replace_client_profile(
+        &self,
+        provider: &ProviderKind,
+        configuration: &OpaqueProviderData,
+        context: &MutationContext,
+    ) -> Result<ProviderRequestProfile, AdminError>;
     async fn replace(
         &self,
         context: &MutationContext,
@@ -267,6 +284,49 @@ impl SettingsService for DefaultSettingsService {
             .load_runtime_settings()
             .await
             .map_err(|error| map_store_error(error, "runtime settings"))
+    }
+
+    fn client_profile_options(
+        &self,
+        provider: &ProviderKind,
+    ) -> Result<OpaqueProviderData, AdminError> {
+        self.providers
+            .require(provider)
+            .and_then(|provider| provider.client_profile_options())
+            .map_err(|error| map_provider_error(error, "provider client profile options"))
+    }
+
+    async fn client_profile(
+        &self,
+        provider: &ProviderKind,
+        configuration: Option<&OpaqueProviderData>,
+    ) -> Result<ProviderRequestProfile, AdminError> {
+        self.providers
+            .require(provider)
+            .map_err(|error| map_provider_error(error, "provider client profile"))?
+            .client_profile(configuration)
+            .await
+            .map_err(|error| map_provider_error(error, "provider client profile"))
+    }
+
+    async fn replace_client_profile(
+        &self,
+        provider: &ProviderKind,
+        configuration: &OpaqueProviderData,
+        context: &MutationContext,
+    ) -> Result<ProviderRequestProfile, AdminError> {
+        let profile = self.client_profile(provider, Some(configuration)).await?;
+        let revision = self
+            .store
+            .replace_client_profile(
+                provider,
+                OpaqueProviderData::new(profile.configuration.clone()),
+                context,
+            )
+            .await
+            .map_err(|error| map_store_error(error, "provider client profile"))?;
+        publish_committed(self.snapshot.as_ref(), revision).await?;
+        Ok(profile)
     }
 
     async fn replace(

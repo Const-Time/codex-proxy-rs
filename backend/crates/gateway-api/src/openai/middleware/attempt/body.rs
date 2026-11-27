@@ -1,10 +1,12 @@
 //! Encode only events already observed by the owning Core attempt.
-use crate::openai::responses::OpenAiResponsesEncoder;
+use crate::openai::responses::{
+    OpenAiResponsesEncoder, response_connection_options, response_header_is_forwardable,
+};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::{
     engine::{attempt_middleware::AttemptSource, middleware::*},
-    event::ProviderEvent,
+    event::{GatewayEvent, ProviderEvent},
 };
 use std::collections::VecDeque;
 const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
@@ -47,9 +49,11 @@ impl SourceBody {
                     .status_code()
                     .filter(|status| (200..300).contains(status))
                     .unwrap_or(status);
-                headers = observation
-                    .client_headers()
+                let response_headers = observation.client_headers();
+                let options = response_connection_options(response_headers);
+                headers = response_headers
                     .iter()
+                    .filter(|header| response_header_is_forwardable(header.name(), &options))
                     .map(|h| MiddlewareHeader::new(h.name(), h.value().clone()))
                     .collect();
             }
@@ -68,7 +72,7 @@ impl SourceBody {
                     .and_then(|wire| wire.raw_json_body().or_else(|| wire.raw_body_chunk()))
                 {
                     size = size.saturating_add(raw.len());
-                } else if !format.raw_json() {
+                } else if !format.raw_json() && format.protocol() == "openai" {
                     for frame in body.encoder.push_sse(&event) {
                         size = size.saturating_add(frame.len());
                     }
@@ -80,11 +84,11 @@ impl SourceBody {
             }
         }
         if !streaming {
-            let raw = crate::openai::endpoint::raw_json_body(&events)
+            let raw = crate::openai::endpoint::protocol_json_body(&events, format.protocol())
                 .map_err(|_| MiddlewareError::InvalidState)?;
             let encoded = if let Some(raw) = raw {
                 raw
-            } else if format.raw_json() {
+            } else if format.raw_json() || format.protocol() != "openai" {
                 return Err(MiddlewareError::InvalidState);
             } else {
                 Bytes::from(
@@ -116,7 +120,7 @@ impl SourceBody {
             );
         }
         Ok(
-            MiddlewareResponse::new("openai".into(), status, headers, Box::new(body))
+            MiddlewareResponse::new(format.protocol().into(), status, headers, Box::new(body))
                 .with_provider_metadata(metadata),
         )
     }
@@ -127,8 +131,12 @@ impl SourceBody {
                 .into_iter()
                 .map(Bytes::from)
                 .collect()
-        } else {
+        } else if self.format.protocol() == "openai" {
             self.encoder.push_sse(&event)
+        } else {
+            super::super::body::native_sse_payload(&event, self.format.protocol())?
+                .into_iter()
+                .collect()
         };
         let wire_framing = if self.format.websocket() {
             MiddlewareFraming::JsonDocument
@@ -138,7 +146,14 @@ impl SourceBody {
         if frames.iter().map(Bytes::len).sum::<usize>() > MAX_DOCUMENT_BYTES {
             return Err(MiddlewareError::InvalidState);
         }
-        let terminal = self.encoder.is_completed() || self.encoder.has_wire_failure();
+        let terminal = if self.format.protocol() == "openai" {
+            self.encoder.is_completed() || self.encoder.has_wire_failure()
+        } else {
+            event
+                .canonical_facts()
+                .iter()
+                .any(|fact| matches!(fact, GatewayEvent::Completed(_)))
+        };
         let last = frames.pop().unwrap_or_default();
         for frame in frames {
             self.pending

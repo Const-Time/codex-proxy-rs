@@ -142,7 +142,7 @@ impl ProviderModelCapabilities {
         self
     }
 
-    /// 声明发现此模型的账号；仅用于目录可见性，不作为推理能力白名单。
+    /// 声明发现此模型的账号，用于目录可见性和固定账号诊断。
     #[must_use]
     pub fn with_catalog_accounts(mut self, accounts: BTreeSet<ProviderAccountId>) -> Self {
         self.catalog_accounts = Some(accounts);

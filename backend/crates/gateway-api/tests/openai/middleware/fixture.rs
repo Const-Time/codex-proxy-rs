@@ -124,10 +124,15 @@ pub(crate) enum Mode {
     Head,
     ShortCircuit,
     ShortCircuitRaw,
+    ShortCircuitChatRateLimit,
     ResponseRewrite,
     ExpandInvalid,
     MessageRewrite,
     MessageIdentity,
+    InspectChat,
+    InspectChatError,
+    MessagesPrelude(&'static [u8]),
+    MessagesExpandPrelude(&'static [&'static [u8]]),
     WaitBeforeNext,
     WaitAfterNext,
     ChangeContinuation,
@@ -487,6 +492,12 @@ impl PluginProcess for Plugin {
         let websocket = context.transport == ClientTransport::WebSocket;
         let attempt = context.mount == MiddlewareMount::Attempt;
         self.seen.lock().unwrap().push(context);
+        assert!(
+            request
+                .headers()
+                .iter()
+                .all(|h| h.name() != "x-goog-api-key")
+        );
         *self.headers.lock().unwrap() = request.headers().iter().map(|h| h.name().into()).collect();
         if matches!(self.mode, Mode::WaitBeforeNext) {
             return futures::future::pending().await;
@@ -529,6 +540,18 @@ impl PluginProcess for Plugin {
                 "model-b"
             });
         }
+        if !attempt && matches!(self.mode, Mode::ShortCircuitChatRateLimit) {
+            return Ok(MiddlewareResponse::new(
+                "chat_completions".into(),
+                429,
+                vec![],
+                Box::new(attempt::Synthetic(Some(MiddlewareFrame::new(
+                    Bytes::from_static(br#"{"resets_in_seconds":29,"error":{"message":"plugin rate limit"},"secret":"private-fixture"}"#),
+                    MiddlewareFraming::JsonDocument,
+                    true,
+                )))),
+            ));
+        }
         if matches!(self.mode, Mode::ShortCircuit | Mode::ShortCircuitRaw) {
             return Ok(MiddlewareResponse::new(
                 "openai".into(),
@@ -551,12 +574,17 @@ impl PluginProcess for Plugin {
         {
             body["previous_response_id"] = json!("resp_other");
         }
-        body["input"] = json!("changed input");
+        if body.get("messages").is_some() {
+            body["messages"] = json!([{"role":"user","content":"changed input"}]);
+        } else {
+            body["input"] = json!("changed input");
+        }
         if matches!(self.mode, Mode::Transport) {
             body["stream"] = json!(!websocket);
         }
         for (name, value) in [
             ("authorization", "Bearer forged"),
+            ("x-goog-api-key", "fixture-injected"),
             ("connection", "x-plugin-hop"),
             ("x-plugin-hop", "hidden"),
             ("chatgpt-account-id", "forged-account"),
@@ -589,13 +617,42 @@ impl PluginProcess for Plugin {
         } else {
             None
         };
+        let protocol = original.protocol().to_owned();
         let request = original.replace_parts(
-            "openai".into(),
+            protocol,
             headers,
             Bytes::from(body.to_string()),
             declaration,
         )?;
         let response = next.run(request).await?;
+        if let Some(messages) = match self.mode {
+            Mode::MessagesPrelude(replacement) => Some(Rewrite::MessagesPrelude(replacement)),
+            Mode::MessagesExpandPrelude(preludes) => Some(Rewrite::MessagesExpandPrelude(preludes)),
+            _ => None,
+        } {
+            assert_eq!(response.protocol(), "anthropic");
+            return Ok(rewrite(response, messages));
+        }
+        if !attempt && matches!(self.mode, Mode::InspectChat) {
+            assert_eq!(response.protocol(), "chat_completions");
+            return Ok(rewrite(response, Rewrite::InspectChat));
+        }
+        if matches!(self.mode, Mode::InspectChatError) {
+            assert!(
+                response
+                    .headers()
+                    .iter()
+                    .all(|header| header.name() != "x-goog-api-key")
+            );
+            if attempt {
+                return Ok(rewrite(response, Rewrite::ChatAttemptError));
+            }
+            assert_eq!(response.status_code(), 429);
+            assert!(response.headers().iter().any(|header| {
+                header.name() == "retry-after" && header.value().as_ref() == b"27"
+            }));
+            return Ok(rewrite(response, Rewrite::InspectChatError));
+        }
         if matches!(self.mode, Mode::WaitAfterNext) {
             let _hold_response = response;
             return futures::future::pending().await;
@@ -656,6 +713,9 @@ pub(crate) struct Effects {
     pub(crate) steering: AtomicBool,
     pub(crate) state: Mutex<Option<gateway_core::operation::ProviderSessionState>>,
     pub(crate) raw_response: Mutex<Option<Bytes>>,
+    pub(crate) private_reasoning: AtomicBool,
+    pub(crate) chat_attempt_error: AtomicBool,
+    pub(crate) upstream_http_error: Mutex<Option<ProviderError>>,
 }
 impl ClientAdmissionPort for Effects {
     fn maintain(
@@ -855,6 +915,7 @@ impl Provider for Effects {
             .to_string();
         assert!(
             !opaque.contains("authorization")
+                && !opaque.contains("x-goog-api-key")
                 && !opaque.contains("x-plugin-hop")
                 && !opaque.contains("chatgpt-account-id"),
             "{opaque}"
@@ -867,7 +928,20 @@ impl Provider for Effects {
                 .unwrap()
                 .as_str()
                 .into(),
-            payload.body()["input"].as_str().unwrap().into(),
+            payload
+                .body()
+                .get("input")
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    payload
+                        .body()
+                        .get("messages")?
+                        .get(0)?
+                        .get("content")?
+                        .as_str()
+                })
+                .unwrap()
+                .into(),
             context.deadline(),
         ));
         use gateway_core::account::*;
@@ -962,6 +1036,54 @@ impl Provider for Effects {
             account,
             UpstreamTransport::new("http").unwrap(),
         );
+        let upstream_http_error = self.upstream_http_error.lock().unwrap().take();
+        if let Some(error) = upstream_http_error {
+            return Ok(ProviderStream::new(
+                meta,
+                futures::stream::iter([Err(error)]),
+                (),
+            ));
+        }
+        if payload.protocol() == "anthropic" {
+            let model = request.candidate().upstream_model().unwrap().as_str();
+            let response = ResponseMeta::new("msg_fixture", model);
+            let start = ProtocolWireEvent::json(
+                "anthropic",
+                Some("message_start".into()),
+                json!({"type":"message_start","message":{"id":"msg_fixture","model":model}}),
+            )
+            .unwrap();
+            let stop = ProtocolWireEvent::json(
+                "anthropic",
+                Some("message_stop".into()),
+                json!({"type":"message_stop"}),
+            )
+            .unwrap();
+            return Ok(ProviderStream::new(
+                meta,
+                futures::stream::iter([
+                    Ok(ProviderEvent::observation(
+                        gateway_core::event::ProviderResponseObservation::new(
+                            UpstreamTransport::new("http").unwrap(),
+                        ),
+                    )),
+                    Ok(ProviderEvent::canonical_with_wire(
+                        vec![
+                            GatewayEvent::Started(response.clone()),
+                            GatewayEvent::ProviderCost(
+                                ProviderReportedCost::from_usd_ticks(25).unwrap(),
+                            ),
+                        ],
+                        start,
+                    )),
+                    Ok(ProviderEvent::canonical_with_wire(
+                        vec![GatewayEvent::Completed(response)],
+                        stop,
+                    )),
+                ]),
+                (),
+            ));
+        }
         if self.retry.load(Ordering::SeqCst)
             && meta.provider_account_id().as_str() == "acct_api_test"
         {
@@ -982,20 +1104,73 @@ impl Provider for Effects {
                 context.response_control().unwrap().clone(),
             );
         }
-        let created = ProviderEvent::canonical_with_wire(
-            vec![GatewayEvent::Started(ResponseMeta::new(
-                "resp_original",
-                "model-b",
-            ))],
-            event("response.created").into_parts().1.unwrap(),
-        );
+        let started = GatewayEvent::Started(ResponseMeta::new("resp_original", "model-b"));
+        let chat_attempt_error = self.chat_attempt_error.load(Ordering::SeqCst);
+        let created = if chat_attempt_error {
+            use gateway_core::event::{ProviderResponseHeader, ProviderResponseObservation};
+            let mut event = ProviderEvent::canonical(started);
+            event.attach_observation(
+                ProviderResponseObservation::new(UpstreamTransport::new("http").unwrap())
+                    .with_client_headers(vec![
+                        ProviderResponseHeader::new(
+                            "x-goog-api-key",
+                            Bytes::from_static(b"fixture-upstream-key"),
+                        ),
+                        ProviderResponseHeader::new(
+                            "x-fixture-response",
+                            Bytes::from_static(b"preserved"),
+                        ),
+                    ]),
+            );
+            event
+        } else {
+            ProviderEvent::canonical_with_wire(
+                vec![started],
+                event("response.created").into_parts().1.unwrap(),
+            )
+        };
+        let completed_wire = if chat_attempt_error {
+            let Operation::Generate(generate) = request.operation() else {
+                unreachable!("the Chat attempt fixture only supports generation");
+            };
+            if generate.protocol_payload().body()["stream"] == true {
+                gateway_core::event::ProtocolWireEvent::json(
+                    "chat_completions",
+                    None,
+                    json!({"object":"chat.completion.chunk"}),
+                )
+                .unwrap()
+            } else {
+                gateway_core::event::ProtocolWireEvent::raw_json(
+                    "chat_completions",
+                    Bytes::from_static(br#"{"object":"chat.completion"}"#),
+                )
+                .unwrap()
+            }
+        } else if self.private_reasoning.load(Ordering::SeqCst) {
+            gateway_core::event::ProtocolWireEvent::json("openai", Some("response.completed".into()), json!({
+                "type":"response.completed", "response": {"id":"resp_original", "status":"completed",
+                    "output":[{"type":"reasoning","id":"rs_private","summary":[{"type":"summary_text","text":"private-chat-reasoning"}],"encrypted_content":"opaque-reasoning"}]
+                }
+            })).unwrap()
+        } else {
+            event("response.completed").into_parts().1.unwrap()
+        };
         let mut completed = ProviderEvent::canonical_with_wire(
             vec![
                 GatewayEvent::ProviderCost(ProviderReportedCost::from_usd_ticks(25).unwrap()),
                 GatewayEvent::Completed(ResponseMeta::new("resp_original", "model-b")),
             ],
-            event("response.completed").into_parts().1.unwrap(),
+            completed_wire,
         );
+        if self.private_reasoning.load(Ordering::SeqCst) {
+            completed = completed.with_fact(GatewayEvent::ReasoningDelta(
+                gateway_core::event::ReasoningDelta {
+                    content_index: 0,
+                    text: "private-chat-reasoning".into(),
+                },
+            ));
+        }
         if let Some(state) = self.state.lock().unwrap().clone() {
             completed.attach_session_update(state);
         }
@@ -1146,22 +1321,31 @@ impl Fixture {
         } else {
             vec![]
         };
+        let capabilities = features
+            .iter()
+            .copied()
+            .chain([gateway_core::operation::Feature::NativeContinuation])
+            .fold(
+                gateway_core::routing::ModelCapabilities::new(
+                    [gateway_core::operation::OperationKind::Generate].into(),
+                    Some(16000),
+                ),
+                |caps, feature| {
+                    caps.with_feature(feature, gateway_core::routing::SupportLevel::Native)
+                },
+            );
+        let capabilities = if matches!(
+            mode,
+            Mode::MessagesPrelude(_) | Mode::MessagesExpandPrelude(_)
+        ) {
+            capabilities.with_native_generation_protocols(["openai", "anthropic"])
+        } else {
+            capabilities
+        };
         let snapshots = RuntimeSnapshotHandle::new(snapshot_with_capabilities_and_accounts(
             "sk_middleware",
             "openai",
-            features
-                .iter()
-                .copied()
-                .chain([gateway_core::operation::Feature::NativeContinuation])
-                .fold(
-                    gateway_core::routing::ModelCapabilities::new(
-                        [gateway_core::operation::OperationKind::Generate].into(),
-                        Some(16000),
-                    ),
-                    |caps, feature| {
-                        caps.with_feature(feature, gateway_core::routing::SupportLevel::Native)
-                    },
-                ),
+            capabilities,
             if retry {
                 &["acct_api_test", "acct_api_retry"]
             } else {

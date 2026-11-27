@@ -63,6 +63,8 @@ pub enum RoutingError {
     /// 动态 Provider/model 标识无法构造。
     #[error("routing identifier is invalid")]
     InvalidIdentifier,
+    #[error("the grouped model requires a supported thinking level")]
+    InvalidReasoningVariant,
     /// 配置 revision 必须为正数。
     #[error("config revision must be greater than zero")]
     InvalidRevision,

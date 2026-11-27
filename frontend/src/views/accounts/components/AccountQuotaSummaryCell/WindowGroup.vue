@@ -2,6 +2,7 @@
 import type { AccountQuotaWindow } from '../../constants'
 
 import { computed } from 'vue'
+import { quotaWindowDisplayLabel } from '../../utils/quotaPresentation'
 import { quotaWindowPresentation } from '../AccountUsageWindow/presenter'
 
 const props = withDefaults(defineProps<{
@@ -14,7 +15,7 @@ const props = withDefaults(defineProps<{
 
 const windowItems = computed(() => props.windows.map(window => ({
   key: window.key,
-  labelTooltip: window.labelDisplay,
+  labelTooltip: quotaWindowDisplayLabel(window, false),
   usedPercent: window.usedPercent,
   usedPercentDisplay: window.usedPercentDisplay,
   presentation: quotaWindowPresentation(window, '2px'),

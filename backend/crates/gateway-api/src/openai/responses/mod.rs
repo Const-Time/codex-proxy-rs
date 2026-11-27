@@ -56,6 +56,7 @@ pub(super) fn response_header_is_forwardable(name: &str, connection_options: &[S
             | "content-encoding"
             | "authorization"
             | "x-api-key"
+            | "x-goog-api-key"
             | "www-authenticate"
             | "authentication-info"
             | "proxy-authenticate"

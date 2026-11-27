@@ -4,7 +4,10 @@ use std::{borrow::Cow, fmt, net::IpAddr};
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload, ProviderSessionState};
+use gateway_core::operation::{
+    GenerateRequest, Operation, ProtocolPayload, ProviderSessionState, RawJsonPayload,
+    TokenCountRequest,
+};
 use gateway_protocol::openai::{
     X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, X_OPENAI_MEMGEN_REQUEST_HEADER,
     is_transport_managed_request_header,
@@ -271,6 +274,73 @@ pub struct DecodedResponsesRequest {
 }
 
 impl DecodedResponsesRequest {
+    pub(in crate::openai) fn for_protocol(
+        protocol: &'static str,
+        body: Map<String, Value>,
+        headers: &HeaderMap,
+        requested_model: String,
+        stream: bool,
+    ) -> Result<Self, RequestDecodeError> {
+        let mut context = OpenAiRequestHeaders::from_headers(headers).protocol_context(None, None);
+        context.insert("stream".into(), Value::Bool(stream));
+        context.insert(
+            "requested_model".into(),
+            Value::String(requested_model.clone()),
+        );
+        let payload = ProtocolPayload::json_object(protocol, body)
+            .map_err(|_| RequestDecodeError::CanonicalContract {
+                field: "request".into(),
+            })?
+            .with_context(context);
+        Ok(Self {
+            operation: Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+            metadata: ResponsesRequestMetadata {
+                requested_model,
+                stream,
+                store: false,
+                continuation: ContinuationIntent::None,
+                client_ip: None,
+                user_agent: None,
+            },
+        })
+    }
+
+    pub(in crate::openai) fn protocol(&self) -> &str {
+        match &self.operation {
+            Operation::Generate(generate) => generate.protocol_payload().protocol(),
+            Operation::CountTokens(count) => count.payload().protocol(),
+            _ => OPENAI_PROTOCOL,
+        }
+    }
+
+    pub(in crate::openai) fn for_count(
+        protocol: &'static str,
+        body: &[u8],
+        headers: &HeaderMap,
+        requested_model: String,
+    ) -> Result<Self, RequestDecodeError> {
+        let mut context = OpenAiRequestHeaders::from_headers(headers).protocol_context(None, None);
+        context.insert(
+            "requested_model".into(),
+            Value::String(requested_model.clone()),
+        );
+        let payload = RawJsonPayload::new(protocol, bytes::Bytes::copy_from_slice(body))
+            .map_err(|_| RequestDecodeError::CanonicalContract {
+                field: "request".into(),
+            })?
+            .with_context(context);
+        Ok(Self {
+            operation: Operation::CountTokens(TokenCountRequest::from_raw_json(payload)),
+            metadata: ResponsesRequestMetadata {
+                requested_model,
+                stream: false,
+                store: false,
+                continuation: ContinuationIntent::None,
+                client_ip: None,
+                user_agent: None,
+            },
+        })
+    }
     pub(in crate::openai) fn with_middleware_capabilities(
         mut self,
         request: &gateway_core::engine::middleware::MiddlewareRequest,
@@ -585,6 +655,7 @@ fn passthrough_header_name(name: &str, connection_headers: &[String]) -> bool {
         // 下游鉴权和账号 cookie 绝不能成为上游账号身份。
         "authorization"
             | "x-api-key"
+            | "x-goog-api-key"
             // Codex 的服务端托管认证标记只用于客户端能力判断，不代表上游身份。
             | "x-openai-actor-authorization"
             | "cookie"

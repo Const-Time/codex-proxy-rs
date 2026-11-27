@@ -29,6 +29,20 @@ impl AttemptMiddleware for RawAttempt {
                 .freeze(context)
                 .map_err(|_| MiddlewareError::Fault)?;
             let payload = super::super::raw::payload(original.operation())?;
+            let format = match payload.protocol() {
+                "openai" => super::super::WireFormat::RawJson,
+                gateway_protocol::anthropic::ANTHROPIC_PROTOCOL => {
+                    super::super::WireFormat::Generation {
+                        protocol: gateway_protocol::anthropic::ANTHROPIC_PROTOCOL,
+                        streaming: false,
+                    }
+                }
+                gateway_protocol::genai::GENAI_PROTOCOL => super::super::WireFormat::Generation {
+                    protocol: gateway_protocol::genai::GENAI_PROTOCOL,
+                    streaming: false,
+                },
+                _ => return Err(MiddlewareError::InvalidState),
+            };
             let headers = super::super::raw::context_headers(payload)?;
             let request = super::super::raw::request(original.operation(), &headers)?;
             let request = match attempt.settings() {
@@ -43,17 +57,10 @@ impl AttemptMiddleware for RawAttempt {
                 gateway_core::middleware::compose(vec![], move |request: MiddlewareRequest| {
                     Box::pin(async move {
                         let operation = super::super::raw::rewrite(original.operation(), &request)?;
-                        body::SourceBody::response(
-                            next.run(operation).await?,
-                            super::super::WireFormat::RawJson,
-                        )
-                        .await
+                        body::SourceBody::response(next.run(operation).await?, format).await
                     })
                 });
-            output::decode(
-                plan.run(request, terminal).await?,
-                super::super::WireFormat::RawJson,
-            )
+            output::decode(plan.run(request, terminal).await?, format)
         })
     }
 }

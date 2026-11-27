@@ -42,9 +42,15 @@ const priceMode = computed({
   set: value => toggleBand(value === 'custom'),
 })
 const bandOptions = computed(() => bands
-  .filter(band => props.row?.base.bands.image
-    ? ['standard', 'image'].includes(band.value)
-    : props.provider !== 'xai' || !['flex', 'long_flex', 'ultrafast', 'long_ultrafast', 'image'].includes(band.value))
+  .filter((band) => {
+    if (props.row?.base.bands.image)
+      return ['standard', 'image'].includes(band.value)
+    if (props.provider === 'xai')
+      return !['flex', 'long_flex', 'ultrafast', 'long_ultrafast', 'image'].includes(band.value)
+    if (props.provider === 'antigravity')
+      return ['standard', 'long_standard', 'image'].includes(band.value)
+    return true
+  })
   .map(band => ({ ...band, label: band.value === 'standard' && props.row?.base.bands.image ? '文本 Token' : band.label })))
 
 watch(open, (value) => {

@@ -19,9 +19,10 @@ test('OpenAI entries split independently while preserving envelope and proxy ref
   assert.equal(original.document.data.accounts.length, 3)
 })
 
-test('single OpenAI and xAI documents keep their provider contract', () => {
+test('single OpenAI, xAI and Antigravity documents keep their provider contract', () => {
   for (const entry of [
     { provider: 'openai' as const, document: { access_token: 'fixture' } },
     { provider: 'xai' as const, document: { accounts: [{ refresh_token: 'fixture' }, { refresh_token: 'fixture' }] } },
+    { provider: 'antigravity' as const, document: { provider: 'antigravity', version: 1, accounts: [{ refreshToken: 'fixture' }] } },
   ]) assert.deepEqual(splitAccountDocument(entry), [entry])
 })

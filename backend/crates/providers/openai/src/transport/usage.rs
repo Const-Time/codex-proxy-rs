@@ -539,7 +539,7 @@ pub fn openai_billing_breakdown(
     service_tier: Option<&str>,
 ) -> Option<CalculatedCostBreakdown> {
     openai_billing_breakdown_with_context(
-        model,
+        model_pricing(model),
         usage,
         service_tier,
         usage.input_tokens > LONG_CONTEXT_THRESHOLD,
@@ -556,7 +556,7 @@ pub fn openai_billing_breakdown_with_override(
     pricing: Option<&gateway_core::metering::ModelPriceOverride>,
 ) -> Option<CalculatedCostBreakdown> {
     openai_billing_breakdown_with_context(
-        model,
+        model_pricing(model),
         usage,
         service_tier,
         usage.input_tokens > LONG_CONTEXT_THRESHOLD,
@@ -564,8 +564,15 @@ pub fn openai_billing_breakdown_with_override(
     )
 }
 
+pub(crate) fn configured_token_billing_breakdown(
+    usage: OpenAiBillingUsage,
+    pricing: &gateway_core::metering::ModelPriceOverride,
+) -> Option<CalculatedCostBreakdown> {
+    openai_billing_breakdown_with_context(None, usage, None, false, Some(pricing))
+}
+
 fn openai_billing_breakdown_with_context(
-    model: &str,
+    pricing: Option<ModelPricing>,
     usage: OpenAiBillingUsage,
     service_tier: Option<&str>,
     long_context: bool,
@@ -579,7 +586,6 @@ fn openai_billing_breakdown_with_context(
     }
     let tool_ticks = web_search_amount_ticks(usage)?
         .checked_add(u128::from(usage.file_search_calls).checked_mul(FILE_SEARCH_CALL_TICKS)?)?;
-    let pricing = model_pricing(model);
     let normalized_tier = normalize_service_tier(service_tier);
     let tier = pricing_tier(normalized_tier.as_deref())?;
     let standard_rates = effective_rates(pricing, custom, PricingTier::Standard, long_context)?;

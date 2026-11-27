@@ -81,6 +81,7 @@ pub struct SseEventDecoder {
     opaque_frame: bool,
     /// 只有整个 SSE 流的第一条物理行允许携带 UTF-8 BOM。
     stream_start: bool,
+    strict: bool,
 }
 
 impl Default for SseEventDecoder {
@@ -90,16 +91,37 @@ impl Default for SseEventDecoder {
             scanned: 0,
             opaque_frame: false,
             stream_start: true,
+            strict: false,
         }
     }
 }
 
 impl SseEventDecoder {
+    /// Decode native SSE without accepting OpenAI's compatibility syntax.
+    pub fn strict() -> Self {
+        Self {
+            strict: true,
+            ..Self::default()
+        }
+    }
+
+    fn frame_separator(&self, bytes: &[u8]) -> Option<(usize, usize)> {
+        if self.strict {
+            strict_frame_separator(bytes)
+        } else {
+            sse_frame_separator_bytes(bytes)
+        }
+    }
+
+    fn parse_frame(&self, text: &str) -> Result<Vec<SseEvent>, SseError> {
+        parse_events(text, self.stream_start, !self.strict)
+    }
+
     /// 返回从 `consumed` 起的下一个完整帧结束位置（含分隔符），并推进扫描边界。
     fn next_frame_end(&mut self, consumed: usize) -> Option<usize> {
         // `\r\n\r\n` 分隔符可能跨 chunk 边界，扫描起点回退 3 字节。
         let from = self.scanned.saturating_sub(3).max(consumed);
-        match sse_frame_separator_bytes(&self.pending[from..]) {
+        match self.frame_separator(&self.pending[from..]) {
             Some((position, separator_len)) => {
                 let end = from + position + separator_len;
                 self.scanned = end;
@@ -128,7 +150,7 @@ impl SseEventDecoder {
         while let Some(end) = self.next_frame_end(consumed) {
             let frame = std::str::from_utf8(&self.pending[consumed..end])
                 .map_err(|error| SseError::ParseError(error.to_string()))?;
-            events.extend(parse_sse_events_inner(frame, self.stream_start)?);
+            events.extend(self.parse_frame(frame)?);
             self.stream_start = false;
             consumed = end;
         }
@@ -163,7 +185,7 @@ impl SseEventDecoder {
             } else {
                 std::str::from_utf8(&raw)
                     .ok()
-                    .and_then(|frame| parse_sse_events_inner(frame, self.stream_start).ok())
+                    .and_then(|frame| self.parse_frame(frame).ok())
                     .unwrap_or_default()
             };
             self.stream_start = false;
@@ -188,7 +210,7 @@ impl SseEventDecoder {
         let pending = std::mem::take(&mut self.pending);
         let frame = std::str::from_utf8(&pending)
             .map_err(|error| SseError::ParseError(error.to_string()))?;
-        let events = parse_sse_events_inner(frame, self.stream_start)?;
+        let events = self.parse_frame(frame)?;
         self.stream_start = false;
         Ok(events)
     }
@@ -208,7 +230,7 @@ impl SseEventDecoder {
         } else {
             std::str::from_utf8(&raw)
                 .ok()
-                .and_then(|frame| parse_sse_events_inner(frame, self.stream_start).ok())
+                .and_then(|frame| self.parse_frame(frame).ok())
                 .unwrap_or_default()
         };
         self.stream_start = false;
@@ -218,7 +240,7 @@ impl SseEventDecoder {
 
     /// 继续透明交付一个已超出观测预算的帧，并在分隔符后恢复普通解析。
     fn finish_opaque_frame(&mut self, frames: &mut Vec<SseFrame>) -> bool {
-        let Some((position, separator_len)) = sse_frame_separator_bytes(&self.pending) else {
+        let Some((position, separator_len)) = self.frame_separator(&self.pending) else {
             return false;
         };
         let end = position + separator_len;
@@ -400,7 +422,7 @@ impl EventBuilder {
         self.has_data = true;
     }
 
-    fn finish(&mut self) -> Option<SseEvent> {
+    fn finish(&mut self, skip_done: bool) -> Option<SseEvent> {
         if !self.has_data {
             self.event = None;
             self.id = None;
@@ -408,7 +430,7 @@ impl EventBuilder {
             return None;
         }
         self.has_data = false;
-        if self.data == "[DONE]" {
+        if skip_done && self.data == "[DONE]" {
             self.event = None;
             self.id = None;
             self.retry = None;
@@ -426,30 +448,66 @@ impl EventBuilder {
 
 /// 解析 SSE 事件流。
 pub fn parse_sse_events(input: &str) -> Result<Vec<SseEvent>, SseError> {
-    parse_sse_events_inner(input, true)
+    parse_events(input, true, true)
 }
 
-fn parse_sse_events_inner(input: &str, strip_leading_bom: bool) -> Result<Vec<SseEvent>, SseError> {
+/// Parse native SSE, ignoring a BOM only at the beginning of the whole stream.
+pub fn parse_sse_events_strict(input: &str, stream_start: bool) -> Result<Vec<SseEvent>, SseError> {
+    parse_events(input, stream_start, false)
+}
+
+/// A native SSE frame ends with an empty line, using LF, CRLF, or CR endings.
+pub fn strict_sse_frame_is_complete(bytes: &[u8]) -> bool {
+    bytes
+        .strip_suffix(b"\r\n")
+        .or_else(|| bytes.strip_suffix(b"\n"))
+        .or_else(|| bytes.strip_suffix(b"\r"))
+        .is_some_and(|prefix| matches!(prefix.last(), Some(b'\n' | b'\r')))
+}
+
+fn parse_events(
+    input: &str,
+    strip_leading_bom: bool,
+    openai_compatibility: bool,
+) -> Result<Vec<SseEvent>, SseError> {
     let mut events = Vec::new();
     let mut builder = EventBuilder::default();
     let mut saw_sse_syntax = false;
     let mut event_buffer_bytes = 0usize;
 
-    for (index, raw_line) in input.lines().enumerate() {
-        let raw_line = if strip_leading_bom && index == 0 {
-            raw_line.strip_prefix('\u{feff}').unwrap_or(raw_line)
+    let text = if strip_leading_bom {
+        input.strip_prefix('\u{feff}').unwrap_or(input)
+    } else {
+        input
+    };
+    let mut compatible_lines = text.lines();
+    let mut strict_lines = text.split_inclusive(['\r', '\n']);
+    let lines = std::iter::from_fn(|| {
+        if openai_compatibility {
+            compatible_lines.next()
         } else {
-            raw_line
-        };
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            strict_lines.next()
+        }
+    });
+    let mut previous_cr = false;
+    for raw_line in lines {
+        let was_cr = std::mem::replace(&mut previous_cr, raw_line.ends_with('\r'));
+        if !openai_compatibility && was_cr && raw_line == "\n" {
+            continue;
+        }
+        let line = raw_line.trim_end_matches('\n');
+        let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
             event_buffer_bytes = 0;
-            if let Some(event) = builder.finish() {
+            if let Some(event) = builder.finish(openai_compatibility) {
                 events.push(event);
             }
             continue;
         }
-        track_event_buffer_bytes(&mut event_buffer_bytes, raw_line)?;
+        track_event_buffer_bytes(
+            &mut event_buffer_bytes,
+            if openai_compatibility { raw_line } else { line },
+        )?;
         if line.starts_with(':') {
             saw_sse_syntax = true;
             continue;
@@ -460,9 +518,17 @@ fn parse_sse_events_inner(input: &str, strip_leading_bom: bool) -> Result<Vec<Ss
             saw_sse_syntax = true;
         }
         match field {
+            "event" if !openai_compatibility && value.is_empty() => builder.event = None,
             "event" => builder.event = Some(value.to_string()),
             "data" => builder.push_data(value),
             "id" if !value.contains('\0') => builder.id = Some(value.to_string()),
+            "retry" if !openai_compatibility => {
+                if value.bytes().all(|byte| byte.is_ascii_digit())
+                    && let Ok(retry) = value.parse::<u64>()
+                {
+                    builder.retry = Some(retry);
+                }
+            }
             "retry" => {
                 builder.retry = Some(
                     value
@@ -470,15 +536,17 @@ fn parse_sse_events_inner(input: &str, strip_leading_bom: bool) -> Result<Vec<Ss
                         .map_err(|_| SseError::InvalidRetry(value.to_string()))?,
                 );
             }
-            _ if builder.has_data && !is_sse_metadata_line(line) => builder.push_data(line),
+            _ if openai_compatibility && builder.has_data && !is_sse_metadata_line(line) => {
+                builder.push_data(line);
+            }
             _ => {}
         }
     }
 
-    if let Some(event) = builder.finish() {
+    if openai_compatibility && let Some(event) = builder.finish(true) {
         events.push(event);
     }
-    if events.is_empty() && !saw_sse_syntax && !input.trim().is_empty() {
+    if openai_compatibility && events.is_empty() && !saw_sse_syntax && !input.trim().is_empty() {
         events.push(non_sse_response_event(input.trim()));
     }
     Ok(events)
@@ -558,6 +626,26 @@ fn sse_frame_separator_bytes(bytes: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
+fn strict_frame_separator(bytes: &[u8]) -> Option<(usize, usize)> {
+    for (index, ending) in bytes.windows(2).enumerate() {
+        match ending {
+            b"\n\n" => return Some((index, 2)),
+            b"\n\r" | b"\r\r" => {
+                // CR already ends the line. A split CRLF's LF can remain
+                // with the next raw frame without changing its SSE events.
+                let length = if bytes.get(index + 2) == Some(&b'\n') {
+                    3
+                } else {
+                    2
+                };
+                return Some((index, length));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn is_sse_metadata_line(line: &str) -> bool {
     line.starts_with("event:")
         || line.starts_with("data:")
@@ -585,20 +673,13 @@ fn non_sse_response_event(raw: &str) -> SseEvent {
 }
 
 fn non_sse_error_message(raw: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return raw.to_string();
-    };
-    value
-        .get("detail")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            value
-                .pointer("/error/message")
-                .and_then(serde_json::Value::as_str)
-        })
-        .filter(|message| !message.trim().is_empty())
-        .unwrap_or(raw)
-        .to_string()
+    let value = serde_json::from_str::<serde_json::Value>(raw).unwrap_or_default();
+    ["/detail", "/error/message", "/detail/message", "/message"]
+        .into_iter()
+        .filter_map(|path| value.pointer(path).and_then(serde_json::Value::as_str))
+        .find(|message| !message.trim().is_empty())
+        .unwrap_or("Upstream response was not an event stream")
+        .to_owned()
 }
 
 fn split_sse_field(line: &str) -> (&str, &str) {

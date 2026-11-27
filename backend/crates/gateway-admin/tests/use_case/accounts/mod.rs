@@ -1668,6 +1668,47 @@ async fn accounts_batch_update_should_commit_once_and_notify_each_provider() {
 }
 
 #[tokio::test]
+async fn quota_policy_is_available_to_antigravity_oauth_accounts() {
+    for (provider, authentication, allowed) in [
+        ("antigravity", "oauth", true),
+        ("antigravity", "api_key", false),
+        ("xai", "oauth", false),
+    ] {
+        let events = events();
+        let mut account = account_record(provider);
+        account.authentication_kind = authentication.to_owned();
+        let store = FakeAccountStore::with_account(account, events.clone());
+        let services =
+            accounts_service(FakeProviderAdmin::new(provider, events.clone()), store).await;
+        let result = services
+            .accounts()
+            .batch_update(
+                &context("quota-policy"),
+                BatchUpdateAccounts {
+                    dispatch_hours: None,
+                    quota_usage_limits: Some(
+                        gateway_core::account::AccountQuotaUsageLimits::new(75, 90).unwrap(),
+                    ),
+                    auto_use_quota_credits: Some(true),
+                    model_access: Default::default(),
+                    outbound_proxy: None,
+                    account_ids: vec!["acct_test".to_owned()],
+                    enabled: None,
+                    concurrency_limit: None,
+                    weight: None,
+                    group_ids: None,
+                },
+            )
+            .await;
+        assert_eq!(result.is_ok(), allowed, "{provider} {authentication}");
+        assert_eq!(
+            recorded(&events).contains(&"store.batch_update_accounts"),
+            allowed
+        );
+    }
+}
+
+#[tokio::test]
 async fn accounts_list_should_return_complete_directory_semantics() {
     let provider = FakeProviderAdmin::new("openai", events());
     let mut stored = account_record("openai");

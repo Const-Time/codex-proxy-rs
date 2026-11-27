@@ -15,7 +15,7 @@ use gateway_core::{
         CommitRequirement, CoordinatedEvent, EngineError, execution::ExecutionSession,
         middleware::*,
     },
-    event::{ProtocolWireEvent, ProviderEvent},
+    event::{GatewayEvent, ProtocolWireEvent, ProviderEvent},
 };
 use serde_json::json;
 use std::{
@@ -135,31 +135,77 @@ enum Rewrite {
     Pass,
     MessageJson,
     MessageIdentity,
+    InspectChat,
+    ChatAttemptError,
+    InspectChatError,
+    MessagesPrelude(&'static [u8]),
+    MessagesExpandPrelude(&'static [&'static [u8]]),
 }
 struct Rewriter {
     inner: Box<dyn MiddlewareBody>,
     mode: Rewrite,
     seen: usize,
-    pending: Option<MiddlewareFrame>,
+    pending: VecDeque<MiddlewareFrame>,
 }
 impl MiddlewareBody for Rewriter {
     fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<MiddlewareFrame>, MiddlewareError>> {
         Box::pin(async move {
-            if let Some(frame) = self.pending.take() {
+            if let Some(frame) = self.pending.pop_front() {
                 return Ok(Some(frame));
             }
             let Some(frame) = self.inner.next_frame().await? else {
                 return Ok(None);
             };
             self.seen += 1;
+            if matches!(self.mode, Rewrite::InspectChat)
+                && let Some(event) = frame.event()
+            {
+                assert!(event.wire_event().is_none());
+                assert!(
+                    event
+                        .canonical_facts()
+                        .iter()
+                        .all(|fact| !matches!(fact, GatewayEvent::ReasoningDelta(_)))
+                );
+            }
             let (bytes, framing, terminal, envelope) = frame.into_parts();
+            let messages_start =
+                envelope
+                    .iter()
+                    .flat_map(|envelope| envelope.events())
+                    .any(|event| {
+                        event
+                            .wire_event()
+                            .is_some_and(|wire| wire.data()["type"] == "message_start")
+                    });
+            if matches!(self.mode, Rewrite::InspectChatError) {
+                for event in envelope.iter().flat_map(|envelope| envelope.events()) {
+                    assert!(event.wire_event().is_none());
+                    assert!(
+                        event
+                            .canonical_facts()
+                            .iter()
+                            .all(|fact| { !matches!(fact, GatewayEvent::ReasoningDelta(_)) })
+                    );
+                }
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                    json!({"error":{"message":"fixture attempt error"}}),
+                );
+            }
+            if matches!(self.mode, Rewrite::InspectChat) && !bytes.is_empty() {
+                let text = std::str::from_utf8(&bytes).unwrap();
+                assert!(text.contains("chat.completion"), "{text}");
+                assert!(!text.contains("private-chat-reasoning"), "{text}");
+                assert!(!text.contains("encrypted_content"), "{text}");
+            }
             if terminal && matches!(self.mode, Rewrite::ExpandInvalidTerminal) {
                 let mut last =
                     MiddlewareFrame::new(Bytes::from_static(b"invalid final event"), framing, true);
                 if let Some(envelope) = envelope {
                     last = last.with_envelope(envelope);
                 }
-                self.pending = Some(last);
+                self.pending.push_back(last);
                 let bytes = if framing == MiddlewareFraming::JsonDocument {
                     Bytes::from_static(
                         br#"{"type":"response.output_text.delta","delta":"must-not-leak"}"#,
@@ -171,7 +217,20 @@ impl MiddlewareBody for Rewriter {
                     MiddlewareFrame::new(bytes, framing, false).with_transformed(true),
                 ));
             }
+            let (bytes, framing) = if matches!(self.mode, Rewrite::ChatAttemptError) {
+                let bytes = if terminal {
+                    Bytes::from_static(br#"{"resets_in_seconds":27,"error":{"message":"fixture attempt error"},"output":[{"type":"reasoning","encrypted_content":"opaque-reasoning"}]}"#)
+                } else {
+                    Bytes::new()
+                };
+                (bytes, MiddlewareFraming::RawBytes)
+            } else {
+                (bytes, framing)
+            };
             let bytes = match self.mode {
+                Rewrite::MessagesPrelude(replacement) if messages_start => {
+                    Bytes::from_static(replacement)
+                }
                 Rewrite::MessageJson | Rewrite::MessageIdentity if !bytes.is_empty() => {
                     let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                     if matches!(self.mode, Rewrite::MessageIdentity) {
@@ -194,6 +253,20 @@ impl MiddlewareBody for Rewriter {
             if let Some(envelope) = envelope {
                 frame = frame.with_envelope(envelope);
             }
+            if let Rewrite::MessagesExpandPrelude(preludes) = self.mode
+                && self.seen == 1
+            {
+                self.pending.extend(preludes.iter().map(|&prelude| {
+                    MiddlewareFrame::new(
+                        Bytes::from_static(prelude),
+                        MiddlewareFraming::SseEvent,
+                        false,
+                    )
+                    .with_transformed(true)
+                }));
+                self.pending.push_back(frame);
+                return Ok(self.pending.pop_front());
+            }
             Ok(Some(frame))
         })
     }
@@ -215,6 +288,11 @@ impl MiddlewareBody for Rewriter {
 }
 fn rewrite(response: MiddlewareResponse, mode: Rewrite) -> MiddlewareResponse {
     let (protocol, status, headers, body, _) = response.into_parts();
+    let status = if matches!(mode, Rewrite::ChatAttemptError) {
+        429
+    } else {
+        status
+    };
     MiddlewareResponse::new(
         protocol,
         status,
@@ -223,7 +301,7 @@ fn rewrite(response: MiddlewareResponse, mode: Rewrite) -> MiddlewareResponse {
             inner: body,
             mode,
             seen: 0,
-            pending: None,
+            pending: VecDeque::new(),
         }),
     )
 }

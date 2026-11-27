@@ -6,6 +6,7 @@ use super::*;
 pub(super) enum AccountProvider {
     OpenAi,
     Xai,
+    Antigravity,
 }
 
 impl AccountProvider {
@@ -13,6 +14,7 @@ impl AccountProvider {
         match value.trim() {
             "openai" => Ok(Self::OpenAi),
             "xai" => Ok(Self::Xai),
+            "antigravity" => Ok(Self::Antigravity),
             _ => Err(WireValidationError::new("provider")),
         }
     }
@@ -174,7 +176,7 @@ impl CompleteAccountAuthorizationRequest {
         }
         let provider = AccountProvider::parse(&self.provider)?;
         match provider {
-            AccountProvider::OpenAi => {
+            AccountProvider::OpenAi | AccountProvider::Antigravity => {
                 if !URL_SAFE_NO_PAD
                     .decode(&self.flow_id)
                     .is_ok_and(|decoded| decoded.len() == 32)
@@ -320,6 +322,7 @@ pub struct RotateAccountRequest {
     pub id_token: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    pub protocol: Option<String>,
     pub transport: Option<String>,
     pub settings: Option<UpdateAccountRequest>,
 }
@@ -343,6 +346,10 @@ impl RotateAccountRequest {
                 || base_url.is_empty()
                 || base_url.len() > 2048
                 || !matches!(self.transport.as_deref(), Some("http" | "prefer_websocket"))
+                || self.protocol.as_deref().is_some_and(|protocol| {
+                    !matches!(protocol, "responses" | "messages")
+                        || (protocol == "messages" && self.transport.as_deref() != Some("http"))
+                })
                 || self.api_key.as_ref().is_some_and(|key| {
                     key.is_empty()
                         || key.len() > 16 * 1024
@@ -353,7 +360,7 @@ impl RotateAccountRequest {
             }
             Ok(())
         } else {
-            if self.api_key.is_some() || self.transport.is_some() {
+            if self.api_key.is_some() || self.protocol.is_some() || self.transport.is_some() {
                 return Err(WireValidationError::new("credential"));
             }
             validate_oauth_material(
@@ -380,6 +387,9 @@ impl RotateAccountRequest {
             );
             if let Some(key) = self.api_key {
                 material.insert("api_key".to_owned(), Value::String(key));
+            }
+            if let Some(protocol) = self.protocol {
+                material.insert("protocol".to_owned(), Value::String(protocol));
             }
         } else {
             material.insert(

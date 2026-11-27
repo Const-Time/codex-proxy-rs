@@ -6,10 +6,22 @@ import BaseSegmented from '@/components/base/BaseSegmented.vue'
 
 defineProps<{ disabled?: boolean, editing?: boolean }>()
 const form = defineModel<ApiKeyAccountForm>({ required: true })
+const protocolOptions = [
+  { label: 'Responses', value: 'responses' },
+  { label: 'Anthropic Messages', value: 'messages' },
+]
 const transportOptions = [
   { label: 'HTTP / SSE', value: 'http' },
   { label: 'WS 优先', value: 'prefer_websocket' },
 ]
+
+function setProtocol(value: string) {
+  if (value === 'responses' || value === 'messages') {
+    form.value.protocol = value
+    if (value === 'messages')
+      form.value.transport = 'http'
+  }
+}
 </script>
 
 <template>
@@ -18,12 +30,21 @@ const transportOptions = [
       <template #extra>
         <span class="text-cp-xs text-cp-text-quaternary" title="填写 API 前缀，接口路径会自动追加">API 前缀</span>
       </template>
-      <BaseInput v-model="form.base_url" type="url" placeholder="https://api.example.com/v1" :disabled="disabled" autocomplete="off" />
+      <BaseInput v-model="form.base_url" type="url" :placeholder="form.protocol === 'messages' ? 'https://api.anthropic.com/v1' : 'https://api.example.com/v1'" :disabled="disabled" autocomplete="off" />
     </BaseFormItem>
     <BaseFormItem label="API Key" :required="!editing">
       <BaseInput v-model="form.apiKey" type="password" :placeholder="editing ? '留空保留当前密钥' : '输入上游密钥'" :disabled="disabled" autocomplete="new-password" />
     </BaseFormItem>
-    <BaseFormItem label="传输方式">
+    <BaseFormItem label="上游协议">
+      <BaseSegmented
+        :model-value="form.protocol"
+        label="上游协议"
+        :options="protocolOptions"
+        :disabled="disabled"
+        @update:model-value="setProtocol"
+      />
+    </BaseFormItem>
+    <BaseFormItem v-if="form.protocol === 'responses'" label="传输方式">
       <BaseSegmented v-model="form.transport" label="传输方式" :options="transportOptions" :disabled="disabled" title="WS 优先需要上游支持 Responses WebSocket" />
     </BaseFormItem>
   </div>

@@ -3,6 +3,8 @@
 use std::{collections::BTreeMap, fmt};
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
+use serde_json::{Map, Value};
 
 use gateway_core::routing::{PublicModelId, UpstreamModelId};
 
@@ -13,6 +15,22 @@ pub type ModelMappings = BTreeMap<PublicModelId, UpstreamModelId>;
 
 /// 账号调度策略；由 Core 拥有稳定值与 wire 映射。
 pub use gateway_core::account::RotationStrategy;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRequestProfile {
+    pub configuration: Map<String, Value>,
+    pub release: Option<ProviderClientRelease>,
+    pub user_agent: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderClientRelease {
+    pub version: String,
+    pub download_url: String,
+    pub checked_at: DateTime<Utc>,
+}
 
 /// 完整运行设置事实。
 #[derive(Debug, Clone, PartialEq, Eq)]

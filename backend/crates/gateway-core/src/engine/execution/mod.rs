@@ -1029,12 +1029,16 @@ impl DefaultExecutionService {
                     &routing_context,
                 )
             }
-            ExecutionTarget::Model(public_model) => request.prepared.settings.snapshot().plan(
-                routed_model.as_ref().unwrap_or(public_model),
-                &request.operation,
-                account_scope,
-                &routing_context,
-            ),
+            ExecutionTarget::Model(public_model) => {
+                request.prepared.settings.snapshot().plan_model(
+                    routed_model.as_ref().unwrap_or(public_model),
+                    &request.operation,
+                    account_scope,
+                    &routing_context,
+                    Some(public_model),
+                    false,
+                )
+            }
         }
         .map_err(map_routing_error)?
         .with_fast_mode(
@@ -1262,16 +1266,28 @@ impl DefaultExecutionService {
         } else {
             None
         };
-        let observation = plan
-            .candidates()
-            .first()
-            .map_or_else(Default::default, |candidate| {
-                self.providers.request_observation(
-                    candidate.provider(),
-                    &operation,
-                    client.policy.key_id(),
-                )
-            });
+        let mut observation =
+            plan.candidates()
+                .first()
+                .map_or_else(Default::default, |candidate| {
+                    self.providers.request_observation(
+                        candidate.provider(),
+                        &operation,
+                        client.policy.key_id(),
+                    )
+                });
+        if let Operation::Generate(generate) = &operation {
+            let payload = generate.protocol_payload();
+            if payload.protocol() != "openai" {
+                let wire = gateway_protocol::request::request_observation(
+                    payload.protocol(),
+                    payload.body(),
+                    payload.context(),
+                    None,
+                );
+                observation.reasoning_effort = wire.reasoning_effort;
+            }
+        }
         let requested_model = target
             .into_public_model()
             .or(observation.requested_model.clone());
@@ -1401,18 +1417,6 @@ impl DefaultExecutionService {
             PublicModelId::new(upstream_model.as_str().to_owned()).map_err(|_| {
                 GatewayError::new(GatewayErrorKind::Unsupported, "requested model is invalid")
             })?;
-        let routing_context = RoutingContext {
-            required_provider: Some(provider_kind),
-            ..RoutingContext::default()
-        };
-        let plan = snapshot
-            .plan(
-                &public_model,
-                &operation,
-                snapshot.all_account_scope(),
-                &routing_context,
-            )
-            .map_err(map_routing_error)?;
         let started_at = SystemTime::now();
         let deadline_at = started_at
             .checked_add(MODEL_PROBE_DEADLINE)
@@ -1420,6 +1424,58 @@ impl DefaultExecutionService {
             .ok_or_else(|| {
                 GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
             })?;
+        let provider = self.providers.get(&provider_kind);
+        let diagnostic_catalog = if let Some(provider) = provider.as_ref() {
+            let lookup = provider.query_diagnostic_model_catalog(&account_id).fuse();
+            let timeout = deadline_at.wait().fuse();
+            pin_mut!(lookup, timeout);
+            let result = select_biased! {
+                () = timeout => Err(EngineError::Deadline),
+                catalog = lookup => catalog.map_err(EngineError::Provider),
+            };
+            match result {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    return Err(self
+                        .observe_probe_failure(&observed, started_at, &error)
+                        .await);
+                }
+            }
+        } else {
+            None
+        };
+        let plan = if let Some(catalog) = diagnostic_catalog {
+            snapshot
+                .plan_diagnostic_model(
+                    &provider_kind,
+                    &account_id,
+                    &upstream_model,
+                    &operation,
+                    &catalog,
+                )
+                .map_err(|error| match error {
+                    crate::validation::RoutingError::ModelNotFound { .. } => GatewayError::new(
+                        GatewayErrorKind::ModelNotFound,
+                        "the requested model was not found in the pinned account's catalog",
+                    ),
+                    error => map_routing_error(error),
+                })?
+        } else {
+            snapshot
+                .plan_model(
+                    &public_model,
+                    &operation,
+                    snapshot.all_account_scope(),
+                    &RoutingContext {
+                        required_provider: Some(provider_kind),
+                        ..RoutingContext::default()
+                    },
+                    None,
+                    provider
+                        .is_some_and(|provider| provider.diagnostic_selects_generation_protocol()),
+                )
+                .map_err(map_routing_error)?
+        };
         let request_id = new_request_id()?;
         let actor = ClientApiKeyId::new("admin_connection_test")
             .map_err(|_| GatewayError::new(GatewayErrorKind::Internal, "invalid admin actor"))?;
@@ -1507,7 +1563,7 @@ impl DefaultExecutionService {
         started_at: SystemTime,
         error: &EngineError,
     ) -> AccountProbeError {
-        let (source, send_state, upstream_response) = match error {
+        let (source, send_state, upstream_status, upstream_response) = match error {
             EngineError::Provider(provider_error) => {
                 let upstream_response = provider_error
                     .client_visible_upstream_response()
@@ -1522,9 +1578,14 @@ impl DefaultExecutionService {
                 } else {
                     AccountProbeErrorSource::Provider
                 };
-                (source, Some(provider_error.send_state()), upstream_response)
+                (
+                    source,
+                    Some(provider_error.send_state()),
+                    provider_error.upstream_status(),
+                    upstream_response,
+                )
             }
-            _ => (AccountProbeErrorSource::Gateway, None, None),
+            _ => (AccountProbeErrorSource::Gateway, None, None, None),
         };
         if let EngineError::Provider(provider_error) = error {
             let latency = started_at.elapsed().unwrap_or_default();
@@ -1567,6 +1628,7 @@ impl DefaultExecutionService {
             send_state,
             upstream_response,
         )
+        .with_upstream_status(upstream_status)
     }
 }
 
@@ -1752,6 +1814,15 @@ impl ExecutionService for DefaultExecutionService {
                     .await?
                 else {
                     for profile in client.snapshot.public_model_profiles_for_provider(kind) {
+                        if protocol == "codex"
+                            && !client.snapshot.native_model_protocol(
+                                kind,
+                                profile.model(),
+                                "openai",
+                            )
+                        {
+                            continue;
+                        }
                         if client.snapshot.catalog_model_allowed_for_scope(
                             kind,
                             profile.model(),
@@ -1779,6 +1850,10 @@ impl ExecutionService for DefaultExecutionService {
                     if !client
                         .snapshot
                         .contains_public_model_for_provider(&model, kind)
+                        || (protocol == "codex"
+                            && !client
+                                .snapshot
+                                .native_model_protocol(kind, &model, "openai"))
                     {
                         continue;
                     }
@@ -1799,6 +1874,10 @@ impl ExecutionService for DefaultExecutionService {
                     if !client
                         .snapshot
                         .contains_public_model_for_provider(&model, kind)
+                        || (protocol == "codex"
+                            && !client
+                                .snapshot
+                                .native_model_protocol(kind, &model, "openai"))
                     {
                         continue;
                     }
@@ -2200,6 +2279,10 @@ fn new_request_id() -> Result<ModelRequestId, GatewayError> {
 
 fn map_routing_error(error: crate::validation::RoutingError) -> GatewayError {
     match error {
+        crate::validation::RoutingError::InvalidReasoningVariant => GatewayError::new(
+            GatewayErrorKind::InvalidRequest,
+            "the grouped model requires a supported thinking level",
+        ),
         crate::validation::RoutingError::ModelNotFound {
             model,
             mapped_model,

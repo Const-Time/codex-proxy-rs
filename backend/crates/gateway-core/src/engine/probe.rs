@@ -101,6 +101,7 @@ pub struct AccountProbeError {
     gateway: GatewayError,
     source: AccountProbeErrorSource,
     send_state: Option<UpstreamSendState>,
+    upstream_status: Option<u16>,
     upstream_response: Option<AccountProbeUpstreamResponse>,
 }
 
@@ -116,8 +117,15 @@ impl AccountProbeError {
             gateway,
             source,
             send_state,
+            upstream_status: None,
             upstream_response,
         }
+    }
+
+    #[must_use]
+    pub const fn with_upstream_status(mut self, status: Option<u16>) -> Self {
+        self.upstream_status = status;
+        self
     }
 
     #[must_use]
@@ -153,6 +161,14 @@ impl AccountProbeError {
     #[must_use]
     pub const fn upstream_response(&self) -> Option<&AccountProbeUpstreamResponse> {
         self.upstream_response.as_ref()
+    }
+
+    #[must_use]
+    pub fn upstream_status(&self) -> Option<u16> {
+        self.upstream_status.or_else(|| {
+            self.upstream_response()
+                .map(AccountProbeUpstreamResponse::status)
+        })
     }
 }
 

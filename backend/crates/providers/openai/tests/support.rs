@@ -90,9 +90,26 @@ impl MemoryAccountStore {
         base_url: String,
         transport: provider_openai::credential::ApiKeyTransport,
     ) {
+        self.seed_api_key_with_protocol(
+            id,
+            base_url,
+            transport,
+            provider_openai::credential::ApiKeyProtocol::Responses,
+        )
+        .await;
+    }
+
+    pub(crate) async fn seed_api_key_with_protocol(
+        &self,
+        id: &str,
+        base_url: String,
+        transport: provider_openai::credential::ApiKeyTransport,
+        protocol: provider_openai::credential::ApiKeyProtocol,
+    ) {
         let credential = provider_openai::credential::CodexCredentialCodec::encode_complete(
             provider_openai::credential::CodexCredentialData::ApiKey(
                 provider_openai::credential::ApiKeyCredentialData {
+                    protocol,
                     schema_version: 1,
                     installation_id: uuid::Uuid::new_v4().to_string(),
                     base_url,

@@ -34,6 +34,7 @@ async fn xai_import_should_prepare_before_atomic_store_commit() {
         [
             "provider.prepare_import",
             "store.commit_import",
+            "provider.account_facts_changed",
             "provider.quota"
         ]
     );
