@@ -1,4 +1,4 @@
-# v3.18.24
+# v3.18.25
 
 - 接入 Antigravity OAuth 账号和原生 Google GenAI 接口，支持模型发现、额度读取、分组模型变体、专用搜索路由和 `countTokens`。
 - 增加 Antigravity Desktop 与 CLI 配置预览、保存和官方版本下载链接。授权使用部署时配置的 Google OAuth 客户端。
